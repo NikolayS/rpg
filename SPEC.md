@@ -2333,7 +2333,2247 @@ When switching modes, context carries over. A plan generated in plan mode can be
 
 ---
 
-## Appendix D: Terminal UX Architecture
+## Appendix A: Language Decision & Build Architecture
+
+_Resolves Issue #2 — Rust/TS Architecture_
+
+### A.1 Decision: Rust
+
+**After evaluating concrete data, the decision is Rust.**
+
+The decision was close and the SPEC's preliminary lean toward TypeScript/Bun was reasonable. The tiebreakers:
+
+1. **Bun binary size is 98 MB** (measured on this machine) — not 90 MB as estimated. Every compile target produces a full bundled Bun runtime. For a psql replacement targeting DBA workflows, this matters: operators copying binaries across bastion hosts, Docker layers, and air-gapped environments feel the difference between 98 MB and 18 MB.
+
+2. **Bun startup is ~11 ms cold** on this Linux x86_64 box — well within the 100 ms budget, so this is not a disqualifier. But Rust startup (< 10 ms) remains faster.
+
+3. **Wire protocol control matters for this project specifically.** Samo is a psql replacement, which means it needs COPY sub-protocol, CancelRequest, LISTEN/NOTIFY, extended query protocol, and eventually logical replication. `tokio-postgres` covers all of these in a battle-tested way. porsager/postgres is excellent but it is a query-centric library — COPY, CancelRequest, and connection parameter negotiation (GSS, SCRAM-SHA-256 with channel binding) require lower-level control than it exposes.
+
+4. **DBA audience credibility.** Surveys of DBA and Postgres community sentiment consistently show that infrastructure tooling written in Rust or C carries significantly more trust than JavaScript-based equivalents. For a tool that touches production databases with autonomy, this perception matters for early adoption.
+
+5. **Bun Windows ARM64** is available (`bun-windows-arm64`) — the concern in the SPEC was real but Bun has shipped it. All 6 targets are available. This removes the main Bun risk factor but does not reverse the binary size or protocol control arguments.
+
+**The TypeScript/Bun arguments remain strong for the AI and connector layers.** The mitigation: the project structure separates protocol/REPL (Rust, performance-critical) from connectors and AI (where TypeScript bindings via Bun can be considered if Rust AI SDK maturity lags). For Phase 0-2, pure Rust is the right call.
+
+### A.2 Bun Cross-Compilation Targets — Full Verification
+
+All 6 required targets are supported by `bun build --compile`:
+
+| Target Flag | Platform | Notes |
+|-------------|----------|-------|
+| `bun-linux-x64` | Linux x86_64 | modern/baseline variants available |
+| `bun-linux-arm64` | Linux aarch64 | Graviton, Raspberry Pi, etc. |
+| `bun-darwin-x64` | macOS Intel | |
+| `bun-darwin-arm64` | macOS Apple Silicon | |
+| `bun-windows-x64` | Windows x86_64 | modern/baseline variants; `.exe` added automatically |
+| `bun-windows-arm64` | Windows ARM64 | Available since Bun 1.1+ |
+
+**Key finding:** Windows ARM64 support is confirmed present. The SPEC concern was valid at the time of writing but has been resolved upstream. However, Bun's Windows ARM64 target is newer and less battle-tested than the others — CI validation is essential before relying on it.
+
+**Bun binary size (measured):** 98 MB standalone executable for a minimal `process.exit(0)` program. This is the fixed cost of bundling the Bun runtime regardless of application code. A full Samo binary would be ~100-105 MB.
+
+**Comparison for Rust:** targeting musl, stripped: estimated 18-22 MB for the full Samo binary including all features.
+
+### A.3 porsager/postgres Wire Protocol Completeness
+
+| Feature | porsager/postgres | tokio-postgres (Rust) |
+|---------|-------------------|----------------------|
+| Simple query protocol | ✅ Full | ✅ Full |
+| Extended query protocol | ✅ Full | ✅ Full |
+| Prepared statements | ✅ Full | ✅ Full |
+| COPY FROM/TO | ✅ Supported | ✅ Full |
+| LISTEN/NOTIFY async | ✅ Supported | ✅ Full |
+| CancelRequest (Ctrl-C) | ⚠️ Partial — exposed but requires `sql.end()` workaround | ✅ Full, signal-level |
+| SCRAM-SHA-256 | ✅ Full | ✅ Full |
+| MD5 auth | ✅ Full | ✅ Full |
+| GSSAPI/Kerberos | ❌ Not supported | ✅ Supported |
+| Channel binding | ❌ Not supported | ✅ Supported |
+| GSS encryption | ❌ Not supported | ✅ Supported |
+| Unix domain sockets | ✅ Supported | ✅ Full |
+| Connection parameter negotiation | ✅ Partial (most params) | ✅ Full |
+| Target session attrs | ❌ Not supported | ✅ Supported |
+| Pipeline mode | ✅ Supported | ✅ Supported |
+| SSL/TLS | ✅ Via `ssl` option | ✅ rustls + native-tls |
+| Large object protocol | ❌ Not built-in | ⚠️ Possible via raw protocol |
+
+**Verdict:** porsager/postgres is excellent for application development but has meaningful gaps for a psql-level replacement: no GSSAPI/Kerberos (enterprise environments), no channel binding (security-hardened deployments), and CancelRequest semantics are awkward. `tokio-postgres` covers all of them.
+
+### A.4 Cross-Compilation Strategy for All 6 Targets
+
+#### Rust Cross-Compilation Setup
+
+```toml
+# .cargo/config.toml
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+
+[target.x86_64-apple-darwin]
+# Built natively on macOS runner or via osxcross on Linux
+
+[target.aarch64-apple-darwin]
+# Built natively on macOS arm64 runner
+
+[target.x86_64-pc-windows-msvc]
+# Built on Windows runner (MSVC toolchain)
+
+[target.aarch64-pc-windows-msvc]
+# Built on Windows ARM runner or cross-compiled
+```
+
+#### Toolchain Requirements per Target
+
+| Target | Toolchain | Notes |
+|--------|-----------|-------|
+| `x86_64-unknown-linux-musl` | musl-tools, musl-gcc | Static binary, no libc dependency |
+| `aarch64-unknown-linux-musl` | aarch64-linux-musl cross toolchain | Docker-based cross preferred |
+| `x86_64-apple-darwin` | macOS + Xcode | Native build on macOS runner |
+| `aarch64-apple-darwin` | macOS + Xcode | Native build on macOS arm64 runner |
+| `x86_64-pc-windows-msvc` | MSVC + Windows SDK | Native build on Windows runner |
+| `aarch64-pc-windows-msvc` | MSVC + Windows SDK | Native build on Windows ARM runner |
+
+#### Recommended: `cross` for Linux musl targets
+
+```bash
+# Install cross
+cargo install cross
+
+# Build Linux musl targets from any platform
+cross build --target x86_64-unknown-linux-musl --release
+cross build --target aarch64-unknown-linux-musl --release
+```
+
+`cross` uses Docker images with the correct musl toolchains, eliminating host toolchain management. Essential for Linux ARM64 musl builds from non-ARM hosts.
+
+#### macOS Universal Binary
+
+```bash
+# Build both archs
+cargo build --target x86_64-apple-darwin --release
+cargo build --target aarch64-apple-darwin --release
+
+# Combine into universal binary
+lipo -create \
+  target/x86_64-apple-darwin/release/samo \
+  target/aarch64-apple-darwin/release/samo \
+  -output target/universal/samo
+```
+
+A universal macOS binary (`samo-darwin-universal`) is worth shipping alongside the arch-specific ones — installer scripts detect architecture, but power users appreciate `curl | sh` working with a universal binary.
+
+#### Windows: MSVC vs GNU Toolchain
+
+Prefer `x86_64-pc-windows-msvc` over `x86_64-pc-windows-gnu`:
+- MSVC links against `vcruntime` (present on all Windows 10+ machines)
+- GNU links against `libgcc` (requires separate distribution)
+- MSVC provides better compatibility with Authenticode signing and Windows Defender
+
+For Windows builds, use the GitHub Actions Windows runner with MSVC — do not attempt cross-compilation from Linux for Windows.
+
+### A.5 CI/CD Pipeline Design
+
+#### Build Matrix (GitHub Actions)
+
+```yaml
+# .github/workflows/release.yml
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Linux (musl static — use cross)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-aarch64
+          # macOS (native runners)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+            artifact: samo-darwin-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+            artifact: samo-darwin-aarch64
+          # Windows (native runners, MSVC)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-x86_64.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            use_cross: false
+            artifact: samo-windows-aarch64.exe
+```
+
+#### Workflow Stages
+
+```
+Push to main branch:
+  1. lint (clippy, rustfmt)
+  2. unit-tests (ubuntu-latest, matrix: pg 14,15,16,17)
+  3. build-debug (x86_64-linux-musl only — fast check)
+
+Pull request:
+  1. lint
+  2. unit-tests
+  3. integration-tests (docker-compose with postgres matrix)
+  4. psql-compat-tests (diff output against real psql)
+
+Tag push (v*.*.*):
+  1. lint + unit-tests (gate)
+  2. build-release (full 6-target matrix)
+  3. sign-binaries (cosign + platform signers)
+  4. generate-checksums (SHA256SUMS)
+  5. create-github-release (upload all artifacts)
+  6. update-homebrew-tap
+  7. publish-docker-image (ghcr.io, multi-arch)
+```
+
+#### Test Strategy
+
+**Unit tests** (no database required):
+- Output formatting: golden files (input row set → expected string)
+- Command parsing: backslash tokenizer, variable interpolation
+- Config loading and merging (priority order)
+- Autonomy level transitions and clamping logic
+- Wire protocol message serialization/deserialization
+- `cargo test` — runs in < 30s
+
+**Integration tests** (require Postgres, run in CI via Docker):
+- Connection with all auth methods (password, MD5, SCRAM-SHA-256)
+- All `\d` family commands against a known schema fixture
+- `\copy` round-trip (both directions, all formats)
+- CancelRequest (Ctrl-C) via signal to test process
+- LISTEN/NOTIFY roundtrip
+- PG version matrix: 12, 13, 14, 15, 16, 17, 18
+- `cargo test --features integration` — runs in < 5 min with Docker
+
+**Compatibility tests** (psql diff):
+```bash
+# scripts/test-compat.sh
+# Runs same commands in psql and samo, diffs output
+# Target: < 5% divergence on common commands
+COMMANDS=(
+  "\dt"
+  "\d users"
+  "\di"
+  "\l"
+  "SELECT 1;"
+  "\conninfo"
+)
+for cmd in "${COMMANDS[@]}"; do
+  diff <(psql -c "$cmd") <(samo -c "$cmd")
+done
+```
+
+**Release artifacts per version:**
+```
+samo-linux-x86_64          (static musl binary)
+samo-linux-aarch64         (static musl binary)
+samo-darwin-x86_64         (dynamic binary)
+samo-darwin-aarch64        (dynamic binary)
+samo-darwin-universal      (fat binary, both arches)
+samo-windows-x86_64.exe    (MSVC binary)
+samo-windows-aarch64.exe   (MSVC binary)
+SHA256SUMS                 (SHA256 of all above)
+SHA256SUMS.sig             (cosign signature)
+```
+
+### A.6 Performance Budget Analysis
+
+| Metric | Budget | Rust (projected) | TypeScript/Bun (measured) |
+|--------|--------|-----------------|--------------------------|
+| Startup time | < 100ms | ~8-15ms | ~11ms (measured: exit-only binary) |
+| Memory baseline | < 50MB | ~15-25MB | ~65-80MB (Bun runtime overhead) |
+| Binary size | < 30MB | ~18-22MB | ~98MB (Bun runtime bundled) |
+| Large result rendering | no OOM at 1M rows | ✅ (streaming) | ✅ (streaming) |
+
+Rust meets all three budget constraints. Bun meets startup (11ms measured) but misses memory and binary size targets. The binary size budget (< 30MB) was clearly written with Rust in mind — the SPEC should update this constraint if Bun is chosen, but since Rust was decided, these budgets stand.
+
+### A.7 Async Architecture
+
+- **Runtime:** Tokio multi-threaded runtime (`tokio::main`)
+- **REPL thread:** `rustyline` blocks on input — run in `tokio::task::spawn_blocking`, communicate with main async runtime via `tokio::sync::mpsc` channels
+- **Wire protocol:** Full async I/O via `tokio-postgres` or direct `tokio::net::TcpStream`/`UnixStream`
+- **Query cancellation:** Dedicated cancel connection (Postgres protocol requires a separate TCP connection for CancelRequest) managed as a background task
+- **Daemon mode:** Multi-threaded Tokio runtime with separate task per monitored database
+- **Connector HTTP calls:** `reqwest` with connection pooling per connector
+
+**Task structure (daemon mode):**
+```
+main task
+  ├── scheduler task (fires periodic health checks)
+  ├── per-database monitor tasks (one per connection)
+  │   ├── analyzer task (read-only queries, LLM calls)
+  │   ├── actor task (awaits approved actions)
+  │   └── auditor task (post-action verification)
+  ├── alert dispatcher task (Slack, email, PagerDuty)
+  └── HTTP health endpoint task (warp or axum)
+```
+
+**Cancellation strategy:** Every long-running task holds a `CancellationToken` from `tokio_util::sync`. On SIGTERM, root token is cancelled; all child tasks detect cancellation and perform graceful shutdown (finish in-flight queries, flush audit log, release DB connections).
+
+### A.8 Error Handling Strategy
+
+- **`anyhow`** for application-level error handling (REPL, commands, connectors): ergonomic, adds context with `.context()`, good `Display` for end-user messages
+- **`thiserror`** for library-level errors (wire protocol, config parsing): typed errors that callers can match on, suitable for crate boundaries
+- **Error taxonomy:**
+  - `ConnectionError` — network failures, auth failures, TLS errors
+  - `ProtocolError` — unexpected server messages, protocol violations
+  - `QueryError` — Postgres `ErrorResponse` (includes SQLSTATE)
+  - `ConfigError` — config file parsing, invalid values
+  - `AutonomyError` — permission denied, wrapper function missing, action rejected
+  - `ConnectorError` — external API failures (typed per connector)
+
+- **MSRV (Minimum Supported Rust Version):** Rust 1.75 (stable, Dec 2023). This gives access to async traits, RPITIT, and sufficient ecosystem support. Pin in `Cargo.toml` (`rust-version = "1.75"`) and test in CI.
+
+### A.9 Dependency Audit
+
+Core dependencies (Phase 0):
+
+| Crate | Version | License | Purpose |
+|-------|---------|---------|---------|
+| `tokio` | 1.x | MIT | Async runtime |
+| `tokio-postgres` | 0.7.x | MIT | Wire protocol |
+| `rustyline` | 14.x | MIT | REPL/readline |
+| `ratatui` | 0.28.x | MIT | TUI pager |
+| `crossterm` | 0.28.x | MIT | Terminal control |
+| `reqwest` | 0.12.x | MIT/Apache | HTTP client |
+| `clap` | 4.x | MIT/Apache | CLI argument parsing |
+| `serde` + `toml` | latest | MIT/Apache | Config serialization |
+| `rusqlite` | 0.31.x | MIT | Session storage |
+| `anyhow` | 1.x | MIT/Apache | Error handling |
+| `thiserror` | 2.x | MIT/Apache | Error types |
+| `syntect` | 5.x | MIT | Syntax highlighting |
+| `tracing` | 0.1.x | MIT | Structured logging |
+| `sha2` | 0.10.x | MIT/Apache | Checksum verification |
+
+All licenses are Apache 2.0 compatible. No GPL dependencies. Lock file (`Cargo.lock`) committed to repo and verified in CI with `cargo audit`.
+
+---
+
+## Appendix B: Autonomy Governance Design
+
+_Resolves Issue #8 — Autonomy Governance_
+
+### B.1 Final Level Names
+
+After evaluating the Advisor/Guardian/Pilot framing and alternatives, the recommendation is to **keep the names but document them differently**. The names are simple, memorable, and the aviation/governance metaphor is coherent.
+
+However, the common confusion point is "Guardian sounds passive but it acts." Here is the revised framing:
+
+| Level | Name | One-line description | Mental model |
+|-------|------|---------------------|--------------|
+| **A** | **Advisor** | Observe and recommend — never touches anything | A consultant who writes reports |
+| **G** | **Guardian** | Propose and act with your approval | A surgeon who explains the procedure before the incision |
+| **P** | **Pilot** | Act autonomously within your rules | Autopilot: you set the destination, it flies |
+
+**Alternative names considered and rejected:**
+
+| Option | Verdict |
+|--------|---------|
+| Watch / Propose / Act | Too generic, no personality |
+| Read / Approve / Auto | "Auto" is ambiguous |
+| Observe / Confirm / Autonomous | "Autonomous" is frightening for a DBA |
+| Scout / Checkpoint / Autopilot | Scout/Checkpoint don't convey the A/G/P progression clearly |
+| Analyst / Sentinel / Operator | Good alternatives; "Sentinel" is compelling for Guardian but loses the progression feel |
+| Suggest / Approve / Execute | Accurate but clinical |
+
+**Final recommendation:** Keep Advisor/Guardian/Pilot. Add the one-liner to every place they're displayed (`\autonomy`, docs, status bar) so users internalize the model quickly.
+
+### B.2 Guardian Mode Approval UX
+
+The Guardian approval experience must work in three distinct contexts.
+
+#### Interactive Terminal (primary)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  🛡 GUARDIAN: index_health                                       │
+├─────────────────────────────────────────────────────────────────┤
+│  FINDING:                                                        │
+│  idx_orders_created_at — 34% bloat (450 MB → ~300 MB)           │
+│                                                                  │
+│  PROPOSED ACTION:                                               │
+│  SELECT samo_ops.reindex_concurrently(                           │
+│    'idx_orders_created_at'::regclass                            │
+│  );                                                             │
+│                                                                  │
+│  AUDITOR ASSESSMENT: ✅ Confidence high. Index bloat confirmed   │
+│  via pgstattuple. REINDEX CONCURRENTLY is non-blocking.          │
+│  Estimated time: 4-7 minutes. No table locks acquired.           │
+│                                                                  │
+│  RISK: Low. Worst case: REINDEX fails (rare), index left in      │
+│  INVALID state — auto-retried on next cycle.                     │
+├─────────────────────────────────────────────────────────────────┤
+│  [Y] Execute  [n] Skip  [e] Edit SQL  [d] More detail  [?] Help │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+- Default answer is "n" (reject) unless user presses Y — fail safe
+- `[e]` opens the SQL in `$EDITOR` — user can modify before execution
+- `[d]` expands to show full evidence (pg_ash data, stats, Auditor reasoning)
+- Timeout: if no response in 60 seconds (configurable), auto-skips with a warning
+- Multi-action plans: shown as a numbered list; user can approve all, approve individually, or reject all
+
+#### Daemon Mode (no interactive terminal)
+
+In daemon mode, approvals are delivered and responded to via configured channels.
+
+**Slack approval flow:**
+```
+[Samo] 🛡 Guardian approval needed
+
+Database: production (db-01.example.com:5432)
+Feature: index_health
+Finding: idx_orders_created_at — 34% bloat
+Action: REINDEX CONCURRENTLY idx_orders_created_at
+
+Auditor: ✅ High confidence. Non-blocking. ~5 min.
+
+[✅ Approve] [❌ Reject] [📋 Details]
+```
+
+- Slack interactive message with buttons
+- Button click sends webhook to daemon's HTTP endpoint
+- Approval is authenticated: webhook token + user identity from Slack
+- Timeout: configurable (default: 4 hours for non-urgent, 15 minutes for urgent/immediate-mitigation actions)
+- Escalation: if not approved within timeout, escalates to a secondary channel or auto-rejects
+
+**Email approval:**
+```
+Subject: [Samo Guardian] Approval needed: REINDEX idx_orders_created_at (production)
+
+Finding: idx_orders_created_at — 34% bloat (450MB → ~300MB after reindex)
+Action: REINDEX CONCURRENTLY via samo_ops wrapper
+Risk: Low — non-blocking, ~5 minutes
+Confidence: High (pgstattuple confirmed)
+
+Approve: https://samo.production.internal/approve?token=abc123&action=reindex_1234
+Reject:  https://samo.production.internal/reject?token=abc123&action=reindex_1234
+
+This link expires in 4 hours.
+```
+
+- HMAC-signed token in URL, time-limited
+- Clicking approve/reject hits daemon HTTP endpoint
+- Response stored in audit log with approver identity
+
+**PagerDuty / generic webhook:**
+- Guardian pending approvals are surfaced as low-urgency PagerDuty incidents
+- Acknowledge = approve; Resolve without acknowledging = reject
+
+#### Queued Approvals
+
+When the daemon accumulates multiple pending approvals, they are presented as a queue:
+
+```bash
+samo approvals          # list pending approvals
+samo approvals --approve 1234  # approve specific action
+samo approvals --reject 1234   # reject specific action
+samo approvals --approve-all   # approve everything pending (use with caution)
+```
+
+### B.3 Pilot Mode Safety Rails
+
+Pilot mode is the highest autonomy level. It requires defense in depth.
+
+#### Circuit Breaker
+
+Each feature area has a circuit breaker that trips when error rates exceed a threshold:
+
+```
+State machine per feature:
+  CLOSED (normal operation)
+    → too many failures → OPEN (feature disabled)
+  OPEN
+    → after cooling period → HALF_OPEN (allow one attempt)
+  HALF_OPEN
+    → success → CLOSED
+    → failure → OPEN (extend cooling period)
+```
+
+**Default thresholds:**
+```toml
+[pilot.circuit_breaker]
+failure_rate_threshold = 0.20   # trip if >20% of actions fail
+minimum_calls = 5               # require at least 5 calls before evaluating
+slow_call_threshold_ms = 30000  # calls >30s count as slow
+slow_call_rate_threshold = 0.50 # trip if >50% of calls are slow
+open_duration_seconds = 300     # wait 5 min before HALF_OPEN
+```
+
+When a circuit breaker trips:
+1. Feature drops from Pilot → Advisor mode automatically (not Guardian — we want zero action, not approval-gated action, until the issue is understood)
+2. Alert sent to all configured channels
+3. Logged with full context of what triggered it
+4. Requires explicit `samo reset-circuit index_health` to re-enable Pilot
+
+#### Rollback on Failure
+
+| Action Type | Rollback Strategy |
+|-------------|-------------------|
+| `REINDEX CONCURRENTLY` | Failure leaves index in INVALID state → auto-issue `DROP INDEX` + `CREATE INDEX CONCURRENTLY` on next cycle |
+| `CREATE INDEX CONCURRENTLY` | Failure leaves INVALID index → auto-drop on next cycle |
+| `DROP INDEX CONCURRENTLY` | No automatic rollback — Guardian mode only, never Pilot |
+| `ALTER SYSTEM SET` | Automatic rollback: store previous value, apply `ALTER SYSTEM SET param = previous_value; SELECT pg_reload_conf()` |
+| `pg_cancel_backend` | No rollback needed (operation is cancel, not mutation) |
+| `pg_terminate_backend` | No rollback needed |
+| `VACUUM` | No rollback needed (VACUUM is always safe) |
+| `ANALYZE` | No rollback needed |
+
+**Rollback detection:** The Auditor monitors post-action state. If the post-action check shows the target metric is worse than pre-action (e.g., bloat increased, or a newly created index is causing query regressions visible in pg_stat_statements), the Auditor escalates to Guardian for human review rather than auto-rolling-back in a loop.
+
+#### Pilot Mode Constraints
+
+```toml
+[pilot.constraints]
+# Pilot mode never runs during business hours unless overridden
+maintenance_window_required = true
+maintenance_window = "02:00-06:00"
+maintenance_window_tz = "UTC"
+
+# Pilot mode pauses if error rate on the *database* exceeds threshold
+# (not just Samo's actions — something else may be wrong)
+pause_on_db_error_rate_threshold = 0.05  # >5% query error rate → pause all pilot
+
+# Maximum actions per hour per feature (rate limiting)
+[pilot.rate_limits]
+index_health = 3        # max 3 index operations per hour
+config_tuning = 1       # max 1 config change per hour
+query_optimization = 20 # cancel/terminate ops are lower risk
+vacuum = 5              # VACUUM is safe but still throttled
+rca = 100               # RCA is read-heavy, higher limit
+```
+
+#### Dry Run Mode
+
+Any Pilot feature can be run in dry-run mode to preview what it would do without executing:
+
+```bash
+samo --autonomy all:pilot --dry-run   # show what Pilot would do, don't execute
+\autonomy vacuum dry-run              # dry-run for vacuum only
+```
+
+Dry-run output:
+```
+[DRY RUN] Would execute: VACUUM ANALYZE orders;
+[DRY RUN] Justification: dead_tuple_ratio=18%, threshold=10%
+[DRY RUN] Estimated duration: ~3 minutes
+[DRY RUN] No action taken.
+```
+
+### B.4 Trust Calibration
+
+The autonomy system needs a path for DBAs to rationally increase trust over time. This is the Auditor's primary long-term function.
+
+#### Trust Score per Feature Area
+
+Each feature area has a rolling trust score (0.0–1.0) computed by the Auditor:
+
+```
+trust_score = (
+  correct_diagnoses / total_diagnoses * 0.40   # diagnosis accuracy
+  + positive_outcomes / actions_taken * 0.40   # action effectiveness
+  + (1 - false_positive_rate) * 0.20           # signal-to-noise
+)
+```
+
+**Where:**
+- `correct_diagnoses` — post-action verification confirmed the finding was real
+- `positive_outcomes` — post-action metric moved in the expected direction
+- `false_positive_rate` — diagnoses that Auditor later determined were wrong
+
+**Trust score display:**
+```
+samo=> \trust
+Feature            | Level   | Trust Score | Actions | Accuracy | Notes
+-------------------|---------|-------------|---------|----------|------------------
+index_health       | pilot   | 0.94 ★★★★★ | 47      | 97%      | Strong track record
+vacuum             | pilot   | 0.88 ★★★★☆ | 123     | 91%      | 2 false positives
+config_tuning      | guardian| 0.71 ★★★☆☆ | 8       | 88%      | Small sample size
+query_optimization | guardian| 0.65 ★★★☆☆ | 15      | 80%      | 3 wrong diagnoses
+rca                | advisor | 0.52 ★★★☆☆ | 0       | N/A      | No actions yet
+```
+
+#### Trust-Based Autonomy Promotion
+
+Samo can suggest autonomy level increases when trust is earned:
+
+```
+[Samo] Trust calibration update:
+  index_health has maintained 0.94 trust score over 47 actions (90-day window)
+  This exceeds the Guardian → Pilot promotion threshold (0.85, 30 actions).
+
+  Current: index_health = guardian
+  Suggested: index_health = pilot
+
+  Promote? [Y/n] (or 'samo autonomy index_health pilot' to set manually)
+```
+
+**Promotion thresholds (defaults, configurable):**
+
+| Transition | Minimum Trust Score | Minimum Action Count | Minimum Observation Window |
+|------------|--------------------|--------------------|--------------------------|
+| Advisor → Guardian | N/A (manual only) | N/A | N/A |
+| Guardian → Pilot | 0.85 | 30 approved+executed | 30 days |
+| Pilot → (stays Pilot) | 0.70 (trip circuit breaker if below) | N/A | Rolling 30-day |
+
+Advisor → Guardian is always manual — it's a conscious decision to enable execution, not something the system earns its way into.
+
+#### Auditor Feedback Loop
+
+```
+Action taken (Pilot) or approved (Guardian)
+  → [5 minutes later] Auditor checks: did the metric improve?
+  → [24 hours later] Auditor checks: did the improvement persist?
+  → Result stored: {action_id, initial_metric, post_5min, post_24h, verdict}
+  → verdict feeds into trust score calculation
+  → Anomalous results (metric got worse) trigger immediate alert
+```
+
+**Anomalous outcome handling:**
+- Metric got worse: alert + suspend that specific action type in Pilot mode (circuit breaker)
+- Metric unchanged after expected improvement: log as "uncertain" — doesn't count against trust score but doesn't count for it either
+- Metric improved: counts as positive outcome
+
+### B.5 Analyzer/Actor/Auditor Isolation — Can It Be Bypassed?
+
+The concern: if all three branches run in the same process, can the isolation be compromised?
+
+**Practical isolation mechanisms:**
+
+1. **No shared mutable state.** The Actor does not have a reference to the Analyzer's LLM context. They communicate only via a structured `ActionRequest` type. The Actor cannot be passed free-form text.
+
+2. **Schema-validated action requests.** The Actor accepts only typed, validated `ActionRequest` structs (not strings, not LLM output directly). The Analyzer's LLM output is parsed into structured types before the Actor sees it — malformed or unexpected outputs are rejected at the parsing boundary.
+
+3. **DB-level enforcement.** Even if process isolation is compromised, the Actor connects to Postgres as `samo_agent` which has only the permissions explicitly granted. The DB is the hard enforcement layer.
+
+4. **Auditor runs after every action.** If the Actor executes something unexpected, the Auditor detects it in post-action verification (unexpected state changes, unexpected metric movements) and alerts.
+
+**The process-level concern:** In the same process, a sufficiently clever prompt injection could theoretically cause the LLM to output a `ActionRequest` that passes schema validation but does something harmful within the Actor's permissions. This is mitigated by:
+- `samo_ops` wrapper functions having hard-coded safety checks (e.g., `reindex_concurrently` validates the OID is actually an index before executing)
+- The Actor logs every action to the audit log before execution — if the log is monitored, anomalous actions are visible
+- Rate limits (Pilot constraints above) limit blast radius
+
+**Future hardening:** If Samo matures to the point where it manages Pilot mode across many critical databases, the architecture should evolve to separate processes (or even separate machines for the Actor) with a narrow IPC channel between Analyzer and Actor. For Phase 3, same-process isolation with schema validation and DB-level enforcement is sufficient.
+
+### B.6 Multi-Database Autonomy Configuration
+
+**Per-database override pattern:**
+```toml
+# Global defaults
+[autonomy]
+vacuum = "advisor"
+index_health = "advisor"
+
+# Production: more conservative
+[connections.production.autonomy]
+vacuum = "advisor"
+index_health = "guardian"
+
+# Staging: experiment with pilot
+[connections.staging.autonomy]
+vacuum = "pilot"
+index_health = "pilot"
+index_health_trust_override = true  # skip trust threshold, I know what I'm doing
+```
+
+**Autonomy is per-(database, feature) — not global.** A single Samo daemon can monitor multiple databases with completely different autonomy configurations. This is the right design: production databases warrant human oversight; dev/staging databases can run more autonomously to build trust scores before promoting production.
+
+---
+
+## Appendix C: Connector Architecture
+
+_Resolves Issue #9 — Connector Architecture_
+
+### C.1 Connector Trait (Common Abstraction)
+
+All external connectors implement a common Rust trait:
+
+```rust
+#[async_trait]
+pub trait Connector: Send + Sync {
+    /// Unique identifier (e.g., "datadog", "pganalyze", "github")
+    fn id(&self) -> &str;
+
+    /// Human-readable name
+    fn name(&self) -> &str;
+
+    /// Check that credentials are valid and connectivity is OK
+    async fn health_check(&self) -> Result<ConnectorHealth>;
+
+    /// Fetch metrics for a time window
+    async fn fetch_metrics(
+        &self,
+        database: &DatabaseId,
+        window: &TimeWindow,
+    ) -> Result<Vec<Metric>>;
+
+    /// Fetch active alerts/incidents
+    async fn fetch_alerts(
+        &self,
+        database: &DatabaseId,
+    ) -> Result<Vec<Alert>>;
+
+    /// Create an issue/ticket (for issue trackers)
+    async fn create_issue(&self, issue: &IssueRequest) -> Result<IssueId> {
+        Err(ConnectorError::NotSupported("create_issue"))
+    }
+
+    /// Update an issue/ticket
+    async fn update_issue(&self, id: &IssueId, update: &IssueUpdate) -> Result<()> {
+        Err(ConnectorError::NotSupported("update_issue"))
+    }
+
+    /// Returns the capabilities of this connector
+    fn capabilities(&self) -> ConnectorCapabilities;
+
+    /// Returns rate limit configuration for this connector
+    fn rate_limit_config(&self) -> RateLimitConfig;
+}
+
+pub struct ConnectorCapabilities {
+    pub can_fetch_metrics: bool,
+    pub can_fetch_alerts: bool,
+    pub can_create_issues: bool,
+    pub can_update_issues: bool,
+    pub can_receive_webhooks: bool,
+    pub supports_pagination: bool,
+}
+```
+
+**Core types:**
+
+```rust
+pub struct Metric {
+    pub name: String,
+    pub value: f64,
+    pub unit: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub tags: HashMap<String, String>,
+    pub source: ConnectorId,
+}
+
+pub struct Alert {
+    pub id: String,
+    pub title: String,
+    pub severity: Severity,
+    pub status: AlertStatus,
+    pub source: ConnectorId,
+    pub database: Option<DatabaseId>,
+    pub created_at: DateTime<Utc>,
+    pub url: Option<String>,
+}
+
+pub struct IssueRequest {
+    pub title: String,
+    pub body: String,        // Markdown
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    pub metadata: HashMap<String, Value>,  // connector-specific fields
+}
+```
+
+### C.2 Auth Pattern Catalog
+
+| Connector | Auth Pattern | Secret Storage |
+|-----------|-------------|---------------|
+| **Datadog** | API Key + Application Key (dual-key) | `DD_API_KEY`, `DD_APP_KEY` env vars |
+| **pganalyze** | Single API Key | `PGANALYZE_API_KEY` env var |
+| **AWS CloudWatch** | AWS credential chain: env vars → `~/.aws/credentials` → IAM role | Standard AWS SDK chain |
+| **Supabase** | Personal access token (PAT) | `SUPABASE_ACCESS_TOKEN` env var |
+| **PostgresAI** | API Key + org/project identifiers | `POSTGRESAI_API_KEY` env var |
+| **GitHub Issues** | Personal access token or GitHub App installation token | `GITHUB_TOKEN` env var |
+| **GitLab Issues** | Personal access token or project token | `GITLAB_TOKEN` env var |
+| **Jira** | Atlassian API token + email (Basic Auth over HTTPS) | `JIRA_API_TOKEN` + `JIRA_EMAIL` env vars |
+| **Slack (alerts)** | Incoming webhook URL (no user auth) | `SLACK_WEBHOOK_URL` env var |
+| **PagerDuty** | Integration routing key | `PAGERDUTY_ROUTING_KEY` env var |
+| **Telegram (alerts)** | Bot token + chat ID | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` env vars |
+| **pg_ash** | Postgres connection (same connection as Samo) | Same as DB connection |
+
+**Credential storage rules:**
+1. Never store credentials in `~/.config/samo/config.toml` in plaintext — only store env var names
+2. If a credential must be in config (e.g., in Docker without env var access), require `600` file permissions and encrypt at rest using system keychain where available
+3. System keychain support: macOS Keychain, Linux `libsecret` (GNOME Keyring/KWallet), Windows Credential Manager — via the `keyring` crate
+4. Credentials are never logged (masked in debug output as `****`)
+
+**AWS auth:** Use the standard AWS SDK credential chain — this means IAM roles work transparently in EC2/ECS/Lambda environments without any configuration. Samo should never encourage hardcoding AWS credentials.
+
+### C.3 Rate Limiting Strategy
+
+Each connector has a `RateLimitConfig` that the common HTTP layer respects:
+
+```rust
+pub struct RateLimitConfig {
+    /// Maximum requests per second (global)
+    pub requests_per_second: f64,
+    /// Maximum requests per minute (for APIs with minute-based limits)
+    pub requests_per_minute: Option<u32>,
+    /// Maximum concurrent requests
+    pub max_concurrent: u32,
+    /// Backoff strategy on 429 / rate limit errors
+    pub backoff: BackoffConfig,
+    /// Whether to respect Retry-After headers
+    pub respect_retry_after: bool,
+}
+
+pub struct BackoffConfig {
+    pub initial_delay_ms: u64,    // 1000
+    pub multiplier: f64,          // 2.0 (exponential)
+    pub max_delay_ms: u64,        // 60_000 (1 minute cap)
+    pub jitter: bool,             // add random jitter to avoid thundering herd
+    pub max_retries: u32,         // 5
+}
+```
+
+**Default rate limits per connector:**
+
+| Connector | Requests/sec | Notes |
+|-----------|-------------|-------|
+| Datadog | 0.5 (30/min) | DD API is 300/hour for most endpoints |
+| pganalyze | 0.17 (10/min) | Conservative default |
+| AWS CloudWatch | 5 (300/min) | CloudWatch default: 400 req/sec but be conservative |
+| GitHub | 0.5 (30/min) | REST API: 5000/hour authenticated |
+| GitLab | 0.3 (20/min) | GitLab: 2000/min but shared across all requests |
+| Jira | 0.3 (20/min) | Varies by tier |
+| Slack webhook | 1 (60/min) | Slack: 1 msg/sec per webhook |
+| PagerDuty | 0.5 (30/min) | PD Events API: 120/min |
+
+**Token bucket implementation:** Use a per-connector token bucket (from `governor` crate or custom implementation). Requests that would exceed the limit are held in a bounded queue (backpressure). If the queue fills, new requests are rejected with a `ConnectorError::RateLimited` that the caller can handle gracefully (log and skip, or retry later).
+
+### C.4 Failure Handling and Retry Strategy
+
+```
+Connector call:
+  → success: return data
+  → network error (timeout, connection refused):
+      retry with exponential backoff (see BackoffConfig)
+      if max_retries exceeded: ConnectorError::Unavailable
+  → 429 Too Many Requests:
+      if Retry-After header: wait that duration
+      else: exponential backoff
+  → 5xx server error:
+      retry (server may recover)
+  → 4xx client error (except 429):
+      do NOT retry (client bug or auth issue)
+      surface error immediately
+  → auth error (401, 403):
+      do NOT retry
+      log: "Connector auth failed — check credentials"
+      disable connector until reconfigured
+```
+
+**Graceful degradation:** If a connector is unavailable, Samo continues operating. The RCA investigation chain simply skips that data source and notes the gap:
+
+```
+RCA report [2026-03-12T14:23:00Z]:
+  ⚠ Datadog connector unavailable — external metrics omitted
+  ⚠ pganalyze connector timeout — query stats from pg_stat_statements only
+
+  Note: Analysis based on available data sources only.
+  Confidence: MEDIUM (reduced due to missing external data)
+```
+
+**Circuit breaker for connectors:** Same circuit breaker pattern as autonomy features (§B.3). A connector that fails >50% of the time over a 5-minute window is marked OPEN (disabled) and retried after a cooling period. The user is notified once (not on every failed call).
+
+### C.5 Data Model — Internal Representations
+
+Connector data is normalized to internal types before the Analyzer sees it. This means the Analyzer doesn't need to know whether data came from Datadog vs CloudWatch:
+
+```rust
+// Internal normalized metric — regardless of source
+pub struct NormalizedMetric {
+    pub category: MetricCategory,  // CpuUsage, MemoryUsage, DiskIops, etc.
+    pub value: f64,
+    pub unit: MetricUnit,
+    pub timestamp: DateTime<Utc>,
+    pub database: Option<DatabaseId>,
+    pub source: ConnectorId,
+    pub raw_name: String,  // original metric name for debugging
+}
+
+pub enum MetricCategory {
+    CpuUsage,
+    MemoryUsage,
+    DiskReadIops,
+    DiskWriteIops,
+    NetworkIn,
+    NetworkOut,
+    ConnectionCount,
+    ReplicationLag,
+    StorageUsed,
+    QueryLatencyP99,
+    QueryLatencyP95,
+    ErrorRate,
+    Custom(String),
+}
+```
+
+Each connector implements a `normalize()` method that maps connector-specific metric names to `MetricCategory`. For example:
+- Datadog `aws.rds.cpuutilization` → `MetricCategory::CpuUsage`
+- CloudWatch `CPUUtilization` → `MetricCategory::CpuUsage`
+- pganalyze `system.cpu.user_pct` → `MetricCategory::CpuUsage`
+
+When multiple connectors provide the same `MetricCategory`, the Analyzer uses the highest-resolution source (prefer pganalyze over CloudWatch for query metrics, prefer CloudWatch for OS-level metrics).
+
+### C.6 pg_ash — Native Connector Pattern
+
+pg_ash is different from external connectors: it's a Postgres extension running inside the monitored database. It's accessed via the same database connection as Samo, not a separate HTTP API.
+
+```rust
+pub struct PgAshConnector {
+    /// Reuses the main database connection pool
+    pool: Arc<PgPool>,
+    /// Whether pg_ash extension is installed and accessible
+    available: bool,
+    /// pg_ash version (affects available functions)
+    version: Option<PgAshVersion>,
+}
+```
+
+**Auto-detection on connect:**
+```sql
+-- Samo runs this on connect to check pg_ash availability
+SELECT extversion FROM pg_extension WHERE extname = 'pg_ash';
+-- If returns a row: pg_ash is available, record version
+-- If no row: pg_ash not installed
+```
+
+**Degraded mode without pg_ash:**
+- `ash.activity_summary()` → manual `pg_stat_activity` polling + in-memory aggregation
+- `ash.top_waits()` → `pg_stat_activity` wait_event snapshots (1s intervals, not 10ms)
+- `ash.timeline_chart()` → reconstructed from snapshots, lower resolution
+- `ash.top_queries_with_text()` → `pg_stat_statements` only (no per-session attribution)
+- `ash.query_waits()` → not available without pg_ash
+
+Samo notes in all outputs when running in degraded mode and offers to install pg_ash.
+
+### C.7 Alert Channel Reliability
+
+**At-least-once delivery:**
+- Alerts are persisted to SQLite before delivery attempt
+- Delivery attempts are retried (with backoff) until acknowledged
+- Each alert has a state machine: `pending` → `delivering` → `delivered` | `failed`
+- Failed alerts are surfaced in `samo status` output
+
+**Deduplication:**
+- Each alert has a `fingerprint` (SHA256 of: database + check_name + finding_key)
+- If a fingerprint was delivered within the `dedup_window` (default: 1 hour), suppress re-delivery
+- Exception: severity escalation (warning → critical) always re-delivers
+
+**Severity routing:**
+```toml
+[alerts.routing]
+# Critical: PagerDuty + Slack + email
+critical = ["pagerduty", "slack", "email"]
+# Warning: Slack only
+warning = ["slack"]
+# Info: Slack only (different channel)
+info = ["slack_info_channel"]
+```
+
+**Webhook security (incoming webhooks for Slack approvals):**
+- Each webhook endpoint has a shared secret (configured during `samo setup`)
+- All incoming webhooks verify HMAC-SHA256 signature before processing
+- Webhook endpoints are only bound to localhost by default — external access requires explicit `--listen 0.0.0.0` and is discouraged in favor of reverse proxy
+- TLS termination handled by the reverse proxy (nginx/caddy in front of the daemon HTTP server)
+
+### C.8 Plugin System for Custom Connectors
+
+Connectors can be added without modifying Samo's source code via two mechanisms:
+
+#### Config-Driven Connectors (Simple)
+
+For read-only HTTP APIs that follow a common pattern, connectors can be defined in config:
+
+```toml
+[connectors.custom_metrics]
+type = "http_json"
+name = "Internal Metrics Server"
+base_url = "https://metrics.internal.example.com/api/v1"
+auth = { type = "bearer", token_env = "METRICS_API_TOKEN" }
+poll_interval_seconds = 60
+rate_limit_rps = 2.0
+
+# Metric mappings: internal path → MetricCategory
+[[connectors.custom_metrics.metrics]]
+path = "$.data.cpu_percent"
+category = "CpuUsage"
+unit = "percent"
+
+[[connectors.custom_metrics.metrics]]
+path = "$.data.active_connections"
+category = "ConnectionCount"
+unit = "count"
+```
+
+Config-driven connectors support: bearer token auth, API key header auth, basic auth. Suitable for internal monitoring systems with JSON APIs.
+
+#### Script Connectors (Advanced)
+
+For connectors that need custom logic, a script interface is provided:
+
+```toml
+[connectors.custom_connector]
+type = "script"
+name = "Custom Internal System"
+command = ["python3", "/etc/samo/connectors/internal.py"]
+timeout_seconds = 30
+rate_limit_rps = 1.0
+```
+
+The script is invoked with a JSON payload on stdin and must return JSON to stdout:
+
+```json
+// stdin (from Samo)
+{
+  "action": "fetch_metrics",
+  "database_id": "production",
+  "window": { "start": "2026-03-12T14:00:00Z", "end": "2026-03-12T14:10:00Z" }
+}
+
+// stdout (from script) — array of normalized metrics
+[
+  {
+    "category": "CpuUsage",
+    "value": 42.5,
+    "unit": "percent",
+    "timestamp": "2026-03-12T14:05:00Z"
+  }
+]
+```
+
+The script is sandboxed: run with `nice`, `timeout`, and (optionally) in a limited filesystem namespace. Script connectors are isolated — a crashing script doesn't affect Samo.
+
+**Security considerations:** Script connectors run with Samo's user privileges. Users are responsible for auditing scripts they configure. Samo should warn on first use: "This connector runs an external script. Review it before enabling."
+
+#### Native Plugin Connectors (Future)
+
+Phase 4+: a stable shared library interface (Rust `dylib`) for maximum performance native connectors. Deferred until the connector trait API is stable — premature ABI commitment is worse than no plugin system.
+
+### C.9 PostgresAI Issues Connector
+
+Special handling for the bidirectional sync between Samo findings and PostgresAI's issue tracker:
+
+**Issue creation from RCA finding:**
+```rust
+// When RCA completes, Samo creates a PostgresAI issue
+let issue = IssueRequest {
+    title: format!("[RCA] {}: {}", incident_type, database.name()),
+    body: render_rca_markdown(&rca_result),
+    labels: vec![
+        "rca".into(),
+        incident_type.label().into(),
+        format!("severity:{}", rca_result.severity),
+    ],
+    metadata: hashmap! {
+        "database_id" => database.id(),
+        "investigation_steps" => json!(rca_result.steps),
+        "confidence" => rca_result.confidence.to_string(),
+        "samo_action_ids" => json!(rca_result.action_ids),
+    },
+};
+postgresai_connector.create_issue(&issue).await?;
+```
+
+**Bidirectional sync with GitHub/Jira:**
+- PostgresAI issue created → optional sync to GitHub Issues (configurable)
+- GitHub Issue closed → marks PostgresAI issue as resolved
+- Conflict resolution: PostgresAI is the source of truth for status; GitHub/Jira are mirrors
+
+**Sync conflict handling:**
+- If both are modified since last sync: prefer the later timestamp
+- If both are closed with different resolutions: log conflict, keep PostgresAI status, add comment noting conflict
+
+### C.10 Testing Strategy
+
+**Mock connectors for unit tests:**
+```rust
+pub struct MockConnector {
+    pub metrics: Vec<Metric>,
+    pub alerts: Vec<Alert>,
+    pub should_fail: bool,
+    pub latency_ms: u64,
+}
+
+impl Connector for MockConnector { ... }
+```
+
+All Analyzer tests use mock connectors — no real external API calls in unit or integration tests.
+
+**Integration test isolation:**
+- External connector tests are gated behind a feature flag (`--features live-connectors`)
+- Require credentials in environment (skipped in CI without them)
+- Use a dedicated test database/project (never touch production)
+- Test at most 1 create/update per test run (minimize side effects)
+
+**Recording/playback:**
+- HTTP responses from connectors are recorded to fixture files during development
+- Tests replay recordings for deterministic output
+- Fixture files are regenerated manually with `cargo test --features record-fixtures`
+
+---
+
+## Appendix D: Distribution Architecture
+
+_Resolves Issue #10 — Distribution & Auto-Update_
+
+### D.1 Install Script Security
+
+The `curl | sh` install pattern has real risks. Samo mitigates them:
+
+```bash
+# get.samo.dev/install.sh — served over HTTPS only
+#!/bin/sh
+set -eu
+
+SAMO_VERSION="${SAMO_VERSION:-latest}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+
+# Detect platform
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  ARCH="x86_64" ;;
+  aarch64|arm64) ARCH="aarch64" ;;
+  *) die "Unsupported architecture: $ARCH" ;;
+esac
+
+# Resolve latest version via GitHub API
+if [ "$SAMO_VERSION" = "latest" ]; then
+  SAMO_VERSION=$(curl -sf https://api.github.com/repos/NikolayS/samo/releases/latest \
+    | grep '"tag_name"' | cut -d'"' -f4)
+fi
+
+BINARY="samo-${OS}-${ARCH}"
+BASE_URL="https://github.com/NikolayS/samo/releases/download/${SAMO_VERSION}"
+
+# Download binary
+curl -sfL "${BASE_URL}/${BINARY}" -o /tmp/samo-download
+
+# Verify SHA256 checksum (REQUIRED — script fails if mismatch)
+EXPECTED=$(curl -sfL "${BASE_URL}/SHA256SUMS" \
+  | grep "${BINARY}" | awk '{print $1}')
+ACTUAL=$(sha256sum /tmp/samo-download | awk '{print $1}')
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+  echo "ERROR: checksum mismatch — download may be corrupt or tampered"
+  rm /tmp/samo-download
+  exit 1
+fi
+
+# Verify cosign signature (if cosign is available)
+if command -v cosign >/dev/null 2>&1; then
+  cosign verify-blob \
+    --certificate "${BASE_URL}/${BINARY}.pem" \
+    --signature "${BASE_URL}/${BINARY}.sig" \
+    --certificate-identity-regexp "https://github.com/NikolayS/samo" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    /tmp/samo-download || {
+    echo "ERROR: cosign signature verification failed"
+    rm /tmp/samo-download
+    exit 1
+  }
+fi
+
+# Install
+mkdir -p "$INSTALL_DIR"
+mv /tmp/samo-download "$INSTALL_DIR/samo"
+chmod +x "$INSTALL_DIR/samo"
+
+echo "✓ Samo ${SAMO_VERSION} installed to ${INSTALL_DIR}/samo"
+```
+
+**Security properties:**
+- HTTPS only (no plain HTTP fallback)
+- SHA256 checksum verification is mandatory (script exits on mismatch)
+- cosign/sigstore verification is attempted if cosign is available (optional but strongly encouraged)
+- Temporary file cleaned up on failure
+- No `sudo` by default — installs to `~/.local/bin`
+- Non-interactive mode: `SAMO_VERSION=v0.3.0 INSTALL_DIR=/usr/local/bin curl -sL https://get.samo.dev | sh`
+
+**Transport security for the install script itself:**
+- `get.samo.dev` must serve over HTTPS with HSTS
+- The install script is also checksummed and signed — users can verify the installer itself via the GitHub releases page
+
+### D.2 Binary Signing
+
+#### macOS: Notarization
+
+Required for macOS 10.15+ (Gatekeeper blocks unsigned binaries):
+
+```bash
+# CI pipeline step (runs on macOS runner)
+
+# 1. Sign with Developer ID
+codesign --sign "Developer ID Application: Nikolay Samokhvalov (TEAM_ID)" \
+  --options runtime \
+  --entitlements samo.entitlements \
+  samo-darwin-aarch64
+
+# 2. Create zip for notarization (notarytool requires zip/pkg/dmg)
+zip samo-darwin-aarch64.zip samo-darwin-aarch64
+
+# 3. Submit to Apple Notary Service
+xcrun notarytool submit samo-darwin-aarch64.zip \
+  --apple-id "$APPLE_ID" \
+  --team-id "$TEAM_ID" \
+  --password "$NOTARIZATION_PASSWORD" \
+  --wait
+
+# 4. Staple notarization ticket to binary
+xcrun stapler staple samo-darwin-aarch64
+
+# 5. Verify
+codesign --verify --deep --strict samo-darwin-aarch64
+spctl --assess --type exec samo-darwin-aarch64
+```
+
+**entitlements file** (minimal — only what's needed):
+```xml
+<!-- samo.entitlements -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Required for hardened runtime -->
+  <key>com.apple.security.cs.allow-jit</key><false/>
+  <key>com.apple.security.network.client</key><true/>
+  <!-- keychain access for credential storage -->
+  <key>com.apple.security.keychain-access-groups</key>
+  <array><string>dev.samo.samo</string></array>
+</dict>
+</plist>
+```
+
+**Credentials in CI:** Apple ID, team ID, and app-specific password are stored as GitHub Actions secrets. Never in repo.
+
+#### Windows: Authenticode
+
+```powershell
+# CI pipeline step (runs on Windows runner)
+
+# Sign using Azure Trusted Signing (preferred over traditional EV cert)
+# Azure Trusted Signing: no hardware token, cloud-native, works in CI
+az trustedsigning sign \
+  --endpoint "https://eus.codesigning.azure.net" \
+  --account "samo-signing" \
+  --certificate-profile "samo-production" \
+  --file-digest sha256 \
+  --timestamp-rfc3161 "http://timestamp.acs.microsoft.com" \
+  --timestamp-digest sha256 \
+  samo-windows-x86_64.exe
+
+# Verify
+signtool verify /pa /v samo-windows-x86_64.exe
+```
+
+**Alternative:** EV code signing certificate from a CA (DigiCert, Sectigo). More expensive, requires hardware token or HSM. Azure Trusted Signing is the modern, CI-friendly approach as of 2024.
+
+**Note on Windows SmartScreen:** New publishers see SmartScreen warnings even with valid Authenticode signatures. SmartScreen reputation is built over time (downloads + no malware reports). Communicate this to early users: "If you see a SmartScreen warning, click 'More info' → 'Run anyway'. This warning disappears after Samo builds reputation."
+
+#### Linux: GPG + cosign/sigstore
+
+```bash
+# CI pipeline step (runs on Linux runner, using Sigstore keyless signing)
+
+# Primary: cosign keyless signing (Sigstore)
+# No key management — uses OIDC identity from GitHub Actions
+cosign sign-blob \
+  --output-certificate samo-linux-x86_64.pem \
+  --output-signature samo-linux-x86_64.sig \
+  samo-linux-x86_64
+
+# Secondary: GPG signing (for users who prefer traditional verification)
+echo "$GPG_PRIVATE_KEY" | gpg --import --batch --passphrase "$GPG_PASSPHRASE"
+gpg --detach-sign --armor \
+  --local-user "samo@samokhvalov.com" \
+  samo-linux-x86_64
+# Produces: samo-linux-x86_64.asc
+```
+
+**Verification instructions published at:** `https://samo.sh/verify`
+
+```bash
+# Verify with cosign (no key needed — verifies against OIDC identity)
+cosign verify-blob \
+  --certificate samo-linux-x86_64.pem \
+  --signature samo-linux-x86_64.sig \
+  --certificate-identity-regexp "https://github.com/NikolayS/samo" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  samo-linux-x86_64
+
+# Verify with GPG (traditional)
+gpg --verify samo-linux-x86_64.asc samo-linux-x86_64
+```
+
+### D.3 Install Paths and PATH Management
+
+| Platform | Default Install Path | PATH strategy |
+|----------|---------------------|---------------|
+| Linux | `~/.local/bin/samo` | Add to `~/.profile` / `~/.bashrc` / `~/.zshrc` if not already in PATH |
+| macOS | `/usr/local/bin/samo` | Always in PATH on macOS with Homebrew or XCode CLI tools installed |
+| Windows | `%LOCALAPPDATA%\samo\samo.exe` | Add to user PATH via `[Environment]::SetEnvironmentVariable` in PowerShell |
+
+**Coexistence with psql:** Samo does not replace or modify the system `psql` binary. Users who want `alias psql=samo` set it themselves. The install script warns if it detects a `samo` binary already in PATH at a different location.
+
+**System-wide install (sudo/admin):**
+```bash
+# Linux system-wide
+INSTALL_DIR=/usr/local/bin curl -sL https://get.samo.dev | sudo sh
+
+# macOS via Homebrew (recommended for system-wide)
+brew install samo
+
+# Windows system-wide (admin PowerShell)
+winget install samo
+```
+
+### D.4 Auto-Update Mechanism
+
+#### Self-Replacing Binary (Linux/macOS)
+
+```rust
+// src/updater.rs
+pub async fn apply_update(new_binary: &Path, current_binary: &Path) -> Result<()> {
+    // 1. Verify checksum and signature of new binary
+    verify_binary(new_binary).await?;
+
+    // 2. Write to same filesystem (atomic rename)
+    let backup = current_binary.with_extension("backup");
+    fs::rename(current_binary, &backup)?;  // backup current
+
+    // 3. Copy new binary (can't rename across filesystems)
+    fs::copy(new_binary, current_binary)?;
+    set_executable(current_binary)?;
+
+    // 4. Exec new binary with same args (seamless restart)
+    // On daemon restart: daemon manager (systemd) handles restart
+    println!("Update applied. Restart samo to use the new version.");
+
+    Ok(())
+}
+```
+
+**Atomic update:** Write to `samo.new` in the same directory, then `rename()` (atomic on POSIX). The old binary is kept as `samo.backup` until the new version successfully starts.
+
+**Rollback:** `samo update --rollback` restores `samo.backup` if present.
+
+#### Windows: Deferred Replace Strategy
+
+Windows cannot replace a running binary (file locked by the OS):
+
+```
+1. Download samo-new.exe to %LOCALAPPDATA%\samo\
+2. Verify checksum and signature
+3. Write update manifest: { "pending": "samo-new.exe", "replace": "samo.exe", "at_version": "0.3.0" }
+4. Print: "Update downloaded. Restart samo to apply."
+5. On next samo launch:
+   a. Check for pending update manifest
+   b. If found: run helper (samo-updater.exe) via `ShellExecuteEx`
+   c. samo-updater.exe: waits for samo.exe process to exit (or kills it after timeout)
+   d. samo-updater.exe: renames samo.exe → samo-backup.exe, renames samo-new.exe → samo.exe
+   e. samo-updater.exe: launches samo.exe with original args
+   f. samo-updater.exe exits
+```
+
+Alternatively: the Windows installer approach (winget/choco/scoop) handles the replace problem at the package manager level — prefer this for Windows.
+
+#### Background Version Check
+
+```rust
+// On startup, spawn a background task (non-blocking)
+tokio::spawn(async move {
+    if let Ok(latest) = fetch_latest_version().await {
+        if latest > current_version() {
+            // Cache result, surface notification next prompt render
+            VERSION_CACHE.store(latest);
+        }
+    }
+});
+```
+
+- Check runs at most once per 24 hours (cached in `~/.local/share/samo/version_cache.json`)
+- Check is async, non-blocking — never delays startup or query execution
+- Notification shown at next prompt: `[update available: v0.3.0 → v0.4.0  run 'samo update']`
+- Disabled with `[update] auto_check = false` in config or `SAMO_NO_UPDATE_CHECK=1` env var
+
+### D.5 First-Run Experience
+
+The first time `samo` is run without arguments, it detects a fresh install and starts a guided setup:
+
+```
+Welcome to Samo v0.1.0 — the AI-native Postgres terminal.
+
+It looks like this is your first time running Samo.
+Let's get you connected in 30 seconds.
+
+? Database connection string or host:
+  > postgresql://localhost/mydb
+  (or press Enter to use PGHOST/PGDATABASE environment variables)
+
+? AI provider (optional — enhances Samo with natural language features):
+  > [1] Anthropic (Claude)  [2] OpenAI (GPT)  [3] Ollama (local)  [4] Skip
+  > 4
+
+✓ Connected to mydb (PostgreSQL 16.2)
+✓ pg_ash detected — full RCA features available
+
+mydb=>
+```
+
+**First-run behaviors:**
+1. Detect if this is the first run (no `~/.config/samo/config.toml` exists)
+2. Offer connection wizard (or skip and accept psql environment variables / args)
+3. Offer AI provider setup (or skip — Samo is fully functional without AI)
+4. Check for pg_ash and offer to install if not found
+5. Show quick reference: `Type SQL to query, /ask to use AI, \? for help`
+6. Create `~/.config/samo/config.toml` with sensible defaults
+
+**Non-interactive first run** (detected via `!isatty(stdin)`):
+- Skip the wizard entirely
+- Connect using environment variables and CLI args
+- No prompts — fail fast with clear errors if connection fails
+
+### D.6 Update Channels
+
+| Channel | Trigger | Binary Tag | Use Case |
+|---------|---------|-----------|---------|
+| `stable` | Git tag `v*.*.*` | Full semver | Production use |
+| `beta` | Git tag `v*.*.*-beta.*` | `v0.3.0-beta.1` | Early adopters, testing |
+| `nightly` | Every push to `main` | `nightly-YYYYMMDD-COMMITSHA` | Developers, CI testing |
+
+**Channel configuration:**
+```toml
+[update]
+channel = "stable"   # stable | beta | nightly
+```
+
+**Channel promotion process:**
+1. Nightly: every commit that passes CI
+2. Beta: manual promotion from nightly + changelog entry
+3. Stable: manual promotion from beta + updated documentation + `brew formula` PR
+
+### D.7 Package Manager Priority
+
+| Platform | Priority | Notes |
+|----------|----------|-------|
+| Linux | `curl \| sh`, `.deb`, `.rpm` | Homebrew on Linux is also supported |
+| macOS | Homebrew (primary), direct binary | `brew install samo` is the recommended path |
+| Windows | winget (primary), direct installer | `winget install samo` — built-in on Windows 11 |
+| All | Docker | `docker run -it ghcr.io/nikolays/samo` for sandboxed use |
+| Rust users | `cargo install samo` | Must build from source — slower but familiar |
+
+**Homebrew tap:**
+- `brew tap nikolays/samo && brew install samo`
+- Or after submission to homebrew-core: `brew install samo`
+- Homebrew formula: downloads the pre-built binary (not a source build) — faster for users
+
+**Docker multi-arch image:**
+```dockerfile
+# Alpine-based, minimal
+FROM alpine:3.20
+COPY --from=builder /app/samo /usr/local/bin/samo
+RUN apk add --no-cache ca-certificates
+ENTRYPOINT ["samo"]
+```
+- Multi-arch manifest: `linux/amd64` + `linux/arm64`
+- Target size: ~20 MB (static musl binary + Alpine base)
+
+### D.8 Offline Environments
+
+For air-gapped environments:
+
+```bash
+# Download tarball (includes binary + checksums + signature)
+curl -L https://github.com/NikolayS/samo/releases/download/v0.3.0/samo-linux-x86_64.tar.gz \
+  -o samo.tar.gz
+
+# Verify (offline, using pre-downloaded signature file)
+sha256sum -c SHA256SUMS  # verify checksum
+gpg --verify samo-linux-x86_64.asc samo-linux-x86_64  # verify GPG sig
+
+# Install
+tar -xzf samo.tar.gz
+cp samo-linux-x86_64 /usr/local/bin/samo
+chmod +x /usr/local/bin/samo
+```
+
+**Tarball contents:**
+```
+samo-linux-x86_64.tar.gz:
+  samo-linux-x86_64      (the binary)
+  SHA256SUMS             (checksum file)
+  samo-linux-x86_64.asc  (GPG signature)
+  samo-linux-x86_64.pem  (cosign certificate)
+  samo-linux-x86_64.sig  (cosign signature)
+  INSTALL.md             (offline install instructions)
+```
+
+**Note:** In air-gapped environments, all AI features require Ollama (local LLM). External connector features (Datadog, CloudWatch, etc.) will be unavailable. Core psql-replacement and local pg_ash features work without internet.
+
+---
+
+## Appendix E: RCA Investigation Playbooks
+
+_Resolves Issue #11 — RCA Investigation Chain Validation_
+
+### E.1 Overview
+
+The pg_ash-powered 8-step investigation chain is validated against 8 production incident types. For each, we document: what the investigation finds at each step, the three-tier mitigation, and known false positive scenarios.
+
+**Investigation chain (canonical):**
+```
+1. Big picture       → ash.activity_summary()
+2. Wait breakdown    → ash.top_waits()
+3. Timeline          → ash.timeline_chart()
+4. Query attribution → ash.top_queries_with_text()
+5. Query deep-dive   → ash.query_waits(query_id)
+6. Lock analysis     → pg_locks + pg_stat_activity (block tree)
+7. Stat correlation  → pg_stat_statements (execution time delta)
+8. Object state      → pg_stat_user_tables, pg_stat_user_indexes
+```
+
+Not all 8 steps are used for every incident. The Analyzer uses the previous step's output to decide whether to continue down the chain or branch to a different query.
+
+### E.2 Incident Type 1: Lock Contention
+
+#### Investigation
+
+**Step 1 — Big picture:** `activity_summary` shows elevated active sessions, normal or reduced throughput. The ratio of active sessions to "actually running queries" is high (many sessions but few doing work).
+
+**Step 2 — Wait breakdown:** `top_waits` shows `Lock:tuple`, `Lock:transactionid`, and/or `Lock:relation` dominating. This is the key signal — lock waits over 20% of total samples indicate a lock problem.
+
+**Step 3 — Timeline:** Lock waits appear suddenly (cascading pattern) rather than gradually. The spike starts from a single point in time — correlate with deployment events, cron jobs, or batch processes.
+
+**Step 4 — Query attribution:** `top_queries_with_text` identifies the victim queries (all waiting on same lock). Also identifies the blocker's last query (if it's idle in transaction, the last query is shown).
+
+**Step 5 — Query deep-dive:** `query_waits` on the victim query shows 100% lock wait time. No CPU, no IO — pure waiting.
+
+**Step 6 — Lock analysis (critical step):** pg_locks + pg_stat_activity join. Reconstruct the block tree:
+```sql
+-- Block tree reconstruction
+WITH RECURSIVE lock_tree AS (
+  SELECT 
+    pid, pg_blocking_pids(pid) AS blocked_by,
+    query, state, wait_event_type, wait_event,
+    now() - state_change AS duration
+  FROM pg_stat_activity
+  WHERE cardinality(pg_blocking_pids(pid)) > 0
+  UNION ALL
+  SELECT sa.pid, pg_blocking_pids(sa.pid), sa.query, sa.state,
+         sa.wait_event_type, sa.wait_event, now() - sa.state_change
+  FROM pg_stat_activity sa
+  JOIN lock_tree lt ON sa.pid = ANY(lt.blocked_by)
+)
+SELECT * FROM lock_tree;
+```
+
+This reveals: root blocker PID, blocking duration, all downstream victims.
+
+**Step 7 — Stat correlation:** `pg_stat_statements` shows the victim query's `mean_exec_time` spiked from baseline (e.g., 3ms → 12,000ms). The change timestamp matches the lock cascade start.
+
+**Step 8 — Object state:** Check `pg_stat_user_tables` for the blocked table — `n_dead_tup` spike could indicate autovacuum contention (separate incident type); normal dead tuple count suggests pure application-level locking.
+
+**Expected findings:** Root blocker is either (a) a long-running transaction (idle in transaction), (b) a batch job or migration holding a table-level lock, or (c) DDL operation (ALTER TABLE requiring AccessExclusiveLock).
+
+#### Three-Tier Mitigation
+
+**Immediate (seconds):**
+```sql
+-- Cancel the root blocker first (SIGINT to backend — gives application a chance to clean up)
+SELECT pg_cancel_backend(14523);
+
+-- If not resolved in 5s, terminate
+SELECT pg_terminate_backend(14523);
+```
+
+Permission required: `pg_cancel_backend` / `pg_terminate_backend` granted to `samo_agent`, or via wrapper function.
+
+**Mid-term GUCs (prevent recurrence):**
+```sql
+-- Kill idle-in-transaction sessions after 30s
+ALTER SYSTEM SET idle_in_transaction_session_timeout = '30000';
+
+-- Kill lock waiters after 10s (fail fast, retry is better than cascade)
+ALTER SYSTEM SET lock_timeout = '10000';
+
+-- Hard statement ceiling
+ALTER SYSTEM SET statement_timeout = '120000';
+
+SELECT pg_reload_conf();
+```
+
+Note: `lock_timeout` affects all sessions. Use `ALTER ROLE app_role SET lock_timeout = '10000'` to target only application roles if global change is too broad.
+
+**Long-term (application):**
+- For work queues: use `SELECT ... FOR UPDATE SKIP LOCKED` — workers skip locked rows instead of queuing
+- For DDL migrations: use `lock_timeout` in migration scripts; retry on timeout
+- For batch jobs: use smaller batches with explicit commits to reduce lock hold time
+- For transactions idling due to app bugs: add health check that detects idle-in-transaction and alerts
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Intentional long transaction | Backup, export, or pg_dump holding a lock | Check `application_name` — pg_dump uses `pg_dump` or custom name |
+| Lock from autovacuum | Autovacuum acquiring ShareUpdateExclusiveLock | Check `pg_stat_activity.backend_type = 'autovacuum worker'` |
+| Expected DDL migration | Scheduled ALTER TABLE | Correlate with deployment timestamps in config |
+| Replication slot holding | `Lock:virtualtransaction` from a slot | Check `pg_replication_slots` — active slot operations |
+
+**Confidence scoring for lock contention:**
+- High (>0.85): `Lock:tuple` or `Lock:transactionid` >30% of waits + identified root blocker + idle_in_transaction duration >10s
+- Medium (0.5-0.85): Lock waits present but root cause ambiguous (multiple blockers, or autovacuum involved)
+- Low (<0.5): Lock waits <20% of total, could be noise or brief contention
+
+### E.3 Incident Type 2: IO Bottleneck
+
+#### Investigation
+
+**Step 1:** `activity_summary` shows moderate to high active sessions, throughput may be degraded. Sessions that are "active" are actually IO-blocked (not CPU-bound).
+
+**Step 2:** `top_waits` shows `IO:DataFileRead` dominant (>30%). Secondary indicators: `IO:DataFileExtend`, `IO:WALWrite`. If `IO:DataFileRead` is dominant, it's a read bottleneck.
+
+**Step 3:** Timeline shows gradual increase, not a sudden spike — IO degradation is usually progressive (table/index growing, cache hit ratio declining).
+
+**Step 4 — Query attribution:** Multiple different queries showing IO waits — not a single query. This indicates a systemic IO issue, not a bad query.
+
+**Step 5:** `query_waits` on the worst query shows majority of time in `IO:DataFileRead`. Check if the query recently changed execution plan (sequential scan where an index was used before).
+
+**Step 7:** `pg_stat_statements` shows `shared_blks_read` increasing over time while `shared_blks_hit` stays flat or decreases — cache hit ratio declining.
+
+**Step 8 (critical for IO):** `pg_stat_user_tables` and `pg_stat_user_indexes`: look for tables with high `seq_scan` and large `n_live_tup`. A large table with no index doing sequential scans is the classic IO bottleneck cause.
+
+**Expected findings:** Either (a) a large sequential scan (missing index), (b) `shared_buffers` undersized (cache eviction causing re-reads), or (c) storage throughput exhaustion (requires external metrics from CloudWatch/Datadog to confirm).
+
+#### Three-Tier Mitigation
+
+**Immediate:** Identify and optionally cancel the worst IO-consuming queries if they're runaway:
+```sql
+SELECT pid, query, now() - query_start AS duration, 
+       wait_event_type, wait_event
+FROM pg_stat_activity
+WHERE wait_event_type = 'IO' AND state = 'active'
+ORDER BY duration DESC LIMIT 5;
+```
+Cancel the worst offender if it's a runaway query: `SELECT pg_cancel_backend(pid)`.
+
+**Mid-term GUCs:**
+```sql
+-- Increase shared_buffers (requires restart — plan it)
+-- Recommendation: 25% of total RAM
+ALTER SYSTEM SET shared_buffers = '4GB';  -- example for 16GB RAM
+
+-- Increase effective_cache_size (affects query planner — no restart needed)
+ALTER SYSTEM SET effective_cache_size = '12GB';
+
+-- Enable OS-level page cache awareness for query planning
+ALTER SYSTEM SET random_page_cost = '1.1';  -- for SSD storage
+
+SELECT pg_reload_conf();
+-- Note: shared_buffers requires restart — schedule during maintenance window
+```
+
+**Long-term:**
+- Add missing indexes for high-seq-scan large tables
+- Implement table partitioning to prune IO to relevant partitions
+- Consider `pg_partman` for automatic partition management
+- Review VACUUM/ANALYZE frequency — stale stats cause bad query plans that do unnecessary IO
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Intentional sequential scan | `pg_dump`, `VACUUM FULL`, `COPY` | Check `application_name`, `pg_stat_progress_*` |
+| Index build IO | `CREATE INDEX` in progress | `pg_stat_progress_create_index` |
+| Autovacuum IO | Autovacuum doing heavy table scan | `pg_stat_progress_vacuum` |
+| Cold cache after restart | Shared_buffers just warming up | Check `pg_stat_bgwriter.buffers_clean` trend |
+
+### E.4 Incident Type 3: CPU Saturation
+
+#### Investigation
+
+**Step 2:** `top_waits` shows `CPU` dominant. High CPU is unusual in pg_ash because pg_ash samples are taken while sessions are waiting — a fully CPU-bound query doesn't "wait" in the Postgres sense; it runs. Very high CPU in pg_ash often means either: (a) extremely high query volume (many short queries), or (b) complex queries with expensive operations.
+
+**Alternative signal:** CPU saturation may not appear clearly in pg_ash. Correlation with external metrics (CloudWatch CPUUtilization, Datadog) is important here. pg_ash's contribution is identifying which queries are responsible.
+
+**Step 4:** `top_queries_with_text` identifies the high-CPU queries. Look for: nested loop joins on large datasets, regex operations, function calls in WHERE clauses, missing statistics causing bad plans.
+
+**Step 7 (critical for CPU):** `pg_stat_statements` — look for queries where `total_exec_time` is growing rapidly. `mean_exec_time` high and `calls` high = CPU intensive. Also check `rows` vs `shared_blks_hit` — high blks_hit with many rows suggests in-memory sorting/processing (CPU bound).
+
+**Expected findings:** Either (a) a poorly-optimized query (bad plan from stale statistics, or genuinely needs index), (b) application-level N+1 queries (many identical queries per request), or (c) a cron job or batch process consuming CPU.
+
+#### Three-Tier Mitigation
+
+**Immediate:** Cancel the worst CPU-consuming queries if they're runaway or causing system-wide impact:
+```sql
+SELECT pid, query, now() - query_start AS duration,
+       (SELECT sum(total_exec_time) FROM pg_stat_statements WHERE queryid = 
+        (SELECT queryid FROM pg_stat_statements WHERE query LIKE ... LIMIT 1)) as total_time
+FROM pg_stat_activity WHERE state = 'active' ORDER BY duration DESC LIMIT 10;
+```
+
+**Mid-term GUCs:**
+```sql
+-- For N+1 query patterns: set statement_timeout to expose slow queries faster
+ALTER SYSTEM SET log_min_duration_statement = '1000';  -- log queries >1s
+
+-- Increase work_mem for sorts that are spilling to disk (reduces CPU for sort-heavy queries)
+-- Per-session setting — apply to specific roles to avoid OOM
+ALTER ROLE analytics_role SET work_mem = '256MB';
+
+-- Enable JIT for complex analytical queries (PG 11+)
+ALTER SYSTEM SET jit = 'on';
+ALTER SYSTEM SET jit_above_cost = '100000';
+
+SELECT pg_reload_conf();
+```
+
+**Long-term:**
+- Run `ANALYZE` to refresh statistics — bad plans are often the root cause
+- Use `pg_stat_statements` to identify the top 5 query shapes by total CPU time and optimize them
+- For N+1 patterns: requires application code review (add batching, use JOINs instead of per-row queries)
+- For complex analytical queries: consider read replicas for analytics workloads
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Intentional batch CPU | Full table scan for reporting, data export | Check `application_name`, time of day (scheduled?) |
+| `VACUUM FULL` / `CLUSTER` | CPU-intensive maintenance | `pg_stat_progress_vacuum` |
+| Autovacuum catchup | Autovacuum processing many dead tuples | Multiple autovacuum workers in pg_stat_activity |
+| `REINDEX` in progress | CPU from index rebuild | `pg_stat_progress_create_index` |
+
+### E.5 Incident Type 4: Connection Exhaustion
+
+#### Investigation
+
+**Step 1:** `activity_summary` shows active sessions near `max_connections`. If active sessions = max_connections, new connections are being rejected.
+
+**Step 2:** `top_waits` likely shows `Client:ClientRead` (sessions waiting for client to send a query — idle sessions consuming slots) and/or actual work waits.
+
+**Step 3:** Timeline shows connection count climbing — often correlates with application deployment (scale-out without corresponding PgBouncer configuration).
+
+**Step 4 — Key query:** Count connections by state, user, application:
+```sql
+SELECT state, application_name, count(*), 
+       max(now() - state_change) AS max_duration
+FROM pg_stat_activity
+WHERE pid != pg_backend_pid()
+GROUP BY 1, 2
+ORDER BY 3 DESC;
+```
+
+Step 6 is less relevant for connection exhaustion — this is about connection counts, not lock trees.
+
+**Expected findings:** Either (a) connection pooler not configured (direct connections from application at scale), (b) connection pool configured too large (pool_size × workers > max_connections), or (c) idle connections not being closed (connection leak in application).
+
+#### Three-Tier Mitigation
+
+**Immediate:** Terminate idle connections to reclaim slots:
+```sql
+-- Terminate idle connections idle for >10 minutes
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE state = 'idle'
+  AND state_change < now() - interval '10 minutes'
+  AND pid != pg_backend_pid();
+```
+
+**Mid-term GUCs:**
+```sql
+-- Kill idle connections after timeout (PG 14+)
+ALTER SYSTEM SET idle_session_timeout = '600000';  -- 10 minutes
+
+-- Ensure connection limits per role/database
+ALTER ROLE app_user CONNECTION LIMIT 50;
+ALTER DATABASE production CONNECTION LIMIT 200;
+
+SELECT pg_reload_conf();
+```
+
+**Long-term:**
+- Deploy PgBouncer (or PgCat, Supavisor) in transaction mode
+- Configure pool_size = (estimated_concurrent_queries × 1.2), not (application_instances × threads)
+- Add application-level connection health checks (`ensure_connection_alive()` pattern)
+- Monitor `pg_stat_activity` count in alerting (alert at 80% of `max_connections`)
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Replication connections | Streaming replicas use connections | Check `pg_stat_replication` and `backend_type = 'walsender'` |
+| Monitoring tools | Prometheus postgres_exporter, pganalyze agent | Check `application_name` |
+| Maintenance connections | DBA work during deployment | Check `usename` and connection time |
+
+### E.6 Incident Type 5: Replication Lag Spike
+
+#### Investigation
+
+**Step 2:** `top_waits` shows `IO:WALWrite` or `IO:WALSync` elevated on primary — replica may be falling behind due to write volume on primary.
+
+**Step 3:** Timeline shows lag increasing. Check if correlated with a bulk write operation (COPY, large UPDATE/DELETE, index rebuild).
+
+**Step 7:** `pg_stat_statements` shows recently executed bulk operations. High `rows` and `wal_bytes` (PG 14+) identify the cause.
+
+**External query (pg_stat_replication, run on primary):**
+```sql
+SELECT 
+  application_name,
+  state,
+  sent_lsn - replay_lsn AS total_lag_bytes,
+  write_lag, flush_lag, replay_lag,
+  now() - pg_last_xact_replay_timestamp() AS replay_delay  -- on replica
+FROM pg_stat_replication;
+```
+
+**Expected findings:** Either (a) bulk operation generating WAL faster than replica can apply, (b) network bandwidth limitation between primary and replica, (c) replica I/O bottleneck (replica disk can't keep up), or (d) `synchronous_standby_names` configured (write latency on primary waiting for replica sync).
+
+#### Three-Tier Mitigation
+
+**Immediate:**
+- If synchronous replication: check if replica is healthy. If replica crashed and sync is configured, primary blocks. Emergency: `ALTER SYSTEM SET synchronous_standby_names = ''` + `pg_reload_conf()` (only if replica is truly down and this is acceptable for RPO).
+- For asymmetric lag (replica falling behind): nothing to do immediately — just monitor. The lag will recover once the write burst ends.
+
+**Mid-term GUCs:**
+```sql
+-- Throttle bulk operations on primary via recovery_min_apply_delay on replica (for HA setups)
+-- On primary: set wal_sender_timeout to detect dead replicas
+ALTER SYSTEM SET wal_sender_timeout = '60000';  -- 60s
+
+-- For write-heavy workloads: tune wal_buffers
+ALTER SYSTEM SET wal_buffers = '64MB';
+
+-- Tune checkpoint behavior to reduce WAL burst
+ALTER SYSTEM SET checkpoint_completion_target = '0.9';
+ALTER SYSTEM SET max_wal_size = '4GB';
+
+SELECT pg_reload_conf();
+```
+
+**Long-term:**
+- For bulk imports: break into smaller transactions (`batch_size` pattern)
+- For large index rebuilds: schedule during off-peak with replica lag monitoring
+- For network-limited replication: investigate network bandwidth or use compressed WAL
+- For high-write workloads: evaluate replica hardware (ensure replica I/O is at least as fast as primary)
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Intentional bulk load | Data migration, initial population | Application_name, scheduled time |
+| Replica maintenance | Replica itself doing autovacuum or index work | pg_stat_activity on replica |
+| Normal checkpoint spike | WAL flushed during checkpoint bursts lag temporarily | Correlate with checkpoint timing |
+| `pg_logical` replication | Logical replication lag is different metric | Check `pg_replication_slots` instead |
+
+### E.7 Incident Type 6: Autovacuum Contention
+
+#### Investigation
+
+**Step 2:** `top_waits` shows `Lock:relation` — but the blocker is an autovacuum worker (not application). Also `IO:DataFileRead` elevated (autovacuum reading dead tuples).
+
+**Step 4:** `top_queries_with_text` shows autovacuum as the top "query" source (autovacuum appears as sessions in pg_stat_activity with `backend_type = 'autovacuum worker'`).
+
+**Step 6 (critical):** Block tree reveals autovacuum worker holding `ShareUpdateExclusiveLock` while application tries to acquire `ShareUpdateExclusiveLock` for `CREATE INDEX CONCURRENTLY`, or `AccessExclusiveLock` for DDL. This is the autovacuum vs DDL conflict pattern.
+
+**Step 8:** `pg_stat_user_tables` shows tables with high `n_dead_tup` — autovacuum is busy because dead tuples have accumulated. Also check `last_autovacuum` — if it's been a long time, autovacuum was blocked before and is now catching up.
+
+**Expected findings:** Either (a) autovacuum running on a table while application needs to do DDL (ALTER TABLE), (b) autovacuum scale_factor too aggressive causing frequent vacuums on large tables, or (c) autovacuum falling behind due to write rate exceeding vacuum capacity.
+
+#### Three-Tier Mitigation
+
+**Immediate:**
+```sql
+-- If autovacuum is blocking urgent DDL: cancel the autovacuum worker
+SELECT pg_cancel_backend(pid)
+FROM pg_stat_activity
+WHERE backend_type = 'autovacuum worker'
+  AND query LIKE '%<target_table>%';
+-- Autovacuum will restart on the table eventually — this is safe
+```
+
+**Mid-term GUCs:**
+```sql
+-- Increase autovacuum worker count for high-write databases
+ALTER SYSTEM SET autovacuum_max_workers = '5';
+
+-- Make vacuum more aggressive (vacuum more often, less dead tuple accumulation)
+ALTER SYSTEM SET autovacuum_vacuum_scale_factor = '0.01';  -- 1% vs default 20%
+ALTER SYSTEM SET autovacuum_analyze_scale_factor = '0.005'; -- 0.5%
+
+-- Throttle autovacuum to reduce IO impact (tradeoff: slower cleanup)
+ALTER SYSTEM SET autovacuum_vacuum_cost_delay = '2ms';   -- default 2ms
+ALTER SYSTEM SET autovacuum_vacuum_cost_limit = '400';   -- default 200
+
+-- Per-table override for high-write tables
+ALTER TABLE orders SET (autovacuum_vacuum_scale_factor = 0.01);
+
+SELECT pg_reload_conf();
+```
+
+**Long-term:**
+- Identify tables with consistently high dead tuple rates — review application DELETE/UPDATE patterns
+- Consider `pg_partman` for time-partitioned tables to control VACUUM scope
+- For autovacuum vs DDL conflicts: schedule DDL changes during off-peak; use `SET lock_timeout = '10s'` in migration scripts
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Manual VACUUM in progress | DBA running explicit VACUUM | Check `pg_stat_progress_vacuum`, `usename != 'autovacuum'` |
+| Autovacuum catching up after pg_ash install | First run after pg_ash installation may trigger autovacuum | Timestamp correlation |
+| `VACUUM FULL` by DBA | VACUUM FULL takes AccessExclusiveLock | `pg_stat_progress_vacuum`, `phase = 'scanning heap'` |
+
+### E.8 Incident Type 7: Checkpoint Storms
+
+#### Investigation
+
+**Step 2:** `top_waits` shows `IO:WALSync` and `IO:WALWrite` spiking. Also `BufferIO:BufferFlush` visible. Checkpoint storms manifest as IO wait storms.
+
+**Step 3:** Timeline shows periodic IO spikes, correlating with checkpoint intervals. Classic signature: sawtooth pattern — IO builds up then spikes at checkpoint.
+
+**Step 7:** `pg_stat_bgwriter` (not just pg_stat_statements):
+```sql
+SELECT 
+  checkpoints_timed, checkpoints_req,
+  checkpoint_write_time, checkpoint_sync_time,
+  buffers_checkpoint, buffers_clean, buffers_backend,
+  buffers_alloc
+FROM pg_stat_bgwriter;
+```
+
+High `checkpoints_req` vs `checkpoints_timed` means checkpoints are happening too frequently (WAL filling faster than `max_wal_size` allows). High `checkpoint_sync_time` means filesystem sync is slow.
+
+**External metrics:** CloudWatch `WriteLatency` / `DiskWriteOps` correlated with checkpoint timing is essential here. pg_ash can identify the correlation between IO waits and checkpoint events, but external metrics confirm storage I/O saturation.
+
+**Expected findings:** `max_wal_size` too small causing frequent requested checkpoints (triggered by WAL fill rather than `checkpoint_timeout`), or storage sync latency too high.
+
+#### Three-Tier Mitigation
+
+**Immediate:** Nothing to cancel or terminate — checkpoint storms are configuration issues, not runaway queries. Inform the user that impact is felt now but can't be stopped instantly without restarting.
+
+**Mid-term GUCs:**
+```sql
+-- Increase max_wal_size to allow checkpoints to happen on schedule (not too early)
+ALTER SYSTEM SET max_wal_size = '4GB';   -- default 1GB; tune based on write rate
+
+-- Smooth out checkpoint dirty page writing over the interval
+ALTER SYSTEM SET checkpoint_completion_target = '0.9';  -- default 0.5
+
+-- Increase checkpoint_timeout to space out checkpoints (default 5min)
+ALTER SYSTEM SET checkpoint_timeout = '15min';
+
+-- Tune bgwriter to pre-clean buffers before checkpoint
+ALTER SYSTEM SET bgwriter_lru_maxpages = '200';
+ALTER SYSTEM SET bgwriter_delay = '100ms';
+
+SELECT pg_reload_conf();
+```
+
+Note: `max_wal_size` is a soft limit. `min_wal_size` is the hard floor. Set `min_wal_size` to avoid thrashing on WAL segment recycling.
+
+**Long-term:**
+- Upgrade storage to higher IOPS/throughput if `checkpoint_sync_time` is consistently high (storage-bound)
+- Use `pg_prewarm` after restart to warm buffer cache and reduce initial checkpoint pressure
+- Evaluate `wal_compression = 'on'` to reduce WAL size and checkpoint frequency
+- For RDS: increase Provisioned IOPS if storage throughput is the constraint
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Post-crash recovery | Database just restarted, doing recovery checkpoints | Check `pg_postmaster_start_time()` — recent restart |
+| `CHECKPOINT` command | DBA ran explicit `CHECKPOINT` | `pg_stat_bgwriter.checkpoints_req` spike with no write increase |
+| Initial data load | Bulk COPY causing WAL overflow | Check for COPY in pg_stat_statements |
+
+### E.9 Incident Type 8: Memory Pressure
+
+#### Investigation
+
+**Step 2:** `top_waits` shows `IO:DataFileRead` with a specific pattern: it's diffuse across many queries (not concentrated in one). Combined with `temp file` creation — queries spilling to disk.
+
+**Step 7 (critical):** `pg_stat_statements`:
+```sql
+SELECT query, calls, 
+       temp_blks_read + temp_blks_written AS temp_blocks,
+       mean_exec_time, stddev_exec_time
+FROM pg_stat_statements
+WHERE temp_blks_read + temp_blks_written > 0
+ORDER BY temp_blocks DESC LIMIT 10;
+```
+High `temp_blks` = queries spilling sorts/hash joins to disk due to insufficient `work_mem`.
+
+**External check:** `pg_stat_activity` for sessions in `IO:DataFileRead` + `temp_file` in `wait_event`. Also check `pg_stat_bgwriter.buffers_backend` — high rate means shared_buffers is too small (buffers being allocated directly by backends without bgwriter).
+
+**Expected findings:** Either (a) `work_mem` too small causing sort/hash join disk spill, (b) `shared_buffers` too small (low cache hit ratio), or (c) total RAM exhaustion (requires OS-level investigation — Samo can suggest but can't confirm without external metrics).
+
+#### Three-Tier Mitigation
+
+**Immediate:** Identify and optionally limit the worst memory consumers:
+```sql
+-- Find queries creating temp files right now
+SELECT pid, query, left(query, 80)
+FROM pg_stat_activity
+WHERE wait_event_type = 'IO' AND wait_event = 'DataFileRead'
+  AND state = 'active';
+```
+
+**Mid-term GUCs:**
+```sql
+-- Increase work_mem for sort/hash operations
+-- Caution: work_mem is per-sort-operation, not per-session
+-- With max_connections=200 and 3 sorts per query: 200 * 3 * work_mem can hit RAM
+ALTER SYSTEM SET work_mem = '64MB';  -- increase carefully, default 4MB
+
+-- Better: target only memory-heavy roles
+ALTER ROLE analytics_role SET work_mem = '256MB';
+
+-- Increase shared_buffers if cache hit ratio is low
+ALTER SYSTEM SET shared_buffers = '4GB';  -- requires restart
+
+-- Set temp_file_limit to prevent runaway temp file usage
+ALTER SYSTEM SET temp_file_limit = '10GB';
+ALTER DATABASE production SET temp_file_limit = '10GB';
+
+SELECT pg_reload_conf();
+```
+
+**Long-term:**
+- Use `EXPLAIN (ANALYZE, BUFFERS)` on the temp-spilling queries — often a missing index eliminates the sort entirely
+- Evaluate query rewrite (window functions instead of sort-heavy CTEs)
+- Add RAM to the database server if pressure is across all workloads
+- Consider connection pooling to reduce per-connection memory overhead
+
+#### False Positive Scenarios
+
+| False Positive | Cause | Detection |
+|---------------|-------|-----------|
+| Intentional large sorts | Analytics/reporting workloads expected | `application_name`, time of day |
+| `pg_dump` memory usage | pg_dump uses significant memory on large tables | Check application_name |
+| Hash join on large tables | Expected for analytics queries with no better plan | Check if plan is actually suboptimal |
+| High `shared_buffers` allocation | Config change took effect, Postgres allocating buffers | Only at startup — check `pg_postmaster_start_time()` |
+
+### E.10 Block Tree Reconstruction for Complex Lock Trees
+
+The standard block tree query (Step 6) handles 2-level trees (A blocks B). For 3+ level deep trees (A blocks B, B blocks C, C blocks D), use the recursive CTE:
+
+```sql
+WITH RECURSIVE lock_tree AS (
+  -- Root blockers (sessions that are not blocked themselves)
+  SELECT 
+    pid,
+    ARRAY[]::integer[] AS blocked_by,
+    query,
+    state,
+    wait_event_type,
+    wait_event,
+    now() - state_change AS holding_duration,
+    0 AS depth,
+    ARRAY[pid] AS path
+  FROM pg_stat_activity
+  WHERE cardinality(pg_blocking_pids(pid)) = 0
+    AND pid != pg_backend_pid()
+    AND pid IN (
+      -- Only include root blockers that are actually blocking something
+      SELECT DISTINCT unnest(pg_blocking_pids(pid))
+      FROM pg_stat_activity
+      WHERE cardinality(pg_blocking_pids(pid)) > 0
+    )
+  
+  UNION ALL
+  
+  -- Blocked nodes
+  SELECT 
+    sa.pid,
+    pg_blocking_pids(sa.pid),
+    sa.query,
+    sa.state,
+    sa.wait_event_type,
+    sa.wait_event,
+    now() - sa.state_change,
+    lt.depth + 1,
+    lt.path || sa.pid
+  FROM pg_stat_activity sa
+  JOIN lock_tree lt ON lt.pid = ANY(pg_blocking_pids(sa.pid))
+  WHERE NOT sa.pid = ANY(lt.path)  -- prevent cycles
+    AND lt.depth < 10              -- safety limit
+)
+SELECT 
+  repeat('  ', depth) || pid::text AS pid_tree,
+  depth,
+  left(query, 80) AS query_preview,
+  state,
+  wait_event_type || ':' || wait_event AS wait,
+  holding_duration
+FROM lock_tree
+ORDER BY path;
+```
+
+**Multiple-blocker scenario:** When multiple sessions each block different sets of victims (parallel lock contention), the recursive CTE surfaces all trees. The Analyzer identifies all root blockers and proposes cancelling the one with the longest holding duration first.
+
+**Cycle detection:** The `NOT sa.pid = ANY(lt.path)` condition prevents infinite recursion if somehow a lock cycle exists (which Postgres prevents, but defensive coding).
+
+### E.11 pg_ash Limitations and Confidence Scoring
+
+#### What Can't Be Diagnosed with 1s Sampling
+
+| Issue | Limitation | Alternative |
+|-------|-----------|-------------|
+| Sub-second lock spikes | 1s sampling misses locks held for <100ms | pg_wait_sampling (10ms resolution) for high-frequency lock analysis |
+| Function-level profiling | pg_ash samples at session level, not statement level | `auto_explain` with nested statements |
+| True query plan attribution | pg_ash doesn't capture EXPLAIN plans | `pg_stat_statements` + manual EXPLAIN |
+| Cross-transaction causality | pg_ash sees independent samples, not cause-effect across transactions | Application traces (OpenTelemetry) |
+| OS-level bottlenecks | pg_ash only sees Postgres waits, not OS scheduler, CPU steal, etc. | CloudWatch, node_exporter |
+
+#### Degraded Mode Without pg_ash
+
+| Investigation Step | With pg_ash | Without pg_ash |
+|--------------------|------------|----------------|
+| Step 1: Big picture | `ash.activity_summary()` — historical | `pg_stat_activity` snapshot — current only |
+| Step 2: Wait breakdown | `ash.top_waits()` — aggregated over window | `pg_stat_activity` wait events — point-in-time |
+| Step 3: Timeline | `ash.timeline_chart()` — historical series | Not available — only current state |
+| Step 4: Query attribution | `ash.top_queries_with_text()` — by wait time | `pg_stat_statements` — by total execution time |
+| Step 5: Query deep-dive | `ash.query_waits(query_id)` — wait breakdown | Only available if query is currently running |
+| Step 6: Lock analysis | pg_locks + pg_stat_activity | pg_locks + pg_stat_activity — same |
+| Step 7: Stat correlation | `pg_stat_statements` + ash timeline | `pg_stat_statements` only |
+| Step 8: Object state | Full — no pg_ash needed | Full — no pg_ash needed |
+
+**Confidence adjustment for degraded mode:** Subtract 0.20 from confidence score when running without pg_ash. The investigation can still reach a correct conclusion for ongoing incidents (Steps 6-8 are unaffected), but historical analysis is unavailable — the investigation can only characterize the current state, not reconstruct the timeline.
+
+#### RCA Confidence Scoring Model
+
+```rust
+pub struct RcaConfidence {
+    /// 0.0 - 1.0
+    pub score: f64,
+    pub level: ConfidenceLevel,
+    pub factors: Vec<ConfidenceFactor>,
+    pub caveats: Vec<String>,
+}
+
+pub enum ConfidenceLevel {
+    High,    // > 0.80: strong evidence, clear root cause
+    Medium,  // 0.50 - 0.80: likely diagnosis, some ambiguity
+    Low,     // 0.30 - 0.50: hypothesis, needs more data
+    Unknown, // < 0.30: insufficient data, list possibilities only
+}
+```
+
+**Confidence factor scoring:**
+
+| Factor | Max contribution | Criteria |
+|--------|----------------|---------|
+| Dominant wait event | +0.25 | Single wait type >50% of samples |
+| Root cause identified | +0.25 | Specific PID/query/table linked to symptom |
+| Timeline correlation | +0.15 | Symptom onset correlates with specific event |
+| Historical pattern | +0.15 | Same issue seen in pg_ash history (>1 occurrence) |
+| pg_ash available | +0.10 | Full historical data (subtract 0.10 if absent) |
+| External metrics corroborated | +0.10 | CloudWatch/Datadog confirm same anomaly |
+| No conflicting signals | +0.10 | No alternative explanations with similar evidence |
+| **Total** | **1.10** | Capped at 1.0 |
+
+**Confidence thresholds for autonomy actions:**
+
+| Action | Minimum Confidence | Rationale |
+|--------|--------------------|-----------|
+| `pg_cancel_backend` | 0.70 | Cancelling the wrong session is disruptive but recoverable |
+| `pg_terminate_backend` | 0.80 | Termination is more disruptive; require higher confidence |
+| `ALTER SYSTEM SET` GUC changes | 0.75 | Config changes are non-trivial to reverse |
+| `CREATE INDEX CONCURRENTLY` | 0.80 | Long operation; high confidence before starting |
+| `REINDEX CONCURRENTLY` | 0.70 | Standard maintenance; lower bar |
+| `VACUUM ANALYZE` | 0.60 | Very safe operation; lower bar acceptable |
+
+In Guardian mode: confidence score is always shown to the human alongside the recommendation. In Pilot mode: actions below the minimum confidence threshold are downgraded to Guardian (shown for approval).
+
+### E.12 Incident Correlation
+
+Real incidents often involve multiple concurrent issues. The Analyzer correlates them using shared signals:
+
+**Correlation signals:**
+- **Shared timeline:** Two issues that appear at the same timestamp are likely related
+- **Shared table/object:** Two issues both involving `orders` table — probably the same root cause
+- **Causal chain:** Bloat → autovacuum contention → lock contention (classic PostgreSQL cascade)
+
+**Known causal chains:**
+```
+Bloat (dead tuples accumulate)
+  → autovacuum runs more aggressively
+  → autovacuum contention (ShareUpdateExclusiveLock)
+  → DDL blocked by autovacuum
+  → application timeout
+
+Missing vacuum/statistics
+  → stale statistics
+  → bad query plan (sequential scan instead of index)
+  → IO bottleneck
+  → connection pressure (slow queries hold connections longer)
+
+Replication slot lag
+  → WAL accumulation
+  → Disk space pressure
+  → Checkpoint storms (frequent checkpoints to free WAL)
+  → IO contention
+
+Connection exhaustion
+  → Idle-in-transaction pile-up
+  → Lock contention (idle sessions hold locks)
+  → More connection exhaustion (cascade)
+```
+
+When correlated issues are detected, the RCA report presents them as a causal chain rather than independent findings:
+
+```
+RCA: CAUSAL CHAIN DETECTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Root cause: Table bloat on orders (n_dead_tup = 2.4M)
+  └─→ Autovacuum running aggressively to catch up
+       └─→ Autovacuum holding ShareUpdateExclusiveLock on orders
+            └─→ DDL migration (ALTER TABLE orders ADD COLUMN) blocked for 8 min
+
+Addressing only the lock (cancelling autovacuum) is a temporary fix.
+The bloat must be addressed to prevent recurrence.
+
+Recommended approach:
+  1. [immediate] Allow autovacuum to complete (don't cancel — it's doing necessary work)
+  2. [immediate] Schedule the DDL migration for off-peak hours
+  3. [mid-term] VACUUM orders; (accelerate cleanup)
+  4. [mid-term] Tune autovacuum for orders table: lower scale_factor
+  5. [long-term] Review delete/update patterns — consider batching large deletes
+```
+
+### E.13 Comparison: Samo RCA vs. Commercial Tools
+
+| Capability | Samo (pg_ash) | pganalyze | Datadog APM | Human DBA |
+|------------|---------------|-----------|-------------|-----------|
+| Historical wait analysis | ✅ (pg_ash) | ✅ | ✅ | ❌ (manual) |
+| Real-time lock tree | ✅ | ✅ | ⚠️ Limited | ✅ |
+| Three-tier mitigation | ✅ Automated | ✅ Recommendations | ❌ | ✅ |
+| Auto-cancel root blocker | ✅ (Guardian/Pilot) | ❌ | ❌ | ✅ |
+| GUC recommendations | ✅ Specific values | ✅ General | ❌ | ✅ |
+| SKIP LOCKED recommendation | ✅ | ⚠️ Generic | ❌ | ✅ |
+| Incident correlation | ✅ Causal chains | ✅ | ✅ | ✅ |
+| Time to diagnosis | < 30 seconds | Minutes (human-reviewed) | Minutes (human-reviewed) | 30-60 minutes |
+| Confidence scoring | ✅ | ❌ | ❌ | Implicit |
+| Runs without internet | ✅ (pg_ash + Ollama) | ❌ | ❌ | ✅ |
+
+**Samo's differentiators:**
+1. **Act, not just alert** — Samo can cancel the blocker and apply GUC changes; commercial tools only observe
+2. **Causal chain reasoning** — LLM connects the dots across multiple symptoms
+3. **Confidence scoring** — explicit uncertainty quantifies when the system doesn't know
+4. **Runs in the terminal** — same interface as psql; no separate dashboard to open during an incident
+
+---
+
+## Appendix F: Terminal UX Architecture
 
 *Addresses Issue #3 — Terminal UX & TUI Architecture Review*
 
@@ -2845,7 +5085,7 @@ Each mode transition is:
 
 ---
 
-## Appendix E: AI/LLM Integration Architecture
+## Appendix G: AI/LLM Integration Architecture
 
 *Addresses Issue #5 — AI/LLM Integration Architecture Review*
 
@@ -3619,7 +5859,7 @@ impl SessionState {
 
 ---
 
-## Appendix F: Security Architecture
+## Appendix H: Security Architecture
 
 *Addresses Issue #6 — Security Architecture Review*
 
@@ -4101,7 +6341,7 @@ Each connector uses a separate credential — never share credentials between co
 
 ---
 
-## Appendix A — Wire Protocol Architecture Review (Issue #1)
+## Appendix I: Wire Protocol Architecture Review (Issue #1)
 
 ### A.1 Overview
 
@@ -4555,7 +6795,7 @@ impl SamoConnection {
 
 ---
 
-## Appendix B — PostgreSQL Domain Expert Review: \dba Diagnostic Queries (Issue #4)
+## Appendix J: PostgreSQL Domain Expert Review: \dba Diagnostic Queries (Issue #4)
 
 ### B.1 Overview
 
@@ -5393,7 +7633,7 @@ fn dba_query(feature: DbaFeature, version: u32) -> &'static str {
 
 ---
 
-## Appendix C — psql Compatibility Test Plan (Issue #7)
+## Appendix K: psql Compatibility Test Plan (Issue #7)
 
 ### C.1 Defining "95% Daily Use"
 
