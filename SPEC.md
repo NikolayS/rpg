@@ -300,6 +300,7 @@ Each area is independently configurable:
 | **minor_upgrade** | Minor PG version upgrades (16.2 → 16.4) | "PG 16.4 available, 3 security fixes" | Produces upgrade plan, waits | Auto-schedules upgrade |
 | **major_upgrade** | Major PG version upgrades (16 → 17) | "PG 17 compatibility report" | Produces migration plan, waits | Auto-orchestrates (requires extensive testing) |
 | **schema_health** | Data type issues, constraint gaps, naming conventions | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Max level: Guardian (schema changes never auto-pilot) |
+| **rca** | Root cause analysis — LLM-assisted investigation using pg_ash, pg_stat_*, logs | "Lock:tuple spike at 14:01, 68% of waits. Caused by concurrent UPDATEs on orders table. Suggest: review application locking pattern, consider SKIP LOCKED." | Produces RCA report + mitigation plan, waits | Auto-investigates anomalies, proposes mitigations, can auto-apply safe fixes |
 | **backup_monitoring** | Backup freshness, WAL archiving, PITR readiness | "Last backup 26h ago, SLA is 24h" | Proposes backup trigger, waits | Auto-alerts, can trigger backups |
 | **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Guardian (security changes never auto-pilot) |
 
@@ -314,6 +315,7 @@ config_tuning = "advisor"
 query_management = "advisor"
 connection_management = "advisor"
 replication = "advisor"
+rca = "advisor"
 minor_upgrade = "advisor"
 major_upgrade = "advisor"
 schema_health = "advisor"        # max level: guardian
@@ -1709,41 +1711,185 @@ samo/
 
 ### Phase 3: Agent (Weeks 23-32)
 
-**Goal:** Autonomous monitoring and remediation with safety controls.
+**Goal:** Autonomous monitoring and remediation, starting with the two highest-priority feature areas: **index health** and **RCA**.
 
-**Week 23-24:**
-- [ ] Autonomy level framework (L1-L5 with action classification)
-- [ ] Action audit log (every agent action recorded with justification)
-- [ ] Monitor loop: periodic health checks in interactive and daemon mode
-- [ ] Advisor level implementation for all features: observe, diagnose, recommend
-- [ ] Analyzer component: read-only analysis, structured recommendation output
+#### Priority 1: Index Health (full spectrum)
 
-**Week 25-26:**
-- [ ] Guardian level implementation: propose + human approval + Actor execution
+The first feature area to reach all three autonomy levels:
+
+**Advisor mode — what it detects:**
+- **Unused indexes** — indexes with zero scans since last stats reset (cross-referenced with index size, age, and recent DDL changes to avoid false positives)
+- **Redundant/duplicate indexes** — indexes that are a prefix of another index, or that have identical column sets
+- **Invalid indexes** — indexes left in invalid state from failed `CREATE INDEX CONCURRENTLY`
+- **Index bloat** — estimated bloat % per index via `pgstattuple` or heuristics from `pg_stat_user_indexes` + `pg_relation_size`
+- **Missing indexes** — sequential scans on large tables where an index would help (from `pg_stat_user_tables.seq_scan` + `pg_ash` wait data + query patterns from `pg_stat_statements`)
+- **Index correlation** — low correlation columns that cause excessive heap fetches with index scans
+
+**Advisor output example:**
+```
+INDEX HEALTH REPORT — production (2026-03-12)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠ UNUSED INDEXES (3 found, 1.2 GB reclaimable)
+  idx_orders_legacy_status    450 MB   0 scans   created 2024-01-15
+  idx_users_old_email         380 MB   0 scans   created 2023-06-20
+  idx_events_temp             370 MB   0 scans   created 2025-11-01
+
+⚠ REDUNDANT INDEXES (1 found)
+  idx_orders_customer_id IS PREFIX OF idx_orders_customer_id_created_at
+  → idx_orders_customer_id can be dropped (280 MB saved)
+
+❌ INVALID INDEXES (1 found)
+  idx_shipments_tracking — INVALID since 2026-03-10 (failed CONCURRENTLY)
+  → Needs: DROP INDEX idx_shipments_tracking; CREATE INDEX CONCURRENTLY ...
+
+⚠ BLOATED INDEXES (2 above 30% threshold)
+  idx_orders_created_at       34% bloat (450 MB → ~300 MB after reindex)
+  idx_payments_amount         31% bloat (120 MB → ~83 MB after reindex)
+
+💡 MISSING INDEXES (1 suggestion)
+  orders.customer_id — 1.2M seq scans/day, 12M rows, no index
+  → CREATE INDEX CONCURRENTLY idx_orders_customer_id ON orders(customer_id);
+
+Actions: 6 recommendations. Run '\autonomy index_health guardian' to enable approval workflow.
+```
+
+**Guardian mode — what it proposes:**
+- For unused: `DROP INDEX CONCURRENTLY` (with grace period confirmation — "this index has been unused for 90 days, confirm drop?")
+- For redundant: `DROP INDEX CONCURRENTLY` on the shorter/redundant one
+- For invalid: `DROP INDEX` + `CREATE INDEX CONCURRENTLY` (reissue)
+- For bloat: `REINDEX CONCURRENTLY` (via `samo_ops` wrapper)
+- For missing: `CREATE INDEX CONCURRENTLY` (with estimated creation time and lock impact)
+
+**Pilot mode — what it auto-does:**
+- Auto-reindexes bloated indexes above threshold during maintenance window
+- Auto-drops unused indexes after configurable grace period (default 90 days, requires minimum 2 stats resets to confirm)
+- Auto-drops redundant indexes (with same grace period logic)
+- Auto-fixes invalid indexes (drop + recreate)
+- Auto-creates missing indexes — ONLY if confidence is high (seq_scan count, table size, query frequency thresholds all met)
+
+#### Priority 2: RCA with Simple Mitigation (pg_ash-powered)
+
+LLM-assisted root cause analysis following the investigation pattern from [pg_ash](https://github.com/NikolayS/pg_ash):
+
+**How it works — the investigation chain:**
+
+The Analyzer follows the same natural investigation flow that a human DBA would, using pg_ash functions as its eyes:
+
+```
+Step 1: Big picture
+  → ash.activity_summary('1 hour')
+  → "Peak 12 active sessions at 14:01, normally 4. Lock:tuple is 68% of waits."
+
+Step 2: Drill into waits
+  → ash.top_waits('1 hour')
+  → "Lock:tuple dominates. Second is CPU. Third is IO:DataFileRead."
+
+Step 3: Timeline — when did it start?
+  → ash.timeline_chart('2 hours', '1 minute')
+  → "Normal until 14:01:00. Lock:tuple spike starts suddenly, peaks at 14:01:30."
+
+Step 4: Which queries?
+  → ash.top_queries_with_text('1 hour')
+  → "Query 7283901445: UPDATE orders SET status = $1 WHERE id = $2 — 45% of samples."
+
+Step 5: That query's wait profile
+  → ash.query_waits(7283901445, '1 hour')
+  → "This query is 80% Lock:tuple. Multiple sessions running it concurrently."
+
+Step 6: Cross-reference with pg_stat_statements
+  → "This query's mean_exec_time jumped from 2ms to 450ms at 14:01."
+
+Step 7: Check related objects
+  → "orders table: 12M rows, last ANALYZE 3 days ago, 500K dead tuples."
+  → "pg_locks shows 8 sessions waiting on the same tuple."
+```
+
+**RCA output example:**
+```
+ROOT CAUSE ANALYSIS — Lock:tuple spike at 14:01 UTC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SUMMARY: 8 concurrent sessions updating the same rows in 'orders' table
+caused a Lock:tuple pileup. The spike lasted 3 minutes (14:01-14:04).
+
+EVIDENCE:
+  • ash.activity_summary: peak 12 active sessions (normal: 4)
+  • ash.top_waits: Lock:tuple = 68% of all wait samples
+  • ash.timeline_chart: spike starts at 14:01:00, recovers at 14:04:12
+  • Top query: UPDATE orders SET status = $1 WHERE id = $2 (45% of samples)
+  • pg_locks: 8 sessions blocked on same tuple in 'orders'
+  • pg_stat_statements: mean_exec_time 2ms → 450ms
+
+ROOT CAUSE: Application bug or hotspot — multiple workers processing the
+same order concurrently. This is a Lock:tuple wait (row-level lock contention),
+not a missing index or config issue.
+
+MITIGATION:
+  1. [immediate] Application-level fix needed — ensure only one worker
+     processes each order (use advisory locks or queue deduplication)
+  2. [immediate] Consider SELECT ... FOR UPDATE SKIP LOCKED pattern
+     if this is a work queue
+  3. [preventive] ANALYZE orders (stale statistics, 3 days old)
+  4. [preventive] VACUUM orders (500K dead tuples)
+
+  Actions #3 and #4 can be auto-applied (vacuum: pilot, autonomy allows).
+  Actions #1 and #2 require application code changes (outside DB scope).
+
+CONFIDENCE: High — clear Lock:tuple pattern with identifiable query and
+concurrent session evidence.
+```
+
+**Integration with other features:**
+- RCA automatically triggers relevant feature actions — if the root cause includes stale stats, it hands off to `vacuum`; if bloated indexes are contributing, it hands off to `bloat`
+- RCA can be triggered manually (`/rca` or `\rca`) or automatically when anomalies are detected (spike in active sessions, sudden wait event changes)
+- In Pilot mode for RCA: auto-investigates anomalies, produces reports, auto-applies safe mitigations (ANALYZE, VACUUM, cancel long queries), escalates application-level issues to configured channels
+
+**pg_ash integration details:**
+- Samo auto-detects pg_ash presence on connect (`SELECT * FROM ash.status()`)
+- If pg_ash is not installed, offers to install it (`\i` the SQL file)
+- All `ash.*` functions are available as first-class `\dba ash *` commands
+- RCA investigation chain is the Analyzer's primary workflow for performance issues
+
+#### Week-by-week (Phase 3)
+
+**Week 23-24: Framework + Index Health (Advisor)**
+- [ ] Three-branch governance framework (Analyzer, Actor, Auditor)
+- [ ] Per-feature autonomy configuration system
+- [ ] Action audit log (every action: timestamp, feature, level, justification, outcome)
+- [ ] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
+- [ ] Index health report generation (structured output)
+- [ ] pg_ash detection and integration
+
+**Week 25-26: RCA (Advisor) + Index Health (Guardian)**
+- [ ] RCA Analyzer: LLM-driven investigation chain using pg_ash functions
+- [ ] RCA report generation with evidence, root cause, mitigation
+- [ ] Index health Guardian: propose actions with justification, wait for approval
 - [ ] Actor component: isolated executor with DB permission validation
-- [ ] Dry-run mode for all actions
-- [ ] Health check protocol engine (pluggable check definitions)
+- [ ] `samo_ops` wrapper generation for index operations
 
-**Week 27-28:**
+**Week 27-28: RCA (Guardian) + Daemon mode**
+- [ ] RCA Guardian: propose mitigations, wait for approval
+- [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes
 - [ ] Daemon mode: headless operation, PID file, signal handling
-- [ ] Notification channels: Slack webhook, email (SMTP)
-- [ ] PostgresAI Issues connector: create/update issues with RCA from agent findings
-- [ ] PostgresAI Monitoring & Checkup connector: pull baselines, health scores
-- [ ] HTTP health check endpoint for daemon mode
+- [ ] Notification channels: Slack webhook, email
+- [ ] HTTP health check endpoint
 
-**Week 29-30:**
+**Week 29-30: Pilot mode for safe features**
+- [ ] Index health Pilot: auto-reindex, auto-drop unused (with grace period), auto-create missing
+- [ ] RCA Pilot: auto-investigate anomalies, auto-apply safe mitigations
+- [ ] Auditor component: post-action verification (did reindex reduce bloat? did index improve queries?)
+- [ ] PostgresAI Issues connector
 - [ ] GitHub Issues connector
-- [ ] Pilot level implementation for safe features (vacuum, index_health, query_management)
-- [ ] Approval workflow: interactive confirmation for high-risk actions
-- [ ] Maintenance window awareness
 
-**Week 31-32:**
+**Week 31-32: Platform services + remaining features (Advisor)**
 - [ ] Systemd unit file and install guide
 - [ ] Launchd plist for macOS
 - [ ] Windows service support
 - [ ] Container image (Alpine-based, ~15MB)
+- [ ] Advisor mode for remaining features: vacuum, bloat, config_tuning, query_management, etc.
 
-**Milestone:** Agent can monitor a database, detect issues, and take appropriate action within configured autonomy level. Runs as a daemon on all platforms.
+**Milestone:** Index health and RCA work end-to-end at all three autonomy levels. Other features work at Advisor level. Agent runs as a daemon on all platforms.
 
 ### Phase 4: Ecosystem (Weeks 33+)
 
