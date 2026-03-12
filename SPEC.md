@@ -504,6 +504,436 @@ alpha -D -E                      # debug mode + echo hidden queries (psql -E com
 - AI API keys are never logged; only provider name and model are recorded
 - Log files are created with 600 permissions
 
+#### FR-15: Session Management
+
+Borrowed from Claude Code and OpenClaw. Long-running database work needs session continuity.
+
+**Sessions:**
+- Each interactive session gets a unique ID and is persisted
+- Session includes: connection parameters, query history, AI conversation, variables, mode state
+- `\session list` — list recent sessions with timestamps, database, duration
+- `\session resume [id]` — resume a previous session (reconnects, restores variables and history)
+- `\session save [name]` — save current session with a name
+- `\session delete [id]` — delete a session
+- Storage: SQLite database at `~/.local/share/alpha/sessions.db`
+
+**Context compaction (from Claude Code / OpenClaw):**
+- AI conversation context grows over a session — queries, results, explanations accumulate
+- When context approaches model's token limit, auto-compact: summarize older conversation, keep recent
+- `/compact` — manually trigger compaction with optional focus ("compact, keep focus on performance tuning")
+- `/clear` — clear AI conversation context entirely (keep connection, variables, history)
+- Compaction summary is persisted in session for resume
+
+**Undo:**
+- `\undo` — undo the last AI-executed action
+- Only works for DDL/DML that the AI executed (not manual SQL)
+- Generates and runs the reverse operation where possible:
+  - `CREATE INDEX` → `DROP INDEX`
+  - `ALTER TABLE ADD COLUMN` → `ALTER TABLE DROP COLUMN`
+  - `INSERT` → `DELETE` (if PK available)
+  - For non-reversible operations (DROP, TRUNCATE): warns that undo is not possible
+- Maintains an undo stack per session (configurable depth, default 20)
+- `\undo list` — show undo stack
+- `\undo all` — undo all AI-executed actions in reverse order
+
+#### FR-16: Named Queries (Favorites)
+
+Borrowed from pgcli. Save frequently used queries with short names.
+
+```
+-- Save a query
+\ns active_locks SELECT pid, relation::regclass, mode, granted FROM pg_locks WHERE NOT granted;
+
+-- List all saved queries
+\n+
+
+-- Execute a saved query
+\n active_locks
+
+-- Delete a saved query
+\nd active_locks
+
+-- Print a saved query without executing
+\np active_locks
+
+-- Save with parameters (positional)
+\ns top_tables SELECT * FROM pg_stat_user_tables ORDER BY $1 DESC LIMIT $2;
+\n top_tables seq_scan 10
+```
+
+- Stored in `~/.config/alpha/named_queries.toml` (portable, shareable)
+- Support positional parameters (`$1`, `$2`, ...)
+- Tab-completion for query names
+- Can be shared across team via version-controlled config
+
+#### FR-17: Destructive Statement Protection
+
+Borrowed from pgcli. Warn before executing dangerous statements.
+
+```
+alpha=> DROP TABLE users;
+WARNING: This is a destructive operation.
+Are you sure you want to execute: DROP TABLE users? [y/N]
+```
+
+**Protected statements (configurable):**
+- `DROP TABLE`, `DROP DATABASE`, `DROP SCHEMA`, `DROP INDEX` (without CONCURRENTLY)
+- `TRUNCATE`
+- `DELETE` without `WHERE`
+- `UPDATE` without `WHERE`
+- `ALTER TABLE ... DROP COLUMN`
+- `ALTER SYSTEM RESET ALL`
+
+**Configuration:**
+```toml
+[safety]
+destructive_warning = true              # enable/disable
+destructive_statements_require_transaction = false  # require explicit transaction for destructive ops
+protected_patterns = [                  # custom patterns (regex)
+  "DROP\\s+TABLE",
+  "TRUNCATE",
+  "DELETE\\s+FROM\\s+\\w+\\s*;",        # DELETE without WHERE
+]
+```
+
+- In YOLO mode: warnings still fire for operations above the autonomy level
+- In non-interactive mode: destructive statements abort with error unless `--force` flag
+
+#### FR-18: Keybindings
+
+Borrowed from pgcli. Configurable keybinding modes.
+
+**Emacs mode (default):**
+- Standard emacs keybindings: Ctrl-A (home), Ctrl-E (end), Ctrl-K (kill line), etc.
+
+**Vi mode:**
+- Modal editing: Esc for normal mode, i for insert mode
+- `^` (beginning), `$` (end), `w` (word forward), `b` (word back), etc.
+
+**Toggle:** F4 key or `\set VI on|off`
+
+**Function keys (pgcli-inspired):**
+| Key | Function |
+|-----|----------|
+| F2 | Toggle smart completion on/off |
+| F3 | Toggle multi-line mode on/off |
+| F4 | Toggle Vi/Emacs keybinding mode |
+| F5 | Toggle auto-EXPLAIN on/off (pgcli-style: auto-prepend EXPLAIN to queries) |
+| Ctrl-T | Toggle SQL/text2sql input mode |
+| Ctrl-R | Reverse history search |
+| Ctrl-Space | Force autocomplete |
+| Tab | Autocomplete (on non-empty line) |
+| Alt-Enter | Insert newline (multi-line mode, emacs) |
+
+**Custom keybindings (config file):**
+```toml
+[keybindings]
+mode = "emacs"    # emacs | vi
+custom = [
+  { key = "ctrl-p", action = "history_prev" },
+  { key = "ctrl-n", action = "history_next" },
+]
+```
+
+#### FR-19: Smart Autocomplete
+
+Enhanced autocomplete beyond basic schema objects. Borrowed from pgcli with additions.
+
+**Smart vs. basic completion:**
+- **Smart (default):** Context-sensitive — only suggest relevant items based on SQL position
+- **Basic:** Show all possible completions regardless of context
+- Toggle with F2
+
+**Features:**
+- Fuzzy matching: typing `djmi` matches `django_migrations` (pgcli-style)
+- Alias resolution: `SELECT u. FROM users u` → suggests columns of `users`
+- Schema qualification: `public.` → only objects in `public` schema
+- Keyword casing: auto-detect and match user's casing style (configurable: lower/upper/auto)
+- Table alias generation: optionally auto-suggest aliases when completing table names (`users` → `users u`)
+- Cross-schema search: when no schema prefix, search all schemas in `search_path`
+- CTE/subquery awareness: autocomplete columns from CTEs and subqueries
+- Function signature hints: show parameter types when completing function names
+- Completion for GUC parameter names after `SET` / `ALTER SYSTEM SET`
+- Completion for enum values in `WHERE col = '...'` context
+
+#### FR-20: MCP Protocol Support
+
+Borrowed from Claude Code. Model Context Protocol (MCP) allows external tools to extend functionality.
+
+**As an MCP client:**
+- Connect to MCP servers (stdio and HTTP transports)
+- Use MCP tools inside text2sql mode (e.g., a web search MCP for finding documentation)
+- Configuration in config file:
+  ```toml
+  [mcp.servers.docs]
+  type = "stdio"
+  command = "postgres-docs-mcp"
+  args = []
+  ```
+
+**As an MCP server:**
+- Expose database operations as MCP tools for other agents/tools:
+  - `query` — execute SQL and return results
+  - `describe` — describe a table/view/function
+  - `health_check` — run health diagnostics
+  - `explain` — run EXPLAIN ANALYZE and return plan
+- Allows integration with Claude Code, Cursor, or other MCP-aware tools
+- Configurable: which tools to expose, read-only mode, rate limits
+
+#### FR-21: Project Configuration Files
+
+Borrowed from Claude Code (CLAUDE.md/AGENTS.md) and OpenCode (/init).
+
+**`.alpha.toml`** — project-level configuration, checked into git:
+```toml
+# .alpha.toml — project-level config (lives in repo root)
+[connection]
+default_database = "myapp_development"
+default_host = "localhost"
+
+[named_queries]
+migrations = "SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 20"
+active = "SELECT * FROM pg_stat_activity WHERE state = 'active'"
+
+[ai]
+context_files = ["docs/schema.md", "docs/queries.md"]  # extra context for AI
+system_prompt = "This is a Rails app. The schema uses UUID primary keys."
+
+[safety]
+protected_tables = ["users", "payments", "audit_log"]  # extra protection for these tables
+```
+
+**`POSTGRES.md`** — natural language project context (like AGENTS.md):
+```markdown
+# Database Context
+
+This is a Rails 7 application using PostgreSQL 16.
+
+## Schema conventions
+- All tables use UUID primary keys
+- Soft deletes via `deleted_at` column
+- Audit trail in `audit_log` table — never DELETE from this table
+
+## Known issues
+- The `orders` table has significant bloat, VACUUM regularly
+- Index `idx_orders_legacy` is unused, safe to drop
+```
+
+- AI reads these files on connect (if present in current directory or home)
+- `/init` command: AI analyzes the connected database and generates `.alpha.toml` and `POSTGRES.md`
+
+#### FR-22: Multi-line Mode
+
+Borrowed from pgcli. Configurable behavior for Enter key.
+
+**Modes:**
+- **psql mode (default):** Enter executes if line ends with semicolon, otherwise continues
+- **safe mode:** Enter always inserts newline; Esc+Enter or Alt+Enter executes
+- **single-line mode:** Enter always executes (psql `-S` compat)
+
+**Toggle:** F3 or `\set MULTILINE psql|safe|single`
+
+**Configuration:**
+```toml
+[input]
+multi_line = true                # enable multi-line (default)
+multi_line_mode = "psql"         # psql | safe
+```
+
+#### FR-23: SSH Tunnel Support
+
+Borrowed from pgcli. Built-in SSH tunnel for remote databases.
+
+```bash
+# Connect through SSH tunnel
+alpha --ssh-tunnel user@bastion:22 -h db-host -p 5432 -d mydb
+
+# Using config
+alpha -h mydb@production   # resolves from named connections with tunnel config
+```
+
+**Configuration:**
+```toml
+[connections.production]
+host = "10.0.1.5"
+port = 5432
+database = "myapp"
+user = "app_user"
+ssh_tunnel = { host = "bastion.example.com", port = 22, user = "deploy", key = "~/.ssh/id_ed25519" }
+```
+
+- Automatic local port allocation
+- SSH agent forwarding support
+- Key-based and password auth
+- Keep-alive for long sessions
+
+#### FR-24: Query Audit Log
+
+Separate from debug logging. A user-friendly log of all queries executed, for compliance and review.
+
+```
+\log-file queries.log        # start logging all queries + results to file
+\log-file                    # stop logging
+```
+
+**Audit log format:**
+```
+-- 2026-03-12 14:23:01 UTC | mydb | user=nik | duration=12ms
+SELECT * FROM users WHERE id = 42;
+-- (1 row)
+
+-- 2026-03-12 14:23:15 UTC | mydb | user=nik | duration=340ms | source=text2sql
+-- prompt: "show me users who signed up this week"
+SELECT * FROM users WHERE created_at >= date_trunc('week', current_date);
+-- (47 rows)
+
+-- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:L3
+-- action: REINDEX CONCURRENTLY idx_orders_created_at
+-- justification: Index bloat at 34%, threshold 25%
+SELECT alpha_ops.reindex_concurrently('idx_orders_created_at'::regclass);
+-- OK
+```
+
+- Every query logged with: timestamp, database, user, duration, source (manual/text2sql/agent)
+- Agent actions include justification
+- Configurable: `logging.audit_file` in config
+- Separate from debug log — audit is human-readable, debug is machine-verbose
+
+#### FR-25: Notification and Alert Channels
+
+For daemon mode and background monitoring. Borrowed from OpenClaw.
+
+**Channels:**
+- Slack webhook
+- Email (SMTP)
+- PagerDuty
+- Generic webhook (POST JSON to URL)
+- Telegram bot
+- stdout/stderr (for container logging)
+
+**Configuration:**
+```toml
+[alerts]
+channels = ["slack", "email"]
+
+[alerts.slack]
+webhook_url_env = "SLACK_WEBHOOK_URL"
+channel = "#db-alerts"
+severity_threshold = "warning"   # only send warning+ severity
+
+[alerts.email]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+from = "alpha@example.com"
+to = ["dba@example.com"]
+severity_threshold = "critical"  # only critical alerts via email
+
+[alerts.pagerduty]
+routing_key_env = "PD_ROUTING_KEY"
+severity_threshold = "critical"
+```
+
+**Alert format:**
+```json
+{
+  "severity": "warning",
+  "database": "production",
+  "host": "db-01.example.com",
+  "check": "index_bloat",
+  "message": "Index idx_orders_created_at bloat at 34% (threshold: 25%)",
+  "recommendation": "REINDEX CONCURRENTLY idx_orders_created_at",
+  "autonomy_action": "auto-reindex scheduled (L3)",
+  "timestamp": "2026-03-12T14:30:00Z"
+}
+```
+
+#### FR-26: Status Bar / Status Line
+
+Borrowed from Claude Code. A persistent status line at the bottom of the terminal.
+
+**Displays:**
+- Connection: `db-host:5432/mydb` (green=connected, red=disconnected, yellow=reconnecting)
+- Mode: `SQL` | `text2sql` | `plan` | `yolo` | `observe`
+- Autonomy: `L1` | `L2` | `L3` | `L4` | `L5`
+- Transaction state: idle | in-transaction | failed
+- Query timing: last query duration
+- AI: token usage / budget remaining (when AI is active)
+- Latency: connection RTT
+- Replication lag (if connected to replica and monitoring)
+
+**Customizable:** config or `\set STATUSLINE` format string:
+```toml
+[display]
+statusline = "{host}:{port}/{db} | {mode} | {autonomy} | {tx_state} | {last_duration}"
+```
+
+**Toggle:** `\set STATUSLINE on|off`
+
+#### FR-27: Explain Mode (Auto-EXPLAIN)
+
+Borrowed from pgcli's F5 feature. When enabled, automatically prepends EXPLAIN to every query.
+
+```
+alpha=> \set EXPLAIN on
+-- Explain mode ON. All queries will show execution plan.
+
+alpha=> SELECT * FROM users WHERE email = 'test@example.com';
+                          QUERY PLAN
+--------------------------------------------------------------
+ Index Scan using idx_users_email on users  (cost=0.42..8.44 rows=1 width=128)
+   Index Cond: (email = 'test@example.com'::text)
+(2 rows)
+```
+
+**Variants:**
+- `\set EXPLAIN on` — EXPLAIN only (no execution)
+- `\set EXPLAIN analyze` — EXPLAIN ANALYZE (executes the query)
+- `\set EXPLAIN verbose` — EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
+- F5 to toggle through: off → explain → analyze → verbose → off
+
+**AI integration:** When explain mode is on and AI is active, automatically feed the plan to the LLM for interpretation.
+
+#### FR-28: Connection Profiles
+
+Named connections with full configuration, including tunnels and autonomy settings.
+
+```toml
+[connections.local]
+host = "localhost"
+port = 5432
+database = "myapp_dev"
+user = "dev"
+
+[connections.staging]
+host = "staging-db.internal"
+port = 5432
+database = "myapp"
+user = "readonly"
+sslmode = "require"
+autonomy = "L1"      # read-only on staging
+
+[connections.production]
+host = "10.0.1.5"
+port = 5432
+database = "myapp"
+user = "alpha_agent"
+sslmode = "verify-full"
+sslrootcert = "~/.ssl/rds-ca.pem"
+autonomy = "L3"
+ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
+```
+
+**Usage:**
+```
+alpha @local          # connect using 'local' profile
+alpha @production     # connect using 'production' profile (with SSH tunnel)
+\c @staging           # switch to staging profile mid-session
+```
+
+- Tab-completion for profile names
+- `\profiles` — list all configured profiles
+- Autonomy level can be pinned per profile (production ≠ development)
+
 ### 3.2 Non-Functional Requirements
 
 #### NFR-1: Performance

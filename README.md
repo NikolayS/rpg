@@ -270,12 +270,14 @@ alpha daemon --config /etc/alpha/config.toml --level L2
 
 | Tool | What We Take | What We Add |
 |------|-------------|-------------|
-| `psql` | Command set, muscle memory | Everything else |
-| `pgcli` | Autocomplete, highlighting | Rust performance, AI, agent |
-| `pspg` | Pager UX | Integrated, not external |
+| `psql` | Command set, muscle memory, wire protocol | Everything else |
+| `pgcli` | Autocomplete, highlighting, named queries, destructive warnings, fuzzy match, vi/emacs modes | Rust performance, AI, agent, TUI pager |
+| `pspg` | Pager UX, column freeze | Integrated, not external |
 | `postgres_dba` | Diagnostic queries | Built-in, not separate SQL files |
-| `warp` | AI in terminal | Postgres-specific, not generic |
-| `claude-code` | AI coding agent | Database-specific domain expertise |
+| `warp` | AI in terminal, status bar | Postgres-specific, not generic |
+| `claude-code` | Plan mode, sessions, compaction, undo, MCP, project files, subagents | Database-specific domain expertise |
+| `opencode` | TUI, session persistence (SQLite), auto-compact, LSP-like intelligence | Postgres wire protocol as the "language server" |
+| `openclaw` | Multi-session, memory, connectors, cron/heartbeats, channel delivery | Native Postgres agent, not generic AI |
 
 ---
 
