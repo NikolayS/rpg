@@ -39,16 +39,72 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 
 ### 3.1 Functional Requirements
 
-#### FR-1: Postgres Wire Protocol
-- Connect via TCP and Unix domain sockets
+#### FR-1: Postgres Wire Protocol and Connection
+
+**Wire protocol:**
 - Wire protocol v3 (simple query, extended query protocol)
+- Connect via TCP and Unix domain sockets
 - Authentication: password, md5, SCRAM-SHA-256
 - SSL/TLS via rustls (with native-tls fallback option)
-- Connection parameters: host, port, dbname, user, password, sslmode, application_name
-- Environment variables: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGPASSFILE, PGSSLMODE
-- `.pgpass` file support
-- Connection URI format: `postgresql://user:pass@host:port/db?sslmode=require`
-- libpq-compatible connection string format
+- GSS encryption support (GSSAPI/Kerberos environments)
+- Connection parameter negotiation
+- CancelRequest for query cancellation
+- COPY sub-protocol (both directions)
+- LISTEN/NOTIFY async notification handling
+- Large object streaming protocol
+
+**Connection parameters (all libpq-compatible):**
+- host, hostaddr, port, dbname, user, password
+- sslmode (disable, allow, prefer, require, verify-ca, verify-full)
+- sslcert, sslkey, sslrootcert, sslcrl, sslcrldir
+- sslnegotiation, sslcompression, sslcertmode, sslsni
+- ssl_min_protocol_version, ssl_max_protocol_version
+- application_name, options (runtime parameters)
+- connect_timeout, client_encoding
+- target_session_attrs (any, read-write, read-only, primary, standby, prefer-standby)
+- load_balance_hosts
+- channel_binding, require_auth
+- gssencmode, krbsrvname, gsslib, gssdelegation
+- passfile, service (pg_service.conf)
+- requirepeer (Unix socket peer auth)
+
+**Environment variables (full libpq set):**
+- PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER
+- PGPASSWORD, PGPASSFILE
+- PGOPTIONS — runtime options passed to server (e.g., `-c search_path=myschema`)
+- PGAPPNAME — application_name
+- PGSSLMODE, PGREQUIRESSL (deprecated), PGSSLCOMPRESSION
+- PGSSLCERT, PGSSLKEY, PGSSLCERTMODE, PGSSLROOTCERT
+- PGSSLCRL, PGSSLCRLDIR, PGSSLSNI
+- PGSSLNEGOTIATION
+- PGSSLMINPROTOCOLVERSION, PGSSLMAXPROTOCOLVERSION
+- PGSERVICE, PGSERVICEFILE
+- PGREQUIREAUTH, PGCHANNELBINDING
+- PGGSSENCMODE, PGKRBSRVNAME, PGGSSLIB, PGGSSDELEGATION
+- PGCONNECT_TIMEOUT
+- PGCLIENTENCODING
+- PGTARGETSESSIONATTRS, PGLOADBALANCEHOSTS
+- PSQLRC, PSQL_HISTORY — psql-specific (we respect these for compatibility)
+- PAGER, PSQL_PAGER — pager program selection
+- PGTZ — default timezone
+- PGDATESTYLE — default date style
+
+**Connection string formats:**
+- URI: `postgresql://user:pass@host:port/db?sslmode=require&options=-csearch_path%3Dmyschema`
+- Key-value: `host=localhost port=5432 dbname=mydb sslmode=require options='-c search_path=myschema'`
+- Positional: `alpha dbname user host port`
+
+**Service file support:**
+- `~/.pg_service.conf` and `PGSERVICEFILE`
+- `pg_service.conf` in sysconfdir
+- `\c service=myservice`
+
+**`.pgpass` file support:**
+- Standard location: `~/.pgpass` (Linux/macOS), `%APPDATA%\postgresql\pgpass.conf` (Windows)
+- `PGPASSFILE` override
+- Format: `hostname:port:database:username:password`
+- Wildcard (`*`) support
+- Permission check (600 on Unix)
 
 #### FR-2: REPL
 - Interactive readline with history (persistent across sessions)
@@ -112,13 +168,28 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 | `\ir file` | Include file (relative) |
 | `\prompt [text] name` | Prompt user for variable |
 
-**Tier 3 — Nice to have (Phase 2+):**
+**Tier 3 — Complete compatibility (Phase 2+):**
 | Command | Description |
 |---------|-------------|
-| `\lo_*` | Large object commands |
-| `\crosstabview` | Pivot results |
-| `\gdesc` | Describe result columns |
-| `\bind` | Bind parameters |
+| `\lo_import`, `\lo_export`, `\lo_list`, `\lo_unlink` | Large object commands |
+| `\crosstabview [colV [colH [colD [sortcolH]]]]` | Pivot query results into crosstab grid |
+| `\gdesc` | Describe result columns without executing |
+| `\bind [params...]` | Bind parameters for next query (extended query protocol) |
+| `\bind_named stmt [params...]` | Bind to named prepared statement |
+| `\parse stmt` | Parse and save a prepared statement |
+| `\close_prepared stmt` | Close a prepared statement |
+| `\C [title]` | Set table title/caption |
+| `\copyright` | Show PostgreSQL copyright |
+| `\errverbose` | Show most recent error in verbose form |
+| `\gx [file]` | Execute query with expanded output |
+
+**Variable interpolation (full psql compatibility):**
+- `:variable` — substitute variable value in SQL and meta-command arguments
+- `:'variable'` — substitute as quoted literal
+- `:"variable"` — substitute as quoted identifier
+- `:{?variable}` — test if variable is defined (TRUE/FALSE)
+- Backquote expansion: `` `command` `` — substitute shell command output
+- Colon escaping: `\:` to prevent substitution
 
 #### FR-4: Output Formatting
 - **Aligned** (default) — columns aligned with headers and borders
@@ -1190,11 +1261,20 @@ project-alpha/
 **Week 1-2: Connect and Query**
 - [ ] Project scaffold: Cargo.toml, CI (GitHub Actions)
 - [ ] Cross-compilation: Linux x86_64/aarch64 (musl), macOS x86_64/aarch64, Windows x86_64/aarch64
-- [ ] Connection: parse all connection params (host, port, dbname, user, password, sslmode, application_name)
-- [ ] Connection URI format: `postgresql://user:pass@host:port/db?options`
-- [ ] libpq-style connection strings
-- [ ] Environment variables: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE, PGCONNECT_TIMEOUT
-- [ ] `.pgpass` file support
+- [ ] Connection: full libpq-compatible parameter parsing
+  - [ ] All connection parameters (host, hostaddr, port, dbname, user, password, sslmode, sslcert, sslkey, sslrootcert, application_name, options, connect_timeout, client_encoding, target_session_attrs, etc.)
+  - [ ] URI format: `postgresql://user:pass@host:port/db?sslmode=require&options=...`
+  - [ ] Key-value format: `host=... port=... dbname=...`
+  - [ ] Positional arguments: `alpha dbname user host port`
+- [ ] All libpq environment variables:
+  - [ ] PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGPASSFILE
+  - [ ] PGOPTIONS, PGAPPNAME, PGSSLMODE, PGSSLCERT, PGSSLKEY, PGSSLROOTCERT
+  - [ ] PGSSLCRL, PGSERVICE, PGSERVICEFILE, PGREQUIREAUTH, PGCHANNELBINDING
+  - [ ] PGGSSENCMODE, PGKRBSRVNAME, PGCONNECT_TIMEOUT, PGCLIENTENCODING
+  - [ ] PGTARGETSESSIONATTRS, PGLOADBALANCEHOSTS, PGTZ, PGDATESTYLE
+  - [ ] PSQLRC, PSQL_HISTORY, PAGER, PSQL_PAGER
+- [ ] `.pgpass` file support (standard paths, PGPASSFILE, wildcard, permission check)
+- [ ] `pg_service.conf` support (PGSERVICE, PGSERVICEFILE, ~/.pg_service.conf)
 - [ ] SSL/TLS (rustls + native-tls fallback)
 - [ ] Auth: password, md5, SCRAM-SHA-256
 - [ ] Unix domain sockets (Linux/macOS)
@@ -1204,6 +1284,7 @@ project-alpha/
 - [ ] Row count footer ("(N rows)")
 - [ ] Query timing display
 - [ ] Error display with SQLSTATE, detail, hint, context, position
+- [ ] `\errverbose` — show most recent error in verbose form
 
 **Week 3-4: Core Meta-Commands**
 - [ ] `\d [pattern]` — describe table/index/sequence/view (match psql output exactly)
@@ -1263,41 +1344,74 @@ project-alpha/
 
 **Week 7-8: COPY, Execution Variants, Scripting, Output Formats**
 - [ ] `\copy ... FROM/TO` — client-side COPY with all format options (CSV, TEXT, BINARY, DELIMITER, HEADER, etc.)
+  - [ ] `\copy ... FROM stdin` / `\copy ... TO stdout`
+  - [ ] `\copy ... FROM program 'cmd'` / `\copy ... TO program 'cmd'`
+  - [ ] pstdin/pstdout support
 - [ ] `\watch [interval]` — re-execute query periodically
 - [ ] `\g [file]` — execute query, optionally send to file
+- [ ] `\g |command` — pipe query output to shell command
+- [ ] `\gx [file]` — execute query with expanded output
 - [ ] `\gset [prefix]` — execute query, store results as variables
 - [ ] `\gexec` — execute each result value as a SQL statement
 - [ ] `\gdesc` — describe result columns without executing
 - [ ] `\sf[+] function` — show function source
 - [ ] `\sv[+] view` — show view definition
-- [ ] `\bind values` — set bind parameters for next query
-- [ ] Output formats: aligned (default), unaligned, wrapped, CSV, HTML, LaTeX, JSON, asciidoc
-- [ ] Customizable null display, border, line style, unicode/ascii
+- [ ] `\bind [params...]` — set bind parameters for next query (extended query protocol)
+- [ ] `\bind_named stmt [params...]` — bind to named prepared statement
+- [ ] `\parse stmt` — parse and save a prepared statement
+- [ ] `\close_prepared stmt` — close a prepared statement
+- [ ] `\crosstabview [colV [colH [colD [sortcolH]]]]` — pivot results
+- [ ] `\copyright` — show PostgreSQL copyright
+- [ ] `\errverbose` — show most recent error in verbose form
+- [ ] `\C [title]` — set table title
+- [ ] Variable interpolation: `:var`, `:'var'`, `:"var"`, `:{?var}`, backquote expansion
+- [ ] Output formats: aligned (default), unaligned, wrapped, CSV, HTML, LaTeX, LaTeX-longtable, JSON, asciidoc, troff-ms
+- [ ] Customizable null display, border, line style (ascii/old-ascii/unicode), unicode_border_linestyle, unicode_column_linestyle, unicode_header_linestyle
+- [ ] `\pset` options: format, border, expanded, fieldsep, fieldsep_zero, footer, null, numericlocale, recordsep, recordsep_zero, title, tuples_only, pager, pager_min_lines, unicode_*
 - [ ] `-c "SQL"` — execute single command and exit
 - [ ] `-f file` — execute file and exit
 - [ ] `-v name=value` — set variable from command line
 - [ ] `-X` — skip .psqlrc
 - [ ] `-A` — unaligned output
 - [ ] `-t` — tuples only
+- [ ] `-F sep` — field separator for unaligned output
+- [ ] `-R sep` — record separator for unaligned output
 - [ ] `-P option=value` — set pset from command line
 - [ ] `-o file` — output to file
+- [ ] `-L file` — send log of all query output to file (in addition to normal output)
 - [ ] `-1` / `--single-transaction` — wrap `-f` in BEGIN/COMMIT
 - [ ] `-b` / `--echo-errors` — echo failed commands
 - [ ] `-e` / `--echo-queries` — echo all queries sent
 - [ ] `-E` / `--echo-hidden` — show queries generated by `\d` commands
 - [ ] `-n` / `--no-readline` — disable readline
+- [ ] `-q` / `--quiet` — suppress informational messages
+- [ ] `-s` / `--single-step` — single step mode (confirm each command)
+- [ ] `-S` / `--single-line` — single-line mode (newline = semicolon)
 - [ ] `-w` / `--no-password` — never prompt for password
 - [ ] `-W` / `--password` — force password prompt
+- [ ] `-z` / `--field-separator-zero` — zero byte field separator for unaligned
+- [ ] `-0` / `--record-separator-zero` — zero byte record separator for unaligned
+- [ ] `--csv` — CSV output mode
+- [ ] `--json` — JSON output mode
 - [ ] Stdin/stdout piping: `echo "SELECT 1" | alpha`
 - [ ] Exit codes: 0 success, 1 error, 2 connection failure, 3 script error (match psql)
 - [ ] `.psqlrc` execution on startup (skip with `-X`)
 - [ ] PSQLRC environment variable
+- [ ] `~/.psql_history` / PSQL_HISTORY for history file location
 - [ ] Tab completion: SQL keywords, schema objects, file paths (for `\i`, `\copy`)
 - [ ] Query cancellation: Ctrl-C sends CancelRequest to server
 - [ ] Ctrl-D on empty line exits
-- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3)
+- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3) with all format codes:
+  - [ ] `%M` — full hostname, `%m` — short hostname, `%>` — port
+  - [ ] `%n` — username, `%/` — database, `%~` — like %/ but ~ for default
+  - [ ] `%#` — `#` if superuser else `>`, `%p` — PID of backend
+  - [ ] `%R` — `=` for ready, `^` for single-line, `!` for disconnected
+  - [ ] `%l` — line number, `%w` — whitespace of same width as prompt
+  - [ ] `%x` — transaction status (`*` active, `!` failed, `?` unknown)
+  - [ ] `%[` / `%]` — terminal control character brackets
 - [ ] Notification (LISTEN/NOTIFY) display
-- [ ] Transaction status in prompt (\* for in-transaction, ! for failed transaction)
+- [ ] Transaction status in prompt
+- [ ] Conditional commands: `\if`, `\elif`, `\else`, `\endif` — scripting conditionals
 
 **Milestone:** Full psql replacement. Can `alias psql=alpha`. All common commands work. Builds and runs on all 6 platform targets. No AI, no extras — just psql in Rust.
 
