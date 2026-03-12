@@ -712,7 +712,245 @@ curl -sL https://get.project-alpha.dev | sh
 
 ---
 
-## 8. Open Questions
+## 8. Interaction Modes
+
+Inspired by Claude Code's mode system (plan mode, YOLO mode) but adapted for the Postgres domain. Modes control **what the input means**, **what the AI can do**, and **how much autonomy the agent has**.
+
+### 8.1 Input Modes
+
+The terminal has two fundamental input modes, switchable with a single keystroke or command:
+
+#### SQL Mode (default)
+
+The classic psql experience. Input is treated as SQL or backslash commands.
+
+```
+alpha=> SELECT * FROM users WHERE id = 42;
+alpha=> \dt public.*
+alpha=> \dba bloat
+```
+
+- Default prompt: `dbname=>`
+- Backslash commands work
+- Multi-line SQL with continuation prompt
+- Tab completes schema objects and keywords
+- This is what psql users expect
+
+#### AI Mode
+
+Input is treated as natural language. The AI interprets intent and generates SQL, runs diagnostics, or takes action.
+
+```
+alpha ai> show me the 10 biggest tables
+-- Generating SQL...
+SELECT schemaname, tablename, 
+       pg_total_relation_size(schemaname || '.' || tablename) AS total_size
+FROM pg_tables 
+ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC 
+LIMIT 10;
+-- Run this query? [Y/n/edit]
+
+alpha ai> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
+-- Analyzing...
+-- The orders table has 12M rows but no index on created_at.
+-- Currently doing a sequential scan (cost: 847291).
+-- Recommendation: CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders(created_at);
+-- Create this index? [Y/n] (autonomy: L3+ required)
+```
+
+- Prompt changes: `dbname ai>`
+- Everything is interpreted as natural language
+- AI generates SQL, shows it, asks before executing (unless in YOLO mode)
+- Can still run raw SQL by prefixing with `\sql` or `;`
+- Tab completes common intents: "show me...", "why is...", "fix...", "optimize..."
+
+#### Switching Modes
+
+```
+-- From SQL mode:
+\ai                     -- switch to AI mode
+-- or just prefix a single query:
+/ask show me table sizes -- one-shot AI, stays in SQL mode
+
+-- From AI mode:
+\sql                    -- switch back to SQL mode
+-- or prefix raw SQL:
+;SELECT 1               -- one-shot SQL, stays in AI mode
+
+-- Toggle:
+Ctrl-T                  -- toggle between SQL and AI mode (like Ctrl-X in nano)
+```
+
+### 8.2 Execution Modes
+
+Orthogonal to input mode — these control *how much the AI can do without asking*.
+
+#### Interactive (default)
+
+The AI always shows what it wants to do and asks for confirmation before executing anything that changes state.
+
+```
+alpha ai> add an index on users.email
+-- I'd like to run:
+--   CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
+-- This is a safe operation (CONCURRENTLY, no locks).
+-- Execute? [Y/n/edit]
+```
+
+- Generated SQL is shown before execution
+- Read-only queries can auto-execute (configurable)
+- Write/DDL requires confirmation
+- User can edit the generated SQL before running
+
+#### Plan Mode
+
+The AI analyzes, plans, but does NOT execute. Produces a plan document.
+
+```
+alpha plan> our API is timing out on the /orders endpoint, database seems slow
+
+-- Entering plan mode. I'll investigate and produce a plan.
+-- [1/5] Checking pg_stat_activity for long-running queries...
+-- [2/5] Analyzing pg_ash wait events for the last hour...
+-- [3/5] Checking index usage on orders-related tables...
+-- [4/5] Reviewing autovacuum status...
+-- [5/5] Checking connection pool saturation...
+
+📋 PLAN: orders endpoint performance fix
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Root Cause: Missing index on orders.customer_id causes nested loop
+with sequential scan during JOIN. Exacerbated by table bloat (34%)
+and stale statistics (last ANALYZE: 3 days ago).
+
+Actions (in order):
+1. ANALYZE orders;                                    [safe, immediate]
+2. CREATE INDEX CONCURRENTLY idx_orders_customer_id   [safe, ~2 min]
+   ON orders(customer_id);
+3. VACUUM orders;                                     [safe, ~5 min]
+4. Review: connection pool size (currently 20,         [manual]
+   recommend 50 based on active sessions)
+
+Execute this plan? [Y/n/edit/save]
+-- Saved to: ~/.local/share/alpha/plans/2026-03-12-orders-perf.md
+```
+
+- AI can run read-only queries to gather information
+- Never executes write/DDL operations
+- Produces a structured plan (saved as markdown)
+- User can review, edit, then execute the plan
+- Plan can be saved and shared (ticket, PR, Slack)
+- Switch to plan mode: `\plan` or `Shift-Tab` (Claude Code style)
+
+#### YOLO Mode
+
+The AI executes within its autonomy level without asking. For power users who trust the agent.
+
+```
+alpha yolo> fix the bloat on the orders table
+-- Running: ANALYZE orders; ✓
+-- Running: REINDEX CONCURRENTLY orders_pkey; ✓
+-- Running: REINDEX CONCURRENTLY idx_orders_created_at; ✓
+-- Running: VACUUM orders; ✓
+-- Done. Bloat reduced from 34% to 2%.
+```
+
+- Auto-executes anything within the configured autonomy level
+- Still respects L1-L5 boundaries (YOLO + L3 = auto-runs safe ops, still asks for DROP)
+- Shows what it's doing in real-time
+- Ctrl-C aborts the current action
+- `\yolo` to enter, `\interactive` to exit
+- **Cannot be combined with L5** without explicit `--i-know-what-im-doing` flag
+
+#### Observe Mode
+
+Read-only. The AI watches and reports but never executes anything. For learning and auditing.
+
+```
+alpha observe> watch the database for 5 minutes
+-- Observing...
+-- 13:04:12 | 247 active connections (pool: 85% utilized)
+-- 13:04:12 | Top wait event: LWLock:BufferContent (23% of samples)
+-- 13:04:45 | ⚠ Long query detected (45s): SELECT * FROM audit_log WHERE...
+-- 13:05:01 | Autovacuum running on: orders, shipments
+-- 13:06:30 | ⚠ Replication lag increased: 12MB → 45MB
+-- 13:08:55 | Replication lag recovered: 45MB → 3MB
+-- 13:09:12 | Session complete.
+
+Summary:
+- Connection pressure is high (consider increasing pool_size)
+- BufferContent lock contention suggests shared_buffers may be undersized
+- 1 long query may need optimization (audit_log sequential scan)
+-- Save this observation? [Y/n]
+```
+
+- Pure read-only (not even ANALYZE)
+- Great for learning a new database
+- Continuous or time-boxed observation
+- Produces summary with recommendations
+- `\observe` to enter
+
+### 8.3 Mode Matrix
+
+Modes are orthogonal — any input mode works with any execution mode:
+
+| | **Interactive** | **Plan** | **YOLO** | **Observe** |
+|---|---|---|---|---|
+| **SQL mode** | Classic psql + AI suggestions | N/A (SQL is explicit) | N/A (SQL is explicit) | Read-only psql |
+| **AI mode** | AI generates, you approve | AI plans, you review | AI does everything | AI watches, you learn |
+
+### 8.4 Prompt Indicators
+
+The prompt tells you exactly what mode you're in:
+
+```
+mydb=>                   -- SQL + Interactive (default)
+mydb ai>                 -- AI + Interactive
+mydb plan>               -- AI + Plan
+mydb yolo>               -- AI + YOLO
+mydb observe>            -- Observe
+mydb [L3]=>              -- SQL + Interactive, autonomy L3 shown
+mydb [L3] ai>            -- AI + Interactive, autonomy L3
+mydb [L3] yolo>          -- AI + YOLO, autonomy L3
+```
+
+### 8.5 Slash Commands for Mode Control
+
+```
+\ai                      -- switch to AI input mode
+\sql                     -- switch to SQL input mode (default)
+\plan                    -- enter plan execution mode
+\yolo                    -- enter YOLO execution mode
+\interactive             -- return to interactive execution mode (default)
+\observe [duration]      -- enter observe mode (optional time limit)
+\level L1|L2|L3|L4|L5   -- set autonomy level
+\mode                    -- show current mode summary
+```
+
+### 8.6 CLI Flags
+
+```bash
+alpha --ai               # start in AI mode
+alpha --plan             # start in plan mode
+alpha --yolo --level L3  # YOLO with L3 autonomy
+alpha --observe 30m      # observe for 30 minutes, then exit
+```
+
+### 8.7 Context Awareness Across Modes
+
+Regardless of mode, the AI maintains context:
+
+- **Schema cache** — knows all tables, columns, indexes, constraints
+- **Session history** — remembers recent queries and results in this session
+- **pg_ash data** — if available, knows recent wait events and query performance
+- **Plan history** — can reference previous plans ("execute step 3 from the last plan")
+- **Error context** — remembers recent errors for follow-up questions
+
+When switching modes, context carries over. A plan generated in plan mode can be executed in YOLO mode. An observation from observe mode can be investigated in AI mode.
+
+---
+
+## 9. Open Questions
 
 1. **Name:** "Project Alpha" is the codename. Final shipping name TBD.
 2. **License:** Source-available? Dual license (AGPL + commercial)? Apache 2.0? Decision impacts adoption and business model.
