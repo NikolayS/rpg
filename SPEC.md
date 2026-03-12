@@ -23,7 +23,7 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust. 
 2. **Root cause analysis** — LLM-assisted investigation of performance incidents, lock contention, and anomalies using pg_ash and pg_stat_*
 3. **AI-first UX** — natural language queries, error explanation, EXPLAIN interpretation, schema-aware suggestions
 4. **psql compatibility** — a Postgres terminal compatible with common psql workflows, so users can adopt it as their daily driver
-5. **Zero-dependency deployment** — single static binary, no runtime deps, runs everywhere psql runs
+5. **Single-binary distribution** — one binary, no required runtime beyond OS facilities. Static on Linux (musl), native OS integration on macOS/Windows.
 6. **Connector ecosystem** — pull data from and push actions to external systems (pg_ash, pganalyze, CloudWatch)
 
 ### Compatibility Policy
@@ -34,7 +34,11 @@ Anyone fluent in psql — human or AI agent — should be immediately productive
 - **AI agents that know psql work too:** LLMs trained on psql documentation and examples can drive Samo effectively
 - **Interactive daily use:** target parity with the top 50 psql commands (see Appendix K for ranking)
 - **Scripted automation:** only documented-compatible flags/commands are guaranteed
-- **Unsupported psql behavior:** fails loudly, never silently — users always know when they hit an edge case
+- **Unsupported psql behavior:** fails loudly, never silently — users always know when they hit an edge case. Error format:
+  ```
+  ERROR: \crosstabview is not yet supported in Samo v0.1
+  HINT: See 'samo --compat' for full compatibility status.
+  ```
 
 ### Non-Goals (for v1)
 
@@ -45,20 +49,32 @@ Anyone fluent in psql — human or AI agent — should be immediately productive
 - Full `.psqlrc` compatibility (partial is fine)
 - Mobile / embedded targets
 
-### Explicitly Deferred (Not in First Commercial Release)
+### Release Boundaries
 
-The following are architecturally planned but will **not** ship in the first release:
+| Release | Scope | Autonomy |
+|---------|-------|----------|
+| **v0.1** | psql-compatible terminal: connect, query, `\d` family, variables, COPY, CLI flags, tab completion, highlighting | N/A — no agent |
+| **v0.2** | Beyond psql: TUI pager, `\dba` diagnostics, connection profiles, named queries, session persistence | N/A — no agent |
+| **v0.3** | AI brain: `/ask`, `/fix`, `/explain`, `/optimize`, plan/YOLO/observe execution modes, LLM providers | N/A — no agent |
+| **v1.0** | First commercial release: AAA framework, RCA, index health, daemon mode | **Observe + Supervised only** |
+| **v1.1** | Early Auto: RCA cancel/terminate, index health REINDEX CONCURRENTLY only. No auto-drop. | Narrow Auto |
+| **v2.0** | Full Auto for validated features. Broader connectors. `pg_stat_io`, `pg_stat_progress_*`. | Full Auto |
 
-- **Auto mode** — all features start at Observe or Supervised; Auto ships only after sustained real-world validation
+### Explicitly Deferred (Not in v1.0)
+
+The following are architecturally planned but will **not** ship in v1.0:
+
+- **Auto mode** — all features start at Observe or Supervised; Auto ships in v1.1 for a narrow set of safe actions (cancel/terminate, REINDEX CONCURRENTLY) only after internal validation
+- **Auto-drop of unused indexes** — even with grace periods, "unused" ≠ "safe to drop" (monthly jobs, failover paths, DR workloads). Not in v1.1 either.
 - **Full psql parity** — rare meta-commands (`\lo_*`, `\crosstabview`), exotic `\pset` options, full `.psqlrc` compatibility, exact prompt format codes
 - **Internal pager advanced features** — mouse support, inline bar charts, column sorting by click
-- **Auto-drop of unused indexes** — even with grace periods, "unused" ≠ "safe to drop" (monthly jobs, failover paths, DR workloads)
 - **Major upgrade execution** — `major_upgrade` stays at Observe (planning-only) indefinitely
 - **Plugin ABI / connector marketplace** — protocol marketplace and custom connector plugins
 - **Multi-database daemon orchestration** — single-database daemon first
-- **Broad connector ecosystem** — Jira, GitLab Issues, Datadog, pganalyze, Supabase connectors are deferred; v1 ships with pg_ash + pg_stat_statements + CloudWatch/RDS only
-- **Config tuning for restart-required GUCs** — v1 config_tuning covers safe runtime changes and reload-only GUCs only (not shared_buffers, WAL sizing)
+- **Broad connector ecosystem** — Jira, GitLab Issues, Datadog, pganalyze, Supabase connectors are deferred; v1.0 ships with pg_ash + pg_stat_statements + CloudWatch/RDS only
+- **Config tuning for restart-required GUCs** — v1.0 config_tuning covers safe runtime changes and reload-only GUCs only (not shared_buffers, WAL sizing)
 - **Statusline AI budget display** — token budget tracking in status bar
+- **Generic `\undo`** — too dangerous to overpromise in databases. v1.0 provides rollback hints only (see below)
 
 ---
 
@@ -306,6 +322,8 @@ Autonomy is **not a single global knob**. It's configured **per feature area**, 
 
 ##### Three Autonomy Levels (per feature)
 
+**Important:** Autonomy levels govern Samo's **agentic actions only**, not the human operator's manual SQL. A human can always run `DROP TABLE` manually regardless of autonomy settings — autonomy controls what the AAA system does, not what the human types. For enforcing read-only access for the human too, use a read-only connection profile (e.g., `samo @production-ro`).
+
 | Level | Name | What it means |
 |-------|------|---------------|
 | **O** | **Observe** | Read-only. The tool observes, diagnoses, and reports. Zero writes to the database. The human reads the report and decides what to do. |
@@ -393,9 +411,9 @@ security = "observe"             # max level: supervised
 
 **Presets for quick configuration:**
 ```bash
-samo --autonomy all:observe          # everything in advisor mode (default, safest)
+samo --autonomy all:observe          # everything in observe mode (default, safest)
 samo --autonomy all:supervised         # everything needs approval
-samo --autonomy all:auto            # full autopilot (use with caution)
+samo --autonomy all:auto            # full auto (use with caution)
 samo --autonomy vacuum:auto,bloat:auto,query_optimization:supervised  # granular
 ```
 
@@ -501,6 +519,31 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 - **Learning loop:** The Auditor's post-action verification creates a feedback cycle that improves recommendations over time — regardless of who executed the action (human or Actor).
 - **Compliance:** Three-way separation of concerns with cross-cutting audit is an auditor's dream for SOC2/ISO27001.
 
+##### Auditor Conflict Resolution Protocol
+
+What happens when the Auditor disagrees with the Analyzer:
+
+| Mode | Conflict Behavior |
+|------|------------------|
+| **Observe** | Both assessments included in report. Human sees: "Analyzer recommends X. Auditor disagrees because Y." Log the disagreement. |
+| **Supervised** | Both assessments shown to human side-by-side. Human decides. Disagreement logged with both rationales. |
+| **Auto** | Auditor veto → **downgrade this specific action to Supervised** (not the whole feature). Alert the user. Never retry automatically after a veto — that's a loop. |
+
+**Key rule:** An Auditor veto in Auto mode does not suppress the finding — it routes it to human review. The Analyzer's recommendation is still valid; the Auditor is saying "I'm not confident enough for autonomous execution."
+
+##### Auditor Cost Model
+
+The Auditor must be cost-aware to avoid burning through token budgets:
+
+| Context | Auditor Implementation |
+|---------|----------------------|
+| **Low-risk Auto actions** (cancel query, VACUUM, ANALYZE) | Rule-based only: action type whitelist, target validation (user object, not system), evidence freshness check, rate limit check. No LLM call. |
+| **High-risk Auto actions** (config changes, index creation) | Rule-based checks + LLM adversarial review. |
+| **Supervised mode** (human is waiting) | Full LLM-based adversarial review — latency is acceptable since human is in the loop. |
+| **Observe mode** (report review) | Rule-based spot checks on Analyzer's findings. LLM review only for high-severity findings. |
+
+This prevents the scenario where 5 active features × 60s check interval = 10 LLM calls/minute = 600/hour, which would exhaust the default token budget in days.
+
 ##### Self-Driving Database Levels (Future Reference)
 
 _Full self-driving level classification (mapping feature autonomy to overall system capability, analogous to SAE driving levels) will be defined separately. In short: when all feature areas reach Auto mode and the Auditor confirms sustained reliability, that's the equivalent of L5 self-driving database._
@@ -543,11 +586,11 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
    GRANT EXECUTE ON FUNCTION samo_ops.reindex_concurrently(regclass) TO samo_agent;
    ```
 
-4. **dblink / postgres_fdw for non-transactional operations** — wrapper functions use `dblink` for operations that can't run in a transaction block (VACUUM, REINDEX CONCURRENTLY, CREATE INDEX CONCURRENTLY).
+4. **Non-transactional operations** — VACUUM, REINDEX/CREATE INDEX CONCURRENTLY execute directly on the Actor's dedicated connection (outside transaction blocks). On PG 16+, `pg_maintain` role eliminates the need for wrapper functions. On PG 14-15, `samo_ops` SECURITY DEFINER wrappers provide the necessary privileges.
 
 5. **Dynamic wrapper generation:**
    ```
-   samo setup --features index_health,vacuum --level pilot --generate-wrappers
+   samo setup --features index_health,vacuum --level auto --generate-wrappers
    -- Outputs SQL to create samo_ops schema, role, wrapper functions, and GRANTs
    -- DBA reviews and applies
    ```
@@ -560,13 +603,13 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 
    Feature            | Autonomy | DB Permissions     | Effective
    -------------------|----------|--------------------|-----------
-   index_health       | pilot    | ✓ reindex_concur.  | pilot
-   vacuum             | pilot    | ✓ vacuum_table     | pilot
-   config_tuning      | guardian | ✓ alter_system_set | guardian
-   query_optimization       | pilot    | ✓ cancel_query     | pilot
-   index_creation     | guardian | ✗ not granted      | advisor ⚠
-   index_removal      | guardian | ✗ not granted      | advisor ⚠
-   major_upgrade      | advisor  | N/A                | advisor
+   index_health       | auto     | ✓ reindex_concur.  | auto
+   vacuum             | auto     | ✓ vacuum_table     | auto
+   config_tuning      | supervised | ✓ alter_system_set | supervised
+   query_optimization       | auto     | ✓ cancel_query     | auto
+   index_creation     | supervised | ✗ not granted      | observe ⚠
+   index_removal      | supervised | ✗ not granted      | observe ⚠
+   major_upgrade      | observe  | N/A                | observe
 
    ⚠ 2 features downgraded due to missing DB permissions.
    Run 'samo setup --features index_health --generate-wrappers'
@@ -596,7 +639,7 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 
 **pganalyze:**
 - Pull query statistics, EXPLAIN plans
-- Index advisor suggestions
+- Index analysis suggestions
 - Auth: PGANALYZE_API_KEY
 
 **AWS CloudWatch:**
@@ -760,17 +803,18 @@ Borrowed from Claude Code and OpenClaw. Long-running database work needs session
   ```
   This action log is **never summarized by the LLM** — only FIFO-evicted if it exceeds its allocated token budget. This prevents the LLM from hallucinating action details (exact DDL, index names, OIDs) during compaction.
 
-**Undo:**
-- `\undo` — undo the last AI-executed action
-- Only works for DDL/DML that the AI executed (not manual SQL)
-- Generates and runs the reverse operation where possible:
-  - `CREATE INDEX` → `DROP INDEX`
-  - `ALTER TABLE ADD COLUMN` → `ALTER TABLE DROP COLUMN`
-  - `INSERT` → `DELETE` (if PK available)
-  - For non-reversible operations (DROP, TRUNCATE): warns that undo is not possible
-- Maintains an undo stack per session (configurable depth, default 20)
-- `\undo list` — show undo stack
-- `\undo all` — undo all AI-executed actions in reverse order
+**Rollback Hints (not generic undo):**
+
+Generic `\undo` is deferred (see Explicitly Deferred section) — it's too dangerous to overpromise in databases. CREATE INDEX → DROP INDEX is not always safe; INSERT → DELETE has side effects; DDL may have cascades, triggers, generated data.
+
+Instead, v1.0 provides **rollback hints** attached to every AI-executed action:
+- Each action in the action log includes a `rollback_hint` field describing how to reverse it
+- `\undo` — shows the rollback hint for the last AI-executed action, asks for confirmation
+- Only a small whitelist of actions support automatic rollback in v1.0:
+  - `ALTER SYSTEM SET <param>` → restore prior value (stored before change)
+  - `CREATE INDEX CONCURRENTLY` → `DROP INDEX CONCURRENTLY`
+- All other actions: `\undo` shows the manual rollback plan but does NOT execute it automatically
+- `\undo list` — show action history with rollback hints
 
 #### FR-16: Named Queries (Favorites)
 
@@ -1054,7 +1098,7 @@ severity_threshold = "critical"
   "check": "index_bloat",
   "message": "Index idx_orders_created_at bloat at 34% (threshold: 25%)",
   "recommendation": "REINDEX CONCURRENTLY idx_orders_created_at",
-  "autonomy_action": "auto-reindex scheduled (index_health: pilot)",
+  "autonomy_action": "auto-reindex scheduled (index_health: auto)",
   "timestamp": "2026-03-12T14:30:00Z"
 }
 ```
@@ -1122,7 +1166,7 @@ port = 5432
 database = "myapp"
 user = "readonly"
 sslmode = "require"
-autonomy = "all:observe"   # all features advisor-only on staging
+autonomy = "all:observe"   # all features observe-only on staging
 
 [connections.production]
 host = "10.0.1.5"
@@ -1243,7 +1287,7 @@ docker run -it ghcr.io/nikolays/samo
 - `SAMO_OFFLINE=1` — global kill switch that severs all non-Postgres outbound network requests (no auto-update checks, no AI API calls, no connector calls). Critical for air-gapped and restricted VPC environments.
 
 #### NFR-4: Compatibility
-- Postgres 12-18 (and upcoming versions)
+- Postgres 14-18 (and upcoming versions). PG 12 (EOL Nov 2024) and PG 13 (EOL Nov 2025) are not supported — maintaining version guards for EOL releases adds technical debt with no commercial value.
 - Forward-compatible: gracefully degrade on unknown PG versions
 - pgBouncer / PgCat / Supavisor connection pooler compatible:
   - Detect pooler on connect (parse `server_version`, check `SHOW pool_mode` where available)
@@ -1257,7 +1301,7 @@ docker run -it ghcr.io/nikolays/samo
   - Supabase: detect via connection string patterns
   - Neon: detect via `neon.*` GUCs
   - Degrade gracefully when pg_stat_statements not available (many managed providers don't enable by default)
-- pg_catalog version matrix: track views/columns that changed between PG 12-18 (e.g., `backend_type`, `pg_stat_progress_*`, `wait_event` changes)
+- pg_catalog version matrix: track views/columns that changed between PG 14-18 (e.g., `backend_type`, `pg_stat_progress_*`, `wait_event` changes)
 
 #### NFR-5: Threat Model
 - Prompt injection via schema names, column names, comments, and query results — LLM context includes user-controlled data
@@ -1272,9 +1316,21 @@ docker run -it ghcr.io/nikolays/samo
 
 ## 4. Architectural Choices
 
-### 4.1 Language: ⚠️ DECISION REQUIRED — Rust vs TypeScript/Bun
+### 4.1 Language: Rust ✅
 
-This is the most consequential architectural decision. Needs research and a final call before Phase 0 begins.
+**Decision: Rust.** See Appendix A for the full analysis (cross-compile verification, benchmark results, ecosystem audit). Summary of rationale:
+
+- **Single static binary** (~20MB stripped, musl) — `curl | sh` delivers one file with zero runtime dependencies
+- **DBA audience credibility** — "written in Rust" carries weight; "written in JavaScript" raises eyebrows
+- **Protocol control** — `tokio-postgres` gives full wire protocol access; critical for CancelRequest, COPY, LISTEN/NOTIFY edge cases
+- **Performance** — sub-50ms startup, <20MB baseline memory, no GC pauses during large result set rendering
+- **Cross-platform** — all 6 targets (Linux/macOS/Windows × x86_64/aarch64) are proven with musl/native-tls
+
+The AI and connector layers (where TypeScript would have been faster to develop) are worth the velocity trade-off because the DBA audience demands native tooling quality, and the wire protocol layer is the foundation everything else builds on.
+
+_For the full comparison matrix, Bun cross-compile results, and ecosystem audit, see Appendix A._
+
+The original deliberation is preserved below for historical context:
 
 #### Option A: Rust
 
@@ -1389,18 +1445,9 @@ This is the most consequential architectural decision. Needs research and a fina
 - [ ] Check Bun's readline/TTY support on Windows (rustyline equivalent)
 - [ ] Survey DBA/Postgres community sentiment on TypeScript vs Rust tooling
 
-#### Recommendation (preliminary, pending research)
+#### Historical Recommendation (superseded by Appendix A)
 
-**Lean TypeScript/Bun** unless the research shows blockers. Rationale:
-- The AI and connector layers are 60%+ of the differentiated value, and TypeScript is dramatically faster to develop there
-- Bun's compiled output is a single binary — distribution is nearly as clean as Rust
-- The performance-sensitive path (rendering large results) can be optimized with streaming, and Bun is fast enough for interactive terminal use
-- Developer velocity matters more than binary size for an early-stage product
-- psql compatibility is mostly about protocol handling and string formatting — doable in either language
-
-**But:** If the DBA audience research shows strong resistance to non-Rust/C tooling, or if Bun's cross-platform story has gaps, switch to Rust.
-
-**Decision deadline:** Before Phase 0 begins. Allocate 1 week for research tasks.
+_The original recommendation leaned TypeScript/Bun for development velocity. After the research tasks in Appendix A were completed (Bun cross-compile verification, benchmarks, DBA community sentiment), the decision was Rust. See Appendix A for details._
 
 ### 4.2 Async Runtime
 
@@ -1797,7 +1844,7 @@ samo/
 - [ ] `+` modifier: extra detail columns (size, description, etc.)
 - [ ] `S` modifier: include system objects
 - [ ] `-E` / `--echo-hidden` flag: show generated SQL for `\d` commands
-- [ ] PG version detection: adapt `\d` queries for PG 12-18 catalog differences
+- [ ] PG version detection: adapt `\d` queries for PG 14-18 catalog differences
 
 **Compatibility tests (golden file):**
 - [ ] Run each `\d` variant in both psql and samo against identical schema, diff output
@@ -2075,7 +2122,7 @@ samo/
 
 #### Sprint S-1.2: Built-in Diagnostics — \dba (2 weeks)
 
-**Goal:** `\dba` family of diagnostic commands with version-aware SQL (PG 12-18).
+**Goal:** `\dba` family of diagnostic commands with version-aware SQL (PG 14-18).
 
 **Tasks:**
 - [ ] `\dba activity` — pg_stat_activity with intelligent grouping (by state, wait_event, query pattern)
@@ -2091,7 +2138,7 @@ samo/
 - [ ] `\dba config [param]` — non-default GUC parameters with source and context
 - [ ] `\dba waits` — pg_ash wait event summary (gracefully skipped if pg_ash not installed)
 - [ ] PG version detection: `SELECT current_setting('server_version_num')::int`
-- [ ] Version-aware SQL generation: handle catalog differences between PG 12-18 (e.g., `backend_type`, `wait_event` columns, `pg_stat_progress_*` views)
+- [ ] Version-aware SQL generation: handle catalog differences between PG 14-18 (e.g., `backend_type`, `wait_event` columns, `pg_stat_progress_*` views)
 - [ ] Connection pooler detection:
   - [ ] PgBouncer: `SHOW pool_mode` (succeeds only through PgBouncer)
   - [ ] Supavisor: check `server_version` format
@@ -2475,7 +2522,7 @@ INDEX HEALTH REPORT — production (2026-03-12)
   orders.customer_id — 1.2M seq scans/day, 12M rows, no index
   → CREATE INDEX CONCURRENTLY idx_orders_customer_id ON orders(customer_id);
 
-Actions: 6 recommendations. Run '\autonomy index_health guardian' to enable approval workflow.
+Actions: 6 recommendations. Run '\autonomy index_health supervised' to enable approval workflow.
 ```
 
 **Supervised mode — what it proposes:**
@@ -2657,9 +2704,10 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 #### Week-by-week (Phase 3)
 
 **Week 23-24: Framework + RCA (Observe)**
-- [ ] AAA Architecture framework (Analyzer, Actor, Auditor)
+- [ ] AAA Architecture framework (Analyzer, Actor, Auditor) — **all three from day one**
+- [ ] Rule-based Auditor: action type whitelist, target validation, evidence freshness check, rate limit enforcement. No LLM needed initially — deterministic checks that validate every proposal the Analyzer produces.
 - [ ] Per-feature autonomy configuration system
-- [ ] Action audit log (every action: timestamp, feature, level, justification, outcome)
+- [ ] Action audit log (every action: timestamp, feature, level, justification, outcome, Auditor assessment)
 - [ ] pg_ash detection and integration
 - [ ] RCA Analyzer: LLM-driven investigation chain (activity_summary → top_waits → timeline → queries → lock tree → stats)
 - [ ] Block tree reconstruction from pg_locks + pg_stat_activity
@@ -2673,17 +2721,19 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
 - [ ] Index health report generation (structured output)
 
-**Week 27-28: RCA (Auto) + Index Health (Supervised) + Daemon mode**
-- [ ] RCA Auto: auto-investigate anomalies, auto-cancel/terminate root blockers, auto-propose GUCs
-- [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes, lock cascades
+**Week 27-28: Index Health (Supervised) + Daemon mode**
 - [ ] Index health Supervised: propose actions with justification, wait for approval
+- [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes, lock cascades (triggers Observe-mode investigation)
 - [ ] Daemon mode: headless operation, PID file, signal handling
 - [ ] Notification channels: Slack webhook, email
-- [ ] HTTP health check endpoint
+- [ ] HTTP health check endpoint:
+  ```json
+  {"status": "healthy", "databases": {"production": {"connected": true, "last_check": "2026-03-12T14:23:01Z", "circuit_breakers": []}}}
+  ```
 
-**Week 29-30: Auto mode for safe features**
-- [ ] Index health Auto: auto-reindex, auto-drop unused (with grace period), auto-create missing
-- [ ] Auditor component: post-action verification (did cancel resolve the lock cascade? did reindex reduce bloat? did GUC change prevent recurrence?)
+**Week 29-30: Auditor Enhancement + Issue Integration**
+- [ ] Auditor LLM upgrade: adversarial review for high-risk actions (complements rule-based Auditor from Week 23-24)
+- [ ] Auditor post-action verification (did cancel resolve the lock cascade? did reindex reduce bloat? did GUC change prevent recurrence?)
 - [ ] PostgresAI Issues connector
 - [ ] GitHub Issues connector
 
@@ -2694,9 +2744,21 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Container image (Alpine-based, ~15MB)
 - [ ] Observe mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
 
-**Milestone:** RCA and index health work end-to-end at all three autonomy levels. RCA can detect lock contention, document it, mitigate immediately, and propose GUC + app-level fixes — all in seconds. Other features work at Observe level. Agent runs as a daemon on all platforms.
+**v1.0 Milestone:** RCA and index health work at Observe and Supervised levels. RCA can detect lock contention, document it, propose mitigation with Auditor validation, and execute after human approval. Other features work at Observe level. Agent runs as a daemon on all platforms. **No Auto mode in v1.0.**
 
-### Phase 4: Ecosystem (Weeks 33+)
+### Phase 3.5: Early Auto (v1.1, Weeks 33-36)
+
+**Goal:** Auto mode for a narrow set of safe, well-validated actions only.
+
+- [ ] RCA Auto (narrow): auto-cancel/terminate root blockers only (no auto-GUC changes)
+- [ ] Index health Auto (narrow): auto-REINDEX CONCURRENTLY only (no auto-DROP, no auto-CREATE)
+- [ ] Circuit breaker integration: sustained poor outcomes → auto-downgrade to Supervised
+- [ ] Auditor veto protocol: veto → downgrade this specific action to Supervised, alert user
+- [ ] Extended validation: minimum 30 successful Supervised actions with >85% Auditor approval before Auto promotion
+
+**v1.1 Milestone:** Auto mode works for cancel/terminate and REINDEX only. No auto-drop of anything. Circuit breaker proven to work.
+
+### Phase 4: Ecosystem (Weeks 37+)
 
 **Goal:** Connect to the outside world.
 
@@ -2709,7 +2771,9 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Plugin system for custom connectors
 - [ ] Helm chart for Kubernetes sidecar deployment
 - [ ] Protocol marketplace (shareable health check definitions)
-- [ ] Auto level for remaining features (with extensive testing and Auditor validation)
+- [ ] Auto level for remaining features (requires extended Supervised validation + Auditor approval)
+- [ ] `pg_stat_io` integration (PG 16+) for I/O attribution in RCA
+- [ ] `pg_stat_progress_*` in `\dba` (VACUUM, CREATE INDEX, CLUSTER, ANALYZE progress monitoring)
 
 ---
 
@@ -2727,7 +2791,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - All `\d` family commands against known schemas
 - `\copy` round-trip
 - Query cancellation
-- PG version matrix: 12, 13, 14, 15, 16, 17, 18
+- PG version matrix: 14, 15, 16, 17, 18
 
 ### Compatibility Tests
 - Run the same commands in psql and Samo, diff the output
@@ -2821,7 +2885,7 @@ samo text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > n
 -- The orders table has 12M rows but no index on created_at.
 -- Currently doing a sequential scan (cost: 847291).
 -- Recommendation: CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders(created_at);
--- Create this index? [Y/n] (requires index_creation: guardian+)
+-- Create this index? [Y/n] (requires index_creation: supervised+)
 
 samo text2sql> fix index bloat on the orders table
 -- Checking orders table indexes...
@@ -2991,7 +3055,15 @@ mydb [3O/5S/2A] text2sql> -- text2sql + Interactive, autonomy summary
 mydb [3O/5S/2A] yolo>    -- text2sql + YOLO, autonomy summary
 ```
 
-### 8.5 Slash Commands for Mode Control
+### 8.5 Command Prefix Convention
+
+**Design rule:** Backslash (`\`) for terminal control and psql-compatible commands. Forward-slash (`/`) for AI actions.
+
+| Prefix | Domain | Examples |
+|--------|--------|---------|
+| `\` | Terminal control, modes, psql-compat | `\d`, `\dt`, `\set`, `\timing`, `\x`, `\dba`, `\text2sql`, `\plan`, `\yolo`, `\observe`, `\autonomy`, `\mode` |
+| `/` | AI actions (require AI backend) | `/ask`, `/fix`, `/explain`, `/optimize`, `/describe`, `/compact`, `/clear` |
+| `;` | Escape to raw SQL from text2sql mode | `;SELECT 1` |
 
 ```
 \text2sql / \t2s         -- switch to text2sql input mode
@@ -3010,7 +3082,7 @@ mydb [3O/5S/2A] yolo>    -- text2sql + YOLO, autonomy summary
 ```bash
 samo --text2sql         # start in text2sql mode
 samo --plan             # start in plan mode
-samo --yolo --autonomy vacuum:auto,index_health:auto  # YOLO with specific features in pilot
+samo --yolo --autonomy vacuum:auto,index_health:auto  # YOLO with specific features in auto
 samo --observe 30m      # observe for 30 minutes, then exit
 ```
 
@@ -3263,7 +3335,7 @@ Tag push (v*.*.*):
 - `\copy` round-trip (both directions, all formats)
 - CancelRequest (Ctrl-C) via signal to test process
 - LISTEN/NOTIFY roundtrip
-- PG version matrix: 12, 13, 14, 15, 16, 17, 18
+- PG version matrix: 14, 15, 16, 17, 18
 - `cargo test --features integration` — runs in < 5 min with Docker
 
 **Compatibility tests** (psql diff):
@@ -3512,7 +3584,7 @@ State machine per feature:
 
 **Default thresholds:**
 ```toml
-[pilot.circuit_breaker]
+[auto.circuit_breaker]
 failure_rate_threshold = 0.20   # trip if >20% of actions fail
 minimum_calls = 5               # require at least 5 calls before evaluating
 slow_call_threshold_ms = 30000  # calls >30s count as slow
@@ -3544,7 +3616,7 @@ When a circuit breaker trips:
 #### Auto Mode Constraints
 
 ```toml
-[pilot.constraints]
+[auto.constraints]
 # Auto mode never runs during business hours unless overridden
 maintenance_window_required = true
 maintenance_window = "02:00-06:00"
@@ -3552,10 +3624,10 @@ maintenance_window_tz = "UTC"
 
 # Auto mode pauses if error rate on the *database* exceeds threshold
 # (not just Samo's actions — something else may be wrong)
-pause_on_db_error_rate_threshold = 0.05  # >5% query error rate → pause all pilot
+pause_on_db_error_rate_threshold = 0.05  # >5% query error rate → pause all auto
 
 # Maximum actions per hour per feature (rate limiting)
-[pilot.rate_limits]
+[auto.rate_limits]
 index_health = 3        # max 3 index operations per hour
 config_tuning = 1       # max 1 config change per hour
 query_optimization = 20 # cancel/terminate ops are lower risk
@@ -3606,11 +3678,11 @@ trust_score = (
 samo=> \trust
 Feature            | Level   | Trust Score | Actions | Accuracy | Notes
 -------------------|---------|-------------|---------|----------|------------------
-index_health       | pilot   | 0.94 ★★★★★ | 47      | 97%      | Strong track record
-vacuum             | pilot   | 0.88 ★★★★☆ | 123     | 91%      | 2 false positives
-config_tuning      | guardian| 0.71 ★★★☆☆ | 8       | 88%      | Small sample size
-query_optimization | guardian| 0.65 ★★★☆☆ | 15      | 80%      | 3 wrong diagnoses
-rca                | advisor | 0.52 ★★★☆☆ | 0       | N/A      | No actions yet
+index_health       | auto    | 0.94 ★★★★★ | 47      | 97%      | Strong track record
+vacuum             | auto    | 0.88 ★★★★☆ | 123     | 91%      | 2 false positives
+config_tuning      | supervised| 0.71 ★★★☆☆ | 8       | 88%      | Small sample size
+query_optimization | supervised| 0.65 ★★★☆☆ | 15      | 80%      | 3 wrong diagnoses
+rca                | observe | 0.52 ★★★☆☆ | 0       | N/A      | No actions yet
 ```
 
 #### Trust-Based Autonomy Promotion
@@ -3622,10 +3694,10 @@ Samo can suggest autonomy level increases when trust is earned:
   index_health has maintained 0.94 trust score over 47 actions (90-day window)
   This exceeds the Supervised → Auto promotion threshold (0.85, 30 actions).
 
-  Current: index_health = guardian
-  Suggested: index_health = pilot
+  Current: index_health = supervised
+  Suggested: index_health = auto
 
-  Promote? [Y/n] (or 'samo autonomy index_health pilot' to set manually)
+  Promote? [Y/n] (or 'samo autonomy index_health auto' to set manually)
 ```
 
 **Promotion thresholds (defaults, configurable):**
@@ -3689,7 +3761,7 @@ index_health = "observe"
 vacuum = "observe"
 index_health = "supervised"
 
-# Staging: experiment with pilot
+# Staging: experiment with auto
 [connections.staging.autonomy]
 vacuum = "auto"
 index_health = "auto"
@@ -4950,14 +5022,31 @@ SELECT pg_reload_conf();
 
 **Step 3:** Timeline shows periodic IO spikes, correlating with checkpoint intervals. Classic signature: sawtooth pattern — IO builds up then spikes at checkpoint.
 
-**Step 7:** `pg_stat_bgwriter` (not just pg_stat_statements):
+**Step 7:** Checkpoint statistics (version-aware):
+
 ```sql
+-- PG 14-15: all columns in pg_stat_bgwriter
+-- PG 16+: checkpointer columns moved to pg_stat_checkpointer
+-- Samo must use the correct view based on server_version_num
+
+-- PG 14-15:
 SELECT 
   checkpoints_timed, checkpoints_req,
   checkpoint_write_time, checkpoint_sync_time,
   buffers_checkpoint, buffers_clean, buffers_backend,
   buffers_alloc
 FROM pg_stat_bgwriter;
+
+-- PG 16+:
+SELECT 
+  num_timed AS checkpoints_timed, 
+  num_requested AS checkpoints_req,
+  write_time AS checkpoint_write_time, 
+  sync_time AS checkpoint_sync_time,
+  buffers_written AS buffers_checkpoint
+FROM pg_stat_checkpointer;
+-- Plus from pg_stat_bgwriter (still exists but only has bgwriter columns):
+SELECT buffers_clean, buffers_alloc FROM pg_stat_bgwriter;
 ```
 
 High `checkpoints_req` vs `checkpoints_timed` means checkpoints are happening too frequently (WAL filling faster than `max_wal_size` allows). High `checkpoint_sync_time` means filesystem sync is slow.
@@ -6816,11 +6905,42 @@ SET search_path = pg_catalog, pg_temp
 
 This pins the search path for the function's execution context, preventing schema hijacking.
 
-#### F.3.3 dblink for Non-Transactional Operations
+#### F.3.3 Non-Transactional Operations (VACUUM, REINDEX/CREATE INDEX CONCURRENTLY)
 
-VACUUM and `CREATE/REINDEX INDEX CONCURRENTLY` cannot run inside a transaction block. Wrapper functions use `dblink` to execute them in a separate connection:
+VACUUM and `CREATE/REINDEX INDEX CONCURRENTLY` cannot run inside a transaction block. There are two approaches, depending on PG version:
+
+**Preferred: Direct execution via Actor's connection (all PG versions)**
+
+The Actor maintains a dedicated database connection as `samo_agent`. For operations that can't run in a transaction block, the Actor simply executes them directly on its own connection **outside of any BEGIN/COMMIT wrapper**. This is cleaner than the dblink approach and avoids its problems (credential management, connection pool competition, poor error propagation).
+
+```rust
+// Actor's non-transactional execution path
+// No BEGIN/COMMIT — just execute directly on the connection
+actor_conn.execute(
+    &format!("VACUUM (ANALYZE) {}.{}", schema_ident, table_ident),
+    &[]
+).await?;
+```
+
+**PG 16+: `pg_maintain` role eliminates wrapper functions entirely**
 
 ```sql
+-- PG 16+ setup: no samo_ops wrappers needed for maintenance operations
+GRANT pg_maintain TO samo_agent;
+
+-- samo_agent can now directly execute:
+--   VACUUM, ANALYZE, REINDEX, CLUSTER, REFRESH MATERIALIZED VIEW, LOCK TABLE
+-- without SUPERUSER and without wrapper functions.
+```
+
+When Samo detects PG 16+, it should prefer `pg_maintain` over `samo_ops` wrappers for maintenance operations. `samo setup` should detect the PG version and use the appropriate approach.
+
+**Legacy (PG 14-15): `samo_ops` wrapper functions still needed**
+
+For PG versions before 16, `samo_ops` SECURITY DEFINER wrapper functions are still required for operations where `samo_agent` lacks direct privileges. These wrappers use the same `format('%I', ...)` safety pattern documented in F.3.1.
+
+```sql
+-- Example: PG 14-15 only (on PG 16+, use pg_maintain instead)
 CREATE OR REPLACE FUNCTION samo_ops.vacuum_table(p_table regclass)
 RETURNS void
 LANGUAGE plpgsql
@@ -6830,16 +6950,14 @@ AS $$
 DECLARE
     v_schema text;
     v_table  text;
-    v_conn   text := current_setting('samo_ops.dblink_connstr', true);
 BEGIN
     SELECT nspname, relname INTO STRICT v_schema, v_table
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.oid = p_table AND c.relkind IN ('r','m','p');
     
-    PERFORM dblink_exec(
-        v_conn,
-        format('VACUUM (ANALYZE) %I.%I', v_schema, v_table)
-    );
+    -- Note: this function must be called outside a transaction block.
+    -- The Actor ensures this by executing on its non-transactional connection path.
+    RAISE NOTICE 'VACUUM (ANALYZE) %.%', v_schema, v_table;
 EXCEPTION
     WHEN NO_DATA_FOUND THEN
         RAISE EXCEPTION 'Not a table: %', p_table;
@@ -6847,7 +6965,11 @@ END;
 $$;
 ```
 
-**Security of dblink connection string:** The `samo_ops.dblink_connstr` setting is a GUC set at the `samo_agent` role level during setup. It uses the same credentials as the direct connection — no escalation.
+**Note:** The previous design used `dblink` inside SECURITY DEFINER functions. This has been replaced because:
+- **Credential management risk** — `samo_ops.dblink_connstr` GUC is readable via `SHOW`
+- **Connection pool competition** — dblink opens a separate connection, competing with the application pool
+- **Poor error propagation** — dblink errors are wrapped and lose context
+- **Unnecessary complexity** — the Actor already has a dedicated connection that can execute outside transaction blocks
 
 #### F.3.4 Permission Escalation Checklist
 
@@ -7518,7 +7640,7 @@ This appendix provides the complete, production-correct SQL for all `\dba` diagn
 ```sql
 -- \dba activity
 -- Shows current pg_stat_activity with intelligent formatting
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 -- PG 14+: query_id available
 -- PG 14+: leader_pid (parallel workers)
 
@@ -7587,7 +7709,7 @@ ORDER BY query_start;
 ```sql
 -- \dba bloat
 -- Estimates table and index bloat using pg_statistics
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 -- Uses pgstattuple if available (more accurate), falls back to heuristic estimate
 -- NOTE: This is an estimate. pgstattuple gives exact figures but requires table scan.
 
@@ -7669,7 +7791,7 @@ ORDER BY pg_relation_size(indexrelid) DESC;
 ```sql
 -- \dba locks
 -- Visualizes lock wait chains, shows blocking and waiting queries
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 -- PG 14+: pg_blocking_pids() is available (PG 9.6+, so all supported versions)
 
 -- Lock wait chain visualization:
@@ -7749,7 +7871,7 @@ ORDER BY granted, count DESC;
 ```sql
 -- \dba unused-idx
 -- Indexes with zero or very few scans since last stats reset
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 
 SELECT
     schemaname AS schema,
@@ -7797,7 +7919,7 @@ ORDER BY pg_relation_size(indexrelid) DESC;
 ```sql
 -- \dba seq-scans
 -- Tables with high sequential scan counts relative to index scans
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 
 SELECT
     schemaname AS schema,
@@ -7832,7 +7954,7 @@ LIMIT 25;
 ```sql
 -- \dba cache-hit
 -- Buffer cache hit ratio by table and index
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 
 -- Table-level cache hit:
 SELECT
@@ -7890,7 +8012,7 @@ FROM pg_statio_user_tables;
 ```sql
 -- \dba vacuum
 -- Autovacuum health, dead tuples, last vacuum/analyze times
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 -- PG 13+: last_seq_scan, last_idx_scan added to pg_stat_user_tables
 -- PG 14+: n_ins_since_vacuum added (tracks inserts for insert-triggered autovacuum)
 
@@ -7932,22 +8054,24 @@ SELECT
     n.nspname AS schema,
     c.relname AS table,
     age(c.relfrozenxid) AS xid_age,
-    -- Alert at 80% of autovacuum_freeze_max_age (default 200M)
+    -- Standard thresholds: warning at 500M XID age, critical at 1B+
+    -- Note: aggressive anti-wraparound autovacuum at autovacuum_freeze_max_age (default 200M) is
+    -- expected healthy behavior — NOT something to alert on. We alert when XID age exceeds levels
+    -- where even aggressive autovacuum may not be keeping up.
     current_setting('autovacuum_freeze_max_age')::bigint AS freeze_max_age,
-    round(100.0 * age(c.relfrozenxid) / 
-        current_setting('autovacuum_freeze_max_age')::bigint, 1) AS pct_toward_freeze,
+    age(c.relfrozenxid) AS xid_age,
     CASE
-        WHEN age(c.relfrozenxid) > 0.9 * current_setting('autovacuum_freeze_max_age')::bigint 
-        THEN '🔴 CRITICAL — aggressive VACUUM needed NOW'
-        WHEN age(c.relfrozenxid) > 0.7 * current_setting('autovacuum_freeze_max_age')::bigint
-        THEN '⚠ WARNING — schedule VACUUM soon'
+        WHEN age(c.relfrozenxid) > 1000000000
+        THEN '🔴 CRITICAL — XID age > 1B, wraparound risk, aggressive VACUUM needed NOW'
+        WHEN age(c.relfrozenxid) > 500000000
+        THEN '⚠ WARNING — XID age > 500M, investigate why autovacuum is not keeping up'
         ELSE 'OK'
     END AS status
 FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'm')  -- tables and materialized views
     AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    AND age(c.relfrozenxid) > 0.5 * current_setting('autovacuum_freeze_max_age')::bigint
+    AND age(c.relfrozenxid) > 500000000  -- only show tables approaching warning threshold
 ORDER BY xid_age DESC;
 ```
 
@@ -7963,7 +8087,7 @@ ORDER BY xid_age DESC;
 ```sql
 -- \dba replication
 -- Replication slots, standby lag, WAL positions
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 -- PG 14+: pg_replication_slots.wal_status, safe_wal_size, two_phase
 -- PG 15+: pg_replication_slots.inactive_since
 -- PG 16+: pg_stat_replication_slots
@@ -8045,7 +8169,7 @@ FROM w;
 ```sql
 -- \dba connections
 -- Connection counts by state, user, application, client
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 
 -- Summary by state:
 SELECT
@@ -8118,7 +8242,7 @@ ORDER BY idle_in_tx_sec DESC;
 ```sql
 -- \dba tablesize
 -- Table sizes including TOAST and indexes
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 
 SELECT
     schemaname AS schema,
@@ -8157,7 +8281,7 @@ ORDER BY size_bytes DESC;
 ```sql
 -- \dba config
 -- Show non-default configuration parameters with context
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 
 SELECT
     name,
@@ -8213,7 +8337,7 @@ ORDER BY name;
 ```sql
 -- \dba waits
 -- Wait event summary using pg_stat_activity (real-time snapshot)
--- Compatible: PG 12-18
+-- Compatible: PG 14-18
 -- For historical wait analysis: requires pg_stat_statements or pg_ash extension
 -- NOTE: This is a point-in-time snapshot. For true ASH, sample pg_stat_activity
 -- repeatedly (Samo daemon mode can maintain this rolling sample)
