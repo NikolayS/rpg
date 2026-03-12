@@ -1723,7 +1723,7 @@ samo/
 
 **Goal:** Autonomous monitoring and remediation, starting with the two highest-priority feature areas: **index health** and **RCA**.
 
-#### Priority 1: Index Health (full spectrum)
+#### Priority 2: Index Health (full spectrum)
 
 The first feature area to reach all three autonomy levels:
 
@@ -1778,117 +1778,175 @@ Actions: 6 recommendations. Run '\autonomy index_health guardian' to enable appr
 - Auto-fixes invalid indexes (drop + recreate)
 - Auto-creates missing indexes — ONLY if confidence is high (seq_scan count, table size, query frequency thresholds all met)
 
-#### Priority 2: RCA with Simple Mitigation (pg_ash-powered)
+#### Priority 1: RCA with Simple Mitigation (pg_ash-powered)
 
-LLM-assisted root cause analysis following the investigation pattern from [pg_ash](https://github.com/NikolayS/pg_ash):
+LLM-assisted root cause analysis following the investigation pattern from [pg_ash](https://github.com/NikolayS/pg_ash). This is the most impressive and immediately useful feature — a tool that understands heavyweight lock contention, documents it, mitigates it, and proposes long-term fixes.
 
-**How it works — the investigation chain:**
+**The killer demo: heavyweight lock contention**
 
-The Analyzer follows the same natural investigation flow that a human DBA would, using pg_ash functions as its eyes:
+A real-world scenario that happens daily in production Postgres:
 
 ```
-Step 1: Big picture
-  → ash.activity_summary('1 hour')
-  → "Peak 12 active sessions at 14:01, normally 4. Lock:tuple is 68% of waits."
+Step 1: Anomaly detected — active sessions spike
+  → ash.activity_summary('10 minutes')
+  → "Peak 23 active sessions (normal: 5). Lock:tuple is 72% of waits."
 
-Step 2: Drill into waits
-  → ash.top_waits('1 hour')
-  → "Lock:tuple dominates. Second is CPU. Third is IO:DataFileRead."
+Step 2: What's blocking what?
+  → pg_stat_activity + pg_locks (block tree reconstruction)
+  → "PID 14523 (UPDATE payments SET status='processed' WHERE id=...)
+     is holding RowExclusiveLock, blocking 22 other sessions.
+     PID 14523 has been running for 47 seconds (idle in transaction)."
 
-Step 3: Timeline — when did it start?
-  → ash.timeline_chart('2 hours', '1 minute')
-  → "Normal until 14:01:00. Lock:tuple spike starts suddenly, peaks at 14:01:30."
+Step 3: Timeline — when and how fast?
+  → ash.timeline_chart('30 minutes', '30 seconds')
+  → "Normal until 14:01:00. Lock:tuple appears at 14:01:02,
+     cascading — 5 blocked at 14:01:05, 15 at 14:01:15, 22 at 14:01:30."
 
-Step 4: Which queries?
-  → ash.top_queries_with_text('1 hour')
-  → "Query 7283901445: UPDATE orders SET status = $1 WHERE id = $2 — 45% of samples."
+Step 4: Which queries are victims?
+  → ash.top_queries_with_text('10 minutes')
+  → "All 22 blocked sessions are running the same UPDATE on payments.
+     They're a work queue — each worker grabs a payment to process."
 
-Step 5: That query's wait profile
-  → ash.query_waits(7283901445, '1 hour')
-  → "This query is 80% Lock:tuple. Multiple sessions running it concurrently."
-
-Step 6: Cross-reference with pg_stat_statements
-  → "This query's mean_exec_time jumped from 2ms to 450ms at 14:01."
-
-Step 7: Check related objects
-  → "orders table: 12M rows, last ANALYZE 3 days ago, 500K dead tuples."
-  → "pg_locks shows 8 sessions waiting on the same tuple."
+Step 5: Root cause identification
+  → ash.query_waits(query_id, '10 minutes')
+  → "The blocking session (PID 14523) is idle in transaction —
+     it acquired the lock but never committed. Application bug:
+     the worker crashed/hung after UPDATE but before COMMIT."
 ```
 
-**RCA output example:**
-```
-ROOT CAUSE ANALYSIS — Lock:tuple spike at 14:01 UTC
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+**Three-tier mitigation (immediate → mid-term → long-term):**
 
-SUMMARY: 8 concurrent sessions updating the same rows in 'orders' table
-caused a Lock:tuple pileup. The spike lasted 3 minutes (14:01-14:04).
+```
+RCA: HEAVYWEIGHT LOCK CONTENTION — payments table
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ROOT CAUSE: PID 14523 holds RowExclusiveLock on payments row, idle in
+transaction for 47s. 22 sessions blocked in cascade. Application worker
+likely crashed after UPDATE but before COMMIT.
+
+╔══════════════════════════════════════════════════════════════════════╗
+║ IMMEDIATE MITIGATION (seconds to resolve)                          ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                    ║
+║  Cancel the blocker:                                               ║
+║    SELECT pg_cancel_backend(14523);                                ║
+║                                                                    ║
+║  If cancel doesn't work within 5s, terminate:                      ║
+║    SELECT pg_terminate_backend(14523);                             ║
+║                                                                    ║
+║  → Autonomy: query_optimization allows this action.                ║
+║  → Execute now? [Y/n]                                              ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+MID-TERM MITIGATION (prevent recurrence via GUC tuning):
+  1. SET idle_in_transaction_session_timeout = '30s';
+     → Kills sessions that sit idle in a transaction for >30s
+     → Prevents one hung worker from cascading to the entire pool
+     → Apply: ALTER SYSTEM SET idle_in_transaction_session_timeout = '30000';
+              SELECT pg_reload_conf();
+
+  2. SET lock_timeout = '10s';
+     → Workers won't wait forever for a lock — they'll fail fast and retry
+     → Apply: ALTER SYSTEM SET lock_timeout = '10000';
+              SELECT pg_reload_conf();
+
+  3. SET statement_timeout = '60s';
+     → Hard ceiling on any single statement
+     → Apply per-role: ALTER ROLE payment_worker SET statement_timeout = '60000';
+
+  → Autonomy: config_tuning can apply these. Execute? [Y/n]
+
+LONG-TERM MITIGATION (application architecture):
+  1. Use SELECT ... FOR UPDATE SKIP LOCKED pattern
+     → Workers skip rows that are already locked instead of waiting
+     → Eliminates cascading lock contention entirely
+     → This is the standard pattern for work queues in Postgres
+
+  2. Implement advisory locks for work distribution
+     → pg_try_advisory_lock(payment_id) before UPDATE
+     → Workers that can't get the lock skip to the next item
+
+  3. Add application-level health checks
+     → Detect worker crashes and release resources (ROLLBACK)
+
+  → These require application code changes (outside DB scope).
+  → Creating PostgresAI Issue with full RCA details...
 
 EVIDENCE:
-  • ash.activity_summary: peak 12 active sessions (normal: 4)
-  • ash.top_waits: Lock:tuple = 68% of all wait samples
-  • ash.timeline_chart: spike starts at 14:01:00, recovers at 14:04:12
-  • Top query: UPDATE orders SET status = $1 WHERE id = $2 (45% of samples)
-  • pg_locks: 8 sessions blocked on same tuple in 'orders'
-  • pg_stat_statements: mean_exec_time 2ms → 450ms
-
-ROOT CAUSE: Application bug or hotspot — multiple workers processing the
-same order concurrently. This is a Lock:tuple wait (row-level lock contention),
-not a missing index or config issue.
-
-MITIGATION:
-  1. [immediate] Application-level fix needed — ensure only one worker
-     processes each order (use advisory locks or queue deduplication)
-  2. [immediate] Consider SELECT ... FOR UPDATE SKIP LOCKED pattern
-     if this is a work queue
-  3. [preventive] ANALYZE orders (stale statistics, 3 days old)
-  4. [preventive] VACUUM orders (500K dead tuples)
-
-  Actions #3 and #4 can be auto-applied (vacuum: pilot, autonomy allows).
-  Actions #1 and #2 require application code changes (outside DB scope).
-
-CONFIDENCE: High — clear Lock:tuple pattern with identifiable query and
-concurrent session evidence.
+  • ash.activity_summary: peak 23 active sessions (normal: 5)
+  • ash.top_waits: Lock:tuple = 72%, Lock:transactionid = 15%
+  • ash.timeline_chart: cascade started at 14:01:02, peak at 14:01:30
+  • pg_locks: PID 14523 → 22 blocked PIDs (tree depth: 3)
+  • pg_stat_activity: PID 14523 state='idle in transaction', duration=47s
+  • pg_stat_statements: UPDATE payments mean_exec_time 3ms → 12,400ms
 ```
 
+**What makes this impressive:**
+- The tool **sees the block tree**, not just individual waits — it reconstructs who blocks whom
+- It **acts immediately** (cancel/terminate the root blocker) if permissions allow
+- It **proposes GUC changes** that prevent recurrence (`idle_in_transaction_session_timeout`, `lock_timeout`, `statement_timeout`) — these are safe, well-understood settings
+- It **explains the long-term fix** (SKIP LOCKED pattern) with enough context that a developer can implement it
+- The entire investigation + mitigation happens in seconds, not the 30-60 minutes a human DBA would need
+
+**Investigation chain (generalized):**
+
+The Analyzer follows this flow for any performance issue:
+
+```
+1. Big picture       → ash.activity_summary()
+2. Wait breakdown    → ash.top_waits()
+3. Timeline          → ash.timeline_chart()
+4. Query attribution → ash.top_queries_with_text()
+5. Query deep-dive   → ash.query_waits(query_id)
+6. Lock analysis     → pg_locks + pg_stat_activity (block tree reconstruction)
+7. Stat correlation  → pg_stat_statements (execution time changes)
+8. Object state      → pg_stat_user_tables, pg_stat_user_indexes (bloat, dead tuples, stale stats)
+```
+
+Each step's output determines what to ask next. The LLM doesn't follow a rigid script — it adapts based on what it finds (if Lock events dominate → drill into pg_locks; if IO events → check table/index bloat; if CPU → check query plans).
+
 **Integration with other features:**
-- RCA automatically triggers relevant feature actions — if the root cause includes stale stats, it hands off to `vacuum`; if bloated indexes are contributing, it hands off to `bloat`
-- RCA can be triggered manually (`/rca` or `\rca`) or automatically when anomalies are detected (spike in active sessions, sudden wait event changes)
-- In Pilot mode for RCA: auto-investigates anomalies, produces reports, auto-applies safe mitigations (ANALYZE, VACUUM, cancel long queries), escalates application-level issues to configured channels
+- RCA automatically triggers relevant feature actions — stale stats → `vacuum`; bloated indexes → `bloat`; missing index → `index_health`; config issue → `config_tuning`
+- RCA can be triggered manually (`/rca` or `\rca`) or automatically when anomalies are detected (session spike, sudden wait event shift, lock cascade)
+- In Pilot mode: auto-investigates anomalies, auto-applies safe immediate mitigations (cancel/terminate root blockers, ANALYZE, VACUUM), auto-proposes GUC changes, escalates app-level issues to configured channels
 
 **pg_ash integration details:**
 - Samo auto-detects pg_ash presence on connect (`SELECT * FROM ash.status()`)
 - If pg_ash is not installed, offers to install it (`\i` the SQL file)
 - All `ash.*` functions are available as first-class `\dba ash *` commands
 - RCA investigation chain is the Analyzer's primary workflow for performance issues
+- Also works without pg_ash (degraded — uses pg_stat_activity snapshots only, no historical data)
 
 #### Week-by-week (Phase 3)
 
-**Week 23-24: Framework + Index Health (Advisor)**
+**Week 23-24: Framework + RCA (Advisor)**
 - [ ] Three-branch governance framework (Analyzer, Actor, Auditor)
 - [ ] Per-feature autonomy configuration system
 - [ ] Action audit log (every action: timestamp, feature, level, justification, outcome)
+- [ ] pg_ash detection and integration
+- [ ] RCA Analyzer: LLM-driven investigation chain (activity_summary → top_waits → timeline → queries → lock tree → stats)
+- [ ] Block tree reconstruction from pg_locks + pg_stat_activity
+- [ ] RCA report generation with three-tier mitigation (immediate / mid-term GUCs / long-term app changes)
+
+**Week 25-26: RCA (Guardian) + Index Health (Advisor)**
+- [ ] RCA Guardian: propose immediate mitigation (cancel/terminate blockers), wait for approval
+- [ ] RCA Guardian: propose GUC changes (idle_in_transaction_session_timeout, lock_timeout, statement_timeout)
+- [ ] Actor component: isolated executor with DB permission validation
+- [ ] `samo_ops` wrapper generation for cancel/terminate + config changes
 - [ ] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
 - [ ] Index health report generation (structured output)
-- [ ] pg_ash detection and integration
 
-**Week 25-26: RCA (Advisor) + Index Health (Guardian)**
-- [ ] RCA Analyzer: LLM-driven investigation chain using pg_ash functions
-- [ ] RCA report generation with evidence, root cause, mitigation
+**Week 27-28: RCA (Pilot) + Index Health (Guardian) + Daemon mode**
+- [ ] RCA Pilot: auto-investigate anomalies, auto-cancel/terminate root blockers, auto-propose GUCs
+- [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes, lock cascades
 - [ ] Index health Guardian: propose actions with justification, wait for approval
-- [ ] Actor component: isolated executor with DB permission validation
-- [ ] `samo_ops` wrapper generation for index operations
-
-**Week 27-28: RCA (Guardian) + Daemon mode**
-- [ ] RCA Guardian: propose mitigations, wait for approval
-- [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes
 - [ ] Daemon mode: headless operation, PID file, signal handling
 - [ ] Notification channels: Slack webhook, email
 - [ ] HTTP health check endpoint
 
 **Week 29-30: Pilot mode for safe features**
 - [ ] Index health Pilot: auto-reindex, auto-drop unused (with grace period), auto-create missing
-- [ ] RCA Pilot: auto-investigate anomalies, auto-apply safe mitigations
-- [ ] Auditor component: post-action verification (did reindex reduce bloat? did index improve queries?)
+- [ ] Auditor component: post-action verification (did cancel resolve the lock cascade? did reindex reduce bloat? did GUC change prevent recurrence?)
 - [ ] PostgresAI Issues connector
 - [ ] GitHub Issues connector
 
@@ -1899,7 +1957,7 @@ concurrent session evidence.
 - [ ] Container image (Alpine-based, ~15MB)
 - [ ] Advisor mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
 
-**Milestone:** Index health and RCA work end-to-end at all three autonomy levels. Other features work at Advisor level. Agent runs as a daemon on all platforms.
+**Milestone:** RCA and index health work end-to-end at all three autonomy levels. RCA can detect lock contention, document it, mitigate immediately, and propose GUC + app-level fixes — all in seconds. Other features work at Advisor level. Agent runs as a daemon on all platforms.
 
 ### Phase 4: Ecosystem (Weeks 33+)
 
