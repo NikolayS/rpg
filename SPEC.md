@@ -28,7 +28,10 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust. 
 
 ### Compatibility Policy
 
-Samo aims for compatibility with common psql workflows, not 100% behavioral parity:
+Anyone fluent in psql — human or AI agent — should be immediately productive in Samo. The goal is not to replace psql in existing scripts, but to ensure that psql knowledge transfers directly:
+
+- **psql muscle memory works:** the commands, flags, and workflows that psql users know carry over without relearning
+- **AI agents that know psql work too:** LLMs trained on psql documentation and examples can drive Samo effectively
 - **Interactive daily use:** target parity with the top 50 psql commands (see Appendix K for ranking)
 - **Scripted automation:** only documented-compatible flags/commands are guaranteed
 - **Unsupported psql behavior:** fails loudly, never silently — users always know when they hit an edge case
@@ -1590,236 +1593,817 @@ samo/
 
 ## 5. Implementation Plan
 
-### Phase 0: psql-Compatible Terminal (Weeks 1-8)
+### Phase 0: psql-Compatible Terminal
 
-**Goal:** A Postgres terminal compatible with common psql workflows. No AI, no agent, no extras — just a solid daily-driver CLI. Split into two sub-phases to ship differentiated value faster.
+**Goal:** A Postgres terminal compatible with common psql workflows. No AI, no agent — just a solid daily-driver CLI. Split into sub-phases to ship differentiated value faster.
 
-#### Phase 0A: Daily-Driver CLI (Weeks 1-6)
+**Team model:** Each sprint is designed as a unit of work for one AI agent. Multiple sprints at the same depth level (e.g., S-0.1 and S-0.2) can run in parallel if they don't share files. Dependencies are explicit.
 
-The commands and features that cover 95% of daily interactive use. Ship this first.
+---
 
-**Week 1-2: Connect and Query**
-- [ ] Project scaffold: Cargo.toml, CI (GitHub Actions)
-- [ ] Cross-compilation: Linux x86_64/aarch64 (musl), macOS x86_64/aarch64, Windows x86_64/aarch64
-- [ ] Connection: full libpq-compatible parameter parsing
-  - [ ] All connection parameters (host, hostaddr, port, dbname, user, password, sslmode, sslcert, sslkey, sslrootcert, application_name, options, connect_timeout, client_encoding, target_session_attrs, etc.)
+#### Sprint S-0.1: Project Scaffold & CI (1 week)
+
+**Goal:** Cargo project builds and cross-compiles on all 6 targets. CI green.
+
+**Tasks:**
+- [ ] Initialize Cargo workspace: `Cargo.toml`, `src/main.rs` (prints version and exits)
+- [ ] `clap` CLI argument parser: `--version`, `--help`, positional `[dbname [user [host [port]]]]`
+- [ ] GitHub Actions CI workflow:
+  - [ ] Build matrix: `{linux-x86_64-musl, linux-aarch64-musl, darwin-x86_64, darwin-aarch64, windows-x86_64, windows-aarch64}`
+  - [ ] `cargo test` on each target
+  - [ ] `cargo clippy` + `cargo fmt --check` as required checks
+  - [ ] Binary artifact upload per target
+- [ ] Release workflow: on tag push, build all 6 binaries, create GitHub Release with checksums (SHA256)
+- [ ] `Makefile` or `justfile` for local dev: `build`, `test`, `fmt`, `clippy`, `release`
+- [ ] `.gitignore`, `rust-toolchain.toml` (pin stable), `rustfmt.toml`
+- [ ] `CONTRIBUTING.md` with build instructions
+
+**Verifiable gate:**
+- `cargo build --release --target x86_64-unknown-linux-musl` succeeds
+- CI passes on all 6 targets
+- `./samo --version` prints `samo 0.1.0-dev (<commit>)` on Linux, macOS, Windows
+- Binary size < 30MB (stripped, musl)
+
+**Depends on:** nothing
+
+---
+
+#### Sprint S-0.2: Wire Protocol & Connection (2 weeks)
+
+**Goal:** Connect to any Postgres instance using any standard method. Execute a query and display results.
+
+**Tasks:**
+- [ ] `tokio-postgres` integration with tokio async runtime
+- [ ] Connection parameter parsing (all libpq-compatible):
   - [ ] URI format: `postgresql://user:pass@host:port/db?sslmode=require&options=...`
-  - [ ] Key-value format: `host=... port=... dbname=...`
+  - [ ] Key-value format: `host=localhost port=5432 dbname=mydb`
   - [ ] Positional arguments: `samo dbname user host port`
 - [ ] All libpq environment variables:
-  - [ ] PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGPASSFILE
-  - [ ] PGOPTIONS, PGAPPNAME, PGSSLMODE, PGSSLCERT, PGSSLKEY, PGSSLROOTCERT
-  - [ ] PGSSLCRL, PGSERVICE, PGSERVICEFILE, PGREQUIREAUTH, PGCHANNELBINDING
-  - [ ] PGGSSENCMODE, PGKRBSRVNAME, PGCONNECT_TIMEOUT, PGCLIENTENCODING
-  - [ ] PGTARGETSESSIONATTRS, PGLOADBALANCEHOSTS, PGTZ, PGDATESTYLE
-  - [ ] PSQLRC, PSQL_HISTORY, PAGER, PSQL_PAGER
-- [ ] `.pgpass` file support (standard paths, PGPASSFILE, wildcard, permission check)
-- [ ] `pg_service.conf` support (PGSERVICE, PGSERVICEFILE, ~/.pg_service.conf)
-- [ ] SSL/TLS (rustls + native-tls fallback)
-- [ ] Auth: password, md5, SCRAM-SHA-256
+  - [ ] Core: PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGPASSFILE
+  - [ ] SSL: PGSSLMODE, PGSSLCERT, PGSSLKEY, PGSSLROOTCERT, PGSSLCRL, PGSSLCRLDIR, PGSSLSNI, PGSSLNEGOTIATION, PGSSLMINPROTOCOLVERSION, PGSSLMAXPROTOCOLVERSION
+  - [ ] Auth: PGREQUIREAUTH, PGCHANNELBINDING, PGGSSENCMODE, PGKRBSRVNAME, PGGSSLIB, PGGSSDELEGATION
+  - [ ] Behavior: PGOPTIONS, PGAPPNAME, PGCONNECT_TIMEOUT, PGCLIENTENCODING, PGTARGETSESSIONATTRS, PGLOADBALANCEHOSTS
+  - [ ] Service: PGSERVICE, PGSERVICEFILE
+  - [ ] Display: PGTZ, PGDATESTYLE
+  - [ ] psql-compat: PSQLRC, PSQL_HISTORY, PAGER, PSQL_PAGER
+- [ ] `.pgpass` file support (standard paths, PGPASSFILE, wildcard matching, 600 permission check on Unix)
+- [ ] `pg_service.conf` support (PGSERVICE, PGSERVICEFILE, `~/.pg_service.conf`, sysconfdir)
+- [ ] SSL/TLS via `rustls` (with `native-tls` fallback compile flag)
+- [ ] Authentication: password, md5, SCRAM-SHA-256
 - [ ] Unix domain sockets (Linux/macOS)
-- [ ] Wire protocol v3: simple query, extended query protocol
-- [ ] Basic REPL: rustyline loop, persistent history file, multi-line input (semicolons)
-- [ ] Query execution with result display (aligned format with headers)
-- [ ] Row count footer ("(N rows)")
-- [ ] Query timing display
-- [ ] Error display with SQLSTATE, detail, hint, context, position
-- [ ] `\errverbose` — show most recent error in verbose form
+- [ ] Wire protocol v3: simple query protocol
+- [ ] Extended query protocol (basic — prepare/bind/execute)
+- [ ] CancelRequest (Ctrl-C sends cancel to server)
+- [ ] Query execution: send SQL, receive rows, format as aligned table with headers
+- [ ] Row count footer: `(N rows)` / `(N row)`
+- [ ] Error display: SQLSTATE, message, detail, hint, context, position marker
+- [ ] `\errverbose` — show last error in verbose form
+- [ ] Connection info display on startup: `You are now connected to database "X" as user "Y" on host "Z" at port "P".`
 
-**Week 3-4: Core Meta-Commands**
-- [ ] `\d [pattern]` — describe table/index/sequence/view (match psql output exactly)
-- [ ] `\dt[+]`, `\di[+]`, `\ds[+]`, `\dv[+]`, `\dm[+]` — list tables/indexes/sequences/views/materialized views
-- [ ] `\df[+] [pattern]` — list functions
-- [ ] `\dn[+]` — list schemas
-- [ ] `\du`, `\dg` — list roles
-- [ ] `\dp` — list privileges (ACLs)
-- [ ] `\db[+]` — list tablespaces
-- [ ] `\dT[+]` — list data types
-- [ ] `\dx[+]` — list extensions
-- [ ] `\dE[+]` — list foreign tables
-- [ ] `\dD[+]` — list domains
-- [ ] `\dc[+]` — list conversions
-- [ ] `\dC[+]` — list casts
-- [ ] `\dd` — show object descriptions
-- [ ] `\des[+]` — list foreign servers
-- [ ] `\dew[+]` — list foreign-data wrappers
-- [ ] `\det[+]` — list foreign tables
-- [ ] `\deu[+]` — list user mappings
-- [ ] `\l[+]` — list databases
-- [ ] `\c [dbname [user] [host] [port]]` — connect to database
-- [ ] `\conninfo` — show current connection info
-- [ ] `\x [on|off|auto]` — toggle expanded output
+**Integration tests (require Docker Postgres in CI):**
+- [ ] Connect via TCP (host/port)
+- [ ] Connect via Unix socket
+- [ ] Connect via URI
+- [ ] Connect via key-value string
+- [ ] Connect via environment variables only
+- [ ] Connect via `.pgpass`
+- [ ] Connect via `pg_service.conf`
+- [ ] SSL connection (self-signed cert)
+- [ ] Auth: password, md5, SCRAM-SHA-256
+- [ ] `SELECT 1` returns `(1 row)` with correct formatting
+- [ ] Error display includes SQLSTATE
+- [ ] Ctrl-C cancels a `pg_sleep(60)` within 1s
+
+**Verifiable gate:**
+- `samo -h localhost -U postgres -d testdb -c "SELECT 1"` returns formatted output matching psql
+- All 13 integration tests pass against PG 16
+- `.pgpass` and `pg_service.conf` resolve correctly
+- SSL connection to PG with `sslmode=require` succeeds
+- Binary startup to first query < 100ms
+
+**Depends on:** S-0.1
+
+---
+
+#### Sprint S-0.3: REPL & History (1 week)
+
+**Goal:** Interactive readline loop with persistent history, multi-line input, and Ctrl-C/Ctrl-D behavior matching psql.
+
+**Tasks:**
+- [ ] `rustyline` integration: interactive REPL loop
+- [ ] Persistent history file: `~/.psql_history` (or PSQL_HISTORY env var)
+- [ ] History search: Ctrl-R reverse incremental search
+- [ ] Multi-line input: lines not ending with `;` continue on next line
+- [ ] Continuation prompt: `dbname->` for incomplete input (vs `dbname=>` for ready)
+- [ ] Ctrl-C on empty line: does nothing (psql compat)
+- [ ] Ctrl-C during query: sends CancelRequest to server
+- [ ] Ctrl-C during input: clears current buffer, returns to prompt
+- [ ] Ctrl-D on empty line: exits
+- [ ] `\q` exits
+- [ ] Query timing display: `Time: X.XXX ms` (when `\timing` is on)
+- [ ] Transaction status in prompt: `*` (in transaction), `!` (failed transaction), `?` (unknown)
+- [ ] Notification display: async LISTEN/NOTIFY messages displayed between prompts
+- [ ] Non-interactive mode: stdin pipe detection, `-c` single command, `-f` file execution
+- [ ] Exit codes: 0 success, 1 error, 2 connection failure, 3 script error
+
+**Tests:**
+- [ ] Multi-line: `SELECT\n  1;` executes as single query
+- [ ] History persists across sessions (write, exit, relaunch, search)
+- [ ] Ctrl-C during `pg_sleep(60)` cancels and returns to prompt
+- [ ] `echo "SELECT 1" | samo -h localhost -d testdb` returns result and exits
+- [ ] `-c "SELECT 1"` returns result, exit code 0
+- [ ] `-c "SELEC 1"` returns error, exit code 1
+- [ ] `-f nonexistent.sql` returns exit code 3
+
+**Verifiable gate:**
+- Interactive session: connect, type multi-line query, get result, Ctrl-R finds it, Ctrl-D exits
+- Pipe mode: `echo "SELECT version();" | samo ...` produces output, exits 0
+- Transaction prompt shows `*` inside BEGIN, `!` after error
+
+**Depends on:** S-0.2
+
+---
+
+#### Sprint S-0.4: Core Meta-Commands — Describe Family (2 weeks)
+
+**Goal:** All `\d` family commands produce output matching psql. Pattern matching and `+`/`S` modifiers work.
+
+**Tasks:**
+- [ ] Backslash command parser: tokenize `\cmd [args]`, dispatch to handlers
+- [ ] `\d [pattern]` — describe table, index, sequence, view, materialized view
+- [ ] `\dt[S+] [pattern]` — list tables
+- [ ] `\di[S+] [pattern]` — list indexes
+- [ ] `\ds[S+] [pattern]` — list sequences
+- [ ] `\dv[S+] [pattern]` — list views
+- [ ] `\dm[S+] [pattern]` — list materialized views
+- [ ] `\df[S+] [pattern]` — list functions
+- [ ] `\dn[S+] [pattern]` — list schemas
+- [ ] `\du [pattern]` / `\dg [pattern]` — list roles
+- [ ] `\dp [pattern]` — list privileges (ACLs)
+- [ ] `\db[+] [pattern]` — list tablespaces
+- [ ] `\dT[S+] [pattern]` — list data types
+- [ ] `\dx[+] [pattern]` — list extensions
+- [ ] `\dE[S+] [pattern]` — list foreign tables
+- [ ] `\dD[S+] [pattern]` — list domains
+- [ ] `\dc[S+] [pattern]` — list conversions
+- [ ] `\dC[+] [pattern]` — list casts
+- [ ] `\dd [pattern]` — show object descriptions/comments
+- [ ] `\des[+] [pattern]` — list foreign servers
+- [ ] `\dew[+] [pattern]` — list foreign-data wrappers
+- [ ] `\det[+] [pattern]` — list foreign tables (via FDW)
+- [ ] `\deu[+] [pattern]` — list user mappings
+- [ ] `\l[+] [pattern]` — list databases
+- [ ] `\sf[+] function_name` — show function source code
+- [ ] `\sv[+] view_name` — show view definition
+- [ ] `\c [dbname [user [host [port]]]]` — reconnect to database
+- [ ] `\conninfo` — display current connection info
+- [ ] `\x [on|off|auto]` — toggle/set expanded display
 - [ ] `\timing [on|off]` — toggle query timing
-- [ ] `\q` — quit
-- [ ] `\?` — help for backslash commands
+- [ ] `\? [topic]` — help for backslash commands
 - [ ] `\h [command]` — SQL command syntax help
-- [ ] Pattern matching (wildcards) for all `\d` commands
-- [ ] `+` modifier (extra detail) for all `\d` commands that support it
-- [ ] `S` modifier (show system objects) where applicable
+- [ ] Pattern matching: `*` and `?` wildcards, schema-qualified `schema.pattern`
+- [ ] `+` modifier: extra detail columns (size, description, etc.)
+- [ ] `S` modifier: include system objects
+- [ ] `-E` / `--echo-hidden` flag: show generated SQL for `\d` commands
+- [ ] PG version detection: adapt `\d` queries for PG 12-18 catalog differences
 
-**Week 5-6: Variables, I/O, Editing**
+**Compatibility tests (golden file):**
+- [ ] Run each `\d` variant in both psql and samo against identical schema, diff output
+- [ ] Test schema: tables with various column types, indexes (btree, hash, gin, gist), views, functions, sequences, foreign tables, domains, extensions (pg_stat_statements, pgcrypto)
+- [ ] Pattern matching: `\dt public.*`, `\dt *orders*`, `\dt *.migrations`
+- [ ] PG version matrix: at least PG 14, 16, 17 in CI
+
+**Verifiable gate:**
+- `\dt+` output matches psql `\dt+` for the test schema (visual diff < 5% for formatting)
+- `\d orders` shows columns, indexes, constraints, foreign keys — matching psql layout
+- `-E` flag shows the generated SQL
+- All `\d` commands work on PG 14, 16, 17
+
+**Depends on:** S-0.3
+
+---
+
+#### Sprint S-0.5: Variables, Settings & I/O (1 week)
+
+**Goal:** psql variable system, output formatting control, file I/O, and editor integration.
+
+**Tasks:**
 - [ ] `\set [name [value]]` — set/show psql variables
 - [ ] `\unset name` — unset variable
-- [ ] Built-in variables: AUTOCOMMIT, ON_ERROR_STOP, ON_ERROR_ROLLBACK, QUIET, SINGLELINE, SINGLESTEP
-- [ ] `\pset [option [value]]` — set output format options (border, format, null, fieldsep, recordsep, title, etc.)
-- [ ] `\a` — toggle aligned/unaligned
+- [ ] Built-in variables: AUTOCOMMIT, ON_ERROR_STOP, ON_ERROR_ROLLBACK, QUIET, SINGLELINE, SINGLESTEP, ECHO, ECHO_HIDDEN
+- [ ] `\pset [option [value]]` — set output format options
+- [ ] `\pset` options: format, border, expanded, fieldsep, fieldsep_zero, footer, null, numericlocale, recordsep, recordsep_zero, title, tuples_only, pager, pager_min_lines, unicode_border_linestyle, unicode_column_linestyle, unicode_header_linestyle
+- [ ] `\a` — toggle aligned/unaligned output
 - [ ] `\t [on|off]` — toggle tuples-only
-- [ ] `\f [sep]` — set field separator
+- [ ] `\f [sep]` — set/show field separator
 - [ ] `\H` — toggle HTML output
-- [ ] `\e [file] [line]` — edit query/file in $EDITOR
+- [ ] `\C [title]` — set table title/caption
+- [ ] Output formats: aligned (default), unaligned, expanded (`\x`), CSV, HTML, JSON, wrapped
+- [ ] `\e [file] [line]` — open $EDITOR, execute buffer on save/close
 - [ ] `\i file` — execute commands from file
-- [ ] `\ir file` — include file (relative path)
-- [ ] `\o [file|command]` — send output to file or pipe
+- [ ] `\ir file` — include file (relative to current script)
+- [ ] `\o [file|command]` — redirect output to file or pipe
 - [ ] `\w file` — write query buffer to file
-- [ ] `\r` — reset query buffer
+- [ ] `\r` — reset (clear) query buffer
 - [ ] `\p` — print current query buffer
-- [ ] `\echo text` — print text to stdout
-- [ ] `\qecho text` — print text to query output channel
-- [ ] `\warn text` — print text to stderr
-- [ ] `\prompt [text] name` — prompt user for variable value
+- [ ] `\echo text` — print to stdout
+- [ ] `\qecho text` — print to query output channel
+- [ ] `\warn text` — print to stderr
+- [ ] `\prompt [text] name` — prompt user, store in variable
 - [ ] `\! [command]` — execute shell command
-- [ ] `\cd [dir]` — change directory
+- [ ] `\cd [dir]` — change working directory
 - [ ] `\encoding [enc]` — show/set client encoding
-- [ ] `\password [user]` — change password (interactively)
+- [ ] `\password [user]` — interactively change password
+- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3) with format codes:
+  - [ ] `%M` (full host), `%m` (short host), `%>` (port), `%n` (user), `%/` (database), `%~` (database, `~` for default)
+  - [ ] `%#` (`#` if superuser, `>` otherwise), `%p` (backend PID), `%R` (ready/single-line/disconnected)
+  - [ ] `%l` (line number), `%w` (whitespace padding), `%x` (transaction status)
+  - [ ] `%[` / `%]` (terminal control character brackets)
+- [ ] Variable interpolation: `:var`, `:'var'`, `:"var"`, `:{?var}`, backquote expansion `` `cmd` ``
 
-#### Phase 0B: Compatibility Hardening (Weeks 7-8)
+**Tests:**
+- [ ] `\set FOO bar` then `SELECT :'FOO';` returns `'bar'`
+- [ ] `\pset format csv` then query outputs CSV
+- [ ] `\o /tmp/out.txt` captures output, `\o` restores
+- [ ] `\i` executes a multi-command SQL file
+- [ ] `\e` opens $EDITOR (mock with `cat > /dev/null` in CI)
+- [ ] Prompt format codes render correctly (test with known connection params)
 
-The long tail — less common commands, exotic formats, scripting edge cases. Important for adoption but not blocking differentiation.
+**Verifiable gate:**
+- `\pset format csv` + `SELECT 1 AS a, 2 AS b;` outputs `a,b\n1,2`
+- Variable interpolation: `:var`, `:'var'`, `:"var"` all work in SQL context
+- `\i` can execute a `.sql` file with multiple statements and `\set` commands
+- All prompt format codes produce correct output for a known connection
 
-**Week 7-8: COPY, Execution Variants, Scripting, Output Formats**
-- [ ] `\copy ... FROM/TO` — client-side COPY with all format options (CSV, TEXT, BINARY, DELIMITER, HEADER, etc.)
-  - [ ] `\copy ... FROM stdin` / `\copy ... TO stdout`
-  - [ ] `\copy ... FROM program 'cmd'` / `\copy ... TO program 'cmd'`
-  - [ ] pstdin/pstdout support
-- [ ] `\watch [interval]` — re-execute query periodically
-- [ ] `\g [file]` — execute query, optionally send to file
-- [ ] `\g |command` — pipe query output to shell command
-- [ ] `\gx [file]` — execute query with expanded output
-- [ ] `\gset [prefix]` — execute query, store results as variables
-- [ ] `\gexec` — execute each result value as a SQL statement
-- [ ] `\gdesc` — describe result columns without executing
-- [ ] `\sf[+] function` — show function source
-- [ ] `\sv[+] view` — show view definition
-- [ ] `\bind [params...]` — set bind parameters for next query (extended query protocol)
-- [ ] `\bind_named stmt [params...]` — bind to named prepared statement
-- [ ] `\parse stmt` — parse and save a prepared statement
-- [ ] `\close_prepared stmt` — close a prepared statement
-- [ ] `\crosstabview [colV [colH [colD [sortcolH]]]]` — pivot results
-- [ ] `\copyright` — show PostgreSQL copyright
-- [ ] `\errverbose` — show most recent error in verbose form
-- [ ] `\C [title]` — set table title
-- [ ] Variable interpolation: `:var`, `:'var'`, `:"var"`, `:{?var}`, backquote expansion
-- [ ] Output formats: aligned (default), unaligned, wrapped, CSV, HTML, LaTeX, LaTeX-longtable, JSON, asciidoc, troff-ms
-- [ ] Customizable null display, border, line style (ascii/old-ascii/unicode), unicode_border_linestyle, unicode_column_linestyle, unicode_header_linestyle
-- [ ] `\pset` options: format, border, expanded, fieldsep, fieldsep_zero, footer, null, numericlocale, recordsep, recordsep_zero, title, tuples_only, pager, pager_min_lines, unicode_*
+**Depends on:** S-0.3
+
+---
+
+#### Sprint S-0.6: CLI Flags & Scripting (1 week)
+
+**Goal:** All psql-compatible CLI flags work. Piping and scripting scenarios pass.
+
+**Tasks:**
 - [ ] `-c "SQL"` — execute single command and exit
 - [ ] `-f file` — execute file and exit
 - [ ] `-v name=value` — set variable from command line
-- [ ] `-X` — skip .psqlrc
+- [ ] `-X` — skip `.psqlrc`
 - [ ] `-A` — unaligned output
 - [ ] `-t` — tuples only
-- [ ] `-F sep` — field separator for unaligned output
-- [ ] `-R sep` — record separator for unaligned output
-- [ ] `-P option=value` — set pset from command line
+- [ ] `-F sep` — field separator for unaligned
+- [ ] `-R sep` — record separator for unaligned
+- [ ] `-P option=value` — set pset option from command line
 - [ ] `-o file` — output to file
-- [ ] `-L file` — send log of all query output to file (in addition to normal output)
+- [ ] `-L file` — log all query output to file
 - [ ] `-1` / `--single-transaction` — wrap `-f` in BEGIN/COMMIT
 - [ ] `-b` / `--echo-errors` — echo failed commands
-- [ ] `-e` / `--echo-queries` — echo all queries sent
-- [ ] `-E` / `--echo-hidden` — show queries generated by `\d` commands
+- [ ] `-e` / `--echo-queries` — echo all sent queries
+- [ ] `-E` / `--echo-hidden` — show generated SQL for `\d` commands
 - [ ] `-n` / `--no-readline` — disable readline
 - [ ] `-q` / `--quiet` — suppress informational messages
-- [ ] `-s` / `--single-step` — single step mode (confirm each command)
-- [ ] `-S` / `--single-line` — single-line mode (newline = semicolon)
-- [ ] `-w` / `--no-password` — never prompt for password
-- [ ] `-W` / `--password` — force password prompt
-- [ ] `-z` / `--field-separator-zero` — zero byte field separator for unaligned
-- [ ] `-0` / `--record-separator-zero` — zero byte record separator for unaligned
+- [ ] `-s` / `--single-step` — confirm each command
+- [ ] `-S` / `--single-line` — newline = semicolon
+- [ ] `-w` / `--no-password` — never prompt
+- [ ] `-W` / `--password` — always prompt
+- [ ] `-z` / `--field-separator-zero` — NUL field separator
+- [ ] `-0` / `--record-separator-zero` — NUL record separator
 - [ ] `--csv` — CSV output mode
 - [ ] `--json` — JSON output mode
-- [ ] Stdin/stdout piping: `echo "SELECT 1" | samo`
-- [ ] Exit codes: 0 success, 1 error, 2 connection failure, 3 script error (match psql)
-- [ ] `.psqlrc` execution on startup (skip with `-X`)
-- [ ] PSQLRC environment variable
-- [ ] `~/.psql_history` / PSQL_HISTORY for history file location
-- [ ] Tab completion: SQL keywords, schema objects, file paths (for `\i`, `\copy`)
-- [ ] Query cancellation: Ctrl-C sends CancelRequest to server
-- [ ] Ctrl-D on empty line exits
-- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3) with all format codes:
-  - [ ] `%M` — full hostname, `%m` — short hostname, `%>` — port
-  - [ ] `%n` — username, `%/` — database, `%~` — like %/ but ~ for default
-  - [ ] `%#` — `#` if superuser else `>`, `%p` — PID of backend
-  - [ ] `%R` — `=` for ready, `^` for single-line, `!` for disconnected
-  - [ ] `%l` — line number, `%w` — whitespace of same width as prompt
-  - [ ] `%x` — transaction status (`*` active, `!` failed, `?` unknown)
-  - [ ] `%[` / `%]` — terminal control character brackets
-- [ ] Notification (LISTEN/NOTIFY) display
-- [ ] Transaction status in prompt
-- [ ] Conditional commands: `\if`, `\elif`, `\else`, `\endif` — scripting conditionals
+- [ ] `-D` / `--debug` — debug mode (wire protocol logging to stderr)
+- [ ] `.psqlrc` execution on startup (standard paths, PSQLRC env var)
+- [ ] Stdin piping: `echo "SELECT 1" | samo -h localhost`
+- [ ] Conditional commands: `\if`, `\elif`, `\else`, `\endif`
 
-**Milestone:** A solid Postgres terminal compatible with common psql workflows. Phase 0A ships the daily-driver commands; Phase 0B hardens the compatibility long tail. Builds and runs on all 6 platform targets. No AI, no extras — just a great terminal for Postgres.
+**Tests:**
+- [ ] `samo -A -t -c "SELECT 1"` outputs `1` (no headers, no footer, unaligned)
+- [ ] `samo --csv -c "SELECT 1 AS a, 2 AS b"` outputs `a,b\n1,2`
+- [ ] `samo -f test.sql -1` wraps in transaction
+- [ ] `samo -v FOO=bar -c "SELECT :'FOO'"` outputs `bar`
+- [ ] `\if` / `\elif` / `\else` / `\endif` conditional execution
+- [ ] `.psqlrc` runs on startup, `-X` skips it
+- [ ] `echo "SELECT 1; SELECT 2;" | samo ...` outputs both results
 
-### Phase 1: Beyond psql (Weeks 9-14)
+**Verifiable gate:**
+- `test-compat.sh`: run 20 representative `-c` commands through both psql and samo, diff outputs, divergence < 5%
+- All CLI flags accepted and functional
+- Conditional scripting: `\if true` / `\else` / `\endif` selects correct branch
 
-**Goal:** Everything psql can't do. This is where we start being *better* than psql.
+**Depends on:** S-0.5
 
-**Week 9-10:**
-- [ ] Schema-aware contextual autocomplete (after FROM → tables, after SELECT → columns)
-- [ ] Syntax highlighting in input line (SQL keywords, strings, numbers, comments)
-- [ ] Configurable color themes (auto-detect dark/light terminal)
-- [ ] TUI pager (ratatui): replaces external pager, vertical/horizontal scroll, search
-- [ ] Pager: column freezing, column sorting, cell/row copy
+---
 
-**Week 11-12:**
-- [ ] `\dba` diagnostic commands: activity, bloat, locks, unused-idx, seq-scans, cache-hit, vacuum, replication, connections, tablesize, config
-- [ ] PG version detection — adapt diagnostic queries to server version (PG 12-18)
-- [ ] Connection pooler detection (pgBouncer/PgCat/Supavisor) — warn about unsupported features
-- [ ] Config file loading (TOML) — user preferences, defaults, themes
+#### Sprint S-0.7: COPY Protocol & Execution Variants (1 week)
 
-**Week 13-14:**
-- [ ] `\dba waits` — pg_ash wait event summary (when pg_ash is available)
-- [ ] Query history search improvements (fuzzy search, filter by table/command type)
-- [ ] Bookmarks: save and recall named queries (`\bookmark save name`, `\bookmark run name`)
-- [ ] `\diff` — compare table structure across two databases/schemas
-- [ ] Named connections: save connection profiles in config, switch with `\c @profile-name`
-- [ ] Output: sparklines and inline bar charts for numeric columns (optional)
+**Goal:** COPY sub-protocol, `\g` variants, prepared statements, and `\watch`.
 
-**Milestone:** Clearly better than psql for daily use. Has autocomplete, highlighting, integrated pager, diagnostics, and quality-of-life features psql never had.
+**Tasks:**
+- [ ] `\copy ... FROM/TO` with format options (CSV, TEXT, BINARY, DELIMITER, HEADER, NULL, QUOTE, ESCAPE, FORCE_QUOTE, FORCE_NOT_NULL, ENCODING)
+  - [ ] `\copy ... FROM stdin` / `\copy ... TO stdout`
+  - [ ] `\copy ... FROM program 'cmd'` / `\copy ... TO program 'cmd'`
+  - [ ] `\copy ... FROM '/path/to/file'` with BINARY format
+- [ ] `\watch [interval]` — re-execute last query every N seconds
+- [ ] `\g [file]` — execute query, optionally send to file
+- [ ] `\g |command` — pipe output to shell command
+- [ ] `\gx [file]` — execute with expanded output
+- [ ] `\gset [prefix]` — execute, store result columns as variables
+- [ ] `\gexec` — execute each result cell as a SQL statement
+- [ ] `\gdesc` — describe result columns without executing
+- [ ] `\bind [params...]` — bind parameters for next query (extended query protocol)
+- [ ] `\bind_named stmt [params...]` — bind to named prepared statement
+- [ ] `\parse stmt` — create named prepared statement
+- [ ] `\close_prepared stmt` — close prepared statement
+- [ ] `\crosstabview [colV [colH [colD [sortcolH]]]]` — pivot results
+- [ ] `\copyright` — show PostgreSQL copyright notice
+- [ ] Large object commands: `\lo_import`, `\lo_export`, `\lo_list`, `\lo_unlink`
+- [ ] Remaining output formats: LaTeX, LaTeX-longtable, asciidoc, troff-ms
 
-### Phase 2: AI Brain (Weeks 15-22)
+**Tests:**
+- [ ] `\copy` round-trip: export table to CSV, reimport, verify row count
+- [ ] `\copy ... FROM program 'cat file.csv'` imports correctly
+- [ ] `\gset` stores columns as variables, `:'col'` substitutes them
+- [ ] `\gexec` executes generated CREATE TABLE statements
+- [ ] `\watch 1` re-executes and shows updated results (manual verification)
+- [ ] `\bind` with extended query protocol: parameterized queries work
+- [ ] `\crosstabview` pivots a simple dataset correctly
 
-**Goal:** LLM integration that makes the terminal dramatically more powerful.
+**Verifiable gate:**
+- `\copy` imports 100K rows from CSV in < 5s
+- `\gset` + `\gexec` chain: generate and execute DDL from query results
+- `\bind` + parameterized query returns correct results
+- All output formats produce valid output for a test query
 
-**Week 15-16:**
-- [ ] `LlmProvider` trait and OpenAI/Anthropic implementations
-- [ ] Schema context builder (compact DDL from pg_catalog)
-- [ ] `/ask` command: NL → SQL generation with streaming display
-- [ ] `/fix` command: explain last error with suggestions
+**Depends on:** S-0.6
 
-**Week 17-18:**
-- [ ] `/explain` command: run EXPLAIN ANALYZE, feed plan to LLM, display interpretation
-- [ ] `/optimize` command: suggest query rewrites and indexes
-- [ ] Session context: feed recent query history to LLM
-- [ ] Token tracking and budget enforcement
+---
 
-**Week 19-20:**
-- [ ] Ollama (local model) support
-- [ ] Inline error suggestions (automatic, toggle-able)
-- [ ] pg_ash context: wait event data fed to LLM for deeper analysis
-- [ ] `/describe` command: AI-generated table/schema descriptions
-- [ ] AI mode (`\ai`) and SQL mode (`\sql`) switching
+#### Sprint S-0.8: Tab Completion & Basic Highlighting (1 week)
 
-**Week 21-22:**
-- [ ] Plan mode (`\plan`): AI investigates read-only, produces plan document
-- [ ] YOLO mode (`\yolo`): AI auto-executes within autonomy level
-- [ ] Observe mode (`\observe`): pure read-only watching with summaries
-- [ ] Mode-aware prompts showing current state
+**Goal:** Schema-aware autocomplete and SQL syntax highlighting in the input line.
 
-**Milestone:** AI features work end-to-end. All interaction modes functional. Can ask questions in English, get SQL back, explain errors, interpret EXPLAIN plans, generate and execute plans.
+**Tasks:**
+- [ ] Schema cache: on connect, query `pg_catalog` for tables, columns, schemas, functions, types, keywords
+- [ ] Basic tab completion: table names, column names, schema names, SQL keywords
+- [ ] Context-aware completion:
+  - [ ] After `FROM` / `JOIN` → suggest tables
+  - [ ] After `SELECT` / `WHERE` / `ON` with table context → suggest columns
+  - [ ] After `\d` → suggest tables
+  - [ ] After `\c` → suggest databases
+  - [ ] After `\i` / `\copy FROM` → suggest file paths
+  - [ ] After `SET` / `ALTER SYSTEM SET` → suggest GUC parameter names
+- [ ] Alias resolution: `SELECT u.| FROM users u` → suggest users columns
+- [ ] Schema-qualified: `public.` → only objects in public schema
+- [ ] `search_path` awareness: unqualified names search all schemas in path
+- [ ] Fuzzy matching: `djmi` matches `django_migrations` (pgcli-style)
+- [ ] Keyword casing: auto-detect and match user's style (configurable: lower/upper/auto)
+- [ ] Schema cache refresh: on `\d` commands, DDL execution, or manual `\refresh`
+- [ ] Syntax highlighting in input buffer:
+  - [ ] SQL keywords (SELECT, FROM, WHERE, etc.) — bold/color
+  - [ ] String literals — distinct color
+  - [ ] Numbers — distinct color
+  - [ ] Comments (-- and /* */) — dimmed
+  - [ ] Identifiers — default
+- [ ] Configurable color scheme: `--no-highlight` / `\set HIGHLIGHT off` to disable
+- [ ] `syntect` or `tree-sitter-sql` for highlighting engine
 
-### Phase 3: Agent (Weeks 23-32)
+**Tests:**
+- [ ] After `SELECT * FROM ` + Tab → shows table names
+- [ ] After `SELECT u.` (with `FROM users u` in buffer) + Tab → shows users columns
+- [ ] `djm` + Tab → completes to `django_migrations` (fuzzy)
+- [ ] After `SET ` + Tab → shows GUC names
+- [ ] Highlighting: keywords appear in configured color (visual test)
+- [ ] `\set HIGHLIGHT off` disables highlighting
 
-**Goal:** Autonomous monitoring and remediation, starting with the two highest-priority feature areas: **index health** and **RCA**.
+**Verifiable gate:**
+- Tab completion populates within 200ms on a database with 500+ tables
+- Context-aware: `FROM ` suggests tables, `SELECT t.` suggests columns of aliased table
+- Fuzzy match works for common patterns
+- Highlighting renders correctly in dark and light terminal themes (screenshot test)
+
+**Depends on:** S-0.4
+
+---
+
+**Phase 0 Milestone:** A solid Postgres terminal compatible with common psql workflows. All top-50 commands work. Builds and runs on all 6 platform targets. Tab completion, syntax highlighting, persistent history, full CLI flags. No AI, no extras — just a great terminal for Postgres.
+
+**Phase 0 verification:**
+- [ ] `test-compat.sh`: 50 representative commands, samo vs psql output diff < 5%
+- [ ] CI green on all 6 targets for PG {14, 16, 17}
+- [ ] Binary size < 30MB (stripped, musl)
+- [ ] Startup to first prompt < 100ms
+- [ ] `\copy` 100K-row round-trip < 10s
+- [ ] Tab completion < 200ms on 500-table schema
+
+---
+
+### Phase 1: Beyond psql — Diagnostics & UX
+
+**Goal:** Everything psql can't do. This is where Samo becomes clearly better.
+
+---
+
+#### Sprint S-1.1: TUI Pager (2 weeks)
+
+**Goal:** Built-in pager replaces external `less`/`pspg`. Vertical and horizontal scroll, search, column freeze.
+
+**Tasks:**
+- [ ] `ratatui` + `crossterm` integration
+- [ ] Pager activates automatically when output exceeds terminal height
+- [ ] Vertical scrolling (arrow keys, Page Up/Down, Home/End)
+- [ ] Horizontal scrolling (Left/Right arrows) for wide result sets
+- [ ] Column freezing: freeze leftmost N columns while scrolling right (`f` key to toggle)
+- [ ] Search within results: `/` to search forward, `?` to search backward, `n`/`N` for next/prev match
+- [ ] `q` exits pager, returns to REPL
+- [ ] Handle terminal resize (SIGWINCH) gracefully
+- [ ] TerminalGuard RAII pattern: always restore terminal state on exit (crash, Ctrl-C, any error path)
+- [ ] External pager fallback: `\set PAGER less` or `PAGER` env var
+- [ ] Pager disable: `\set PAGER off`
+- [ ] `\pset pager_min_lines N` — only activate pager for results with > N rows
+- [ ] Copy cell/row to clipboard: `y` copies current cell, `Y` copies row (if terminal supports OSC 52)
+- [ ] Stable cursor/selection across terminal resize
+- [ ] No mouse support in v1 (explicit non-goal to reduce complexity)
+
+**Tests:**
+- [ ] 10K-row result set: pager activates, scrolling is smooth (<16ms per frame)
+- [ ] 100-column result: horizontal scroll works, column freeze holds left columns
+- [ ] Search: `/foo` highlights all matches, `n` cycles through them
+- [ ] `q` returns to REPL with terminal in correct state
+- [ ] Ctrl-C during pager returns to REPL cleanly
+- [ ] `\set PAGER off` disables pager, output streams directly
+- [ ] Terminal resize during pager doesn't corrupt display
+
+**Verifiable gate:**
+- Pager handles 100K rows × 50 columns without OOM (memory < 200MB)
+- Terminal state is always restored (even on crash — TerminalGuard RAII verified)
+- Scrolling latency < 16ms per frame (60fps feel)
+- Works correctly through SSH and tmux
+
+**Depends on:** Phase 0 complete
+
+---
+
+#### Sprint S-1.2: Built-in Diagnostics — \dba (2 weeks)
+
+**Goal:** `\dba` family of diagnostic commands with version-aware SQL (PG 12-18).
+
+**Tasks:**
+- [ ] `\dba activity` — pg_stat_activity with intelligent grouping (by state, wait_event, query pattern)
+- [ ] `\dba locks` — lock tree visualization (who blocks whom, with wait duration)
+- [ ] `\dba bloat` — table and index bloat estimates (heuristic from pg_class + pg_stat_user_tables)
+- [ ] `\dba unused-idx` — indexes with zero scans since stats reset (with stats_reset timestamp)
+- [ ] `\dba seq-scans` — tables sorted by sequential scan count
+- [ ] `\dba cache-hit` — buffer cache hit ratio by table
+- [ ] `\dba vacuum` — autovacuum status, dead tuple counts, last vacuum/analyze times, XID age
+- [ ] `\dba replication` — replication slots, lag (bytes and time), WAL positions
+- [ ] `\dba connections` — connection counts grouped by state, user, application_name
+- [ ] `\dba tablesize` — table sizes including TOAST, indexes, and total
+- [ ] `\dba config [param]` — non-default GUC parameters with source and context
+- [ ] `\dba waits` — pg_ash wait event summary (gracefully skipped if pg_ash not installed)
+- [ ] PG version detection: `SELECT current_setting('server_version_num')::int`
+- [ ] Version-aware SQL generation: handle catalog differences between PG 12-18 (e.g., `backend_type`, `wait_event` columns, `pg_stat_progress_*` views)
+- [ ] Connection pooler detection:
+  - [ ] PgBouncer: `SHOW pool_mode` (succeeds only through PgBouncer)
+  - [ ] Supavisor: check `server_version` format
+  - [ ] PgCat: check `application_name` / `server_version` patterns
+  - [ ] Warn about features that break in transaction mode (prepared statements, temp tables, SET, LISTEN/NOTIFY, advisory locks)
+- [ ] Managed Postgres detection:
+  - [ ] RDS: check for `rds.extensions` GUC
+  - [ ] Cloud SQL: check for `cloudsql.*` GUCs
+  - [ ] Supabase: check connection string / GUC patterns
+  - [ ] Neon: check for `neon.*` GUCs
+  - [ ] Degrade gracefully when pg_stat_statements unavailable
+
+**Tests:**
+- [ ] Each `\dba` command produces valid output on PG 14, 16, 17
+- [ ] `\dba locks` correctly renders a 3-level blocking chain (set up with concurrent transactions)
+- [ ] `\dba bloat` produces estimates within 20% of `pgstattuple` ground truth (on test data)
+- [ ] `\dba vacuum` shows correct XID age and autovacuum status
+- [ ] `\dba waits` shows "pg_ash not installed" message when pg_ash is absent
+- [ ] Pooler detection: correctly identifies PgBouncer in transaction mode
+
+**Verifiable gate:**
+- All 12 `\dba` commands produce output on PG 14, 16, 17
+- `\dba locks` renders a 3-level block tree correctly
+- `\dba config` matches `SHOW ALL` for non-default parameters
+- `\dba activity` handles 500+ connections without timeout (< 2s)
+
+**Depends on:** Phase 0 complete
+
+---
+
+#### Sprint S-1.3: Config, Profiles & Quality-of-Life (1 week)
+
+**Goal:** TOML config files, named connection profiles, named queries, destructive warnings.
+
+**Tasks:**
+- [ ] Config file loading hierarchy: `/etc/samo/config.toml` → `~/.config/samo/config.toml` → `SAMO_*` env vars → CLI flags → `\set`
+- [ ] Config schema: `[connection]`, `[display]`, `[keybindings]`, `[safety]`, `[logging]`
+- [ ] Named connection profiles in config:
+  ```toml
+  [connections.production]
+  host = "10.0.1.5"
+  port = 5432
+  sslmode = "verify-full"
+  ```
+- [ ] `samo @production` syntax to connect via profile
+- [ ] `\c @profile` to switch mid-session
+- [ ] `\profiles` to list configured profiles
+- [ ] Tab completion for profile names
+- [ ] Named queries (`\ns name query`, `\n name`, `\n+`, `\nd name`, `\np name`)
+- [ ] Named query storage: `~/.config/samo/named_queries.toml`
+- [ ] Named query parameters: `\ns top_tables SELECT * FROM pg_stat_user_tables ORDER BY $1 DESC LIMIT $2;` then `\n top_tables seq_scan 10`
+- [ ] Destructive statement protection:
+  - [ ] Warn on: DROP TABLE/DATABASE/SCHEMA, TRUNCATE, DELETE/UPDATE without WHERE, ALTER TABLE DROP COLUMN
+  - [ ] `Are you sure? [y/N]` confirmation
+  - [ ] Configurable: `[safety] destructive_warning = true`
+  - [ ] Custom patterns via `[safety] protected_patterns`
+- [ ] Keybinding modes: Emacs (default) and Vi (`\set VI on|off`, F4 toggle)
+- [ ] Function keys: F2 (toggle smart completion), F3 (multi-line mode), F4 (Vi/Emacs), F5 (auto-EXPLAIN toggle)
+- [ ] `\set EXPLAIN on|analyze|verbose` — auto-EXPLAIN mode
+
+**Tests:**
+- [ ] `samo @production` connects with profile settings
+- [ ] `\ns` saves query, `\n` executes it, `\nd` deletes it
+- [ ] `DROP TABLE users;` triggers confirmation prompt
+- [ ] Config file values override defaults, CLI flags override config
+
+**Verifiable gate:**
+- Connection profiles work: `samo @production` connects, `\c @staging` switches
+- Named queries with parameters: save, execute with args, list, delete
+- Destructive warning fires for `DROP TABLE`, suppressed with `[safety] destructive_warning = false`
+- Vi mode: Esc enters normal mode, `i` enters insert, `^`/`$`/`w`/`b` navigate
+
+**Depends on:** S-0.8 (for tab completion integration)
+
+---
+
+#### Sprint S-1.4: Session Persistence & Debug Logging (1 week)
+
+**Goal:** Sessions persist in SQLite. Debug/audit logging works.
+
+**Tasks:**
+- [ ] SQLite session store: `~/.local/share/samo/sessions.db`
+- [ ] Each session: unique ID, connection params, timestamp, query count, duration
+- [ ] `\session list` — recent sessions with timestamps, database, duration
+- [ ] `\session resume [id]` — reconnect, restore variables and history context
+- [ ] `\session save [name]` — save with friendly name
+- [ ] `\session delete [id]` — delete session
+- [ ] Debug logging:
+  - [ ] `--debug` / `-D` flag, `SAMO_DEBUG=1` env var, `\set DEBUG on`
+  - [ ] Logs wire protocol messages, SQL queries, auth negotiation, command dispatch
+  - [ ] Log to stderr (interactive) and/or file (`--log-file path`)
+  - [ ] Log levels: error, warn, info, debug, trace
+  - [ ] Structured format: `[timestamp] [level] [component] message`
+- [ ] `-e` / `--echo-queries` and `-E` / `--echo-hidden` integration with log levels
+- [ ] Action audit log: `~/.local/share/samo/actions.log` (separate from debug)
+- [ ] Log rotation: `max_file_size_mb`, `max_files` config
+- [ ] Security: never log passwords/API keys, mask credentials in connection strings
+- [ ] SSH tunnel support:
+  - [ ] `--ssh-tunnel user@bastion:22`
+  - [ ] `ssh_tunnel` config in connection profiles
+  - [ ] Local port auto-allocation
+  - [ ] SSH agent forwarding, key-based auth
+
+**Tests:**
+- [ ] Create session, disconnect, `\session list` shows it, `\session resume` reconnects
+- [ ] `--debug` logs wire protocol to stderr
+- [ ] `--log-file /tmp/debug.log` captures structured logs
+- [ ] Passwords never appear in any log
+- [ ] SSH tunnel: connect through bastion to a Postgres instance
+
+**Verifiable gate:**
+- Sessions persist across restarts, `\session resume` restores connection
+- Debug log contains structured entries for a `SELECT 1` roundtrip (connect, auth, query, result)
+- `grep -i password /tmp/debug.log` returns nothing
+- SSH tunnel test passes (connect through localhost SSHD to local PG)
+
+**Depends on:** S-0.3
+
+---
+
+**Phase 1 Milestone:** Clearly better than psql for daily use. Has contextual autocomplete, syntax highlighting, integrated TUI pager, 12 diagnostic commands, connection profiles, named queries, session persistence, and debug logging.
+
+**Phase 1 verification:**
+- [ ] All 12 `\dba` commands work on PG {14, 16, 17}
+- [ ] Pager handles 100K rows without OOM
+- [ ] Tab completion < 200ms, context-aware
+- [ ] Config file + profiles + named queries all functional
+- [ ] Session resume works across process restarts
+
+---
+
+### Phase 2: AI Brain
+
+**Goal:** LLM integration that makes the terminal dramatically more powerful. Text2SQL, error explanation, EXPLAIN analysis, and all execution modes.
+
+---
+
+#### Sprint S-2.1: LLM Provider & Schema Context (2 weeks)
+
+**Goal:** Pluggable LLM backend with schema-aware context. Foundation for all AI features.
+
+**Tasks:**
+- [ ] `LlmProvider` trait:
+  ```rust
+  trait LlmProvider: Send + Sync {
+      fn name(&self) -> &str;
+      fn default_model(&self) -> &str;
+      async fn complete(&self, messages: &[Message], options: &CompletionOptions) -> Result<CompletionStream>;
+  }
+  ```
+- [ ] OpenAI implementation (GPT-4o, o3, etc.) with streaming via SSE
+- [ ] Anthropic implementation (Claude Sonnet/Opus) with streaming
+- [ ] Ollama implementation (local models) with streaming
+- [ ] Custom endpoint support (any OpenAI-compatible API)
+- [ ] Config: `[ai] provider`, `model`, `api_key_env`, `base_url`, `max_tokens_per_request`
+- [ ] `\set AI_PROVIDER`, `\set AI_MODEL` for runtime switching
+- [ ] Schema context builder:
+  - [ ] Query `pg_catalog` for tables, columns, types, constraints, indexes
+  - [ ] Compact DDL format (not full pg_dump — minimize tokens)
+  - [ ] Tiered context strategy for large schemas (1000+ tables):
+    - [ ] Tier 1 (always): tables in recent queries + user prompt
+    - [ ] Tier 2 (if space): same-schema tables, FK-related tables
+    - [ ] Tier 3 (on demand): remaining tables as counts per schema
+  - [ ] Schema cache refresh on DDL execution or `\refresh`
+- [ ] Token budget management:
+  - [ ] Track tokens per request and cumulative per session
+  - [ ] Configurable budget: `[ai] monthly_budget_usd`
+  - [ ] Warning at 80%, hard stop at 100% of budget
+  - [ ] `\tokens` command to show usage
+- [ ] Prompt injection mitigation:
+  - [ ] Schema names, column names, comments marked as untrusted data in system prompt
+  - [ ] Query results wrapped in explicit data markers
+  - [ ] System prompt instructs model to treat all DB content as data, not instructions
+- [ ] Works without AI configured: all `/` commands produce clear "AI not configured" message
+
+**Tests:**
+- [ ] OpenAI provider: streaming completion works, tokens counted correctly
+- [ ] Anthropic provider: streaming completion works
+- [ ] Ollama provider: connects to local instance, streams
+- [ ] Schema context for 10-table DB: compact DDL < 2000 tokens
+- [ ] Schema context for 1000-table DB: tiered strategy keeps context < 50% of window
+- [ ] Token tracking: cumulative count matches expected for known prompts
+- [ ] Budget enforcement: hard stop fires at limit
+
+**Verifiable gate:**
+- Send a test prompt through each provider, receive streaming response
+- Schema context builder produces valid DDL that an LLM can interpret
+- Token tracking accuracy within 5% of actual usage
+- Budget hard stop prevents API calls after limit
+
+**Depends on:** Phase 0 complete (but can start in parallel with Phase 1)
+
+---
+
+#### Sprint S-2.2: Core AI Commands (2 weeks)
+
+**Goal:** `/ask`, `/fix`, `/explain`, `/optimize` work end-to-end with schema context.
+
+**Tasks:**
+- [ ] `/ask <natural language>` — generate SQL from NL, display with syntax highlighting, ask to execute
+  - [ ] Show generated SQL
+  - [ ] `[Y/n/edit]` prompt — execute, skip, or open in $EDITOR
+  - [ ] Read-only queries can auto-execute (configurable)
+- [ ] `/fix` — explain last error with fix suggestions
+  - [ ] Captures last error context (SQLSTATE, message, query, schema)
+  - [ ] Suggests corrected SQL
+  - [ ] Offers to execute fix
+- [ ] `/explain [query]` — run EXPLAIN ANALYZE, feed plan to LLM, display interpretation
+  - [ ] Auto-runs EXPLAIN ANALYZE on last or given query
+  - [ ] LLM interprets: bottlenecks, missing indexes, join strategy issues
+  - [ ] Shows both raw plan and AI analysis
+- [ ] `/optimize [query]` — suggest query rewrites and missing indexes
+  - [ ] Analyzes query plan + schema + statistics
+  - [ ] Suggests: index creation, query rewrite, join order changes
+  - [ ] Shows estimated improvement
+- [ ] `/describe [table]` — AI-generated description of table purpose and relationships
+- [ ] Session conversation context: recent queries + results fed to LLM for follow-up
+- [ ] Context compaction:
+  - [ ] Auto-compact at 70% of model's context window
+  - [ ] `/compact [focus]` — manual compact with optional focus
+  - [ ] `/clear` — clear AI context entirely
+  - [ ] Separate action state from conversational context (action log is never LLM-summarized)
+- [ ] Streaming display: AI responses stream token-by-token in terminal
+
+**Tests:**
+- [ ] `/ask show me the 10 biggest tables` generates valid SQL with pg_total_relation_size
+- [ ] `/fix` after `SELECT * FROM nonexistent_table` suggests correct table name
+- [ ] `/explain SELECT * FROM large_table` produces AI-annotated plan
+- [ ] `/optimize` suggests index for a query doing sequential scan
+- [ ] Context compaction: after 50 exchanges, compaction fires and conversation continues coherently
+- [ ] Action log survives compaction (verify JSON action entries persist)
+
+**Verifiable gate:**
+- `/ask` generates executable SQL for 5 natural language queries against test schema
+- `/fix` correctly diagnoses column name typo, missing table, type mismatch
+- `/explain` identifies sequential scan on 1M-row table as bottleneck
+- Streaming works: tokens appear incrementally (no blocking until full response)
+
+**Depends on:** S-2.1
+
+---
+
+#### Sprint S-2.3: Execution Modes — Plan, YOLO, Observe (1 week)
+
+**Goal:** All execution modes from Section 8 work.
+
+**Tasks:**
+- [ ] Input mode switching:
+  - [ ] `\sql` — SQL input mode (default)
+  - [ ] `\text2sql` / `\t2s` — text2sql input mode
+  - [ ] `Ctrl-T` — toggle between SQL and text2sql
+  - [ ] `;` prefix in text2sql mode for raw SQL
+  - [ ] `/ask` prefix in SQL mode for one-shot NL query
+- [ ] Plan mode (`\plan`):
+  - [ ] AI runs read-only queries to investigate
+  - [ ] Never executes write/DDL
+  - [ ] Produces structured plan document (markdown)
+  - [ ] `[Y/n/edit/save]` to execute, skip, edit, or save plan
+  - [ ] Plans saved to `~/.local/share/samo/plans/`
+- [ ] YOLO mode (`\yolo`):
+  - [ ] AI auto-executes within configured autonomy level
+  - [ ] Shows what it's doing in real-time
+  - [ ] Ctrl-C aborts current action
+  - [ ] Still respects autonomy boundaries (YOLO + Guardian = asks for dangerous ops)
+  - [ ] Cannot combine `\yolo` + all:pilot without `--i-know-what-im-doing`
+- [ ] Observe mode (`\observe [duration]`):
+  - [ ] Pure read-only — not even ANALYZE
+  - [ ] Continuous or time-boxed observation
+  - [ ] Reports: connection count, top wait events, long queries, autovacuum, replication lag
+  - [ ] Produces summary with recommendations on exit
+- [ ] `\interactive` — return to default mode
+- [ ] `\mode` — show current mode summary
+- [ ] Prompt indicators: `dbname=>`, `dbname text2sql>`, `dbname plan>`, `dbname yolo>`, `dbname observe>`
+
+**Tests:**
+- [ ] `\text2sql` → type NL → generates SQL → `\sql` returns to SQL mode
+- [ ] `\plan` → ask question → AI shows investigation steps → produces plan → `save` saves to file
+- [ ] `\yolo` → ask to fix bloat → AI auto-executes REINDEX CONCURRENTLY → shows progress
+- [ ] `\observe 30s` → AI reports activity for 30s → produces summary
+- [ ] Ctrl-T toggles between SQL and text2sql
+- [ ] Prompt changes reflect current mode
+
+**Verifiable gate:**
+- All 4 execution modes work: interactive, plan, YOLO, observe
+- Plan mode saves valid markdown plan files
+- YOLO respects autonomy level (doesn't execute DROP when level is Guardian)
+- Observe mode produces meaningful summary after watching a loaded database
+
+**Depends on:** S-2.2
+
+---
+
+#### Sprint S-2.4: Explain Mode & Auto-Error Suggestions (1 week)
+
+**Goal:** Auto-EXPLAIN toggle (F5), inline error suggestions, `\dba` AI integration.
+
+**Tasks:**
+- [ ] Auto-EXPLAIN mode:
+  - [ ] F5 cycles: off → EXPLAIN → EXPLAIN ANALYZE → EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING) → off
+  - [ ] `\set EXPLAIN on|analyze|verbose|off`
+  - [ ] When on, every query automatically shows execution plan
+  - [ ] When AI is active, plan is automatically interpreted
+- [ ] Inline error suggestions:
+  - [ ] After any SQL error, AI automatically suggests fix (if AI is configured)
+  - [ ] Shown as dimmed text below error
+  - [ ] Toggle: `[ai] auto_explain_errors = true|false`
+  - [ ] Does not fire for trivial errors (syntax errors on partial input)
+- [ ] pg_ash context integration:
+  - [ ] When pg_ash is available, feed recent wait event data to LLM context
+  - [ ] `/ask` and `/explain` use wait event data for deeper analysis
+  - [ ] `\dba waits` AI interpretation mode
+- [ ] `\watch` + AI guard: `\watch` output bypasses AI context window (no token burn for repetitive output)
+
+**Tests:**
+- [ ] F5 enables auto-EXPLAIN, query shows plan, F5 cycles through modes
+- [ ] SQL error triggers inline suggestion (when AI configured)
+- [ ] `\set auto_explain_errors off` suppresses suggestions
+- [ ] `\watch 1` does NOT accumulate tokens in AI context
+
+**Verifiable gate:**
+- Auto-EXPLAIN: F5 toggle works, plan displayed with AI interpretation
+- Error suggestion appears within 2s of error
+- pg_ash context: `/explain` references wait event data when available
+- `\watch` token isolation verified (token count doesn't increase during `\watch`)
+
+**Depends on:** S-2.2, S-1.2
+
+---
+
+**Phase 2 Milestone:** AI features work end-to-end. `/ask`, `/fix`, `/explain`, `/optimize` functional. All execution modes (plan, YOLO, observe) working. Schema context, token tracking, streaming, and budget enforcement operational.
+
+**Phase 2 verification:**
+- [ ] `/ask` generates correct SQL for 10 natural language queries across 3 different schemas
+- [ ] `/fix` correctly diagnoses 5 common error types
+- [ ] `/explain` identifies bottlenecks in 3 slow query patterns
+- [ ] Plan mode produces actionable markdown plans
+- [ ] Token budget enforcement stops API calls at limit
+- [ ] All 3 LLM providers (OpenAI, Anthropic, Ollama) work
+
+---
+
+### Phase 3: Autonomous Agent
+
+**Goal:** Self-driving Postgres: governance framework, RCA, index health, and daemon mode. This is the core differentiator.
 
 #### Priority 2: Index Health (full spectrum)
 
