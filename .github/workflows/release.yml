@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+permissions:
+  contents: write
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: lint-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            lint-${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            test-${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo test
+
+  build:
+    name: Build (${{ matrix.artifact }})
+    needs: [lint, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (musl static -- use cross)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            artifact: samo-linux-aarch64
+          # macOS (native runners)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+            artifact: samo-darwin-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+            artifact: samo-darwin-aarch64
+          # Windows (MSVC)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-x86_64.exe
+          # Windows aarch64 cross-compiled from x64 via MSVC
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            artifact: samo-windows-aarch64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            release-${{ matrix.target }}-cargo-
+
+      - name: Install cross
+        if: matrix.use_cross
+        shell: bash
+        run: cargo install cross --locked
+
+      - name: Build release (cross)
+        if: matrix.use_cross
+        shell: bash
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build release (native)
+        if: "!matrix.use_cross"
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (unix)
+        if: "!contains(matrix.os, 'windows')"
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/samo" "${{ matrix.artifact }}"
+          chmod +x "${{ matrix.artifact }}"
+
+      - name: Prepare artifact (windows)
+        if: contains(matrix.os, 'windows')
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/samo.exe" "${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          mkdir -p release
+
+          # Move all binaries into release/
+          for dir in artifacts/*/; do
+            for file in "${dir}"*; do
+              cp "${file}" "release/"
+            done
+          done
+
+          # Generate SHA256SUMS
+          cd release
+          sha256sum -- * > SHA256SUMS
+
+          echo "=== Release artifacts ==="
+          ls -la
+          echo ""
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Extract release notes
+        id: notes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag="${GITHUB_REF_NAME}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Releasing ${tag}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag }}
+          name: Samo ${{ steps.notes.outputs.tag }}
+          draft: false
+          prerelease: ${{ contains(steps.notes.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: |
+            release/*
