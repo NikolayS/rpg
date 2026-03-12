@@ -1,8 +1,6 @@
 # Samo — build tooling
 # Run `just --list` to see available targets.
 
-set shell := ["bash", "-Eeuo", "pipefail", "-c"]
-
 # Debug build
 build:
   cargo build
@@ -40,6 +38,6 @@ clean:
 run *ARGS:
   cargo run -- {{ARGS}}
 
-# Cross-compile for a given TARGET triple (requires cross)
+# Cross-compile for a Linux TARGET triple (requires cross + Docker)
 cross TARGET:
   cross build --release --target {{TARGET}}

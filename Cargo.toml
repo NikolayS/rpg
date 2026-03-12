@@ -7,6 +7,9 @@ description = "Self-driving Postgres agent and psql-compatible terminal"
 license = "Apache-2.0"
 repository = "https://github.com/NikolayS/project-alpha"
 
+[features]
+integration = []
+
 [[bin]]
 name = "samo"
 path = "src/main.rs"

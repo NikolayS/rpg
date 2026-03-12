@@ -41,7 +41,7 @@ Run `just --list` for the full list. Key targets:
 | `just lint` | Format check + clippy |
 | `just clean` | Remove build artifacts |
 | `just run` | Build and run (debug) |
-| `just cross TARGET` | Cross-compile for a target triple |
+| `just cross TARGET` | Cross-compile for a Linux target triple |
 
 ## Platform-specific instructions
 
@@ -152,7 +152,10 @@ Integration tests require a running Postgres instance. Docker is used to spin up
 
 ## Cross-compilation
 
-Samo targets single-binary distribution. Common targets:
+Samo targets single-binary distribution. The `just cross` recipe uses
+[cross](https://github.com/cross-rs/cross), which manages toolchains via
+Docker containers and therefore only supports **Linux** targets. macOS
+builds should use `just build` or `just build-release` natively.
 
 ```bash
 # Linux static (musl)
@@ -160,9 +163,6 @@ just cross x86_64-unknown-linux-musl
 
 # Linux ARM
 just cross aarch64-unknown-linux-musl
-
-# macOS ARM (Apple Silicon)
-just cross aarch64-apple-darwin
 ```
 
-Cross-compilation uses [cross](https://github.com/cross-rs/cross), which manages toolchains via Docker. Install it with `cargo install cross`.
+Install cross with `cargo install cross`.
