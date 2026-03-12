@@ -300,7 +300,7 @@ The following are architecturally planned but will **not** ship in the first rel
 - Works without AI configured (all AI features simply unavailable, no errors)
 - Commands that loop or stream heavily (`\watch`, large COPY, bulk queries) bypass the AI context window entirely — no tokens consumed for repetitive output
 
-#### FR-11: Autonomy Model — Per-Feature Levels + Three Branches of Governance
+#### FR-11: Autonomy Model — Per-Feature Levels + AAA Architecture
 
 Autonomy is **not a single global knob**. It's configured **per feature area**, and each area has exactly three levels. Trust is earned incrementally — feature by feature.
 
@@ -406,13 +406,13 @@ samo --autonomy vacuum:pilot,bloat:pilot,query_optimization:guardian  # granular
 \autonomy all guardian              -- set all features to guardian
 ```
 
-##### Three Branches of Governance (Architecture)
+##### AAA Architecture — Three Branches of Governance
 
-The autonomy system is built on **three isolated components**, inspired by separation of powers:
+The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor) — three isolated components, inspired by separation of powers:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    Samo Governance Model                      │
+│              Samo AAA Architecture (Governance)               │
 │                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │  ANALYZER    │  │  ACTOR       │  │  AUDITOR     │       │
@@ -463,7 +463,7 @@ The autonomy system is built on **three isolated components**, inspired by separ
   - **Anomaly detection:** Flags unexpected outcomes (reindex made things worse, vacuum didn't reclaim space, config change degraded performance) and triggers rollback recommendations.
 - **Implementation:** Can be a separate LLM call with a different prompt (adversarial review), or rule-based checks, or both.
 
-**Why three branches matter:**
+**Why the AAA Architecture matters:**
 - **Prompt injection defense:** Even if an attacker crafts a malicious query result that tricks the Analyzer into recommending `DROP TABLE`, the Actor validates against DB-level permissions (can't drop), and the Auditor flags that a DROP recommendation is abnormal for a bloat check.
 - **Trust building:** Users can see each branch's output separately. The Auditor's independent assessment builds confidence in the Analyzer's recommendations.
 - **Learning loop:** The Auditor's post-action verification creates a feedback cycle that improves recommendations over time.
@@ -2625,7 +2625,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 #### Week-by-week (Phase 3)
 
 **Week 23-24: Framework + RCA (Advisor)**
-- [ ] Three-branch governance framework (Analyzer, Actor, Auditor)
+- [ ] AAA Architecture framework (Analyzer, Actor, Auditor)
 - [ ] Per-feature autonomy configuration system
 - [ ] Action audit log (every action: timestamp, feature, level, justification, outcome)
 - [ ] pg_ash detection and integration
@@ -3623,7 +3623,7 @@ Action taken (Pilot) or approved (Guardian)
 - Metric unchanged after expected improvement: log as "uncertain" — doesn't count against trust score but doesn't count for it either
 - Metric improved: counts as positive outcome
 
-### B.5 Analyzer/Actor/Auditor Isolation — Can It Be Bypassed?
+### B.5 AAA Isolation — Can It Be Bypassed?
 
 The concern: if all three branches run in the same process, can the isolation be compromised?
 
@@ -6601,7 +6601,7 @@ Same principles as AI API keys:
 
 ### F.2 Three-Branch Governance: Bypass Analysis
 
-The Analyzer/Actor/Auditor separation is the core security architecture. This section validates that it cannot be bypassed.
+The AAA Architecture (Analyzer/Actor/Auditor separation) is the core security architecture. This section validates that it cannot be bypassed.
 
 #### F.2.1 Attack Vectors and Mitigations
 

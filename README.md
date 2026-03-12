@@ -12,7 +12,7 @@
 
 A self-driving Postgres agent that lives in your terminal. Four things that have never been combined:
 
-1. **An autonomous agent** — detects, diagnoses, and resolves database issues with per-feature autonomy levels and three-branch governance (Analyzer/Actor/Auditor)
+1. **An autonomous agent** — detects, diagnoses, and resolves database issues with per-feature autonomy levels and the AAA Architecture (Analyzer/Actor/Auditor)
 2. **An AI-powered terminal** — LLM inside, understands your schema, explains errors, writes and optimizes SQL, performs root cause analysis
 3. **Batteries included** — pgcli-style autocomplete, pspg-style pager, postgres_dba diagnostics built in
 4. **psql-compatible** — common psql workflows work out of the box, respecting 30 years of muscle memory
@@ -40,7 +40,7 @@ AI coding tools (Cursor, Warp, Claude Code) proved that putting an LLM *inside* 
 │                       samo                          │
 │                                                     │
 │  ┌──────────────────────────────────────────────┐   │
-│  │      Autonomous Agent (the differentiator)   │   │
+│  │      Autonomous Agent — AAA Architecture     │   │
 │  │                                              │   │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐     │   │
 │  │  │ ANALYZER │→│  ACTOR   │→│ AUDITOR  │     │   │
@@ -176,7 +176,7 @@ Each feature area (index health, vacuum, config tuning, upgrades, etc.) is indep
 | **G** | **Guardian** | Propose action with justification. Human approves, then tool executes. |
 | **P** | **Pilot** | Automatic action within boundaries. Human notified after. |
 
-Three isolated governance components (Analyzer → Actor → Auditor) ensure the decision-maker never has direct execution access.
+The **AAA Architecture** (Analyzer → Actor → Auditor) — three isolated governance components ensure the decision-maker never has direct execution access.
 
 ### What the Agent Does
 - **Root cause analysis** — reconstruct block trees, correlate pg_ash wait events with metrics and locks, produce structured RCA reports with three-tier mitigation (immediate/mid-term/long-term)
