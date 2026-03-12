@@ -49,11 +49,11 @@ Anyone fluent in psql — human or AI agent — should be immediately productive
 
 The following are architecturally planned but will **not** ship in the first release:
 
-- **Pilot mode** — all features start at Advisor or Guardian; Pilot ships only after sustained real-world validation
+- **Auto mode** — all features start at Observe or Supervised; Auto ships only after sustained real-world validation
 - **Full psql parity** — rare meta-commands (`\lo_*`, `\crosstabview`), exotic `\pset` options, full `.psqlrc` compatibility, exact prompt format codes
 - **Internal pager advanced features** — mouse support, inline bar charts, column sorting by click
 - **Auto-drop of unused indexes** — even with grace periods, "unused" ≠ "safe to drop" (monthly jobs, failover paths, DR workloads)
-- **Major upgrade execution** — `major_upgrade` stays at Advisor (planning-only) indefinitely
+- **Major upgrade execution** — `major_upgrade` stays at Observe (planning-only) indefinitely
 - **Plugin ABI / connector marketplace** — protocol marketplace and custom connector plugins
 - **Multi-database daemon orchestration** — single-database daemon first
 - **Broad connector ecosystem** — Jira, GitLab Issues, Datadog, pganalyze, Supabase connectors are deferred; v1 ships with pg_ash + pg_stat_statements + CloudWatch/RDS only
@@ -308,15 +308,15 @@ Autonomy is **not a single global knob**. It's configured **per feature area**, 
 
 | Level | Name | What it means |
 |-------|------|---------------|
-| **A** | **Advisor** | Analyze + recommend. The tool observes, diagnoses, and produces actionable recommendations. The human reviews and acts. |
-| **G** | **Guardian** | Act with approval. The tool proposes a specific action with full justification. A human reviews and explicitly approves before execution. The **acting component is isolated from the decision-making component** — the Analyzer proposes, but the Actor only executes after human sign-off. |
-| **P** | **Pilot** | Automatic action. The tool acts autonomously within the defined boundaries. Human is notified after the fact. |
+| **O** | **Observe** | Read-only. The tool observes, diagnoses, and reports. Zero writes to the database. The human reads the report and decides what to do. |
+| **S** | **Supervised** | Act with human supervision. The tool proposes a specific action with full justification. A human reviews and explicitly approves before execution. The **acting component is isolated from the decision-making component** — the Analyzer proposes, but the Actor only executes after human sign-off. |
+| **A** | **Auto** | Act autonomously within policy. The tool acts within defined boundaries and DB-level permissions. Human is notified after the fact. |
 
 ##### Feature Areas
 
 Each area is independently configurable:
 
-| Feature Area | Description | Example A (Advisor) | Example G (Guardian) | Example P (Pilot) |
+| Feature Area | Description | Example O (Observe) | Example S (Supervised) | Example A (Auto) |
 |---|---|---|---|---|
 | **vacuum** | Dead tuples, autovacuum health, freezing/wraparound prevention | "orders has 500K dead tuples, recommend VACUUM" | Proposes VACUUM, waits for approval | Auto-vacuums based on policy |
 | **bloat** | Table bloat (pg_repack, VACUUM FULL, CLUSTER), index bloat (REINDEX CONCURRENTLY) | "orders 40% table bloat; idx_orders_created_at 34% index bloat" | Shows pg_repack / REINDEX CONCURRENTLY, waits | Auto-runs during maintenance window |
@@ -327,15 +327,15 @@ Each area is independently configurable:
 | **replication** | Replication lag, slot management, failover | "Slot 'sub1' lag at 5GB" | Shows command, waits | Auto-manages slots |
 | **minor_upgrade** | Minor PG version upgrades (16.2 → 16.4) | "PG 16.4 available, 3 security fixes" | Produces upgrade plan, waits | Auto-schedules upgrade |
 | **major_upgrade** | Major PG version upgrades (16 → 17) | "PG 17 compatibility report" | Produces migration plan, waits | Auto-orchestrates (requires extensive testing) |
-| **schema_health** | Data type issues, constraint gaps, naming conventions | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Max level: Guardian (schema changes never auto-pilot) |
+| **schema_health** | Data type issues, constraint gaps, naming conventions | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Max level: Supervised (schema changes never auto) |
 | **rca** | Root cause analysis — LLM-assisted investigation using pg_ash, pg_stat_*, logs | "Lock:tuple spike at 14:01, 68% of waits. Caused by concurrent UPDATEs on orders table. Suggest: review application locking pattern, consider SKIP LOCKED." | Produces RCA report + mitigation plan, waits | Auto-investigates anomalies, proposes mitigations, can auto-apply safe fixes |
 | **partitioning** | Automated partition creation, detach/archive old partitions, partition-wise planning | "orders has 50M rows, no partitioning. Suggest range partition by created_at (monthly)" | Shows partition DDL + migration plan, waits | Auto-creates future partitions, auto-detaches old ones per policy |
-| **sharding** | Shard key analysis, shard rebalancing, cross-shard query detection | "Table 'events' is 500GB on single node. Shard key candidate: tenant_id (high cardinality, even distribution)" | Produces sharding plan, waits | Max level: Guardian (sharding changes never auto-pilot) |
-| **corruption** | Data corruption detection (checksums, pg_amcheck), repair guidance | "Page checksum failure in orders at block 42891. 3 rows affected." | Proposes repair strategy (REINDEX, pg_surgery, restore from backup), waits | Auto-detects via periodic checks, auto-alerts. Max repair level: Guardian |
+| **sharding** | Shard key analysis, shard rebalancing, cross-shard query detection | "Table 'events' is 500GB on single node. Shard key candidate: tenant_id (high cardinality, even distribution)" | Produces sharding plan, waits | Max level: Supervised (sharding changes never auto) |
+| **corruption** | Data corruption detection (checksums, pg_amcheck), repair guidance | "Page checksum failure in orders at block 42891. 3 rows affected." | Proposes repair strategy (REINDEX, pg_surgery, restore from backup), waits | Auto-detects via periodic checks, auto-alerts. Max repair level: Supervised |
 | **data_lifecycle** | Archiving, purging, retention policies, cold storage | "audit_log has 2B rows, 800GB. Rows older than 2 years: 1.2B. Suggest archive + purge." | Shows archive/purge plan with retention rules, waits | Auto-archives/purges per configured retention policy |
 | **budgets** | Infrastructure cost analysis, right-sizing, reserved instance recommendations | "RDS r6g.2xlarge at $1,400/mo. CPU avg 12%, memory 45%. Suggest r6g.xlarge ($700/mo)" | Shows right-sizing plan, waits | Auto-alerts on cost anomalies, recommends changes |
 | **backup_monitoring** | Backup freshness, WAL archiving, PITR readiness | "Last backup 26h ago, SLA is 24h" | Proposes backup trigger, waits | Auto-alerts, can trigger backups |
-| **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Guardian (security changes never auto-pilot) |
+| **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Supervised (security changes never auto) |
 
 ##### Evidence Classification
 
@@ -343,9 +343,9 @@ Every autonomous finding must declare its evidence quality. This determines what
 
 | Class | Definition | Examples | Max Autonomy |
 |-------|-----------|----------|-------------|
-| **Factual** | Deterministic, directly observable from pg_catalog/pg_stat_* | Invalid indexes, idle-in-transaction sessions, replication lag bytes, XID age, lock cascades | Pilot |
-| **Heuristic** | Statistical inference, may have false positives | Unused indexes (stats may have been reset), missing indexes (based on seq_scan counts), bloat estimates (without pgstattuple), config right-sizing | Guardian (Pilot only after extended validation period) |
-| **Advisory** | Subjective assessment, depends on workload context | Schema health (naming conventions), long-term architecture suggestions, major upgrade planning | Advisor only |
+| **Factual** | Deterministic, directly observable from pg_catalog/pg_stat_* | Invalid indexes, idle-in-transaction sessions, replication lag bytes, XID age, lock cascades | Auto |
+| **Heuristic** | Statistical inference, may have false positives | Unused indexes (stats may have been reset), missing indexes (based on seq_scan counts), bloat estimates (without pgstattuple), config right-sizing | Supervised (Auto only after extended validation period) |
+| **Advisory** | Subjective assessment, depends on workload context | Schema health (naming conventions), long-term architecture suggestions, major upgrade planning | Observe only |
 
 **Evidence contracts per feature area:**
 
@@ -370,40 +370,40 @@ _Example — index_health sub-findings:_
 **Default configuration:**
 ```toml
 [autonomy]
-# Per-feature levels: "advisor" | "guardian" | "pilot"
-vacuum = "advisor"
-bloat = "advisor"
-index_health = "advisor"
-config_tuning = "advisor"
-query_optimization = "advisor"
-connection_management = "advisor"
-replication = "advisor"
-rca = "advisor"
-partitioning = "advisor"
-sharding = "advisor"             # max level: guardian
-corruption = "advisor"           # max repair level: guardian
-data_lifecycle = "advisor"
-budgets = "advisor"
-minor_upgrade = "advisor"
-major_upgrade = "advisor"
-schema_health = "advisor"        # max level: guardian
-backup_monitoring = "advisor"
-security = "advisor"             # max level: guardian
+# Per-feature levels: "observe" | "supervised" | "auto"
+vacuum = "observe"
+bloat = "observe"
+index_health = "observe"
+config_tuning = "observe"
+query_optimization = "observe"
+connection_management = "observe"
+replication = "observe"
+rca = "observe"
+partitioning = "observe"
+sharding = "observe"             # max level: supervised
+corruption = "observe"           # max repair level: supervised
+data_lifecycle = "observe"
+budgets = "observe"
+minor_upgrade = "observe"
+major_upgrade = "observe"
+schema_health = "observe"        # max level: supervised
+backup_monitoring = "observe"
+security = "observe"             # max level: supervised
 ```
 
 **Presets for quick configuration:**
 ```bash
-samo --autonomy all:advisor          # everything in advisor mode (default, safest)
-samo --autonomy all:guardian         # everything needs approval
-samo --autonomy all:pilot            # full autopilot (use with caution)
-samo --autonomy vacuum:pilot,bloat:pilot,query_optimization:guardian  # granular
+samo --autonomy all:observe          # everything in advisor mode (default, safest)
+samo --autonomy all:supervised         # everything needs approval
+samo --autonomy all:auto            # full autopilot (use with caution)
+samo --autonomy vacuum:auto,bloat:auto,query_optimization:supervised  # granular
 ```
 
 **CLI and runtime:**
 ```
 \autonomy                           -- show current per-feature autonomy settings
-\autonomy vacuum pilot              -- change vacuum to pilot mode
-\autonomy all guardian              -- set all features to guardian
+\autonomy vacuum auto               -- change vacuum to auto mode
+\autonomy all supervised            -- set all features to supervised
 ```
 
 ##### AAA Architecture — Three Branches of Governance
@@ -441,23 +441,23 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 - **Role:** Observe, diagnose, think, recommend, plan.
 - **Can:** Read all database state (pg_stat_*, pg_catalog, pg_ash, logs, metrics). Run read-only queries. Generate recommendations and plans.
 - **Cannot:** Execute any state-changing SQL. Period.
-- **Implementation:** This is where the LLM lives. It has full read access to understand the database but zero write access. Even in Pilot mode, the Analyzer only produces a *plan* — it never executes directly.
+- **Implementation:** This is where the LLM lives. It has full read access to understand the database but zero write access. Even in Auto mode, the Analyzer only produces a *plan* — it never executes directly.
 - **Output:** Structured recommendations with: finding, severity, evidence, proposed action, expected outcome, risk assessment.
 
 **2. ACTOR (Executive branch)**
 - **Role:** Execute approved actions within strictly defined boundaries.
-- **Can:** Execute only the specific operations it has been granted (via `samo_ops` wrapper functions). Only acts on plans that have been approved (by human in Guardian mode, or by policy in Pilot mode).
+- **Can:** Execute only the specific operations it has been granted (via `samo_ops` wrapper functions). Only acts on plans that have been approved (by human in Supervised mode, or by policy in Auto mode).
 - **Cannot:** Decide what to do. It has no intelligence — it's a constrained executor.
 - **Implementation:** A thin execution layer. Receives a structured action request, validates it against the permission model (DB-level GRANTs + wrapper functions), executes, reports result. No LLM, no decision-making.
 - **Key constraint:** The Actor is **a different component** from the Analyzer. They don't share memory or state. The Actor cannot be tricked by prompt injection because it doesn't process natural language — it only accepts structured, validated action requests.
-- **Isolation:** In Guardian mode, there's a human in the loop between Analyzer and Actor. In Pilot mode, policy rules gate the handoff (but the Actor still validates against DB permissions).
+- **Isolation:** In Supervised mode, there's a human in the loop between Analyzer and Actor. In Auto mode, policy rules gate the handoff (but the Actor still validates against DB permissions).
 
 **3. AUDITOR (Judicial branch)**
 - **Role:** Verify actions, catch mistakes, provide feedback for learning.
 - **Can:** Read all state (like Analyzer) + read the action log. Compare pre/post state. Flag anomalies.
 - **Cannot:** Execute anything. Advisory only.
 - **What it does:**
-  - **Pre-action audit:** Before Actor executes, Auditor validates the plan (is the diagnosis correct? is the action proportionate? are there risks the Analyzer missed?). In Guardian mode, the Auditor's assessment is shown to the human alongside the Analyzer's recommendation.
+  - **Pre-action audit:** Before Actor executes, Auditor validates the plan (is the diagnosis correct? is the action proportionate? are there risks the Analyzer missed?). In Supervised mode, the Auditor's assessment is shown to the human alongside the Analyzer's recommendation.
   - **Post-action audit:** After Actor executes, Auditor verifies the outcome (did bloat actually decrease? did the index actually improve query performance? did the config change have the expected effect?).
   - **Self-awareness loop:** Auditor tracks accuracy of past recommendations (was the diagnosis correct? did the action help?). This feedback feeds into improving the Analyzer's future recommendations.
   - **Anomaly detection:** Flags unexpected outcomes (reindex made things worse, vacuum didn't reclaim space, config change degraded performance) and triggers rollback recommendations.
@@ -471,7 +471,7 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 
 ##### Self-Driving Database Levels (Future Reference)
 
-_Full self-driving level classification (mapping feature autonomy to overall system capability, analogous to SAE driving levels) will be defined separately. In short: when all feature areas reach Pilot mode and the Auditor confirms sustained reliability, that's the equivalent of L5 self-driving database._
+_Full self-driving level classification (mapping feature autonomy to overall system capability, analogous to SAE driving levels) will be defined separately. In short: when all feature areas reach Auto mode and the Auditor confirms sustained reliability, that's the equivalent of L5 self-driving database._
 
 #### FR-11a: Permission Model (Database-Level Enforcement)
 
@@ -540,13 +540,13 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
    Run 'samo setup --features index_health --generate-wrappers'
    ```
 
-7. **Autonomy clamping** — if the config says Pilot but the DB role lacks permissions, the effective level is downgraded and the user is warned.
+7. **Autonomy clamping** — if the config says Auto but the DB role lacks permissions, the effective level is downgraded and the user is warned.
 
 **Why this matters:**
 - **Cloud environments** (RDS, Cloud SQL, Supabase) don't give superuser access. Wrappers work within constraints.
 - **SOC2/compliance** — audit trail in `pg_audit`, enforcement in Postgres itself.
 - **Defense in depth** — prompt injection → Analyzer recommends bad action → Actor can't execute (no DB permission) → Auditor flags anomaly.
-- **Gradual trust** — start with all features at Advisor, add wrapper functions as trust builds.
+- **Gradual trust** — start with all features at Observe, add wrapper functions as trust builds.
 
 #### FR-12: Connectors
 
@@ -967,7 +967,7 @@ SELECT * FROM users WHERE id = 42;
 SELECT * FROM users WHERE created_at >= date_trunc('week', current_date);
 -- (47 rows)
 
--- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:index_health:pilot
+-- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:index_health:auto
 -- action: REINDEX CONCURRENTLY idx_orders_created_at
 -- justification: Index bloat at 34%, threshold 25%
 SELECT samo_ops.reindex_concurrently('idx_orders_created_at'::regclass);
@@ -1034,7 +1034,7 @@ Borrowed from Claude Code. A persistent status line at the bottom of the termina
 **Displays:**
 - Connection: `db-host:5432/mydb` (green=connected, red=disconnected, yellow=reconnecting)
 - Mode: `SQL` | `text2sql` | `plan` | `yolo` | `observe`
-- Autonomy: per-feature summary (e.g., `3A/5G/2P` = 3 Advisor, 5 Guardian, 2 Pilot)
+- Autonomy: per-feature summary (e.g., `3O/5S/2A` = 3 Observe, 5 Supervised, 2 Auto)
 - Transaction state: idle | in-transaction | failed
 - Query timing: last query duration
 - AI: token usage / budget remaining (when AI is active)
@@ -1090,7 +1090,7 @@ port = 5432
 database = "myapp"
 user = "readonly"
 sslmode = "require"
-autonomy = "all:advisor"   # all features advisor-only on staging
+autonomy = "all:observe"   # all features advisor-only on staging
 
 [connections.production]
 host = "10.0.1.5"
@@ -1099,7 +1099,7 @@ database = "myapp"
 user = "samo_agent"
 sslmode = "verify-full"
 sslrootcert = "~/.ssl/rds-ca.pem"
-autonomy = "vacuum:pilot,index_health:pilot,query_optimization:guardian"
+autonomy = "vacuum:auto,index_health:auto,query_optimization:supervised"
 ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
 ```
 
@@ -1479,7 +1479,7 @@ max_tokens_per_request = 4096
 monthly_budget_usd = 50.0
 
 [agent]
-autonomy = "all:advisor"
+autonomy = "all:observe"
 check_interval_seconds = 60
 maintenance_window = "02:00-06:00 UTC"
 
@@ -2323,8 +2323,8 @@ samo/
   - [ ] AI auto-executes within configured autonomy level
   - [ ] Shows what it's doing in real-time
   - [ ] Ctrl-C aborts current action
-  - [ ] Still respects autonomy boundaries (YOLO + Guardian = asks for dangerous ops)
-  - [ ] Cannot combine `\yolo` + all:pilot without `--i-know-what-im-doing`
+  - [ ] Still respects autonomy boundaries (YOLO + Supervised = asks for dangerous ops)
+  - [ ] Cannot combine `\yolo` + all:auto without `--i-know-what-im-doing`
 - [ ] Observe mode (`\observe [duration]`):
   - [ ] Pure read-only — not even ANALYZE
   - [ ] Continuous or time-boxed observation
@@ -2345,7 +2345,7 @@ samo/
 **Verifiable gate:**
 - All 4 execution modes work: interactive, plan, YOLO, observe
 - Plan mode saves valid markdown plan files
-- YOLO respects autonomy level (doesn't execute DROP when level is Guardian)
+- YOLO respects autonomy level (doesn't execute DROP when level is Supervised)
 - Observe mode produces meaningful summary after watching a loaded database
 
 **Depends on:** S-2.2
@@ -2409,7 +2409,7 @@ samo/
 
 The first feature area to reach all three autonomy levels:
 
-**Advisor mode — what it detects:**
+**Observe mode — what it detects:**
 - **Unused indexes** — indexes with zero scans since last stats reset (cross-referenced with index size, age, and recent DDL changes to avoid false positives)
 - **Redundant/duplicate indexes** — indexes that are a prefix of another index, or that have identical column sets
 - **Invalid indexes** — indexes left in invalid state from failed `CREATE INDEX CONCURRENTLY`
@@ -2417,7 +2417,7 @@ The first feature area to reach all three autonomy levels:
 - **Missing indexes** — sequential scans on large tables where an index would help (from `pg_stat_user_tables.seq_scan` + `pg_ash` wait data + query patterns from `pg_stat_statements`)
 - **Index correlation** — low correlation columns that cause excessive heap fetches with index scans
 
-**Advisor output example:**
+**Observe output example:**
 ```
 INDEX HEALTH REPORT — production (2026-03-12)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2446,14 +2446,14 @@ INDEX HEALTH REPORT — production (2026-03-12)
 Actions: 6 recommendations. Run '\autonomy index_health guardian' to enable approval workflow.
 ```
 
-**Guardian mode — what it proposes:**
+**Supervised mode — what it proposes:**
 - For unused: `DROP INDEX CONCURRENTLY` (with grace period confirmation — "this index has been unused for 90 days, confirm drop?")
 - For redundant: `DROP INDEX CONCURRENTLY` on the shorter/redundant one
 - For invalid: `DROP INDEX` + `CREATE INDEX CONCURRENTLY` (reissue)
 - For bloat: `REINDEX CONCURRENTLY` (via `samo_ops` wrapper)
 - For missing: `CREATE INDEX CONCURRENTLY` (with estimated creation time and lock impact)
 
-**Pilot mode — what it auto-does:**
+**Auto mode — what it auto-does:**
 - Auto-reindexes bloated indexes above threshold during maintenance window
 - Auto-drops unused indexes after configurable grace period (default 90 days, requires minimum 2 stats resets to confirm)
 - Auto-drops redundant indexes (with same grace period logic)
@@ -2613,7 +2613,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 **Integration with other features:**
 - RCA automatically triggers relevant feature actions — stale stats → `vacuum`; bloated indexes → `bloat`; missing index → `index_health`; config issue → `config_tuning`
 - RCA can be triggered manually (`/rca` or `\rca`) or automatically when anomalies are detected (session spike, sudden wait event shift, lock cascade)
-- In Pilot mode: auto-investigates anomalies, auto-applies safe immediate mitigations (cancel/terminate root blockers, ANALYZE, VACUUM), auto-proposes GUC changes, escalates app-level issues to configured channels
+- In Auto mode: auto-investigates anomalies, auto-applies safe immediate mitigations (cancel/terminate root blockers, ANALYZE, VACUUM), auto-proposes GUC changes, escalates app-level issues to configured channels
 
 **pg_ash integration details:**
 - Samo auto-detects pg_ash presence on connect (`SELECT * FROM ash.status()`)
@@ -2624,7 +2624,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 
 #### Week-by-week (Phase 3)
 
-**Week 23-24: Framework + RCA (Advisor)**
+**Week 23-24: Framework + RCA (Observe)**
 - [ ] AAA Architecture framework (Analyzer, Actor, Auditor)
 - [ ] Per-feature autonomy configuration system
 - [ ] Action audit log (every action: timestamp, feature, level, justification, outcome)
@@ -2633,36 +2633,36 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Block tree reconstruction from pg_locks + pg_stat_activity
 - [ ] RCA report generation with three-tier mitigation (immediate / mid-term GUCs / long-term app changes)
 
-**Week 25-26: RCA (Guardian) + Index Health (Advisor)**
-- [ ] RCA Guardian: propose immediate mitigation (cancel/terminate blockers), wait for approval
-- [ ] RCA Guardian: propose GUC changes (idle_in_transaction_session_timeout, lock_timeout, statement_timeout)
+**Week 25-26: RCA (Supervised) + Index Health (Observe)**
+- [ ] RCA Supervised: propose immediate mitigation (cancel/terminate blockers), wait for approval
+- [ ] RCA Supervised: propose GUC changes (idle_in_transaction_session_timeout, lock_timeout, statement_timeout)
 - [ ] Actor component: isolated executor with DB permission validation
 - [ ] `samo_ops` wrapper generation for cancel/terminate + config changes
 - [ ] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
 - [ ] Index health report generation (structured output)
 
-**Week 27-28: RCA (Pilot) + Index Health (Guardian) + Daemon mode**
-- [ ] RCA Pilot: auto-investigate anomalies, auto-cancel/terminate root blockers, auto-propose GUCs
+**Week 27-28: RCA (Auto) + Index Health (Supervised) + Daemon mode**
+- [ ] RCA Auto: auto-investigate anomalies, auto-cancel/terminate root blockers, auto-propose GUCs
 - [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes, lock cascades
-- [ ] Index health Guardian: propose actions with justification, wait for approval
+- [ ] Index health Supervised: propose actions with justification, wait for approval
 - [ ] Daemon mode: headless operation, PID file, signal handling
 - [ ] Notification channels: Slack webhook, email
 - [ ] HTTP health check endpoint
 
-**Week 29-30: Pilot mode for safe features**
-- [ ] Index health Pilot: auto-reindex, auto-drop unused (with grace period), auto-create missing
+**Week 29-30: Auto mode for safe features**
+- [ ] Index health Auto: auto-reindex, auto-drop unused (with grace period), auto-create missing
 - [ ] Auditor component: post-action verification (did cancel resolve the lock cascade? did reindex reduce bloat? did GUC change prevent recurrence?)
 - [ ] PostgresAI Issues connector
 - [ ] GitHub Issues connector
 
-**Week 31-32: Platform services + remaining features (Advisor)**
+**Week 31-32: Platform services + remaining features (Observe)**
 - [ ] Systemd unit file and install guide
 - [ ] Launchd plist for macOS
 - [ ] Windows service support
 - [ ] Container image (Alpine-based, ~15MB)
-- [ ] Advisor mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
+- [ ] Observe mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
 
-**Milestone:** RCA and index health work end-to-end at all three autonomy levels. RCA can detect lock contention, document it, mitigate immediately, and propose GUC + app-level fixes — all in seconds. Other features work at Advisor level. Agent runs as a daemon on all platforms.
+**Milestone:** RCA and index health work end-to-end at all three autonomy levels. RCA can detect lock contention, document it, mitigate immediately, and propose GUC + app-level fixes — all in seconds. Other features work at Observe level. Agent runs as a daemon on all platforms.
 
 ### Phase 4: Ecosystem (Weeks 33+)
 
@@ -2677,7 +2677,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Plugin system for custom connectors
 - [ ] Helm chart for Kubernetes sidecar deployment
 - [ ] Protocol marketplace (shareable health check definitions)
-- [ ] Pilot level for remaining features (with extensive testing and Auditor validation)
+- [ ] Auto level for remaining features (with extensive testing and Auditor validation)
 
 ---
 
@@ -2905,7 +2905,7 @@ samo yolo> fix the bloat on the orders table
 - Shows what it's doing in real-time
 - Ctrl-C aborts the current action
 - `\yolo` to enter, `\interactive` to exit
-- **Cannot be combined with all:pilot** without explicit `--i-know-what-im-doing` flag
+- **Cannot be combined with all:auto** without explicit `--i-know-what-im-doing` flag
 
 #### Observe Mode
 
@@ -2954,9 +2954,9 @@ mydb text2sql>           -- text2sql + Interactive
 mydb plan>               -- text2sql + Plan
 mydb yolo>               -- text2sql + YOLO
 mydb observe>            -- Observe
-mydb [3A/5G/2P]=>        -- SQL + Interactive, autonomy summary shown
-mydb [3A/5G/2P] text2sql> -- text2sql + Interactive, autonomy summary
-mydb [3A/5G/2P] yolo>    -- text2sql + YOLO, autonomy summary
+mydb [3O/5S/2A]=>        -- SQL + Interactive, autonomy summary shown
+mydb [3O/5S/2A] text2sql> -- text2sql + Interactive, autonomy summary
+mydb [3O/5S/2A] yolo>    -- text2sql + YOLO, autonomy summary
 ```
 
 ### 8.5 Slash Commands for Mode Control
@@ -2978,7 +2978,7 @@ mydb [3A/5G/2P] yolo>    -- text2sql + YOLO, autonomy summary
 ```bash
 samo --text2sql         # start in text2sql mode
 samo --plan             # start in plan mode
-samo --yolo --autonomy vacuum:pilot,index_health:pilot  # YOLO with specific features in pilot
+samo --yolo --autonomy vacuum:auto,index_health:auto  # YOLO with specific features in pilot
 samo --observe 30m      # observe for 30 minutes, then exit
 ```
 
@@ -3344,32 +3344,31 @@ _Resolves Issue #8 — Autonomy Governance_
 
 ### B.1 Final Level Names
 
-After evaluating the Advisor/Guardian/Pilot framing and alternatives, the recommendation is to **keep the names but document them differently**. The names are simple, memorable, and the aviation/governance metaphor is coherent.
+**Decision: Observe / Supervised / Auto (O/S/A)**
 
-However, the common confusion point is "Guardian sounds passive but it acts." Here is the revised framing:
+The names describe exactly what they do — no metaphors to misunderstand:
 
-| Level | Name | One-line description | Mental model |
-|-------|------|---------------------|--------------|
-| **A** | **Advisor** | Observe and recommend — never touches anything | A consultant who writes reports |
-| **G** | **Guardian** | Propose and act with your approval | A surgeon who explains the procedure before the incision |
-| **P** | **Pilot** | Act autonomously within your rules | Autopilot: you set the destination, it flies |
+| Level | Name | What it does | Config value |
+|-------|------|-------------|-------------|
+| **O** | **Observe** | Read-only. Observe, diagnose, report. Zero writes. | `"observe"` |
+| **S** | **Supervised** | Act with human approval. Proposes action, human confirms. | `"supervised"` |
+| **A** | **Auto** | Act autonomously within policy and DB permissions. | `"auto"` |
 
-**Alternative names considered and rejected:**
+**Names considered and rejected:**
 
 | Option | Verdict |
 |--------|---------|
-| Watch / Propose / Act | Too generic, no personality |
-| Read / Approve / Auto | "Auto" is ambiguous |
-| Observe / Confirm / Autonomous | "Autonomous" is frightening for a DBA |
-| Scout / Checkpoint / Autopilot | Scout/Checkpoint don't convey the A/G/P progression clearly |
-| Analyst / Sentinel / Operator | Good alternatives; "Sentinel" is compelling for Guardian but loses the progression feel |
+| Advisor / Guardian / Pilot | "Guardian" sounds passive but acts; "Pilot" is scary for DBAs; aviation metaphor doesn't land |
+| Watch / Propose / Act | Too generic |
+| Scout / Checkpoint / Autopilot | Doesn't convey progression clearly |
+| Analyst / Sentinel / Operator | "Sentinel" is compelling but loses progression feel |
 | Suggest / Approve / Execute | Accurate but clinical |
 
-**Final recommendation:** Keep Advisor/Guardian/Pilot. Add the one-liner to every place they're displayed (`\autonomy`, docs, status bar) so users internalize the model quickly.
+The final names (Observe/Supervised/Auto) are self-documenting. No one-liner needed — the name _is_ the description.
 
-### B.2 Guardian Mode Approval UX
+### B.2 Supervised Mode Approval UX
 
-The Guardian approval experience must work in three distinct contexts.
+The Supervised mode approval experience must work in three distinct contexts.
 
 #### Interactive Terminal (primary)
 
@@ -3408,7 +3407,7 @@ In daemon mode, approvals are delivered and responded to via configured channels
 
 **Slack approval flow:**
 ```
-[Samo] 🛡 Guardian approval needed
+[Samo] 🔒 Supervised approval needed
 
 Database: production (db-01.example.com:5432)
 Feature: index_health
@@ -3428,7 +3427,7 @@ Auditor: ✅ High confidence. Non-blocking. ~5 min.
 
 **Email approval:**
 ```
-Subject: [Samo Guardian] Approval needed: REINDEX idx_orders_created_at (production)
+Subject: [Samo Supervised] Approval needed: REINDEX idx_orders_created_at (production)
 
 Finding: idx_orders_created_at — 34% bloat (450MB → ~300MB after reindex)
 Action: REINDEX CONCURRENTLY via samo_ops wrapper
@@ -3446,7 +3445,7 @@ This link expires in 4 hours.
 - Response stored in audit log with approver identity
 
 **PagerDuty / generic webhook:**
-- Guardian pending approvals are surfaced as low-urgency PagerDuty incidents
+- Supervised pending approvals are surfaced as low-urgency PagerDuty incidents
 - Acknowledge = approve; Resolve without acknowledging = reject
 
 #### Queued Approvals
@@ -3460,9 +3459,9 @@ samo approvals --reject 1234   # reject specific action
 samo approvals --approve-all   # approve everything pending (use with caution)
 ```
 
-### B.3 Pilot Mode Safety Rails
+### B.3 Auto Mode Safety Rails
 
-Pilot mode is the highest autonomy level. It requires defense in depth.
+Auto mode is the highest autonomy level. It requires defense in depth.
 
 #### Circuit Breaker
 
@@ -3490,10 +3489,10 @@ open_duration_seconds = 300     # wait 5 min before HALF_OPEN
 ```
 
 When a circuit breaker trips:
-1. Feature drops from Pilot → Advisor mode automatically (not Guardian — we want zero action, not approval-gated action, until the issue is understood)
+1. Feature drops from Auto → Observe mode automatically (not Supervised — we want zero action, not approval-gated action, until the issue is understood)
 2. Alert sent to all configured channels
 3. Logged with full context of what triggered it
-4. Requires explicit `samo reset-circuit index_health` to re-enable Pilot
+4. Requires explicit `samo reset-circuit index_health` to re-enable Auto
 
 #### Rollback on Failure
 
@@ -3501,25 +3500,25 @@ When a circuit breaker trips:
 |-------------|-------------------|
 | `REINDEX CONCURRENTLY` | Failure leaves index in INVALID state → auto-issue `DROP INDEX` + `CREATE INDEX CONCURRENTLY` on next cycle |
 | `CREATE INDEX CONCURRENTLY` | Failure leaves INVALID index → auto-drop on next cycle |
-| `DROP INDEX CONCURRENTLY` | No automatic rollback — Guardian mode only, never Pilot |
+| `DROP INDEX CONCURRENTLY` | No automatic rollback — Supervised mode only, never Auto |
 | `ALTER SYSTEM SET` | Automatic rollback: store previous value, apply `ALTER SYSTEM SET param = previous_value; SELECT pg_reload_conf()` |
 | `pg_cancel_backend` | No rollback needed (operation is cancel, not mutation) |
 | `pg_terminate_backend` | No rollback needed |
 | `VACUUM` | No rollback needed (VACUUM is always safe) |
 | `ANALYZE` | No rollback needed |
 
-**Rollback detection:** The Auditor monitors post-action state. If the post-action check shows the target metric is worse than pre-action (e.g., bloat increased, or a newly created index is causing query regressions visible in pg_stat_statements), the Auditor escalates to Guardian for human review rather than auto-rolling-back in a loop.
+**Rollback detection:** The Auditor monitors post-action state. If the post-action check shows the target metric is worse than pre-action (e.g., bloat increased, or a newly created index is causing query regressions visible in pg_stat_statements), the Auditor escalates to Supervised for human review rather than auto-rolling-back in a loop.
 
-#### Pilot Mode Constraints
+#### Auto Mode Constraints
 
 ```toml
 [pilot.constraints]
-# Pilot mode never runs during business hours unless overridden
+# Auto mode never runs during business hours unless overridden
 maintenance_window_required = true
 maintenance_window = "02:00-06:00"
 maintenance_window_tz = "UTC"
 
-# Pilot mode pauses if error rate on the *database* exceeds threshold
+# Auto mode pauses if error rate on the *database* exceeds threshold
 # (not just Samo's actions — something else may be wrong)
 pause_on_db_error_rate_threshold = 0.05  # >5% query error rate → pause all pilot
 
@@ -3534,10 +3533,10 @@ rca = 100               # RCA is read-heavy, higher limit
 
 #### Dry Run Mode
 
-Any Pilot feature can be run in dry-run mode to preview what it would do without executing:
+Any Auto feature can be run in dry-run mode to preview what it would do without executing:
 
 ```bash
-samo --autonomy all:pilot --dry-run   # show what Pilot would do, don't execute
+samo --autonomy all:auto --dry-run   # show what Auto would do, don't execute
 \autonomy vacuum dry-run              # dry-run for vacuum only
 ```
 
@@ -3589,7 +3588,7 @@ Samo can suggest autonomy level increases when trust is earned:
 ```
 [Samo] Trust calibration update:
   index_health has maintained 0.94 trust score over 47 actions (90-day window)
-  This exceeds the Guardian → Pilot promotion threshold (0.85, 30 actions).
+  This exceeds the Supervised → Auto promotion threshold (0.85, 30 actions).
 
   Current: index_health = guardian
   Suggested: index_health = pilot
@@ -3601,16 +3600,16 @@ Samo can suggest autonomy level increases when trust is earned:
 
 | Transition | Minimum Trust Score | Minimum Action Count | Minimum Observation Window |
 |------------|--------------------|--------------------|--------------------------|
-| Advisor → Guardian | N/A (manual only) | N/A | N/A |
-| Guardian → Pilot | 0.85 | 30 approved+executed | 30 days |
-| Pilot → (stays Pilot) | 0.70 (trip circuit breaker if below) | N/A | Rolling 30-day |
+| Observe → Supervised | N/A (manual only) | N/A | N/A |
+| Supervised → Auto | 0.85 | 30 approved+executed | 30 days |
+| Auto → (stays Auto) | 0.70 (trip circuit breaker if below) | N/A | Rolling 30-day |
 
-Advisor → Guardian is always manual — it's a conscious decision to enable execution, not something the system earns its way into.
+Observe → Supervised is always manual — it's a conscious decision to enable execution, not something the system earns its way into.
 
 #### Auditor Feedback Loop
 
 ```
-Action taken (Pilot) or approved (Guardian)
+Action taken (Auto) or approved (Supervised)
   → [5 minutes later] Auditor checks: did the metric improve?
   → [24 hours later] Auditor checks: did the improvement persist?
   → Result stored: {action_id, initial_metric, post_5min, post_24h, verdict}
@@ -3619,7 +3618,7 @@ Action taken (Pilot) or approved (Guardian)
 ```
 
 **Anomalous outcome handling:**
-- Metric got worse: alert + suspend that specific action type in Pilot mode (circuit breaker)
+- Metric got worse: alert + suspend that specific action type in Auto mode (circuit breaker)
 - Metric unchanged after expected improvement: log as "uncertain" — doesn't count against trust score but doesn't count for it either
 - Metric improved: counts as positive outcome
 
@@ -3640,9 +3639,9 @@ The concern: if all three branches run in the same process, can the isolation be
 **The process-level concern:** In the same process, a sufficiently clever prompt injection could theoretically cause the LLM to output a `ActionRequest` that passes schema validation but does something harmful within the Actor's permissions. This is mitigated by:
 - `samo_ops` wrapper functions having hard-coded safety checks (e.g., `reindex_concurrently` validates the OID is actually an index before executing)
 - The Actor logs every action to the audit log before execution — if the log is monitored, anomalous actions are visible
-- Rate limits (Pilot constraints above) limit blast radius
+- Rate limits (Auto constraints above) limit blast radius
 
-**Future hardening:** If Samo matures to the point where it manages Pilot mode across many critical databases, the architecture should evolve to separate processes (or even separate machines for the Actor) with a narrow IPC channel between Analyzer and Actor. For Phase 3, same-process isolation with schema validation and DB-level enforcement is sufficient.
+**Future hardening:** If Samo matures to the point where it manages Auto mode across many critical databases, the architecture should evolve to separate processes (or even separate machines for the Actor) with a narrow IPC channel between Analyzer and Actor. For Phase 3, same-process isolation with schema validation and DB-level enforcement is sufficient.
 
 ### B.6 Multi-Database Autonomy Configuration
 
@@ -3650,18 +3649,18 @@ The concern: if all three branches run in the same process, can the isolation be
 ```toml
 # Global defaults
 [autonomy]
-vacuum = "advisor"
-index_health = "advisor"
+vacuum = "observe"
+index_health = "observe"
 
 # Production: more conservative
 [connections.production.autonomy]
-vacuum = "advisor"
-index_health = "guardian"
+vacuum = "observe"
+index_health = "supervised"
 
 # Staging: experiment with pilot
 [connections.staging.autonomy]
-vacuum = "pilot"
-index_health = "pilot"
+vacuum = "auto"
+index_health = "auto"
 index_health_trust_override = true  # skip trust threshold, I know what I'm doing
 ```
 
@@ -5170,7 +5169,7 @@ pub enum ConfidenceLevel {
 | `REINDEX CONCURRENTLY` | 0.70 | Standard maintenance; lower bar |
 | `VACUUM ANALYZE` | 0.60 | Very safe operation; lower bar acceptable |
 
-In Guardian mode: confidence score is always shown to the human alongside the recommendation. In Pilot mode: actions below the minimum confidence threshold are downgraded to Guardian (shown for approval).
+In Supervised mode: confidence score is always shown to the human alongside the recommendation. In Auto mode: actions below the minimum confidence threshold are downgraded to Supervised (shown for approval).
 
 ### E.12 Incident Correlation
 
@@ -5236,7 +5235,7 @@ Recommended approach:
 | Historical wait analysis | ✅ (pg_ash) | ✅ | ✅ | ❌ (manual) |
 | Real-time lock tree | ✅ | ✅ | ⚠️ Limited | ✅ |
 | Three-tier mitigation | ✅ Automated | ✅ Recommendations | ❌ | ✅ |
-| Auto-cancel root blocker | ✅ (Guardian/Pilot) | ❌ | ❌ | ✅ |
+| Auto-cancel root blocker | ✅ (Supervised/Auto) | ❌ | ❌ | ✅ |
 | GUC recommendations | ✅ Specific values | ✅ General | ❌ | ✅ |
 | SKIP LOCKED recommendation | ✅ | ⚠️ Generic | ❌ | ✅ |
 | Incident correlation | ✅ Causal chains | ✅ | ✅ | ✅ |
@@ -5349,7 +5348,7 @@ ratatui requires full terminal ownership (raw mode, alternate screen). The REPL 
 
 **Status bar format (configurable, see FR-25):**
 ```
- db-host:5432/mydb │ SQL │ tx:idle │ 3A/5G/2P │ last: 12ms │ ai: 847/4096 tok 
+ db-host:5432/mydb │ SQL │ tx:idle │ 3O/5S/2A │ last: 12ms │ ai: 847/4096 tok 
 ```
 
 **Rendering strategy:**
@@ -6534,7 +6533,7 @@ impl SessionState {
 }
 ```
 
-**YOLO mode safety:** Even in YOLO mode, actions are gated by autonomy level. If autonomy is `all:advisor`, YOLO mode has no effect on write operations — YOLO only removes the "are you sure?" prompt, it doesn't elevate autonomy level.
+**YOLO mode safety:** Even in YOLO mode, actions are gated by autonomy level. If autonomy is `all:observe`, YOLO mode has no effect on write operations — YOLO only removes the "are you sure?" prompt, it doesn't elevate autonomy level.
 
 ---
 
@@ -6627,8 +6626,8 @@ The AAA Architecture (Analyzer/Actor/Auditor separation) is the core security ar
 - Defense:
   1. Analyzer and Actor are separated by message passing via a **tokio channel** — there is no shared memory or direct function call path
   2. All messages on the channel are logged to the action log **before** the Actor processes them (write-ahead logging principle)
-  3. In Guardian mode, the channel is paused pending human confirmation — the human reads the Auditor's assessment before approving
-  4. In Pilot mode, the Auditor runs a pre-action check synchronously before the Actor executes
+  3. In Supervised mode, the channel is paused pending human confirmation — the human reads the Auditor's assessment before approving
+  4. In Auto mode, the Auditor runs a pre-action check synchronously before the Actor executes
 
 **Attack 3: Auditor compromise**
 - Vector: Analyzer tricks Auditor into approving a bad action
@@ -6645,13 +6644,13 @@ The AAA Architecture (Analyzer/Actor/Auditor separation) is the core security ar
   2. `samo_ops` wrapper functions validate their inputs and only perform the specific operation they're designed for (parameterized, no dynamic SQL construction from actor inputs beyond validated object references)
   3. Database-level GRANT enforcement is independent of application code — even a completely compromised application cannot exceed what the database role permits
 
-**Attack 5: Pilot mode runaway**
-- Vector: In Pilot mode, a bug causes continuous destructive operations
+**Attack 5: Auto mode runaway**
+- Vector: In Auto mode, a bug causes continuous destructive operations
 - Defense:
   1. Per-feature action rate limits: e.g., index_health can run at most N REINDEX CONCURRENTLY operations per hour
   2. Action budget: configurable maximum number of actions per monitoring cycle
-  3. Anomaly detection in Auditor: if post-action state is worse than pre-action state (bloat increased after reindex), automatically suspend that feature's Pilot mode and alert
-  4. Kill switch: `SAMO_EMERGENCY_STOP=1` environment variable or `samo stop` command immediately halts all Pilot operations
+  3. Anomaly detection in Auditor: if post-action state is worse than pre-action state (bloat increased after reindex), automatically suspend that feature's Auto mode and alert
+  4. Kill switch: `SAMO_EMERGENCY_STOP=1` environment variable or `samo stop` command immediately halts all Auto operations
 
 #### F.2.2 Governance Architecture Implementation
 
@@ -6983,7 +6982,7 @@ Each connector uses a separate credential — never share credentials between co
 | Compromised AI provider | MITM API responses | Inject malicious SQL suggestions |
 | Local privilege escalation | Read files as other user | Credential theft from config/logs |
 | Supply chain attacker | Malicious dependency | Code execution during build or run |
-| Pilot-mode bug | Application logic error | Unintended destructive operations |
+| Auto-mode bug | Application logic error | Unintended destructive operations |
 
 #### F.7.3 Risk Matrix
 
@@ -6991,7 +6990,7 @@ Each connector uses a separate credential — never share credentials between co
 |---|---|---|---|---|
 | Prompt injection via schema | Medium | Medium | **Medium** | Structured ActionRequest; whitelist |
 | Credential theft from log | Low | Very High | **Medium** | Never log credentials; SecretString |
-| Pilot mode runaway | Low | High | **Medium** | Rate limits; Auditor; kill switch |
+| Auto mode runaway | Low | High | **Medium** | Rate limits; Auditor; kill switch |
 | AI API key leak via config | Medium | Medium | **Medium** | Env var recommendation; 0600 check |
 | SECURITY DEFINER SQL injection | Very Low | Very High | **Low** | %I/%L format; input validation |
 | Audit log tampering | Very Low | High | **Low** | chattr +a; hash chain |
@@ -7007,7 +7006,7 @@ Each connector uses a separate credential — never share credentials between co
 3. **Use `sslmode=verify-full`** with proper CA certificate for database connection
 4. **Enable `pgaudit`** extension on the database for independent audit trail
 5. **Rotate API keys** for AI providers monthly; use short-lived credentials where possible (AWS IAM roles, not static keys)
-6. **Review autonomy settings** — default is `all:advisor` for a reason. Pilot mode should only be enabled for specific features after manual verification that the Analyzer's recommendations are accurate.
+6. **Review autonomy settings** — default is `all:observe` for a reason. Auto mode should only be enabled for specific features after manual verification that the Analyzer's recommendations are accurate.
 7. **Set `monthly_budget_usd`** — prevents runaway cost from a bug or injection that causes excessive LLM calls
 8. **Run `cargo audit`** against the lock file in CI to catch dependency vulnerabilities
 

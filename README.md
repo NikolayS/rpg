@@ -172,9 +172,9 @@ Each feature area (index health, vacuum, config tuning, upgrades, etc.) is indep
 
 | Level | Name | What it means |
 |-------|------|---------------|
-| **A** | **Advisor** | Analyze + recommend. Human acts. |
-| **G** | **Guardian** | Propose action with justification. Human approves, then tool executes. |
-| **P** | **Pilot** | Automatic action within boundaries. Human notified after. |
+| **O** | **Observe** | Read-only. Observe, diagnose, report. Zero writes. |
+| **S** | **Supervised** | Act with human approval. Proposes action, human confirms. |
+| **A** | **Auto** | Act autonomously within policy and DB permissions. Human notified after. |
 
 The **AAA Architecture** (Analyzer → Actor → Auditor) — three isolated governance components ensure the decision-maker never has direct execution access.
 
@@ -205,7 +205,7 @@ The **AAA Architecture** (Analyzer → Actor → Auditor) — three isolated gov
 
 ```bash
 # Interactive — agent assists in real-time
-samo --host prod-db-01 --autonomy rca:guardian,index_health:advisor
+samo --host prod-db-01 --autonomy rca:supervised,index_health:observe
 
 # Daemon mode — headless monitoring and remediation
 samo daemon --config /etc/samo/config.toml
