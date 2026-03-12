@@ -160,15 +160,17 @@ samo=> /explain SELECT * FROM orders JOIN customers ON ...
 
 The differentiator — not just a terminal, but an agent control surface.
 
-### Autonomy Levels
+### Per-Feature Autonomy (3 levels × N feature areas)
 
-| Level | Name | Can Do | Needs Approval |
-|-------|------|--------|----------------|
-| L1 | MONITOR | Read-only observation, alerting | Everything |
-| L2 | ADVISE | Generate recommendations with runnable commands | All actions |
-| L3 | ASSIST | `ANALYZE`, `REINDEX CONCURRENTLY`, vacuum, config reload | DDL, `DROP`, data changes |
-| L4 | OPERATE | Most operational tasks autonomously | `DROP`, destructive DDL, major config |
-| L5 | AUTOPILOT | Full autonomous operation | Nothing (human on-call) |
+Each feature area (index health, vacuum, config tuning, upgrades, etc.) is independently configured:
+
+| Level | Name | What it means |
+|-------|------|---------------|
+| **A** | **Advisor** | Analyze + recommend. Human acts. |
+| **G** | **Guardian** | Propose action with justification. Human approves, then tool executes. |
+| **P** | **Pilot** | Automatic action within boundaries. Human notified after. |
+
+Three isolated governance components (Analyzer → Actor → Auditor) ensure the decision-maker never has direct execution access.
 
 ### What the Agent Does
 - **Continuous health monitoring** — connect, collect metrics, detect anomalies

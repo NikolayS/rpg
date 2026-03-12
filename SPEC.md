@@ -272,36 +272,144 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 - `\set AI_PROVIDER`, `\set AI_MODEL`, `\set AI_API_KEY`
 - Works without AI configured (all AI features simply unavailable, no errors)
 
-#### FR-11: Autonomy Levels
-- Configurable via `--level L1|L2|L3|L4|L5` or `\set AUTONOMY L3`
-- **L1 MONITOR** — observe only, alert on issues
-- **L2 ADVISE** — generate recommendations with copy-pasteable commands
-- **L3 ASSIST** — auto-execute safe operations:
-  - `ANALYZE` on tables with stale statistics
-  - `REINDEX CONCURRENTLY` on bloated indexes
-  - `VACUUM` (not FULL) on tables with dead tuples
-  - `ALTER SYSTEM SET` + `pg_reload_conf()` for safe config parameters
-  - `pg_cancel_backend()` for long-running queries (with configurable threshold)
-- **L4 OPERATE** — L3 plus:
-  - `CREATE INDEX CONCURRENTLY` for suggested indexes
-  - `DROP INDEX CONCURRENTLY` for unused indexes (with grace period)
-  - `VACUUM FULL` during maintenance windows
-  - Connection termination (`pg_terminate_backend()`)
-  - Replication slot management
-- **L5 AUTOPILOT** — L4 plus:
-  - `DROP TABLE`, `DROP COLUMN` for cleanup (with backup verification)
-  - Major version upgrade orchestration
-  - Failover decisions
-  - Schema migrations
-- Each action logged with: timestamp, autonomy level, action taken, justification, outcome
-- Dry-run mode: show what *would* be done without doing it
-- Approval workflow: L4/L5 actions can require interactive approval
+#### FR-11: Autonomy Model — Per-Feature Levels + Three Branches of Governance
+
+Autonomy is **not a single global knob**. It's configured **per feature area**, and each area has exactly three levels. Trust is earned incrementally — feature by feature.
+
+##### Three Autonomy Levels (per feature)
+
+| Level | Name | What it means |
+|-------|------|---------------|
+| **A** | **Advisor** | Analyze + recommend. The tool observes, diagnoses, and produces actionable recommendations. The human reviews and acts. |
+| **G** | **Guardian** | Act with approval. The tool proposes a specific action with full justification. A human reviews and explicitly approves before execution. The **acting component is isolated from the decision-making component** — the Analyzer proposes, but the Actor only executes after human sign-off. |
+| **P** | **Pilot** | Automatic action. The tool acts autonomously within the defined boundaries. Human is notified after the fact. |
+
+##### Feature Areas
+
+Each area is independently configurable:
+
+| Feature Area | Description | Example A (Advisor) | Example G (Guardian) | Example P (Pilot) |
+|---|---|---|---|---|
+| **index_health** | Index bloat detection, reindexing | "idx_orders_created_at has 34% bloat, recommend REINDEX CONCURRENTLY" | Shows command, waits for approval, then runs | Auto-reindexes when bloat > threshold |
+| **vacuum** | Dead tuple management, vacuum scheduling | "orders table has 500K dead tuples, recommend VACUUM" | Proposes VACUUM, waits for approval | Auto-vacuums based on policy |
+| **config_tuning** | PostgreSQL parameter optimization | "shared_buffers is 128MB, recommend 4GB based on available RAM" | Shows ALTER SYSTEM SET, waits for approval | Auto-tunes safe parameters |
+| **query_cancel** | Long-running query management | "Query PID 12345 running for 45min, recommend cancel" | Shows pg_cancel_backend, waits | Auto-cancels queries exceeding threshold |
+| **query_terminate** | Connection termination | "Idle-in-transaction PID 6789 for 2h" | Shows pg_terminate_backend, waits | Auto-terminates based on policy |
+| **index_creation** | Missing index suggestions | "Sequential scan on orders.customer_id, suggest index" | Shows CREATE INDEX CONCURRENTLY, waits | Auto-creates indexes |
+| **index_removal** | Unused index cleanup | "idx_legacy unused for 90 days, suggest removal" | Shows DROP INDEX CONCURRENTLY, waits | Auto-drops after grace period |
+| **bloat_control** | Table bloat, VACUUM FULL, pg_repack | "users table 40% bloat, recommend pg_repack" | Shows command, waits | Auto-runs during maintenance window |
+| **minor_upgrade** | Minor Postgres version upgrades | "PG 16.2 → 16.4 available, security fixes" | Produces upgrade plan, waits | Auto-schedules upgrade |
+| **major_upgrade** | Major Postgres version upgrades | "PG 16 → 17, compatibility report" | Produces migration plan, waits | Auto-orchestrates (requires extensive testing first) |
+| **replication** | Replication slot management, lag | "Slot 'sub1' lag at 5GB, recommend drop" | Shows command, waits | Auto-manages slots |
+| **connection_mgmt** | Connection pool, idle cleanup | "Pool at 95%, 20 idle-in-transaction" | Shows plan, waits | Auto-manages connections |
+| **schema_health** | Data type issues, constraint gaps | "column 'phone' is text, suggest constraint" | Shows ALTER TABLE, waits | Advisory only — schema changes are always G max |
+
+**Default configuration:**
+```toml
+[autonomy]
+# Per-feature levels: "advisor" | "guardian" | "pilot"
+index_health = "advisor"
+vacuum = "advisor"
+config_tuning = "advisor"
+query_cancel = "advisor"
+query_terminate = "advisor"
+index_creation = "advisor"
+index_removal = "advisor"
+bloat_control = "advisor"
+minor_upgrade = "advisor"
+major_upgrade = "advisor"
+replication = "advisor"
+connection_mgmt = "advisor"
+schema_health = "advisor"     # max level: guardian (never auto-pilot for schema changes)
+```
+
+**Presets for quick configuration:**
+```bash
+samo --autonomy all:advisor          # everything in advisor mode (default, safest)
+samo --autonomy all:guardian         # everything needs approval
+samo --autonomy all:pilot            # full autopilot (use with caution)
+samo --autonomy vacuum:pilot,index_health:pilot,query_cancel:guardian  # granular
+```
+
+**CLI and runtime:**
+```
+\autonomy                           -- show current per-feature autonomy settings
+\autonomy vacuum pilot              -- change vacuum to pilot mode
+\autonomy all guardian              -- set all features to guardian
+```
+
+##### Three Branches of Governance (Architecture)
+
+The autonomy system is built on **three isolated components**, inspired by separation of powers:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Samo Governance Model                      │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │  ANALYZER    │  │  ACTOR       │  │  AUDITOR     │       │
+│  │  (Analysis)  │  │  (Execution) │  │  (Oversight) │       │
+│  │              │  │              │  │              │       │
+│  │  Observes    │  │  Executes    │  │  Verifies    │       │
+│  │  Diagnoses   │  │  within      │  │  Reviews     │       │
+│  │  Recommends  │  │  boundaries  │  │  Improves    │       │
+│  │  Plans       │  │  Only acts   │  │  Catches     │       │
+│  │              │  │  on approved │  │  mistakes    │       │
+│  │              │  │  plans       │  │              │       │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘       │
+│         │                 │                 │                │
+│         │    proposes     │    reports to   │                │
+│         ├────────────────►│────────────────►│                │
+│         │                 │                 │                │
+│         │◄────────────────┤    feedback     │                │
+│         │  learns from    │◄────────────────┤                │
+│         │  audit results  │  catches errors │                │
+│  ───────┴─────────────────┴─────────────────┴────────        │
+│                    Shared Action Log                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**1. ANALYZER (Legislative branch)**
+- **Role:** Observe, diagnose, think, recommend, plan.
+- **Can:** Read all database state (pg_stat_*, pg_catalog, pg_ash, logs, metrics). Run read-only queries. Generate recommendations and plans.
+- **Cannot:** Execute any state-changing SQL. Period.
+- **Implementation:** This is where the LLM lives. It has full read access to understand the database but zero write access. Even in Pilot mode, the Analyzer only produces a *plan* — it never executes directly.
+- **Output:** Structured recommendations with: finding, severity, evidence, proposed action, expected outcome, risk assessment.
+
+**2. ACTOR (Executive branch)**
+- **Role:** Execute approved actions within strictly defined boundaries.
+- **Can:** Execute only the specific operations it has been granted (via `samo_ops` wrapper functions). Only acts on plans that have been approved (by human in Guardian mode, or by policy in Pilot mode).
+- **Cannot:** Decide what to do. It has no intelligence — it's a constrained executor.
+- **Implementation:** A thin execution layer. Receives a structured action request, validates it against the permission model (DB-level GRANTs + wrapper functions), executes, reports result. No LLM, no decision-making.
+- **Key constraint:** The Actor is **a different component** from the Analyzer. They don't share memory or state. The Actor cannot be tricked by prompt injection because it doesn't process natural language — it only accepts structured, validated action requests.
+- **Isolation:** In Guardian mode, there's a human in the loop between Analyzer and Actor. In Pilot mode, policy rules gate the handoff (but the Actor still validates against DB permissions).
+
+**3. AUDITOR (Judicial branch)**
+- **Role:** Verify actions, catch mistakes, provide feedback for learning.
+- **Can:** Read all state (like Analyzer) + read the action log. Compare pre/post state. Flag anomalies.
+- **Cannot:** Execute anything. Advisory only.
+- **What it does:**
+  - **Pre-action audit:** Before Actor executes, Auditor validates the plan (is the diagnosis correct? is the action proportionate? are there risks the Analyzer missed?). In Guardian mode, the Auditor's assessment is shown to the human alongside the Analyzer's recommendation.
+  - **Post-action audit:** After Actor executes, Auditor verifies the outcome (did bloat actually decrease? did the index actually improve query performance? did the config change have the expected effect?).
+  - **Self-awareness loop:** Auditor tracks accuracy of past recommendations (was the diagnosis correct? did the action help?). This feedback feeds into improving the Analyzer's future recommendations.
+  - **Anomaly detection:** Flags unexpected outcomes (reindex made things worse, vacuum didn't reclaim space, config change degraded performance) and triggers rollback recommendations.
+- **Implementation:** Can be a separate LLM call with a different prompt (adversarial review), or rule-based checks, or both.
+
+**Why three branches matter:**
+- **Prompt injection defense:** Even if an attacker crafts a malicious query result that tricks the Analyzer into recommending `DROP TABLE`, the Actor validates against DB-level permissions (can't drop), and the Auditor flags that a DROP recommendation is abnormal for a bloat check.
+- **Trust building:** Users can see each branch's output separately. The Auditor's independent assessment builds confidence in the Analyzer's recommendations.
+- **Learning loop:** The Auditor's post-action verification creates a feedback cycle that improves recommendations over time.
+- **Compliance:** Three-way separation of concerns is an auditor's dream for SOC2/ISO27001.
+
+##### Self-Driving Database Levels (Future Reference)
+
+_Full self-driving level classification (mapping feature autonomy to overall system capability, analogous to SAE driving levels) will be defined separately. In short: when all feature areas reach Pilot mode and the Auditor confirms sustained reliability, that's the equivalent of L5 self-driving database._
 
 #### FR-11a: Permission Model (Database-Level Enforcement)
 
-Autonomy levels (FR-11) define what the **application** considers allowed. But the real enforcement happens at the **Postgres level** through the privilege system. The tool connects as a specific database user, and that user's GRANTs define the hard boundary of what's possible — regardless of what the application-level autonomy config says.
+The Actor (FR-11) can only execute what the **Postgres privilege system** allows. This is the hard enforcement layer — independent of the application's autonomy configuration.
 
-**Principle:** Two-layer security. The application layer (L1-L5) is a policy filter. The database layer (GRANT/REVOKE + wrapper functions) is the enforcement mechanism. Even if the app layer has a bug, the database won't let the tool do anything its user can't do.
+**Principle:** The application layer (Autonomy levels) is a policy filter. The database layer (GRANT/REVOKE + wrapper functions) is the enforcement. Even if the app layer has a bug, the database won't let the tool exceed its permissions.
 
 **How it works:**
 
@@ -309,7 +417,6 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
 
 2. **Fine-grained GRANTs** — the DBA grants exactly what the tool is allowed to do:
    ```sql
-   -- L3: can ANALYZE, VACUUM, REINDEX CONCURRENTLY, cancel queries
    GRANT pg_stat_scan_tables TO samo_agent;
    GRANT USAGE ON SCHEMA public TO samo_agent;
    GRANT SELECT ON ALL TABLES IN SCHEMA public TO samo_agent;
@@ -318,15 +425,13 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
 
 3. **PL/pgSQL wrapper functions with SECURITY DEFINER** — for operations that need elevated privileges but should be constrained:
    ```sql
-   -- Wrapper: allows REINDEX CONCURRENTLY on any index, but nothing else
    CREATE OR REPLACE FUNCTION samo_ops.reindex_concurrently(p_index regclass)
    RETURNS void
    LANGUAGE plpgsql
-   SECURITY DEFINER  -- runs as the function owner (superuser/owner)
+   SECURITY DEFINER
    SET search_path = pg_catalog
    AS $$
    BEGIN
-     -- Validate: only indexes, not tables
      IF NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = p_index AND relkind = 'i') THEN
        RAISE EXCEPTION 'Not an index: %', p_index;
      END IF;
@@ -338,90 +443,42 @@ Autonomy levels (FR-11) define what the **application** considers allowed. But t
    GRANT EXECUTE ON FUNCTION samo_ops.reindex_concurrently(regclass) TO samo_agent;
    ```
 
-4. **dblink / postgres_fdw for non-transactional operations** — some operations (like `REINDEX CONCURRENTLY`, `CREATE INDEX CONCURRENTLY`, `VACUUM`) cannot run inside a transaction block. Wrapper functions use `dblink` or `postgres_fdw` to execute these in a separate connection:
-   ```sql
-   -- Wrapper using dblink for operations that can't run in a transaction
-   CREATE OR REPLACE FUNCTION samo_ops.vacuum_table(p_table regclass)
-   RETURNS void
-   LANGUAGE plpgsql
-   SECURITY DEFINER
-   AS $$
-   DECLARE
-     v_schema text;
-     v_table text;
-   BEGIN
-     SELECT nspname, relname INTO v_schema, v_table
-     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE c.oid = p_table AND c.relkind IN ('r', 'm');
-     IF NOT FOUND THEN
-       RAISE EXCEPTION 'Not a table: %', p_table;
-     END IF;
-     PERFORM dblink('dbname=' || current_database(),
-       format('VACUUM %I.%I', v_schema, v_table));
-   END;
-   $$;
-   ```
+4. **dblink / postgres_fdw for non-transactional operations** — wrapper functions use `dblink` for operations that can't run in a transaction block (VACUUM, REINDEX CONCURRENTLY, CREATE INDEX CONCURRENTLY).
 
-5. **Dynamic wrapper generation** — during the setup/permission review phase, the tool can generate the appropriate wrapper functions based on the desired autonomy level:
+5. **Dynamic wrapper generation:**
    ```
-   samo setup --level L3 --generate-wrappers
-   -- Outputs SQL to create the samo_ops schema, role, wrapper functions, and GRANTs
+   samo setup --features index_health,vacuum --level pilot --generate-wrappers
+   -- Outputs SQL to create samo_ops schema, role, wrapper functions, and GRANTs
    -- DBA reviews and applies
-   
-   samo setup --level L4 --generate-wrappers
-   -- Generates additional wrappers for CREATE/DROP INDEX CONCURRENTLY, VACUUM FULL, etc.
    ```
 
-6. **Permission introspection** — the tool checks what it can actually do on connect:
+6. **Permission introspection:**
    ```
    samo=> \permissions
    Role: samo_agent
    Database: production
-   
-   Effective permissions:
-     ✓ SELECT on all tables (public, analytics)
-     ✓ ANALYZE (via samo_ops.analyze_table)
-     ✓ VACUUM (via samo_ops.vacuum_table)
-     ✓ REINDEX CONCURRENTLY (via samo_ops.reindex_concurrently)
-     ✓ pg_cancel_backend (via samo_ops.cancel_query)
-     ✗ CREATE INDEX — not granted (would need L4 wrappers)
-     ✗ DROP — not granted
-     ✗ ALTER SYSTEM — not granted
-     ✗ pg_terminate_backend — not granted
-   
-   Autonomy config: L3
-   Effective autonomy: L3 (all L3 operations available)
+
+   Feature            | Autonomy | DB Permissions     | Effective
+   -------------------|----------|--------------------|-----------
+   index_health       | pilot    | ✓ reindex_concur.  | pilot
+   vacuum             | pilot    | ✓ vacuum_table     | pilot
+   config_tuning      | guardian | ✓ alter_system_set | guardian
+   query_cancel       | pilot    | ✓ cancel_query     | pilot
+   index_creation     | guardian | ✗ not granted      | advisor ⚠
+   index_removal      | guardian | ✗ not granted      | advisor ⚠
+   major_upgrade      | advisor  | N/A                | advisor
+
+   ⚠ 2 features downgraded due to missing DB permissions.
+   Run 'samo setup --features index_creation,index_removal --generate-wrappers'
    ```
 
-7. **Autonomy level clamping** — if the app config says L4 but the database role only has L3 permissions, the tool operates at L3 and warns:
-   ```
-   WARNING: Autonomy level L4 requested but database role 'samo_agent' 
-   lacks permissions for L4 operations (CREATE INDEX, DROP INDEX, VACUUM FULL).
-   Effective autonomy: L3
-   Run 'samo setup --level L4 --generate-wrappers' to generate the required SQL.
-   ```
-
-**Schema layout:**
-```
-samo_ops                    -- dedicated schema for wrapper functions
-├── analyze_table(regclass)  -- SECURITY DEFINER, L3
-├── vacuum_table(regclass)   -- SECURITY DEFINER + dblink, L3
-├── reindex_concurrently(regclass)  -- SECURITY DEFINER + dblink, L3
-├── cancel_query(int)        -- SECURITY DEFINER, L3
-├── create_index_concurrently(text)  -- SECURITY DEFINER + dblink, L4
-├── drop_index_concurrently(regclass)  -- SECURITY DEFINER + dblink, L4
-├── vacuum_full_table(regclass)  -- SECURITY DEFINER + dblink, L4
-├── terminate_backend(int)   -- SECURITY DEFINER, L4
-├── alter_system_set(text, text)  -- SECURITY DEFINER, L4 (with parameter allowlist)
-├── reload_conf()            -- SECURITY DEFINER, L3
-└── ...                      -- dynamically generated based on level
-```
+7. **Autonomy clamping** — if the config says Pilot but the DB role lacks permissions, the effective level is downgraded and the user is warned.
 
 **Why this matters:**
-- **Cloud environments** (RDS, Cloud SQL, Supabase) don't give superuser access. Wrapper functions work within managed Postgres constraints.
-- **SOC2/compliance** — the audit trail is in Postgres's own `pg_audit` log, not just the app log. The database itself enforces what the tool can do.
-- **Defense in depth** — a prompt injection that tricks the AI layer into generating a `DROP TABLE` will fail at the database level because the role can't execute it.
-- **Gradual trust** — start with L1 (read-only role, no wrappers), add wrappers as trust builds, same as the autonomy philosophy.
+- **Cloud environments** (RDS, Cloud SQL, Supabase) don't give superuser access. Wrappers work within constraints.
+- **SOC2/compliance** — audit trail in `pg_audit`, enforcement in Postgres itself.
+- **Defense in depth** — prompt injection → Analyzer recommends bad action → Actor can't execute (no DB permission) → Auditor flags anomaly.
+- **Gradual trust** — start with all features at Advisor, add wrapper functions as trust builds.
 
 #### FR-12: Connectors
 
@@ -834,7 +891,7 @@ SELECT * FROM users WHERE id = 42;
 SELECT * FROM users WHERE created_at >= date_trunc('week', current_date);
 -- (47 rows)
 
--- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:L3
+-- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:index_health:pilot
 -- action: REINDEX CONCURRENTLY idx_orders_created_at
 -- justification: Index bloat at 34%, threshold 25%
 SELECT samo_ops.reindex_concurrently('idx_orders_created_at'::regclass);
@@ -889,7 +946,7 @@ severity_threshold = "critical"
   "check": "index_bloat",
   "message": "Index idx_orders_created_at bloat at 34% (threshold: 25%)",
   "recommendation": "REINDEX CONCURRENTLY idx_orders_created_at",
-  "autonomy_action": "auto-reindex scheduled (L3)",
+  "autonomy_action": "auto-reindex scheduled (index_health: pilot)",
   "timestamp": "2026-03-12T14:30:00Z"
 }
 ```
@@ -901,7 +958,7 @@ Borrowed from Claude Code. A persistent status line at the bottom of the termina
 **Displays:**
 - Connection: `db-host:5432/mydb` (green=connected, red=disconnected, yellow=reconnecting)
 - Mode: `SQL` | `text2sql` | `plan` | `yolo` | `observe`
-- Autonomy: `L1` | `L2` | `L3` | `L4` | `L5`
+- Autonomy: per-feature summary (e.g., `3A/5G/2P` = 3 Advisor, 5 Guardian, 2 Pilot)
 - Transaction state: idle | in-transaction | failed
 - Query timing: last query duration
 - AI: token usage / budget remaining (when AI is active)
@@ -957,7 +1014,7 @@ port = 5432
 database = "myapp"
 user = "readonly"
 sslmode = "require"
-autonomy = "L1"      # read-only on staging
+autonomy = "all:advisor"   # all features advisor-only on staging
 
 [connections.production]
 host = "10.0.1.5"
@@ -966,7 +1023,7 @@ database = "myapp"
 user = "samo_agent"
 sslmode = "verify-full"
 sslrootcert = "~/.ssl/rds-ca.pem"
-autonomy = "L3"
+autonomy = "vacuum:pilot,index_health:pilot,query_cancel:guardian"
 ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
 ```
 
@@ -1319,7 +1376,7 @@ max_tokens_per_request = 4096
 monthly_budget_usd = 50.0
 
 [agent]
-autonomy_level = "L2"
+autonomy = "all:advisor"
 check_interval_seconds = 60
 maintenance_window = "02:00-06:00 UTC"
 
@@ -1660,11 +1717,12 @@ samo/
 - [ ] Autonomy level framework (L1-L5 with action classification)
 - [ ] Action audit log (every agent action recorded with justification)
 - [ ] Monitor loop: periodic health checks in interactive and daemon mode
-- [ ] L1 implementation: alert on issues (bloat, long queries, replication lag, connection saturation)
+- [ ] Advisor level implementation for all features: observe, diagnose, recommend
+- [ ] Analyzer component: read-only analysis, structured recommendation output
 
 **Week 25-26:**
-- [ ] L2 implementation: generate recommendations with copy-pasteable commands
-- [ ] L3 implementation: auto-execute safe operations (ANALYZE, REINDEX CONCURRENTLY, VACUUM)
+- [ ] Guardian level implementation: propose + human approval + Actor execution
+- [ ] Actor component: isolated executor with DB permission validation
 - [ ] Dry-run mode for all actions
 - [ ] Health check protocol engine (pluggable check definitions)
 
@@ -1677,7 +1735,7 @@ samo/
 
 **Week 29-30:**
 - [ ] GitHub Issues connector
-- [ ] L4 implementation: CREATE/DROP INDEX CONCURRENTLY, VACUUM FULL, pg_terminate_backend
+- [ ] Pilot level implementation for safe features (vacuum, index_health, query_cancel)
 - [ ] Approval workflow: interactive confirmation for high-risk actions
 - [ ] Maintenance window awareness
 
@@ -1702,7 +1760,7 @@ samo/
 - [ ] Plugin system for custom connectors
 - [ ] Helm chart for Kubernetes sidecar deployment
 - [ ] Protocol marketplace (shareable health check definitions)
-- [ ] L5 implementation (with extensive testing and safeguards)
+- [ ] Pilot level for remaining features (with extensive testing and Auditor validation)
 
 ---
 
@@ -1814,7 +1872,7 @@ samo text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > n
 -- The orders table has 12M rows but no index on created_at.
 -- Currently doing a sequential scan (cost: 847291).
 -- Recommendation: CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders(created_at);
--- Create this index? [Y/n] (requires L3+ permissions)
+-- Create this index? [Y/n] (requires index_creation: guardian+)
 
 samo text2sql> fix index bloat on the orders table
 -- Checking orders table indexes...
@@ -1930,7 +1988,7 @@ samo yolo> fix the bloat on the orders table
 - Shows what it's doing in real-time
 - Ctrl-C aborts the current action
 - `\yolo` to enter, `\interactive` to exit
-- **Cannot be combined with L5** without explicit `--i-know-what-im-doing` flag
+- **Cannot be combined with all:pilot** without explicit `--i-know-what-im-doing` flag
 
 #### Observe Mode
 
@@ -1979,9 +2037,9 @@ mydb text2sql>           -- text2sql + Interactive
 mydb plan>               -- text2sql + Plan
 mydb yolo>               -- text2sql + YOLO
 mydb observe>            -- Observe
-mydb [L3]=>              -- SQL + Interactive, autonomy L3 shown
-mydb [L3] text2sql>      -- text2sql + Interactive, autonomy L3
-mydb [L3] yolo>          -- text2sql + YOLO, autonomy L3
+mydb [3A/5G/2P]=>        -- SQL + Interactive, autonomy summary shown
+mydb [3A/5G/2P] text2sql> -- text2sql + Interactive, autonomy summary
+mydb [3A/5G/2P] yolo>    -- text2sql + YOLO, autonomy summary
 ```
 
 ### 8.5 Slash Commands for Mode Control
@@ -1993,7 +2051,7 @@ mydb [L3] yolo>          -- text2sql + YOLO, autonomy L3
 \yolo                    -- enter YOLO execution mode
 \interactive             -- return to interactive execution mode (default)
 \observe [duration]      -- enter observe mode (optional time limit)
-\level L1|L2|L3|L4|L5   -- set autonomy level
+\autonomy [feature level] -- show or set per-feature autonomy
 \permissions             -- show effective permissions (role GRANTs + wrapper functions)
 \mode                    -- show current mode summary (input mode + execution mode + autonomy + permissions)
 ```
@@ -2003,7 +2061,7 @@ mydb [L3] yolo>          -- text2sql + YOLO, autonomy L3
 ```bash
 samo --text2sql         # start in text2sql mode
 samo --plan             # start in plan mode
-samo --yolo --level L3  # YOLO with L3 autonomy
+samo --yolo --autonomy vacuum:pilot,index_health:pilot  # YOLO with specific features in pilot
 samo --observe 30m      # observe for 30 minutes, then exit
 ```
 
