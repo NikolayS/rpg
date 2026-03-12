@@ -727,31 +727,7 @@ Enhanced autocomplete beyond basic schema objects. Borrowed from pgcli with addi
 - Completion for GUC parameter names after `SET` / `ALTER SYSTEM SET`
 - Completion for enum values in `WHERE col = '...'` context
 
-#### FR-20: MCP Protocol Support
-
-Borrowed from Claude Code. Model Context Protocol (MCP) allows external tools to extend functionality.
-
-**As an MCP client:**
-- Connect to MCP servers (stdio and HTTP transports)
-- Use MCP tools inside text2sql mode (e.g., a web search MCP for finding documentation)
-- Configuration in config file:
-  ```toml
-  [mcp.servers.docs]
-  type = "stdio"
-  command = "postgres-docs-mcp"
-  args = []
-  ```
-
-**As an MCP server:**
-- Expose database operations as MCP tools for other agents/tools:
-  - `query` — execute SQL and return results
-  - `describe` — describe a table/view/function
-  - `health_check` — run health diagnostics
-  - `explain` — run EXPLAIN ANALYZE and return plan
-- Allows integration with Claude Code, Cursor, or other MCP-aware tools
-- Configurable: which tools to expose, read-only mode, rate limits
-
-#### FR-21: Project Configuration Files
+#### FR-20: Project Configuration Files
 
 Borrowed from Claude Code (CLAUDE.md/AGENTS.md) and OpenCode (/init).
 
@@ -793,7 +769,7 @@ This is a Rails 7 application using PostgreSQL 16.
 - AI reads these files on connect (if present in current directory or home)
 - `/init` command: AI analyzes the connected database and generates `.alpha.toml` and `POSTGRES.md`
 
-#### FR-22: Multi-line Mode
+#### FR-21: Multi-line Mode
 
 Borrowed from pgcli. Configurable behavior for Enter key.
 
@@ -811,7 +787,7 @@ multi_line = true                # enable multi-line (default)
 multi_line_mode = "psql"         # psql | safe
 ```
 
-#### FR-23: SSH Tunnel Support
+#### FR-22: SSH Tunnel Support
 
 Borrowed from pgcli. Built-in SSH tunnel for remote databases.
 
@@ -838,7 +814,7 @@ ssh_tunnel = { host = "bastion.example.com", port = 22, user = "deploy", key = "
 - Key-based and password auth
 - Keep-alive for long sessions
 
-#### FR-24: Query Audit Log
+#### FR-23: Query Audit Log
 
 Separate from debug logging. A user-friendly log of all queries executed, for compliance and review.
 
@@ -870,7 +846,7 @@ SELECT alpha_ops.reindex_concurrently('idx_orders_created_at'::regclass);
 - Configurable: `logging.audit_file` in config
 - Separate from debug log — audit is human-readable, debug is machine-verbose
 
-#### FR-25: Notification and Alert Channels
+#### FR-24: Notification and Alert Channels
 
 For daemon mode and background monitoring. Borrowed from OpenClaw.
 
@@ -918,7 +894,7 @@ severity_threshold = "critical"
 }
 ```
 
-#### FR-26: Status Bar / Status Line
+#### FR-25: Status Bar / Status Line
 
 Borrowed from Claude Code. A persistent status line at the bottom of the terminal.
 
@@ -940,7 +916,7 @@ statusline = "{host}:{port}/{db} | {mode} | {autonomy} | {tx_state} | {last_dura
 
 **Toggle:** `\set STATUSLINE on|off`
 
-#### FR-27: Explain Mode (Auto-EXPLAIN)
+#### FR-26: Explain Mode (Auto-EXPLAIN)
 
 Borrowed from pgcli's F5 feature. When enabled, automatically prepends EXPLAIN to every query.
 
@@ -964,7 +940,7 @@ alpha=> SELECT * FROM users WHERE email = 'test@example.com';
 
 **AI integration:** When explain mode is on and AI is active, automatically feed the plan to the LLM for interpretation.
 
-#### FR-28: Connection Profiles
+#### FR-27: Connection Profiles
 
 Named connections with full configuration, including tunnels and autonomy settings.
 
