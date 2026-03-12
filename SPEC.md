@@ -312,11 +312,15 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust.
 - Binary size: < 30MB (static, stripped)
 
 #### NFR-2: Portability
-- Linux x86_64, aarch64 (primary targets)
-- macOS x86_64, aarch64 (primary targets)
-- Windows x86_64 (secondary, best effort)
-- Static linking preferred (musl on Linux)
-- No runtime dependencies
+- **Linux x86_64** — primary, static (musl)
+- **Linux aarch64** — primary, static (musl)
+- **macOS x86_64** — primary
+- **macOS aarch64 (Apple Silicon)** — primary
+- **Windows x86_64** — primary
+- **Windows aarch64** — primary
+- All six targets are first-class, tested in CI, included in every release
+- Static linking on Linux (musl), dynamic on macOS/Windows (system TLS)
+- No runtime dependencies beyond OS-provided libraries
 
 #### NFR-3: Security
 - No credentials stored in plaintext by the tool itself
@@ -548,125 +552,230 @@ project-alpha/
 
 ## 5. Implementation Plan
 
-### Phase 0: Bootstrap (Weeks 1-4)
+### Phase 0: psql Replacement (Weeks 1-8)
 
-**Goal:** Connect to Postgres, run queries, display results. The absolute minimum to be useful.
+**Goal:** A drop-in psql replacement. No AI, no agent, no extras — just a Rust binary that does everything psql does. If a user can't `alias psql=alpha` and keep working, this phase isn't done.
 
-**Week 1-2:**
-- [ ] Project scaffold: Cargo.toml, CI (GitHub Actions), cross-compilation targets
-- [ ] Connection: parse connection params (URI, env vars, flags), connect via `tokio-postgres`
-- [ ] Simple query execution: send SQL, receive RowDescription + DataRow, display
-- [ ] Basic aligned output formatting with headers
-- [ ] Basic REPL: rustyline loop, history file, multi-line input detection (semicolons)
+**Week 1-2: Connect and Query**
+- [ ] Project scaffold: Cargo.toml, CI (GitHub Actions)
+- [ ] Cross-compilation: Linux x86_64/aarch64 (musl), macOS x86_64/aarch64, Windows x86_64/aarch64
+- [ ] Connection: parse all connection params (host, port, dbname, user, password, sslmode, application_name)
+- [ ] Connection URI format: `postgresql://user:pass@host:port/db?options`
+- [ ] libpq-style connection strings
+- [ ] Environment variables: PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE, PGCONNECT_TIMEOUT
+- [ ] `.pgpass` file support
+- [ ] SSL/TLS (rustls + native-tls fallback)
+- [ ] Auth: password, md5, SCRAM-SHA-256
+- [ ] Unix domain sockets (Linux/macOS)
+- [ ] Wire protocol v3: simple query, extended query protocol
+- [ ] Basic REPL: rustyline loop, persistent history file, multi-line input (semicolons)
+- [ ] Query execution with result display (aligned format with headers)
+- [ ] Row count footer ("(N rows)")
+- [ ] Query timing display
+- [ ] Error display with SQLSTATE, detail, hint, context, position
 
-**Week 3-4:**
-- [ ] `\d`, `\dt`, `\di`, `\l`, `\c` — the essentials
-- [ ] `\x` expanded output
-- [ ] `\timing`
-- [ ] `\q` and Ctrl-D exit
-- [ ] Query cancellation (Ctrl-C → CancelRequest)
-- [ ] Error display with SQLSTATE
-- [ ] `-c` and `-f` flags for scripting
-- [ ] `.pgpass` support
+**Week 3-4: Core Meta-Commands**
+- [ ] `\d [pattern]` — describe table/index/sequence/view (match psql output exactly)
+- [ ] `\dt[+]`, `\di[+]`, `\ds[+]`, `\dv[+]`, `\dm[+]` — list tables/indexes/sequences/views/materialized views
+- [ ] `\df[+] [pattern]` — list functions
+- [ ] `\dn[+]` — list schemas
+- [ ] `\du`, `\dg` — list roles
+- [ ] `\dp` — list privileges (ACLs)
+- [ ] `\db[+]` — list tablespaces
+- [ ] `\dT[+]` — list data types
+- [ ] `\dx[+]` — list extensions
+- [ ] `\dE[+]` — list foreign tables
+- [ ] `\dD[+]` — list domains
+- [ ] `\dc[+]` — list conversions
+- [ ] `\dC[+]` — list casts
+- [ ] `\dd` — show object descriptions
+- [ ] `\des[+]` — list foreign servers
+- [ ] `\dew[+]` — list foreign-data wrappers
+- [ ] `\det[+]` — list foreign tables
+- [ ] `\deu[+]` — list user mappings
+- [ ] `\l[+]` — list databases
+- [ ] `\c [dbname [user] [host] [port]]` — connect to database
+- [ ] `\conninfo` — show current connection info
+- [ ] `\x [on|off|auto]` — toggle expanded output
+- [ ] `\timing [on|off]` — toggle query timing
+- [ ] `\q` — quit
+- [ ] `\?` — help for backslash commands
+- [ ] `\h [command]` — SQL command syntax help
+- [ ] Pattern matching (wildcards) for all `\d` commands
+- [ ] `+` modifier (extra detail) for all `\d` commands that support it
+- [ ] `S` modifier (show system objects) where applicable
 
-**Milestone:** Can connect to any Postgres, run queries, see results. Usable as a basic psql.
+**Week 5-6: Variables, I/O, Editing**
+- [ ] `\set [name [value]]` — set/show psql variables
+- [ ] `\unset name` — unset variable
+- [ ] Built-in variables: AUTOCOMMIT, ON_ERROR_STOP, ON_ERROR_ROLLBACK, QUIET, SINGLELINE, SINGLESTEP
+- [ ] `\pset [option [value]]` — set output format options (border, format, null, fieldsep, recordsep, title, etc.)
+- [ ] `\a` — toggle aligned/unaligned
+- [ ] `\t [on|off]` — toggle tuples-only
+- [ ] `\f [sep]` — set field separator
+- [ ] `\H` — toggle HTML output
+- [ ] `\e [file] [line]` — edit query/file in $EDITOR
+- [ ] `\i file` — execute commands from file
+- [ ] `\ir file` — include file (relative path)
+- [ ] `\o [file|command]` — send output to file or pipe
+- [ ] `\w file` — write query buffer to file
+- [ ] `\r` — reset query buffer
+- [ ] `\p` — print current query buffer
+- [ ] `\echo text` — print text to stdout
+- [ ] `\qecho text` — print text to query output channel
+- [ ] `\warn text` — print text to stderr
+- [ ] `\prompt [text] name` — prompt user for variable value
+- [ ] `\! [command]` — execute shell command
+- [ ] `\cd [dir]` — change directory
+- [ ] `\encoding [enc]` — show/set client encoding
+- [ ] `\password [user]` — change password (interactively)
 
-### Phase 1: Daily Driver (Weeks 5-10)
+**Week 7-8: COPY, Execution Variants, Scripting, Output Formats**
+- [ ] `\copy ... FROM/TO` — client-side COPY with all format options (CSV, TEXT, BINARY, DELIMITER, HEADER, etc.)
+- [ ] `\watch [interval]` — re-execute query periodically
+- [ ] `\g [file]` — execute query, optionally send to file
+- [ ] `\gset [prefix]` — execute query, store results as variables
+- [ ] `\gexec` — execute each result value as a SQL statement
+- [ ] `\gdesc` — describe result columns without executing
+- [ ] `\sf[+] function` — show function source
+- [ ] `\sv[+] view` — show view definition
+- [ ] `\bind values` — set bind parameters for next query
+- [ ] Output formats: aligned (default), unaligned, wrapped, CSV, HTML, LaTeX, JSON, asciidoc
+- [ ] Customizable null display, border, line style, unicode/ascii
+- [ ] `-c "SQL"` — execute single command and exit
+- [ ] `-f file` — execute file and exit
+- [ ] `-v name=value` — set variable from command line
+- [ ] `-X` — skip .psqlrc
+- [ ] `-A` — unaligned output
+- [ ] `-t` — tuples only
+- [ ] `-P option=value` — set pset from command line
+- [ ] `-o file` — output to file
+- [ ] `-1` / `--single-transaction` — wrap `-f` in BEGIN/COMMIT
+- [ ] `-b` / `--echo-errors` — echo failed commands
+- [ ] `-e` / `--echo-queries` — echo all queries sent
+- [ ] `-E` / `--echo-hidden` — show queries generated by `\d` commands
+- [ ] `-n` / `--no-readline` — disable readline
+- [ ] `-w` / `--no-password` — never prompt for password
+- [ ] `-W` / `--password` — force password prompt
+- [ ] Stdin/stdout piping: `echo "SELECT 1" | alpha`
+- [ ] Exit codes: 0 success, 1 error, 2 connection failure, 3 script error (match psql)
+- [ ] `.psqlrc` execution on startup (skip with `-X`)
+- [ ] PSQLRC environment variable
+- [ ] Tab completion: SQL keywords, schema objects, file paths (for `\i`, `\copy`)
+- [ ] Query cancellation: Ctrl-C sends CancelRequest to server
+- [ ] Ctrl-D on empty line exits
+- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3)
+- [ ] Notification (LISTEN/NOTIFY) display
+- [ ] Transaction status in prompt (\* for in-transaction, ! for failed transaction)
 
-**Goal:** Good enough to be someone's default Postgres terminal.
+**Milestone:** Full psql replacement. Can `alias psql=alpha`. All common commands work. Builds and runs on all 6 platform targets. No AI, no extras — just psql in Rust.
 
-**Week 5-6:**
-- [ ] Schema-aware autocomplete (tables, columns, keywords)
-- [ ] Syntax highlighting in input
-- [ ] `\set`, `\unset`, `\pset`, variables
-- [ ] `\e` (edit in $EDITOR)
-- [ ] `\i`, `\ir` (include files)
-- [ ] `\o` (output to file)
+### Phase 1: Beyond psql (Weeks 9-14)
 
-**Week 7-8:**
-- [ ] `\copy` (client-side COPY TO/FROM)
-- [ ] `\watch` (periodic re-execution)
-- [ ] `\g`, `\gset`, `\gexec`
-- [ ] CSV, JSON output formats
-- [ ] `\sf`, `\sv` (show function/view source)
-- [ ] `\dp`, `\db`, `\dT`, `\dx`
+**Goal:** Everything psql can't do. This is where we start being *better* than psql.
 
 **Week 9-10:**
-- [ ] TUI pager (ratatui): vertical/horizontal scroll, search, column freeze
-- [ ] `\dba` commands: activity, bloat, locks, unused-idx, vacuum, replication
-- [ ] PG version detection and query adaptation
-- [ ] `.psqlrc` basic support (execute commands on startup)
-- [ ] Config file loading (TOML)
+- [ ] Schema-aware contextual autocomplete (after FROM → tables, after SELECT → columns)
+- [ ] Syntax highlighting in input line (SQL keywords, strings, numbers, comments)
+- [ ] Configurable color themes (auto-detect dark/light terminal)
+- [ ] TUI pager (ratatui): replaces external pager, vertical/horizontal scroll, search
+- [ ] Pager: column freezing, column sorting, cell/row copy
 
-**Milestone:** Can replace psql for daily use. Has autocomplete, highlighting, pager, diagnostics.
+**Week 11-12:**
+- [ ] `\dba` diagnostic commands: activity, bloat, locks, unused-idx, seq-scans, cache-hit, vacuum, replication, connections, tablesize, config
+- [ ] PG version detection — adapt diagnostic queries to server version (PG 12-18)
+- [ ] Connection pooler detection (pgBouncer/PgCat/Supavisor) — warn about unsupported features
+- [ ] Config file loading (TOML) — user preferences, defaults, themes
 
-### Phase 2: AI Brain (Weeks 11-16)
+**Week 13-14:**
+- [ ] `\dba waits` — pg_ash wait event summary (when pg_ash is available)
+- [ ] Query history search improvements (fuzzy search, filter by table/command type)
+- [ ] Bookmarks: save and recall named queries (`\bookmark save name`, `\bookmark run name`)
+- [ ] `\diff` — compare table structure across two databases/schemas
+- [ ] Named connections: save connection profiles in config, switch with `\c @profile-name`
+- [ ] Output: sparklines and inline bar charts for numeric columns (optional)
+
+**Milestone:** Clearly better than psql for daily use. Has autocomplete, highlighting, integrated pager, diagnostics, and quality-of-life features psql never had.
+
+### Phase 2: AI Brain (Weeks 15-22)
 
 **Goal:** LLM integration that makes the terminal dramatically more powerful.
 
-**Week 11-12:**
+**Week 15-16:**
 - [ ] `LlmProvider` trait and OpenAI/Anthropic implementations
 - [ ] Schema context builder (compact DDL from pg_catalog)
 - [ ] `/ask` command: NL → SQL generation with streaming display
 - [ ] `/fix` command: explain last error with suggestions
 
-**Week 13-14:**
+**Week 17-18:**
 - [ ] `/explain` command: run EXPLAIN ANALYZE, feed plan to LLM, display interpretation
 - [ ] `/optimize` command: suggest query rewrites and indexes
 - [ ] Session context: feed recent query history to LLM
 - [ ] Token tracking and budget enforcement
 
-**Week 15-16:**
+**Week 19-20:**
 - [ ] Ollama (local model) support
 - [ ] Inline error suggestions (automatic, toggle-able)
-- [ ] pg_ash integration: wait event data as LLM context
+- [ ] pg_ash context: wait event data fed to LLM for deeper analysis
 - [ ] `/describe` command: AI-generated table/schema descriptions
-- [ ] `\dba waits` command for pg_ash visualization
+- [ ] AI mode (`\ai`) and SQL mode (`\sql`) switching
 
-**Milestone:** AI features work end-to-end. Can ask questions in English, get SQL back, explain errors, interpret EXPLAIN plans.
+**Week 21-22:**
+- [ ] Plan mode (`\plan`): AI investigates read-only, produces plan document
+- [ ] YOLO mode (`\yolo`): AI auto-executes within autonomy level
+- [ ] Observe mode (`\observe`): pure read-only watching with summaries
+- [ ] Mode-aware prompts showing current state
 
-### Phase 3: Agent (Weeks 17-24)
+**Milestone:** AI features work end-to-end. All interaction modes functional. Can ask questions in English, get SQL back, explain errors, interpret EXPLAIN plans, generate and execute plans.
+
+### Phase 3: Agent (Weeks 23-32)
 
 **Goal:** Autonomous monitoring and remediation with safety controls.
 
-**Week 17-18:**
+**Week 23-24:**
 - [ ] Autonomy level framework (L1-L5 with action classification)
 - [ ] Action audit log (every agent action recorded with justification)
 - [ ] Monitor loop: periodic health checks in interactive and daemon mode
 - [ ] L1 implementation: alert on issues (bloat, long queries, replication lag, connection saturation)
 
-**Week 19-20:**
+**Week 25-26:**
 - [ ] L2 implementation: generate recommendations with copy-pasteable commands
 - [ ] L3 implementation: auto-execute safe operations (ANALYZE, REINDEX CONCURRENTLY, VACUUM)
 - [ ] Dry-run mode for all actions
 - [ ] Health check protocol engine (pluggable check definitions)
 
-**Week 21-22:**
+**Week 27-28:**
 - [ ] Daemon mode: headless operation, PID file, signal handling
 - [ ] Notification channels: Slack webhook, email (SMTP)
-- [ ] GitHub Issues connector: create issues with RCA from agent findings
+- [ ] PostgresAI Issues connector: create/update issues with RCA from agent findings
+- [ ] PostgresAI Monitoring & Checkup connector: pull baselines, health scores
 - [ ] HTTP health check endpoint for daemon mode
 
-**Week 23-24:**
+**Week 29-30:**
+- [ ] GitHub Issues connector
 - [ ] L4 implementation: CREATE/DROP INDEX CONCURRENTLY, VACUUM FULL, pg_terminate_backend
 - [ ] Approval workflow: interactive confirmation for high-risk actions
 - [ ] Maintenance window awareness
+
+**Week 31-32:**
 - [ ] Systemd unit file and install guide
+- [ ] Launchd plist for macOS
+- [ ] Windows service support
+- [ ] Container image (Alpine-based, ~15MB)
 
-**Milestone:** Agent can monitor a database, detect issues, and take appropriate action within configured autonomy level.
+**Milestone:** Agent can monitor a database, detect issues, and take appropriate action within configured autonomy level. Runs as a daemon on all platforms.
 
-### Phase 4: Ecosystem (Weeks 25+)
+### Phase 4: Ecosystem (Weeks 33+)
 
 **Goal:** Connect to the outside world.
 
 - [ ] Datadog connector
 - [ ] pganalyze connector
-- [ ] AWS RDS connector (Performance Insights, CloudWatch)
+- [ ] AWS CloudWatch connector (metrics, logs, alarms, RDS Performance Insights, Enhanced Monitoring)
 - [ ] Supabase connector
 - [ ] Jira connector
 - [ ] GitLab Issues connector
 - [ ] Plugin system for custom connectors
-- [ ] Container image (Alpine-based, ~15MB)
 - [ ] Helm chart for Kubernetes sidecar deployment
 - [ ] Protocol marketplace (shareable health check definitions)
 - [ ] L5 implementation (with extensive testing and safeguards)
@@ -710,13 +819,15 @@ project-alpha/
 ## 7. Distribution
 
 ### Binary Releases
-- GitHub Releases with pre-built binaries:
+- GitHub Releases with pre-built binaries for all 6 targets:
   - `alpha-linux-x86_64` (static, musl)
   - `alpha-linux-aarch64` (static, musl)
   - `alpha-darwin-x86_64`
   - `alpha-darwin-aarch64`
   - `alpha-windows-x86_64.exe`
+  - `alpha-windows-aarch64.exe`
 - Checksums (SHA256) and signatures
+- All targets built and tested in CI from Phase 0
 
 ### Package Managers
 - `brew install alpha` (Homebrew tap)
