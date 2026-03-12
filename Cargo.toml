@@ -10,6 +10,11 @@ repository = "https://github.com/NikolayS/project-alpha"
 [features]
 integration = []
 
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+
 [[bin]]
 name = "samo"
 path = "src/main.rs"

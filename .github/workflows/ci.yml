@@ -5,61 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: lint-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            lint-${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: test-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            test-${{ runner.os }}-cargo-
-
-      - name: Run tests
-        run: cargo test
+  checks:
+    name: Checks
+    uses: ./.github/workflows/checks.yml
 
   build:
     name: Build (${{ matrix.artifact }})
-    needs: [lint, test]
+    needs: [checks]
     strategy:
       fail-fast: false
       matrix:
@@ -94,13 +54,14 @@ jobs:
             artifact: samo-windows-aarch64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cargo/registry
@@ -113,7 +74,11 @@ jobs:
       - name: Install cross
         if: matrix.use_cross
         shell: bash
-        run: cargo install cross --locked
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          curl -fsSL "https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "${HOME}/.cargo/bin"
 
       - name: Build (cross)
         if: matrix.use_cross
@@ -129,6 +94,8 @@ jobs:
         if: "!contains(matrix.os, 'windows')"
         shell: bash
         run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
           cp "target/${{ matrix.target }}/release/samo" "${{ matrix.artifact }}"
           chmod +x "${{ matrix.artifact }}"
 
@@ -136,10 +103,12 @@ jobs:
         if: contains(matrix.os, 'windows')
         shell: bash
         run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
           cp "target/${{ matrix.target }}/release/samo.exe" "${{ matrix.artifact }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
