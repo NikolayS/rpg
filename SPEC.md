@@ -305,7 +305,7 @@ Each area is independently configurable:
 | **sharding** | Shard key analysis, shard rebalancing, cross-shard query detection | "Table 'events' is 500GB on single node. Shard key candidate: tenant_id (high cardinality, even distribution)" | Produces sharding plan, waits | Max level: Guardian (sharding changes never auto-pilot) |
 | **corruption** | Data corruption detection (checksums, pg_amcheck), repair guidance | "Page checksum failure in orders at block 42891. 3 rows affected." | Proposes repair strategy (REINDEX, pg_surgery, restore from backup), waits | Auto-detects via periodic checks, auto-alerts. Max repair level: Guardian |
 | **data_lifecycle** | Archiving, purging, retention policies, cold storage | "audit_log has 2B rows, 800GB. Rows older than 2 years: 1.2B. Suggest archive + purge." | Shows archive/purge plan with retention rules, waits | Auto-archives/purges per configured retention policy |
-| **cost** | Infrastructure cost analysis, right-sizing, reserved instance recommendations | "RDS r6g.2xlarge at $1,400/mo. CPU avg 12%, memory 45%. Suggest r6g.xlarge ($700/mo)" | Shows right-sizing plan, waits | Auto-alerts on cost anomalies, recommends changes |
+| **budgets** | Infrastructure cost analysis, right-sizing, reserved instance recommendations | "RDS r6g.2xlarge at $1,400/mo. CPU avg 12%, memory 45%. Suggest r6g.xlarge ($700/mo)" | Shows right-sizing plan, waits | Auto-alerts on cost anomalies, recommends changes |
 | **backup_monitoring** | Backup freshness, WAL archiving, PITR readiness | "Last backup 26h ago, SLA is 24h" | Proposes backup trigger, waits | Auto-alerts, can trigger backups |
 | **security** | Role audit, password policy, pg_hba review, extension vulnerabilities | "Role 'app' has SUPERUSER, recommend downgrade" | Shows REVOKE/ALTER ROLE, waits | Max level: Guardian (security changes never auto-pilot) |
 
@@ -325,7 +325,7 @@ partitioning = "advisor"
 sharding = "advisor"             # max level: guardian
 corruption = "advisor"           # max repair level: guardian
 data_lifecycle = "advisor"
-cost = "advisor"
+budgets = "advisor"
 minor_upgrade = "advisor"
 major_upgrade = "advisor"
 schema_health = "advisor"        # max level: guardian
