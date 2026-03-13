@@ -206,6 +206,32 @@ pub enum MetaCmd {
     /// The raw argument string (everything after `\copy `) is captured here
     /// and passed to [`crate::copy::parse_copy_args`] at dispatch time.
     Copy(String),
+    // -- Extended query protocol (#57) ------------------------------------
+    /// `\bind [param...]` — set positional parameters for the next query.
+    ///
+    /// The listed parameter values are stored and used when the next SQL
+    /// statement is executed.  Execution uses the extended query protocol
+    /// (`client.query`) so that server-side type inference applies.  The
+    /// parameters are consumed after one use.
+    ///
+    /// Example: `select $1::int + $2::int \bind 3 4 \g` → `7`
+    Bind(Vec<String>),
+    /// `\parse stmt_name` — prepare the current query buffer as a named
+    /// server-side prepared statement.
+    ///
+    /// Sends a `Parse` message via `client.prepare(sql)` and stores the
+    /// resulting [`tokio_postgres::Statement`] under `stmt_name`.
+    Parse(String),
+    /// `\bind_named stmt_name [param...]` — execute a named prepared
+    /// statement with the supplied positional parameters.
+    ///
+    /// Retrieves the previously stored [`tokio_postgres::Statement`] and
+    /// calls `client.query(&stmt, &params)`.
+    BindNamed(String, Vec<String>),
+    /// `\close_prepared stmt_name` — deallocate a named prepared statement.
+    ///
+    /// Sends `DEALLOCATE stmt_name` and removes it from the local map.
+    ClosePrepared(String),
 
     // -- Cross-tabulation (#54) --------------------------------------------
     /// `\crosstabview [colV [colH [colD [sortcolH]]]]` — execute the buffer
@@ -368,6 +394,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('u') => parse_unset(input),
         Some('w') => parse_w(input),
         Some('x') => parse_x(input),
+        Some('b') => parse_b_family(input),
         Some('g') => parse_g_family(input),
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
@@ -528,7 +555,7 @@ fn parse_x(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Expanded(mode))
 }
 
-/// Parse `\conninfo`, `\crosstabview`, `\copy`, `\cd`, `\c`, or unknown `\c…`.
+/// Parse `\conninfo`, `\crosstabview`, `\copy`, `\close_prepared`, `\cd`, `\c`, or unknown `\c…`.
 fn parse_c_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("conninfo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -546,6 +573,16 @@ fn parse_c_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("copy") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::Copy(rest.trim().to_owned()));
+        }
+    }
+    // `\close_prepared stmt_name` — deallocate a named prepared statement.
+    if let Some(rest) = input.strip_prefix("close_prepared") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let name = rest.trim().to_owned();
+            if name.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::ClosePrepared(name));
         }
     }
     // `\cd [dir]` — must be checked before bare `\c`.
@@ -896,7 +933,8 @@ fn parse_w(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\p` (print buffer), `\password [user]`, and `\pset [option [value]]`.
+/// Parse `\p` (print buffer), `\parse stmt_name`, `\password [user]`, and
+/// `\pset [option [value]]`.
 fn parse_p_family(input: &str) -> ParsedMeta {
     // `\password` must be checked before bare `\p` (longer prefix wins).
     if let Some(rest) = input.strip_prefix("password") {
@@ -921,6 +959,16 @@ fn parse_p_family(input: &str) -> ParsedMeta {
             return parse_pset(input);
         }
     }
+    // `\parse stmt_name` — prepare buffer as named prepared statement.
+    if let Some(rest) = input.strip_prefix("parse") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let name = rest.trim().to_owned();
+            if name.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::Parse(name));
+        }
+    }
     parse_simple_or_unknown(input, "p", MetaCmd::PrintBuffer)
 }
 
@@ -941,6 +989,96 @@ fn parse_shell(input: &str) -> ParsedMeta {
         },
         echo_hidden: false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// \b family parser — extended query protocol commands (#57)
+// ---------------------------------------------------------------------------
+
+/// Split a whitespace-separated argument string into individual tokens.
+///
+/// A token may be single-quoted to include spaces: `'hello world'` → one
+/// token.  Doubled single-quotes inside a quoted token are an escaped quote.
+/// Unquoted tokens are delimited by ASCII whitespace.
+fn split_params(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if c == '\'' {
+            // Quoted token: consume until closing `'` ('' is an escape).
+            chars.next(); // consume opening quote
+            let mut token = String::new();
+            loop {
+                match chars.next() {
+                    None => break,
+                    Some('\'') => {
+                        if chars.peek() == Some(&'\'') {
+                            // Escaped quote inside quoted string.
+                            chars.next();
+                            token.push('\'');
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(ch) => token.push(ch),
+                }
+            }
+            result.push(token);
+        } else {
+            // Unquoted token: consume until whitespace.
+            let mut token = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch.is_whitespace() {
+                    break;
+                }
+                token.push(ch);
+                chars.next();
+            }
+            result.push(token);
+        }
+    }
+
+    result
+}
+
+/// Parse `\bind`, `\bind_named`, and `\close_prepared`.
+///
+/// Disambiguation order (longest match first):
+///   `bind_named` → [`MetaCmd::BindNamed`]
+///   `bind`       → [`MetaCmd::Bind`]
+///   `close_prepared` (starts with `c`, not `b`) — handled in `parse_c_family`
+///
+/// Any unrecognised `b`-prefixed command falls through to [`MetaCmd::Unknown`].
+fn parse_b_family(input: &str) -> ParsedMeta {
+    // `\bind_named stmt_name [params...]` — checked before `\bind`.
+    if let Some(rest) = input.strip_prefix("bind_named") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim();
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or("").to_owned();
+            let params_str = parts.next().unwrap_or("").trim();
+            let params = split_params(params_str);
+            if name.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::BindNamed(name, params));
+        }
+    }
+
+    // `\bind [params...]`
+    if let Some(rest) = input.strip_prefix("bind") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let params = split_params(rest.trim());
+            return ParsedMeta::simple(MetaCmd::Bind(params));
+        }
+    }
+
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2075,6 +2213,61 @@ mod tests {
         );
     }
 
+    // -- \bind (#57) ---------------------------------------------------------
+
+    #[test]
+    fn parse_bind_no_params() {
+        let m = parse("\\bind");
+        assert_eq!(m.cmd, MetaCmd::Bind(vec![]));
+    }
+
+    #[test]
+    fn parse_bind_one_param() {
+        let m = parse("\\bind 42");
+        assert_eq!(m.cmd, MetaCmd::Bind(vec!["42".to_owned()]));
+    }
+
+    #[test]
+    fn parse_bind_two_params() {
+        let m = parse("\\bind 3 4");
+        assert_eq!(m.cmd, MetaCmd::Bind(vec!["3".to_owned(), "4".to_owned()]));
+    }
+
+    #[test]
+    fn parse_bind_quoted_param_with_space() {
+        let m = parse("\\bind 'hello world'");
+        assert_eq!(m.cmd, MetaCmd::Bind(vec!["hello world".to_owned()]));
+    }
+
+    #[test]
+    fn parse_bind_not_confused_with_bind_named() {
+        // \bind_named must not fall through to \bind.
+        assert!(!matches!(
+            parse("\\bind_named my_stmt 1").cmd,
+            MetaCmd::Bind(_)
+        ));
+    }
+
+    // -- \bind_named (#57) ---------------------------------------------------
+
+    #[test]
+    fn parse_bind_named_no_params() {
+        let m = parse("\\bind_named my_stmt");
+        assert_eq!(m.cmd, MetaCmd::BindNamed("my_stmt".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn parse_bind_named_with_params() {
+        let m = parse("\\bind_named my_stmt 1 2 3");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::BindNamed(
+                "my_stmt".to_owned(),
+                vec!["1".to_owned(), "2".to_owned(), "3".to_owned()],
+            )
+        );
+    }
+
     #[test]
     fn parse_copy_to_stdout() {
         let m = parse("\\copy t TO stdout CSV");
@@ -2093,6 +2286,92 @@ mod tests {
         assert!(matches!(parse("\\copy t FROM stdin").cmd, MetaCmd::Copy(_)));
         assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
         assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
+    }
+
+    #[test]
+    fn parse_bind_named_missing_name() {
+        // No name: should parse as Unknown.
+        let m = parse("\\bind_named");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    // -- \parse (#57) --------------------------------------------------------
+
+    #[test]
+    fn parse_parse_stmt() {
+        let m = parse("\\parse my_stmt");
+        assert_eq!(m.cmd, MetaCmd::Parse("my_stmt".to_owned()));
+    }
+
+    #[test]
+    fn parse_parse_missing_name() {
+        // No name: should parse as Unknown.
+        let m = parse("\\parse");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_parse_not_confused_with_p() {
+        // \parse must not fall through to PrintBuffer.
+        assert!(!matches!(parse("\\parse stmt").cmd, MetaCmd::PrintBuffer));
+    }
+
+    // -- \close_prepared (#57) -----------------------------------------------
+
+    #[test]
+    fn parse_close_prepared() {
+        let m = parse("\\close_prepared my_stmt");
+        assert_eq!(m.cmd, MetaCmd::ClosePrepared("my_stmt".to_owned()));
+    }
+
+    #[test]
+    fn parse_close_prepared_missing_name() {
+        let m = parse("\\close_prepared");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_close_prepared_not_confused_with_conninfo() {
+        assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+        assert!(matches!(
+            parse("\\close_prepared stmt").cmd,
+            MetaCmd::ClosePrepared(_)
+        ));
+    }
+
+    // -- split_params helper -------------------------------------------------
+
+    #[test]
+    fn split_params_empty() {
+        assert!(split_params("").is_empty());
+    }
+
+    #[test]
+    fn split_params_whitespace_only() {
+        assert!(split_params("   ").is_empty());
+    }
+
+    #[test]
+    fn split_params_unquoted() {
+        assert_eq!(split_params("a b c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn split_params_quoted_space() {
+        assert_eq!(split_params("'hello world'"), vec!["hello world"]);
+    }
+
+    #[test]
+    fn split_params_escaped_quote() {
+        assert_eq!(split_params("'it''s'"), vec!["it's"]);
+    }
+
+    #[test]
+    fn split_params_mixed() {
+        assert_eq!(
+            split_params("42 'foo bar' baz"),
+            vec!["42", "foo bar", "baz"]
+        );
     }
 
     // -- \crosstabview -------------------------------------------------------

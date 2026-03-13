@@ -4,6 +4,7 @@
 //! SQL accumulation, backslash command handling, transaction-state prompts,
 //! and signal-aware Ctrl-C / Ctrl-D behaviour.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -286,6 +287,16 @@ pub struct ReplSettings {
     pub cond: crate::conditional::ConditionalState,
     /// The last successfully-executed SQL string, used by `\watch`.
     pub last_query: Option<String>,
+    /// Pending bind parameters set by `\bind` for the next query execution.
+    ///
+    /// When `Some`, the next query is sent using the extended query protocol
+    /// (`client.query`) with these values as positional parameters.  The
+    /// field is cleared to `None` after each query execution.
+    pub pending_bind_params: Option<Vec<String>>,
+    /// Named prepared statements stored by `\parse`.
+    ///
+    /// Maps statement name → compiled [`tokio_postgres::Statement`].
+    pub named_statements: HashMap<String, tokio_postgres::Statement>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -310,6 +321,17 @@ impl std::fmt::Debug for ReplSettings {
             .field("debug", &self.debug)
             .field("cond_depth", &self.cond.depth())
             .field("last_query", &self.last_query.as_deref().map(|_| "<sql>"))
+            .field(
+                "pending_bind_params",
+                &self
+                    .pending_bind_params
+                    .as_ref()
+                    .map(|p| format!("{} params", p.len())),
+            )
+            .field(
+                "named_statements",
+                &format!("{} stmts", self.named_statements.len()),
+            )
             .finish()
     }
 }
@@ -585,6 +607,277 @@ pub async fn execute_query(
     // Store as the last successfully executed query (used by `\watch`).
     if success {
         settings.last_query = Some(sql.to_owned());
+    }
+
+    success
+}
+
+// ---------------------------------------------------------------------------
+// Extended query protocol execution (#57)
+// ---------------------------------------------------------------------------
+
+/// Execute a SQL string using the extended query protocol with positional
+/// parameters and print results.
+///
+/// All parameter values arrive as `String`s from `\bind`.  They are passed
+/// as `&str` to tokio-postgres, which sends them as untyped text parameters
+/// over the wire.  The query should contain explicit casts (e.g. `$1::int`)
+/// so that Postgres can resolve the types.
+///
+/// Returns `true` on success, `false` if the query produced a SQL error.
+#[allow(clippy::too_many_lines)]
+pub async fn execute_query_extended(
+    client: &Client,
+    sql: &str,
+    params: &[String],
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) -> bool {
+    // Interpolate variables before sending.
+    let interpolated = settings.vars.interpolate(sql);
+    let sql_to_send = interpolated.as_str();
+
+    // -s / --single-step: prompt before executing.
+    if settings.single_step && !confirm_single_step(sql_to_send) {
+        return true; // skipped — not an error
+    }
+
+    // -e / --echo-queries: print query to stderr before executing.
+    if settings.echo_queries {
+        eprintln!("{sql_to_send}");
+    }
+
+    // -L: log query input to the log file.
+    if let Some(ref mut lf) = settings.log_file {
+        let _ = writeln!(lf, "{sql_to_send}");
+    }
+
+    let start = if settings.timing {
+        Some(Instant::now())
+    } else {
+        None
+    };
+
+    // Prepare the statement so we can execute with typed parameters.
+    let stmt = match client.prepare(sql_to_send).await {
+        Ok(s) => s,
+        Err(e) => {
+            if settings.echo_errors {
+                eprintln!("{sql_to_send}");
+            }
+            eprintln!("ERROR:  {e}");
+            tx.on_error();
+            return false;
+        }
+    };
+
+    // Build the parameter list as &str references (text format).
+    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let dyn_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
+        .iter()
+        .map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+
+    let success = match client.query(&stmt, dyn_params.as_slice()).await {
+        Ok(rows) => {
+            // Print results using the same pset formatting as simple_query.
+            use crate::output::format_rowset_pset;
+            use crate::query::{ColumnMeta, RowSet};
+
+            if !rows.is_empty() || !stmt.columns().is_empty() {
+                let col_names: Vec<String> =
+                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
+
+                let row_data: Vec<Vec<Option<String>>> = rows
+                    .iter()
+                    .map(|row| {
+                        (0..col_names.len())
+                            .map(|i| row.try_get::<_, Option<String>>(i).unwrap_or(None))
+                            .collect()
+                    })
+                    .collect();
+
+                let columns: Vec<ColumnMeta> = col_names
+                    .iter()
+                    .enumerate()
+                    .map(|(col_idx, n)| {
+                        let mut has_value = false;
+                        let is_numeric = row_data.iter().all(|r| {
+                            match r.get(col_idx).and_then(|v| v.as_deref()) {
+                                None | Some("") => true,
+                                Some(val) => {
+                                    has_value = true;
+                                    val.parse::<f64>().is_ok()
+                                }
+                            }
+                        }) && has_value;
+                        ColumnMeta {
+                            name: n.clone(),
+                            is_numeric,
+                        }
+                    })
+                    .collect();
+
+                let rs = RowSet {
+                    columns,
+                    rows: row_data,
+                };
+
+                let mut out = String::new();
+                format_rowset_pset(&mut out, &rs, &settings.pset);
+
+                let out_bytes = out.as_bytes();
+
+                if let Some(ref mut lf) = settings.log_file {
+                    let _ = lf.write_all(out_bytes);
+                }
+
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = w.write_all(out_bytes);
+                } else {
+                    let _ = io::stdout().write_all(out_bytes);
+                }
+            }
+
+            tx.update_from_sql(sql_to_send);
+            true
+        }
+        Err(e) => {
+            if settings.echo_errors {
+                eprintln!("{sql_to_send}");
+            }
+            eprintln!("ERROR:  {e}");
+            tx.on_error();
+            false
+        }
+    };
+
+    if let Some(t) = start {
+        let elapsed = t.elapsed();
+        println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+    }
+
+    if success {
+        settings.last_query = Some(sql.to_owned());
+    }
+
+    success
+}
+
+/// Execute a named prepared statement with the given parameters.
+///
+/// Returns `true` on success, `false` on error.  If `stmt_name` is not
+/// found in `settings.named_statements`, an error message is printed.
+async fn execute_named_stmt(
+    client: &Client,
+    stmt_name: &str,
+    params: &[String],
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) -> bool {
+    // Clone the statement out of the map so we don't hold a borrow on
+    // settings while calling async client methods.
+    let Some(stmt) = settings.named_statements.get(stmt_name).cloned() else {
+        eprintln!("\\bind_named: prepared statement \"{stmt_name}\" does not exist");
+        return false;
+    };
+
+    if settings.single_step {
+        let preview = format!("[execute stmt \"{stmt_name}\"]");
+        if !confirm_single_step(&preview) {
+            return true;
+        }
+    }
+
+    if settings.echo_queries {
+        eprintln!("[execute stmt \"{stmt_name}\"]");
+    }
+
+    let start = if settings.timing {
+        Some(Instant::now())
+    } else {
+        None
+    };
+
+    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let dyn_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
+        .iter()
+        .map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+
+    let success = match client.query(&stmt, dyn_params.as_slice()).await {
+        Ok(rows) => {
+            use crate::output::format_rowset_pset;
+            use crate::query::{ColumnMeta, RowSet};
+
+            if !rows.is_empty() || !stmt.columns().is_empty() {
+                let col_names: Vec<String> =
+                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
+
+                let row_data: Vec<Vec<Option<String>>> = rows
+                    .iter()
+                    .map(|row| {
+                        (0..col_names.len())
+                            .map(|i| row.try_get::<_, Option<String>>(i).unwrap_or(None))
+                            .collect()
+                    })
+                    .collect();
+
+                let columns: Vec<ColumnMeta> = col_names
+                    .iter()
+                    .enumerate()
+                    .map(|(col_idx, n)| {
+                        let mut has_value = false;
+                        let is_numeric = row_data.iter().all(|r| {
+                            match r.get(col_idx).and_then(|v| v.as_deref()) {
+                                None | Some("") => true,
+                                Some(val) => {
+                                    has_value = true;
+                                    val.parse::<f64>().is_ok()
+                                }
+                            }
+                        }) && has_value;
+                        ColumnMeta {
+                            name: n.clone(),
+                            is_numeric,
+                        }
+                    })
+                    .collect();
+
+                let rs = RowSet {
+                    columns,
+                    rows: row_data,
+                };
+
+                let mut out = String::new();
+                format_rowset_pset(&mut out, &rs, &settings.pset);
+
+                let out_bytes = out.as_bytes();
+
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = w.write_all(out_bytes);
+                } else {
+                    let _ = io::stdout().write_all(out_bytes);
+                }
+            }
+
+            tx.update_from_sql(&format!("[bind_named {stmt_name}]"));
+            true
+        }
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            tx.on_error();
+            false
+        }
+    };
+
+    if let Some(t) = start {
+        let elapsed = t.elapsed();
+        println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+    }
+
+    if success {
+        settings.last_query = Some(format!("[bind_named {stmt_name}]"));
     }
 
     success
@@ -1188,10 +1481,17 @@ pub(crate) async fn exec_lines(
                 MetaResult::ExecuteBuffer => {
                     let sql = buf.trim().to_owned();
                     buf.clear();
-                    if !sql.is_empty() && !execute_query(client, &sql, settings, tx).await {
-                        exit_code = 1;
-                        if settings.single_transaction {
-                            break 'lines;
+                    if !sql.is_empty() {
+                        let ok = if let Some(bp) = settings.pending_bind_params.take() {
+                            execute_query_extended(client, &sql, &bp, settings, tx).await
+                        } else {
+                            execute_query(client, &sql, settings, tx).await
+                        };
+                        if !ok {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
                         }
                     }
                 }
@@ -1204,6 +1504,52 @@ pub(crate) async fn exec_lines(
                     buf.clear();
                     if !sql.is_empty() {
                         execute_crosstabview(client, &sql, &args, settings, tx).await;
+                    }
+                }
+                MetaResult::BindParams(params) => {
+                    settings.pending_bind_params = Some(params);
+                }
+                MetaResult::ParseStatement(name) => {
+                    let sql = buf.trim().to_owned();
+                    if sql.is_empty() {
+                        eprintln!("\\parse: query buffer is empty");
+                    } else {
+                        match client.prepare(&sql).await {
+                            Ok(stmt) => {
+                                settings.named_statements.insert(name, stmt);
+                            }
+                            Err(e) => {
+                                eprintln!("ERROR:  {e}");
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    break 'lines;
+                                }
+                            }
+                        }
+                    }
+                }
+                MetaResult::BindNamedExec(name, params) => {
+                    if !execute_named_stmt(client, &name, &params, settings, tx).await {
+                        exit_code = 1;
+                        if settings.single_transaction {
+                            break 'lines;
+                        }
+                    }
+                }
+                MetaResult::ClosePrepared(name) => {
+                    if settings.named_statements.remove(&name).is_some() {
+                        let deallocate = format!("deallocate {name}");
+                        if !execute_query(client, &deallocate, settings, tx).await {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "\\close_prepared: prepared statement \
+                             \"{name}\" does not exist"
+                        );
                     }
                 }
                 _ => {}
@@ -1227,10 +1573,17 @@ pub(crate) async fn exec_lines(
                     MetaResult::ExecuteBuffer => {
                         let sql = buf.trim().to_owned();
                         buf.clear();
-                        if !sql.is_empty() && !execute_query(client, &sql, settings, tx).await {
-                            exit_code = 1;
-                            if settings.single_transaction {
-                                break 'lines;
+                        if !sql.is_empty() {
+                            let ok = if let Some(bp) = settings.pending_bind_params.take() {
+                                execute_query_extended(client, &sql, &bp, settings, tx).await
+                            } else {
+                                execute_query(client, &sql, settings, tx).await
+                            };
+                            if !ok {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    break 'lines;
+                                }
                             }
                         }
                     }
@@ -1249,6 +1602,17 @@ pub(crate) async fn exec_lines(
                         buf.clear();
                         if !sql.is_empty() {
                             execute_crosstabview(client, &sql, &args, settings, tx).await;
+                        }
+                    }
+                    MetaResult::BindParams(params) => {
+                        settings.pending_bind_params = Some(params);
+                    }
+                    MetaResult::BindNamedExec(name, params) => {
+                        if !execute_named_stmt(client, &name, &params, settings, tx).await {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
                         }
                     }
                     _ => {}
@@ -1653,6 +2017,24 @@ pub enum MetaResult {
     ///
     /// The inner `String` carries the raw argument string (may be empty).
     CrosstabViewBuffer(String),
+    /// Store bind parameters for the next query (`\bind params…`).
+    ///
+    /// The REPL saves these in `ReplSettings::pending_bind_params`; the
+    /// next query execution drains them and uses the extended protocol.
+    BindParams(Vec<String>),
+    /// Prepare the current buffer as a named server-side statement (`\parse name`).
+    ///
+    /// The REPL calls `client.prepare(buf)` and stores the result under `name`
+    /// in `ReplSettings::named_statements`.
+    ParseStatement(String),
+    /// Execute a named prepared statement with the given params (`\bind_named name params…`).
+    ///
+    /// The REPL retrieves the stored statement and calls `client.query`.
+    BindNamedExec(String, Vec<String>),
+    /// Deallocate a named prepared statement (`\close_prepared name`).
+    ///
+    /// Sends `DEALLOCATE name` to the server and removes it from the local map.
+    ClosePrepared(String),
 }
 
 /// Default `\watch` interval in seconds.
@@ -1889,6 +2271,15 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::CrosstabView(ref args) => Some(MetaResult::CrosstabViewBuffer(args.clone())),
+
+        // -- Extended query protocol (#57) -----------------------------------
+        MetaCmd::Bind(ref params) => Some(MetaResult::BindParams(params.clone())),
+        MetaCmd::BindNamed(ref name, ref params) => {
+            Some(MetaResult::BindNamedExec(name.clone(), params.clone()))
+        }
+        MetaCmd::Parse(ref name) => Some(MetaResult::ParseStatement(name.clone())),
+        MetaCmd::ClosePrepared(ref name) => Some(MetaResult::ClosePrepared(name.clone())),
+
         _ => None,
     }
 }
@@ -2498,7 +2889,11 @@ async fn handle_backslash_dumb(
             let sql = buf.trim().to_owned();
             buf.clear();
             if !sql.is_empty() {
-                execute_query(client, &sql, settings, tx).await;
+                if let Some(bind_params) = settings.pending_bind_params.take() {
+                    execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                } else {
+                    execute_query(client, &sql, settings, tx).await;
+                }
             }
             HandleLineResult::BufferUpdated
         }
@@ -2525,7 +2920,11 @@ async fn handle_backslash_dumb(
                 let prev = settings.expanded;
                 settings.expanded = ExpandedMode::On;
                 settings.pset.expanded = ExpandedMode::On;
-                execute_query(client, &sql, settings, tx).await;
+                if let Some(bind_params) = settings.pending_bind_params.take() {
+                    execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                } else {
+                    execute_query(client, &sql, settings, tx).await;
+                }
                 settings.expanded = prev;
                 settings.pset.expanded = prev;
             }
@@ -2573,6 +2972,37 @@ async fn handle_backslash_dumb(
                 execute_crosstabview(client, &sql, &args, settings, tx).await;
             }
             HandleLineResult::BufferUpdated
+        }
+        MetaResult::BindParams(params) => {
+            settings.pending_bind_params = Some(params);
+            HandleLineResult::Continue
+        }
+        MetaResult::ParseStatement(name) => {
+            let sql = buf.trim().to_owned();
+            if sql.is_empty() {
+                eprintln!("\\parse: query buffer is empty");
+            } else {
+                match client.prepare(&sql).await {
+                    Ok(stmt) => {
+                        settings.named_statements.insert(name.clone(), stmt);
+                    }
+                    Err(e) => eprintln!("ERROR:  {e}"),
+                }
+            }
+            HandleLineResult::Continue
+        }
+        MetaResult::BindNamedExec(name, params) => {
+            execute_named_stmt(client, &name, &params, settings, tx).await;
+            HandleLineResult::Continue
+        }
+        MetaResult::ClosePrepared(name) => {
+            if settings.named_statements.remove(&name).is_some() {
+                let deallocate = format!("deallocate {name}");
+                execute_query(client, &deallocate, settings, tx).await;
+            } else {
+                eprintln!("\\close_prepared: prepared statement \"{name}\" does not exist");
+            }
+            HandleLineResult::Continue
         }
         MetaResult::Continue => HandleLineResult::Continue,
     }
@@ -2644,7 +3074,11 @@ async fn handle_line(
                 buf.clear();
                 stmt_buf.clear();
                 if !sql.is_empty() {
-                    execute_query(client, &sql, settings, tx).await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                    } else {
+                        execute_query(client, &sql, settings, tx).await;
+                    }
                 }
                 HandleLineResult::BufferUpdated
             }
@@ -2674,7 +3108,11 @@ async fn handle_line(
                     let prev = settings.expanded;
                     settings.expanded = ExpandedMode::On;
                     settings.pset.expanded = ExpandedMode::On;
-                    execute_query(client, &sql, settings, tx).await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                    } else {
+                        execute_query(client, &sql, settings, tx).await;
+                    }
                     settings.expanded = prev;
                     settings.pset.expanded = prev;
                 }
@@ -2727,6 +3165,40 @@ async fn handle_line(
                 }
                 HandleLineResult::BufferUpdated
             }
+            MetaResult::BindParams(params) => {
+                settings.pending_bind_params = Some(params);
+                HandleLineResult::Continue
+            }
+            MetaResult::ParseStatement(name) => {
+                let sql = buf.trim().to_owned();
+                if sql.is_empty() {
+                    eprintln!("\\parse: query buffer is empty");
+                } else {
+                    match client.prepare(&sql).await {
+                        Ok(stmt) => {
+                            settings.named_statements.insert(name.clone(), stmt);
+                        }
+                        Err(e) => eprintln!("ERROR:  {e}"),
+                    }
+                }
+                HandleLineResult::Continue
+            }
+            MetaResult::BindNamedExec(name, params) => {
+                execute_named_stmt(client, &name, &params, settings, tx).await;
+                HandleLineResult::Continue
+            }
+            MetaResult::ClosePrepared(name) => {
+                if settings.named_statements.remove(&name).is_some() {
+                    let deallocate = format!("deallocate {name}");
+                    execute_query(client, &deallocate, settings, tx).await;
+                } else {
+                    eprintln!(
+                        "\\close_prepared: prepared statement \"{name}\" \
+                         does not exist"
+                    );
+                }
+                HandleLineResult::Continue
+            }
             MetaResult::Continue => HandleLineResult::Continue,
         };
     }
@@ -2767,7 +3239,11 @@ async fn handle_line(
                 buf.clear();
                 stmt_buf.clear();
                 if !sql.is_empty() {
-                    execute_query(client, &sql, settings, tx).await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                    } else {
+                        execute_query(client, &sql, settings, tx).await;
+                    }
                 }
                 HandleLineResult::BufferUpdated
             }
@@ -2797,7 +3273,11 @@ async fn handle_line(
                     let prev = settings.expanded;
                     settings.expanded = ExpandedMode::On;
                     settings.pset.expanded = ExpandedMode::On;
-                    execute_query(client, &sql, settings, tx).await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                    } else {
+                        execute_query(client, &sql, settings, tx).await;
+                    }
                     settings.expanded = prev;
                     settings.pset.expanded = prev;
                 }
@@ -2834,6 +3314,14 @@ async fn handle_line(
                     execute_crosstabview(client, &sql, &args, settings, tx).await;
                 }
                 HandleLineResult::BufferUpdated
+            }
+            MetaResult::BindParams(params) => {
+                settings.pending_bind_params = Some(params);
+                HandleLineResult::Continue
+            }
+            MetaResult::BindNamedExec(name, params) => {
+                execute_named_stmt(client, &name, &params, settings, tx).await;
+                HandleLineResult::Continue
             }
             _ => HandleLineResult::Continue,
         };
