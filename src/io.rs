@@ -24,9 +24,17 @@ use crate::repl::{ReplSettings, TxState};
 /// turn. A trailing statement without a terminating semicolon is also
 /// executed.
 ///
+/// `tx` is the caller's transaction state and is updated in-place so that
+/// transaction context is inherited across `\i` / `\ir` inclusions.
+///
 /// Returns 0 on success, 1 if the file cannot be read or any statement
 /// produces a SQL error.
-pub async fn include_file(client: &Client, path: &str, settings: &ReplSettings) -> i32 {
+pub async fn include_file(
+    client: &Client,
+    path: &str,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) -> i32 {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -35,7 +43,6 @@ pub async fn include_file(client: &Client, path: &str, settings: &ReplSettings) 
         }
     };
 
-    let mut tx = TxState::default();
     let mut buf = String::new();
     let mut exit_code = 0i32;
 
@@ -47,7 +54,7 @@ pub async fn include_file(client: &Client, path: &str, settings: &ReplSettings) 
 
         if crate::repl::is_complete(&buf) {
             let sql = buf.trim().to_owned();
-            if !crate::repl::execute_query(client, &sql, settings, &mut tx).await {
+            if !crate::repl::execute_query(client, &sql, settings, tx).await {
                 exit_code = 1;
             }
             buf.clear();
@@ -55,8 +62,7 @@ pub async fn include_file(client: &Client, path: &str, settings: &ReplSettings) 
     }
 
     // Trailing statement without a semicolon.
-    if !buf.trim().is_empty()
-        && !crate::repl::execute_query(client, buf.trim(), settings, &mut tx).await
+    if !buf.trim().is_empty() && !crate::repl::execute_query(client, buf.trim(), settings, tx).await
     {
         exit_code = 1;
     }
@@ -259,6 +265,7 @@ pub fn encoding(enc: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Read;
 
     // -- shell_command -------------------------------------------------------
@@ -344,11 +351,14 @@ mod tests {
     // -- edit (temp file creation and read-back) ----------------------------
 
     #[test]
+    #[serial]
     fn edit_creates_and_reads_temp_file() {
         // Use a no-op editor (cat or true) that doesn't modify the file.
         // We override $EDITOR to `cat` so the test is non-interactive.
         // `cat file` prints the file and exits 0 without modification.
+        // Clear $VISUAL so it doesn't override $EDITOR.
         std::env::set_var("EDITOR", "cat");
+        std::env::remove_var("VISUAL");
         let content = "select 42;";
         let result = edit(content, None, None);
         // cat should succeed and return the original content unchanged.

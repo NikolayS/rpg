@@ -249,6 +249,7 @@ pub use crate::output::ExpandedMode;
 // ---------------------------------------------------------------------------
 
 /// Runtime-adjustable display settings.
+#[derive(Default)]
 pub struct ReplSettings {
     /// Whether to print query timing after each query.
     pub timing: bool,
@@ -263,19 +264,6 @@ pub struct ReplSettings {
     /// Current output redirect target. When `Some`, query output and `\qecho`
     /// text are written here instead of stdout.
     pub output_target: Option<Box<dyn std::io::Write>>,
-}
-
-impl Default for ReplSettings {
-    fn default() -> Self {
-        Self {
-            timing: false,
-            expanded: ExpandedMode::default(),
-            echo_hidden: false,
-            pset: crate::output::PsetConfig::default(),
-            vars: crate::vars::Variables::new(),
-            output_target: None,
-        }
-    }
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -322,7 +310,9 @@ pub fn history_file() -> Option<PathBuf> {
 /// `is_first` is `false` when this is a subsequent result set in a
 /// multi-statement query, in which case a blank separator line is printed
 /// before the table (matching psql behaviour).
+/// `writer` is the output destination (stdout or a redirected file).
 fn print_result_set_pset(
+    writer: &mut dyn io::Write,
     col_names: &[String],
     rows: &[Vec<String>],
     had_rows: bool,
@@ -336,7 +326,7 @@ fn print_result_set_pset(
     if had_rows {
         if !col_names.is_empty() {
             if !is_first {
-                println!();
+                let _ = writeln!(writer);
             }
 
             // Build a RowSet from the raw string data.
@@ -364,15 +354,15 @@ fn print_result_set_pset(
 
             let mut out = String::new();
             format_rowset_pset(&mut out, &rs, pset);
-            print!("{out}");
+            let _ = writer.write_all(out.as_bytes());
         }
     } else {
         // Non-SELECT statement: show rows affected if > 0.
         if rows_affected > 0 {
             if !is_first {
-                println!();
+                let _ = writeln!(writer);
             }
-            println!("{rows_affected}");
+            let _ = writeln!(writer, "{rows_affected}");
         }
     }
 }
@@ -386,7 +376,7 @@ fn print_result_set_pset(
 pub async fn execute_query(
     client: &Client,
     sql: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> bool {
     // Interpolate variables before sending.
@@ -428,14 +418,27 @@ pub async fn execute_query(
                     SimpleQueryMessage::CommandComplete(n) => {
                         // Flush the current result set, then reset for next
                         // statement in a multi-statement query.
-                        print_result_set_pset(
-                            &col_names,
-                            &rows,
-                            had_rows,
-                            n,
-                            result_set_index == 0,
-                            &settings.pset,
-                        );
+                        if let Some(ref mut w) = settings.output_target {
+                            print_result_set_pset(
+                                w.as_mut(),
+                                &col_names,
+                                &rows,
+                                had_rows,
+                                n,
+                                result_set_index == 0,
+                                &settings.pset,
+                            );
+                        } else {
+                            print_result_set_pset(
+                                &mut io::stdout(),
+                                &col_names,
+                                &rows,
+                                had_rows,
+                                n,
+                                result_set_index == 0,
+                                &settings.pset,
+                            );
+                        }
                         result_set_index += 1;
                         col_names.clear();
                         rows.clear();
@@ -459,6 +462,7 @@ pub async fn execute_query(
 
     if let Some(t) = start {
         let elapsed = t.elapsed();
+        // Timing always goes to stdout regardless of output redirection.
         println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
     }
 
@@ -473,7 +477,7 @@ pub async fn execute_query(
 pub async fn exec_command(
     client: &Client,
     sql: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &crate::connection::ConnParams,
 ) -> i32 {
     if sql.trim_start().starts_with('\\') {
@@ -484,7 +488,8 @@ pub async fn exec_command(
             echo_hidden: settings.echo_hidden,
             ..Default::default()
         };
-        dispatch_meta(parsed, client, params, &mut dummy_settings).await;
+        let mut tx = TxState::default();
+        dispatch_meta(parsed, client, params, &mut dummy_settings, &mut tx).await;
         return 0;
     }
     let mut tx = TxState::default();
@@ -499,7 +504,7 @@ pub async fn exec_command(
 ///
 /// # Errors
 /// Returns 1 if the file cannot be read or any statement produces a SQL error.
-pub async fn exec_file(client: &Client, path: &str, settings: &ReplSettings) -> i32 {
+pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings) -> i32 {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -535,7 +540,7 @@ pub async fn exec_file(client: &Client, path: &str, settings: &ReplSettings) -> 
 }
 
 /// Execute SQL lines from stdin (non-interactive piped input).
-pub async fn exec_stdin(client: &Client, settings: &ReplSettings) -> i32 {
+pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings) -> i32 {
     let stdin = io::stdin();
     let mut buf = String::new();
     let mut tx = TxState::default();
@@ -909,7 +914,13 @@ pub enum MetaResult {
     /// Print the query buffer (`\p`).
     PrintBuffer,
     /// Open the editor on the buffer; execute the result on close (`\e`).
-    EditBuffer,
+    ///
+    /// `file` is the optional explicit file path from `\e file [line]`.
+    /// `line` is the optional starting line number.
+    EditBuffer {
+        file: Option<String>,
+        line: Option<usize>,
+    },
     /// Write the buffer to the given path (`\w file`).
     WriteBufferToFile(String),
 }
@@ -922,6 +933,7 @@ async fn dispatch_io(
     parsed: &crate::metacmd::ParsedMeta,
     client: &Client,
     settings: &mut ReplSettings,
+    tx: &mut TxState,
 ) -> Option<MetaResult> {
     use crate::metacmd::MetaCmd;
 
@@ -929,7 +941,7 @@ async fn dispatch_io(
         MetaCmd::Include => {
             match parsed.pattern.as_deref() {
                 Some(path) => {
-                    crate::io::include_file(client, path, settings).await;
+                    crate::io::include_file(client, path, settings, tx).await;
                 }
                 None => eprintln!("\\i: file name required"),
             }
@@ -941,7 +953,7 @@ async fn dispatch_io(
             // (future work).
             match parsed.pattern.as_deref() {
                 Some(path) => {
-                    crate::io::include_file(client, path, settings).await;
+                    crate::io::include_file(client, path, settings, tx).await;
                 }
                 None => eprintln!("\\ir: file name required"),
             }
@@ -951,9 +963,6 @@ async fn dispatch_io(
             match crate::io::open_output(parsed.pattern.as_deref()) {
                 Ok(target) => {
                     settings.output_target = target;
-                    if parsed.pattern.is_none() {
-                        println!("Output reset to stdout.");
-                    }
                 }
                 Err(e) => eprintln!("{e}"),
             }
@@ -968,7 +977,19 @@ async fn dispatch_io(
             }
             Some(MetaResult::Continue)
         }
-        MetaCmd::Edit => Some(MetaResult::EditBuffer),
+        MetaCmd::Edit => {
+            // Pattern may be "file" or "file line".
+            let (file, line) = match parsed.pattern.as_deref() {
+                None => (None, None),
+                Some(p) => {
+                    let mut parts = p.splitn(2, char::is_whitespace);
+                    let f = parts.next().filter(|s| !s.is_empty()).map(str::to_owned);
+                    let l = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+                    (f, l)
+                }
+            };
+            Some(MetaResult::EditBuffer { file, line })
+        }
         MetaCmd::Shell => {
             crate::io::shell_command(parsed.pattern.as_deref());
             Some(MetaResult::Continue)
@@ -1031,20 +1052,25 @@ fn dispatch_password(user: Option<&str>) {
 
 /// Dispatch a parsed meta-command, applying any side-effects to `settings`.
 ///
+/// `tx` is the caller's transaction state; it is forwarded to I/O commands
+/// such as `\i` / `\ir` so that included files inherit the outer context.
+///
 /// Returns a [`MetaResult`] indicating whether the loop should continue,
 /// exit, or replace the current connection. Buffer-mutating commands
 /// (`\r`, `\p`, `\w`, `\e`) return special variants that the REPL loop
 /// handles where the buffer is accessible.
+#[allow(clippy::too_many_lines)]
 async fn dispatch_meta(
     parsed: crate::metacmd::ParsedMeta,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
+    tx: &mut TxState,
 ) -> MetaResult {
     use crate::metacmd::MetaCmd;
 
     // Try I/O commands first (they are the most numerous).
-    if let Some(result) = dispatch_io(&parsed, client, settings).await {
+    if let Some(result) = dispatch_io(&parsed, client, settings, tx).await {
         return result;
     }
 
@@ -1349,7 +1375,7 @@ async fn handle_backslash_dumb(
 ) -> HandleLineResult {
     let mut parsed = crate::metacmd::parse(input);
     parsed.echo_hidden = settings.echo_hidden;
-    match dispatch_meta(parsed, client, params, settings).await {
+    match dispatch_meta(parsed, client, params, settings, tx).await {
         MetaResult::Quit => HandleLineResult::Quit,
         MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
         MetaResult::ClearBuffer => {
@@ -1371,8 +1397,8 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::Continue
         }
-        MetaResult::EditBuffer => {
-            match crate::io::edit(buf, None, None) {
+        MetaResult::EditBuffer { file, line } => {
+            match crate::io::edit(buf, file.as_deref(), line) {
                 Ok(new_content) => {
                     let trimmed = new_content.trim().to_owned();
                     if !trimmed.is_empty() {
@@ -1406,7 +1432,7 @@ async fn handle_line(
         // Backslash command — execute immediately, with access to the buffer.
         let mut parsed = crate::metacmd::parse(line.trim());
         parsed.echo_hidden = settings.echo_hidden;
-        return match dispatch_meta(parsed, client, params, settings).await {
+        return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
             MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::ClearBuffer => {
@@ -1429,9 +1455,9 @@ async fn handle_line(
                 }
                 HandleLineResult::Continue
             }
-            MetaResult::EditBuffer => {
+            MetaResult::EditBuffer { file, line } => {
                 // Write buffer to temp file, open editor, read back, execute.
-                match crate::io::edit(buf, None, None) {
+                match crate::io::edit(buf, file.as_deref(), line) {
                     Ok(new_content) => {
                         let trimmed = new_content.trim().to_owned();
                         if !trimmed.is_empty() {
