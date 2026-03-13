@@ -8,6 +8,9 @@
 //! Per-feature autonomy levels control how much Samo can do without
 //! human approval.
 
+// Many types are defined ahead of their consumers (Phase 3 integration).
+#![allow(dead_code)]
+
 use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
