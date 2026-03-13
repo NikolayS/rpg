@@ -932,12 +932,24 @@ fn parse_i_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\o [file]` and `\observe`.
+/// Parse `\o [file]` and `\observe [duration]`.
 fn parse_o(input: &str) -> ParsedMeta {
-    // `\observe` — enter observe execution mode.
+    // `\observe [duration]` — enter observe execution mode.
     if let Some(rest) = input.strip_prefix("observe") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ParsedMeta::simple(MetaCmd::ObserveMode);
+            let arg = rest.trim();
+            let pattern = if arg.is_empty() {
+                None
+            } else {
+                Some(arg.to_owned())
+            };
+            return ParsedMeta {
+                cmd: MetaCmd::ObserveMode,
+                pattern,
+                plus: false,
+                system: false,
+                echo_hidden: false,
+            };
         }
     }
     let Some(rest) = input.strip_prefix('o') else {
@@ -2834,6 +2846,21 @@ mod tests {
     #[test]
     fn parse_observe_mode() {
         assert_eq!(parse("\\observe").cmd, MetaCmd::ObserveMode);
+        assert!(parse("\\observe").pattern.is_none());
+    }
+
+    #[test]
+    fn parse_observe_mode_with_duration() {
+        let parsed = parse("\\observe 30s");
+        assert_eq!(parsed.cmd, MetaCmd::ObserveMode);
+        assert_eq!(parsed.pattern.as_deref(), Some("30s"));
+    }
+
+    #[test]
+    fn parse_observe_mode_with_minutes() {
+        let parsed = parse("\\observe 5m");
+        assert_eq!(parsed.cmd, MetaCmd::ObserveMode);
+        assert_eq!(parsed.pattern.as_deref(), Some("5m"));
     }
 
     #[test]
