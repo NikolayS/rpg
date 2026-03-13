@@ -276,6 +276,113 @@ pub async fn run_supervised_flow(
     executed
 }
 
+/// Execute proposals automatically in Auto mode.
+///
+/// Unlike Supervised mode, no user confirmation is required.
+/// Actions are validated by the Auditor, checked against Auto constraints,
+/// and the circuit breaker is consulted before execution.
+///
+/// Returns the number of actions executed.
+pub async fn run_auto_flow(
+    client: &Client,
+    proposals: &[ActionProposal],
+    audit_log: &mut AuditLog,
+    circuit_breaker: &mut crate::governance::CircuitBreaker,
+) -> usize {
+    if proposals.is_empty() {
+        return 0;
+    }
+
+    let auditor = Auditor;
+    let mut actor = Actor::new();
+
+    // Learn our PID.
+    if let Ok(messages) = client.simple_query("SELECT pg_backend_pid()").await {
+        for msg in &messages {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                if let Some(pid) = row.get(0).and_then(|s| s.parse::<i32>().ok()) {
+                    actor.set_own_pid(pid);
+                }
+            }
+        }
+    }
+
+    let mut executed = 0;
+    for proposal in proposals {
+        // Check Auto action constraints.
+        if !crate::governance::is_auto_permitted(proposal.feature, &proposal.proposed_action) {
+            crate::logging::info(
+                "auto",
+                &format!(
+                    "Skipping (not Auto-permitted): {}",
+                    proposal.proposed_action
+                ),
+            );
+            log_action(audit_log, proposal, ActionOutcome::Skipped, None);
+            continue;
+        }
+
+        // Auditor review (rule-based).
+        let decision = auditor.review(proposal, AutonomyLevel::Auto);
+        if let AuditDecision::Rejected { reason } = decision {
+            crate::logging::info("auto", &format!("Auditor rejected: {reason}"));
+            log_action(audit_log, proposal, ActionOutcome::Vetoed { reason }, None);
+            continue;
+        }
+
+        // Parse and validate.
+        let Some(action_request) = parse_proposal_to_request(proposal) else {
+            continue;
+        };
+        if let Err(e) = actor.validate(&action_request) {
+            crate::logging::warn("auto", &format!("Validation failed: {e}"));
+            continue;
+        }
+
+        // Execute.
+        let outcome = actor.execute(client, &action_request).await;
+        let success = matches!(outcome, ActionOutcome::Success { .. });
+
+        if success {
+            if let ActionOutcome::Success { ref detail } = outcome {
+                crate::logging::info("auto", &format!("Executed: {detail}"));
+            }
+            // Post-action verification.
+            let vr = crate::verification::verify_action(client, &action_request.action_type).await;
+            crate::logging::info("auto", &format!("Verification: {vr}"));
+
+            let verified = vr.is_confirmed();
+            // Record in circuit breaker (verification result determines success).
+            let tripped = circuit_breaker.record(proposal.feature, verified);
+            if tripped {
+                crate::logging::warn(
+                    "auto",
+                    &format!(
+                        "Circuit breaker tripped for {} — downgrading to Supervised",
+                        proposal.feature.label()
+                    ),
+                );
+            }
+        } else {
+            if let ActionOutcome::Failure { ref error } = outcome {
+                crate::logging::warn("auto", &format!("Failed: {error}"));
+            }
+            circuit_breaker.record(proposal.feature, false);
+        }
+
+        log_action(audit_log, proposal, outcome, None);
+        if success {
+            executed += 1;
+        }
+    }
+
+    if executed > 0 {
+        crate::logging::info("auto", &format!("{executed} Auto action(s) executed"));
+    }
+
+    executed
+}
+
 /// Log an action to the audit log.
 fn log_action(
     audit_log: &mut AuditLog,

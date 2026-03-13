@@ -233,6 +233,8 @@ pub async fn run(
     use tokio::sync::RwLock;
 
     let mut detector = AnomalyDetector::new();
+    let mut circuit_breaker = crate::governance::CircuitBreaker::new();
+    let mut audit_log = crate::governance::AuditLog::new();
     let interval = Duration::from_secs(10);
 
     let health = Arc::new(RwLock::new(HealthStatus {
@@ -330,10 +332,11 @@ pub async fn run(
 
         // Auto-RCA on severe anomalies.
         if crate::anomaly::AnomalyDetector::should_trigger_rca(&anomalies) {
-            let pg_ash = config
+            let configured_autonomy = config
                 .governance
                 .autonomy_for(crate::governance::FeatureArea::Rca);
-            let _ = pg_ash; // RCA in daemon is Observe-only for now.
+            let effective_autonomy = circuit_breaker
+                .effective_autonomy(crate::governance::FeatureArea::Rca, configured_autonomy);
 
             crate::logging::info("daemon", "Auto-triggering RCA investigation");
             let rca_snapshot = crate::rca::collect_snapshot(client, false).await;
@@ -343,6 +346,27 @@ pub async fn run(
                 format!("[{dbname}] RCA auto-triggered — {data_steps} diagnostic steps collected");
             for ch in channels {
                 notify(ch, &rca_msg).await;
+            }
+
+            // In Auto mode, propose and execute mitigations automatically.
+            if effective_autonomy == crate::governance::AutonomyLevel::Auto {
+                let proposals = crate::rca_actions::propose_mitigations(client).await;
+                if !proposals.is_empty() {
+                    let executed = crate::rca_actions::run_auto_flow(
+                        client,
+                        &proposals,
+                        &mut audit_log,
+                        &mut circuit_breaker,
+                    )
+                    .await;
+                    if executed > 0 {
+                        let msg =
+                            format!("[{dbname}] Auto-executed {executed} mitigation action(s)");
+                        for ch in channels {
+                            notify(ch, &msg).await;
+                        }
+                    }
+                }
             }
 
             detector.reset_rca_cooldown();
