@@ -928,8 +928,7 @@ mod tests {
     /// `WITH (FORMAT csv, HEADER)` parenthesised options block.
     #[test]
     fn test_parse_with_options_block() {
-        let spec =
-            parse_copy_args("t FROM '/f' WITH (FORMAT csv, HEADER)").unwrap();
+        let spec = parse_copy_args("t FROM '/f' WITH (FORMAT csv, HEADER)").unwrap();
         assert_eq!(spec.format, CopyFormat::Csv);
         assert!(spec.header);
     }
@@ -937,8 +936,7 @@ mod tests {
     /// `WITH (FORMAT text, DELIMITER ',')` options block.
     #[test]
     fn test_parse_with_options_block_delimiter() {
-        let spec =
-            parse_copy_args("t FROM '/f' WITH (FORMAT text, DELIMITER ',')").unwrap();
+        let spec = parse_copy_args("t FROM '/f' WITH (FORMAT text, DELIMITER ',')").unwrap();
         assert_eq!(spec.format, CopyFormat::Text);
         assert_eq!(spec.delimiter, Some(','));
     }
