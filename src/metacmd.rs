@@ -266,8 +266,18 @@ pub enum MetaCmd {
     SqlMode,
     /// `\text2sql` / `\t2s` — switch to text-to-SQL input mode.
     Text2SqlMode,
-    /// `\mode` — show current input mode.
+    /// `\mode` — show current mode summary.
     ShowMode,
+
+    // -- Execution mode ----------------------------------------------------
+    /// `\plan` — enter plan mode.
+    PlanMode,
+    /// `\yolo` — enter YOLO mode.
+    YoloMode,
+    /// `\observe` — enter observe mode (optional duration argument).
+    ObserveMode,
+    /// `\interactive` — return to interactive mode.
+    InteractiveMode,
 
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
@@ -429,6 +439,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('d') => parse_d_family(input),
         Some('n') => parse_n_family(input),
         Some('m') => parse_m_family(input),
+        Some('y') => parse_y_family(input),
         Some('!') => parse_shell(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
@@ -557,6 +568,16 @@ fn parse_m_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("mode") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::ShowMode);
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\yolo` — enter YOLO execution mode.
+fn parse_y_family(input: &str) -> ParsedMeta {
+    if let Some(rest) = input.strip_prefix("yolo") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::YoloMode);
         }
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -851,6 +872,12 @@ fn parse_e_family(input: &str) -> ParsedMeta {
 
 /// Parse `\if expr`, `\i file`, and `\ir file`.
 fn parse_i_family(input: &str) -> ParsedMeta {
+    // `\interactive` — return to interactive execution mode.
+    if let Some(rest) = input.strip_prefix("interactive") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::InteractiveMode);
+        }
+    }
     // `\if <expression>` — expression captured in `pattern`.
     if let Some(rest) = input.strip_prefix("if") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -905,8 +932,14 @@ fn parse_i_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\o [file]`.
+/// Parse `\o [file]` and `\observe`.
 fn parse_o(input: &str) -> ParsedMeta {
+    // `\observe` — enter observe execution mode.
+    if let Some(rest) = input.strip_prefix("observe") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ObserveMode);
+        }
+    }
     let Some(rest) = input.strip_prefix('o') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
@@ -1031,6 +1064,12 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
             }
             return ParsedMeta::simple(MetaCmd::Parse(name));
+        }
+    }
+    // `\plan` — enter plan execution mode.
+    if let Some(rest) = input.strip_prefix("plan") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::PlanMode);
         }
     }
     parse_simple_or_unknown(input, "p", MetaCmd::PrintBuffer)
@@ -2778,5 +2817,39 @@ mod tests {
     fn parse_mode_prefix_unknown() {
         // \modex should be unknown, not \mode
         assert!(matches!(parse("\\modex").cmd, MetaCmd::Unknown(_)));
+    }
+
+    // -- Execution mode commands -----------------------------------------------
+
+    #[test]
+    fn parse_plan_mode() {
+        assert_eq!(parse("\\plan").cmd, MetaCmd::PlanMode);
+    }
+
+    #[test]
+    fn parse_yolo_mode() {
+        assert_eq!(parse("\\yolo").cmd, MetaCmd::YoloMode);
+    }
+
+    #[test]
+    fn parse_observe_mode() {
+        assert_eq!(parse("\\observe").cmd, MetaCmd::ObserveMode);
+    }
+
+    #[test]
+    fn parse_interactive_mode() {
+        assert_eq!(parse("\\interactive").cmd, MetaCmd::InteractiveMode);
+    }
+
+    #[test]
+    fn parse_plan_does_not_steal_p() {
+        // Bare \p should still be PrintBuffer, not PlanMode
+        assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
+    }
+
+    #[test]
+    fn parse_observe_does_not_steal_o() {
+        // Bare \o should still be Output, not ObserveMode
+        assert_eq!(parse("\\o").cmd, MetaCmd::Output);
     }
 }

@@ -115,11 +115,25 @@ impl TxState {
 ///
 /// Format: `dbname=>` (idle), `dbname=*>` (in-tx), `dbname=!>` (failed).
 /// Continuation uses `-` instead of `=` as the first separator.
-pub fn build_prompt(dbname: &str, tx: TxState, continuation: bool, mode: InputMode) -> String {
+pub fn build_prompt(
+    dbname: &str,
+    tx: TxState,
+    continuation: bool,
+    input_mode: InputMode,
+    exec_mode: ExecMode,
+) -> String {
     let infix = tx.infix();
-    let mode_tag = match mode {
-        InputMode::Sql => String::new(),
-        InputMode::Text2Sql => " text2sql".to_owned(),
+    // Show the most specific non-default mode tag.  When the execution mode
+    // is not Interactive it takes priority; otherwise we fall back to the
+    // input mode (only non-default, i.e. text2sql, gets a tag).
+    let mode_tag = match exec_mode {
+        ExecMode::Plan => " plan",
+        ExecMode::Yolo => " yolo",
+        ExecMode::Observe => " observe",
+        ExecMode::Interactive => match input_mode {
+            InputMode::Text2Sql => " text2sql",
+            InputMode::Sql => "",
+        },
     };
     if continuation {
         format!("{dbname}{mode_tag}-{infix}> ")
@@ -271,6 +285,27 @@ pub enum InputMode {
 }
 
 // ---------------------------------------------------------------------------
+// Execution mode
+// ---------------------------------------------------------------------------
+
+/// Controls *how much* the AI can do without asking.
+///
+/// Orthogonal to [`InputMode`] — any input mode can combine with any
+/// execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    /// AI always shows generated SQL and asks before executing (default).
+    #[default]
+    Interactive,
+    /// AI investigates (read-only) and produces a plan document.
+    Plan,
+    /// AI auto-executes within configured autonomy level.
+    Yolo,
+    /// Pure read-only observation — AI watches and reports.
+    Observe,
+}
+
+// ---------------------------------------------------------------------------
 // Last-error context (used by /fix)
 // ---------------------------------------------------------------------------
 
@@ -356,6 +391,8 @@ pub struct ReplSettings {
     pub config: crate::config::Config,
     /// Current input interpretation mode.
     pub input_mode: InputMode,
+    /// Current execution mode (how much the AI can do without asking).
+    pub exec_mode: ExecMode,
     /// Context from the most-recently failed query.
     ///
     /// Populated whenever a query returns an error; cleared on the next
@@ -402,6 +439,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("destructive_warning", &self.destructive_warning)
             .field("config_profiles", &self.config.connections.len())
             .field("input_mode", &self.input_mode)
+            .field("exec_mode", &self.exec_mode)
             .field(
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
@@ -438,6 +476,7 @@ impl Default for ReplSettings {
             destructive_warning: true,
             config: crate::config::Config::default(),
             input_mode: InputMode::default(),
+            exec_mode: ExecMode::default(),
             last_error: None,
         }
     }
@@ -2337,6 +2376,8 @@ pub enum MetaResult {
     ClosePrepared(String),
     /// Switch input mode (`\sql`, `\text2sql`, `\t2s`).
     SetInputMode(InputMode),
+    /// Switch execution mode (`\plan`, `\yolo`, `\observe`, `\interactive`).
+    SetExecMode(ExecMode),
     /// Show current mode summary (`\mode`).
     ShowMode,
 }
@@ -2702,6 +2743,18 @@ async fn dispatch_meta(
         MetaCmd::ShowMode => {
             return MetaResult::ShowMode;
         }
+        MetaCmd::PlanMode => {
+            return MetaResult::SetExecMode(ExecMode::Plan);
+        }
+        MetaCmd::YoloMode => {
+            return MetaResult::SetExecMode(ExecMode::Yolo);
+        }
+        MetaCmd::ObserveMode => {
+            return MetaResult::SetExecMode(ExecMode::Observe);
+        }
+        MetaCmd::InteractiveMode => {
+            return MetaResult::SetExecMode(ExecMode::Interactive);
+        }
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
@@ -3005,7 +3058,13 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
-        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty(), settings.input_mode);
+        let prompt = build_prompt(
+            &params.dbname,
+            *tx,
+            !buf.is_empty(),
+            settings.input_mode,
+            settings.exec_mode,
+        );
 
         match rl.readline(&prompt) {
             Ok(line) => {
@@ -3087,7 +3146,13 @@ async fn run_dumb_loop(
 
     loop {
         // Print prompt to stderr (so it doesn't mix with redirected output).
-        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty(), settings.input_mode);
+        let prompt = build_prompt(
+            &params.dbname,
+            *tx,
+            !buf.is_empty(),
+            settings.input_mode,
+            settings.exec_mode,
+        );
         eprint!("{prompt}");
         let _ = io::stderr().flush();
 
@@ -3468,12 +3533,29 @@ async fn handle_backslash_dumb(
             eprintln!("Input mode: {label}");
             HandleLineResult::Continue
         }
+        MetaResult::SetExecMode(mode) => {
+            settings.exec_mode = mode;
+            let label = match mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+                ExecMode::Observe => "observe",
+            };
+            eprintln!("Execution mode: {label}");
+            HandleLineResult::Continue
+        }
         MetaResult::ShowMode => {
-            let label = match settings.input_mode {
+            let input_label = match settings.input_mode {
                 InputMode::Sql => "sql",
                 InputMode::Text2Sql => "text2sql",
             };
-            eprintln!("Input mode: {label}");
+            let exec_label = match settings.exec_mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+                ExecMode::Observe => "observe",
+            };
+            eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             HandleLineResult::Continue
         }
         MetaResult::Continue => HandleLineResult::Continue,
@@ -3724,12 +3806,29 @@ async fn handle_line(
                 eprintln!("Input mode: {label}");
                 HandleLineResult::Continue
             }
+            MetaResult::SetExecMode(mode) => {
+                settings.exec_mode = mode;
+                let label = match mode {
+                    ExecMode::Interactive => "interactive",
+                    ExecMode::Plan => "plan",
+                    ExecMode::Yolo => "yolo",
+                    ExecMode::Observe => "observe",
+                };
+                eprintln!("Execution mode: {label}");
+                HandleLineResult::Continue
+            }
             MetaResult::ShowMode => {
-                let label = match settings.input_mode {
+                let input_label = match settings.input_mode {
                     InputMode::Sql => "sql",
                     InputMode::Text2Sql => "text2sql",
                 };
-                eprintln!("Input mode: {label}");
+                let exec_label = match settings.exec_mode {
+                    ExecMode::Interactive => "interactive",
+                    ExecMode::Plan => "plan",
+                    ExecMode::Yolo => "yolo",
+                    ExecMode::Observe => "observe",
+                };
+                eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
                 HandleLineResult::Continue
             }
             MetaResult::Continue => HandleLineResult::Continue,
@@ -4972,7 +5071,13 @@ mod tests {
     #[test]
     fn prompt_idle() {
         assert_eq!(
-            build_prompt("mydb", TxState::Idle, false, InputMode::Sql),
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb=> "
         );
     }
@@ -4980,7 +5085,13 @@ mod tests {
     #[test]
     fn prompt_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, false, InputMode::Sql),
+            build_prompt(
+                "mydb",
+                TxState::InTransaction,
+                false,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb=*> "
         );
     }
@@ -4988,7 +5099,13 @@ mod tests {
     #[test]
     fn prompt_failed_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::Failed, false, InputMode::Sql),
+            build_prompt(
+                "mydb",
+                TxState::Failed,
+                false,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb=!> "
         );
     }
@@ -4996,7 +5113,13 @@ mod tests {
     #[test]
     fn prompt_continuation() {
         assert_eq!(
-            build_prompt("mydb", TxState::Idle, true, InputMode::Sql),
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                true,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb-> "
         );
     }
@@ -5004,7 +5127,13 @@ mod tests {
     #[test]
     fn prompt_continuation_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, true, InputMode::Sql),
+            build_prompt(
+                "mydb",
+                TxState::InTransaction,
+                true,
+                InputMode::Sql,
+                ExecMode::Interactive
+            ),
             "mydb-*> "
         );
     }
@@ -5012,7 +5141,13 @@ mod tests {
     #[test]
     fn prompt_text2sql_mode() {
         assert_eq!(
-            build_prompt("mydb", TxState::Idle, false, InputMode::Text2Sql),
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Text2Sql,
+                ExecMode::Interactive
+            ),
             "mydb text2sql=> "
         );
     }
@@ -5020,7 +5155,13 @@ mod tests {
     #[test]
     fn prompt_text2sql_continuation() {
         assert_eq!(
-            build_prompt("mydb", TxState::Idle, true, InputMode::Text2Sql),
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                true,
+                InputMode::Text2Sql,
+                ExecMode::Interactive
+            ),
             "mydb text2sql-> "
         );
     }
@@ -5028,8 +5169,59 @@ mod tests {
     #[test]
     fn prompt_text2sql_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, false, InputMode::Text2Sql),
+            build_prompt(
+                "mydb",
+                TxState::InTransaction,
+                false,
+                InputMode::Text2Sql,
+                ExecMode::Interactive
+            ),
             "mydb text2sql=*> "
+        );
+    }
+
+    #[test]
+    fn prompt_plan_mode() {
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, false, InputMode::Sql, ExecMode::Plan),
+            "mydb plan=> "
+        );
+    }
+
+    #[test]
+    fn prompt_yolo_mode() {
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, false, InputMode::Sql, ExecMode::Yolo),
+            "mydb yolo=> "
+        );
+    }
+
+    #[test]
+    fn prompt_observe_mode() {
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Sql,
+                ExecMode::Observe
+            ),
+            "mydb observe=> "
+        );
+    }
+
+    #[test]
+    fn prompt_plan_overrides_text2sql() {
+        // Execution mode tag takes priority over input mode tag.
+        assert_eq!(
+            build_prompt(
+                "mydb",
+                TxState::Idle,
+                false,
+                InputMode::Text2Sql,
+                ExecMode::Plan
+            ),
+            "mydb plan=> "
         );
     }
 
