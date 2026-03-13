@@ -2115,18 +2115,44 @@ async fn run_dumb_loop(
                         HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
                 } else if settings.cond.is_active() {
-                    if !buf.is_empty() {
-                        buf.push('\n');
-                    }
-                    buf.push_str(&line);
-                    // In single-line mode, newline terminates the statement.
-                    let complete = settings.single_line || is_complete(&buf);
-                    if complete {
-                        let sql = buf.trim().to_owned();
-                        if !sql.is_empty() {
-                            execute_query(client, &sql, settings, tx).await;
+                    // Check for inline backslash command (e.g. `select 1 \gset`).
+                    if let Some(pos) = find_inline_backslash(&line) {
+                        let sql_part = &line[..pos];
+                        let meta_part = line[pos..].trim();
+                        if !sql_part.trim().is_empty() {
+                            if !buf.is_empty() {
+                                buf.push('\n');
+                            }
+                            buf.push_str(sql_part.trim_end());
                         }
-                        buf.clear();
+                        match handle_backslash_dumb(
+                            meta_part, &mut buf, client, params, settings, tx,
+                        )
+                        .await
+                        {
+                            HandleLineResult::Quit => break,
+                            HandleLineResult::Reconnected(new_client, new_params) => {
+                                *client = *new_client;
+                                *params = new_params;
+                                *tx = TxState::default();
+                                buf.clear();
+                            }
+                            HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
+                        }
+                    } else {
+                        if !buf.is_empty() {
+                            buf.push('\n');
+                        }
+                        buf.push_str(&line);
+                        // In single-line mode, newline terminates the statement.
+                        let complete = settings.single_line || is_complete(&buf);
+                        if complete {
+                            let sql = buf.trim().to_owned();
+                            if !sql.is_empty() {
+                                execute_query(client, &sql, settings, tx).await;
+                            }
+                            buf.clear();
+                        }
                     }
                 }
             }
@@ -2150,6 +2176,108 @@ async fn run_dumb_loop(
 // ---------------------------------------------------------------------------
 // HandleLineResult — outcome of processing one input line
 // ---------------------------------------------------------------------------
+
+/// Find the byte offset of the first unquoted backslash in `line` that could
+/// be the start of an inline meta-command (e.g. `select 1 \gset`).
+///
+/// Returns `Some(offset)` if found, `None` if the line has no inline
+/// backslash command.  The scan respects single-quoted strings, dollar-quoted
+/// strings, line comments (`--`), and block comments (`/* … */`).
+fn find_inline_backslash(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_block_comment = false;
+    let mut dollar_tag: Option<String> = None;
+
+    while i < len {
+        // Dollar-quoted string
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_block_comment {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2;
+                in_block_comment = false;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Line comment
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            return None; // rest of line is a comment
+        }
+
+        // Block comment start
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        // Single-quote start
+        if bytes[i] == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        // Dollar-quote start
+        if bytes[i] == b'$' {
+            let rest = &line[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+
+        // Backslash followed by a letter — potential meta-command
+        if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1].is_ascii_alphabetic() {
+            // Only treat as inline if there is some SQL before this position
+            if line[..i].trim().is_empty() {
+                // The line starts with `\` — not an inline command
+                return None;
+            }
+            return Some(i);
+        }
+
+        i += 1;
+    }
+    None
+}
 
 /// Outcome of processing a single input line in the REPL.
 enum HandleLineResult {
@@ -2437,6 +2565,98 @@ async fn handle_line(
     // When inside a suppressed conditional branch, discard the input.
     if !settings.cond.is_active() {
         return HandleLineResult::Continue;
+    }
+
+    // Check for inline backslash command (e.g. `select 1 \gset my_`).
+    if let Some(pos) = find_inline_backslash(line) {
+        let sql_part = &line[..pos];
+        let meta_part = line[pos..].trim();
+        // Accumulate the SQL portion into the buffer.
+        if !sql_part.trim().is_empty() {
+            if !buf.is_empty() {
+                buf.push('\n');
+                stmt_buf.push('\n');
+            }
+            buf.push_str(sql_part.trim_end());
+            stmt_buf.push_str(sql_part.trim_end());
+        }
+        // Record the meta-command in stmt_buf for history.
+        if !stmt_buf.is_empty() {
+            stmt_buf.push(' ');
+        }
+        stmt_buf.push_str(meta_part);
+        // Dispatch the backslash command.
+        let mut parsed = crate::metacmd::parse(meta_part);
+        parsed.echo_hidden = settings.echo_hidden;
+        return match dispatch_meta(parsed, client, params, settings, tx).await {
+            MetaResult::Quit => HandleLineResult::Quit,
+            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
+            MetaResult::ExecuteBuffer => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_query(client, &sql, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferToFile(path) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_to_file(client, &sql, &path, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferPiped(cmd) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_piped(client, &sql, &cmd, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferExpanded => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    let prev = settings.expanded;
+                    settings.expanded = ExpandedMode::On;
+                    settings.pset.expanded = ExpandedMode::On;
+                    execute_query(client, &sql, settings, tx).await;
+                    settings.expanded = prev;
+                    settings.pset.expanded = prev;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferExpandedToFile(path) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    let prev = settings.expanded;
+                    settings.expanded = ExpandedMode::On;
+                    settings.pset.expanded = ExpandedMode::On;
+                    execute_to_file(client, &sql, &path, settings, tx).await;
+                    settings.expanded = prev;
+                    settings.pset.expanded = prev;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::GSet(prefix) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            _ => HandleLineResult::Continue,
+        };
     }
 
     if !buf.is_empty() {
@@ -2905,5 +3125,45 @@ mod tests {
     #[test]
     fn command_tag_drop_table() {
         assert_eq!(command_tag_for("DROP TABLE t1", 0), "DROP TABLE");
+    }
+
+    // -- find_inline_backslash -----------------------------------------------
+
+    #[test]
+    fn inline_backslash_simple_gset() {
+        assert_eq!(find_inline_backslash("select 1 \\gset"), Some(9));
+    }
+
+    #[test]
+    fn inline_backslash_g_bare() {
+        assert_eq!(find_inline_backslash("select 1 \\g"), Some(9));
+    }
+
+    #[test]
+    fn inline_backslash_none_when_starts_with_backslash() {
+        assert_eq!(find_inline_backslash("\\dt"), None);
+    }
+
+    #[test]
+    fn inline_backslash_none_when_no_backslash() {
+        assert_eq!(find_inline_backslash("select 1"), None);
+    }
+
+    #[test]
+    fn inline_backslash_inside_string_not_detected() {
+        assert_eq!(find_inline_backslash("select '\\gset'"), None);
+    }
+
+    #[test]
+    fn inline_backslash_after_comment_not_detected() {
+        assert_eq!(find_inline_backslash("select 1 -- \\gset"), None);
+    }
+
+    #[test]
+    fn inline_backslash_gexec() {
+        assert_eq!(
+            find_inline_backslash("select 'create table t()' \\gexec"),
+            Some(26)
+        );
     }
 }
