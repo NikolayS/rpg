@@ -452,6 +452,13 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
+    // Install the default rustls CryptoProvider before any TLS operations.
+    // Required because multiple dependencies (tokio-postgres-rustls, reqwest)
+    // pull in different crypto backends, preventing auto-selection.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok();
+
     let mut cli = Cli::parse();
 
     // Initialise structured logging before anything else.
