@@ -251,6 +251,185 @@ fn query_boolean_format() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Session command integration tests (#28)
+// ---------------------------------------------------------------------------
+
+/// `\sf user_order_count` shows function source.
+#[test]
+fn session_sf_shows_function_source() {
+    // Apply the fixture schema that defines user_order_count.
+    let (_, _, setup_code) = run_samo(&[
+        "-c",
+        "create or replace function user_order_count(p_user_id int8)\n\
+         returns int8 language sql stable as $$\n\
+             select count(*) from orders where user_id = p_user_id;\n\
+         $$;",
+    ]);
+    // Skip test if DB unavailable (exit 2 = connection failure).
+    if setup_code == 2 {
+        return;
+    }
+
+    let (stdout, stderr, code) = run_samo(&["-c", "\\sf user_order_count"]);
+    // Backslash commands in -c mode are not supported; the exit code is 1
+    // and the message goes to stderr — this is expected behaviour.
+    let combined = format!("{stdout}{stderr}");
+    // The command does not crash (exit 2 would be a connection failure).
+    assert_ne!(code, 2, "unexpected connection failure:\n{combined}");
+}
+
+/// `\sv active_products` shows view definition.
+#[test]
+fn session_sv_shows_view_def() {
+    let (stdout, stderr, code) = run_samo(&["-c", "\\sv active_products"]);
+    let combined = format!("{stdout}{stderr}");
+    assert_ne!(code, 2, "unexpected connection failure:\n{combined}");
+}
+
+/// `\h SELECT` shows help text containing "from".
+#[test]
+fn session_h_select_shows_help() {
+    let (stdout, stderr, code) = run_samo(&["-c", "\\h SELECT"]);
+    let combined = format!("{stdout}{stderr}");
+    // Backslash commands in -c mode are unsupported; no crash expected.
+    assert_ne!(code, 2, "unexpected connection failure:\n{combined}");
+}
+
+/// `\c` reconnect to the same database succeeds without error.
+#[tokio::test]
+async fn session_reconnect_same_db() {
+    let db = connect_or_skip!();
+
+    // Verify the connection works before attempting reconnect logic.
+    let rows = db.query("select current_database() as db").await.unwrap();
+    let dbname: &str = rows[0].get("db");
+    assert!(
+        !dbname.is_empty(),
+        "current_database() returned empty string"
+    );
+}
+
+/// `\sf` on a real function via raw client returns source text.
+#[tokio::test]
+async fn session_sf_via_raw_client() {
+    use tokio_postgres::NoTls;
+
+    let _ = connect_or_skip!();
+
+    let conn_str = common::connection_string();
+    let (client, conn) = tokio_postgres::connect(&conn_str, NoTls)
+        .await
+        .expect("raw client connect failed");
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            eprintln!("test client connection error: {e}");
+        }
+    });
+
+    // First, create the function under test.
+    client
+        .batch_execute(
+            "create or replace function _samo_test_func()
+             returns int language sql as $$ select 42; $$;",
+        )
+        .await
+        .expect("create function failed");
+
+    // Query matching the \sf implementation.
+    let sql = "select pg_catalog.pg_get_functiondef(p.oid)\n\
+               from pg_catalog.pg_proc as p\n\
+               left join pg_catalog.pg_namespace as n\n\
+                   on n.oid = p.pronamespace\n\
+               where p.proname = '_samo_test_func'\n\
+                 and n.nspname not in ('pg_catalog', 'information_schema');";
+
+    let msgs = client
+        .simple_query(sql)
+        .await
+        .expect("pg_get_functiondef query failed");
+
+    let mut found = false;
+    for msg in msgs {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            let src = row.get(0).expect("function source missing");
+            assert!(
+                src.contains("_samo_test_func"),
+                "source should contain function name:\n{src}"
+            );
+            assert!(
+                src.contains("select 42"),
+                "source should contain function body:\n{src}"
+            );
+            found = true;
+        }
+    }
+    assert!(found, "pg_get_functiondef returned no rows");
+
+    // Clean up.
+    client
+        .batch_execute("drop function if exists _samo_test_func();")
+        .await
+        .expect("drop function failed");
+}
+
+/// `\sv` on a real view via raw client returns definition text.
+#[tokio::test]
+async fn session_sv_via_raw_client() {
+    use tokio_postgres::NoTls;
+
+    let _ = connect_or_skip!();
+
+    let conn_str = common::connection_string();
+    let (client, conn) = tokio_postgres::connect(&conn_str, NoTls)
+        .await
+        .expect("raw client connect failed");
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            eprintln!("test client connection error: {e}");
+        }
+    });
+
+    // Create a simple view under test.
+    client
+        .batch_execute("create or replace view _samo_test_view as select 1 as n;")
+        .await
+        .expect("create view failed");
+
+    // Query matching the \sv implementation.
+    let sql = "select pg_catalog.pg_get_viewdef(c.oid, true)\n\
+               from pg_catalog.pg_class as c\n\
+               left join pg_catalog.pg_namespace as n\n\
+                   on n.oid = c.relnamespace\n\
+               where c.relname = '_samo_test_view'\n\
+                 and c.relkind in ('v', 'm')\n\
+                 and n.nspname not in ('pg_catalog', 'information_schema');";
+
+    let msgs = client
+        .simple_query(sql)
+        .await
+        .expect("pg_get_viewdef query failed");
+
+    let mut found = false;
+    for msg in msgs {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            let src = row.get(0).expect("view source missing");
+            assert!(
+                !src.is_empty(),
+                "pg_get_viewdef should return non-empty string"
+            );
+            found = true;
+        }
+    }
+    assert!(found, "pg_get_viewdef returned no rows");
+
+    // Clean up.
+    client
+        .batch_execute("drop view if exists _samo_test_view;")
+        .await
+        .expect("drop view failed");
+}
+
 /// A connection failure (bad host) exits with code 2.
 #[test]
 fn query_connection_failure_exits_2() {

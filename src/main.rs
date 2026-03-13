@@ -14,6 +14,7 @@ mod pattern;
 #[allow(dead_code)]
 mod query;
 mod repl;
+mod session;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
@@ -319,11 +320,10 @@ async fn main() {
                 // Piped / redirected stdin: execute non-interactively.
                 repl::exec_stdin(&client, &settings).await
             } else {
-                // Interactive REPL.
-                repl::run_repl(&client, &resolved, settings, cli.no_readline).await
+                // Interactive REPL — consumes client and resolved.
+                repl::run_repl(client, resolved, settings, cli.no_readline).await
             };
 
-            drop(client);
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }
