@@ -22,6 +22,7 @@ mod governance;
 mod highlight;
 mod io;
 mod logging;
+mod markdown;
 mod metacmd;
 mod named;
 mod output;

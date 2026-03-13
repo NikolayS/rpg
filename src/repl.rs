@@ -3777,7 +3777,7 @@ async fn observe_loop(
     };
 
     eprintln!("\n-- Summary:");
-    match stream_completion(provider.as_ref(), &messages, &options).await {
+    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -5830,24 +5830,73 @@ async fn interpret_dba_output(context: &str, subcommand: &str, settings: &mut Re
     }
 }
 
+/// Stream a completion to the terminal, rendering markdown when enabled.
+///
+/// When `no_highlight` is `false` (the default), tokens are buffered and
+/// the completed response is passed through [`crate::markdown::render_markdown`]
+/// before printing, so that headers, bold text, code fences, etc. are
+/// displayed with ANSI styling.
+///
+/// When `no_highlight` is `true` the raw text is streamed directly to
+/// stdout token by token (original behaviour).
 async fn stream_completion(
     provider: &dyn crate::ai::LlmProvider,
     messages: &[crate::ai::Message],
     options: &crate::ai::CompletionOptions,
+    no_highlight: bool,
 ) -> Result<crate::ai::CompletionResult, String> {
     use std::io::Write;
+
+    if no_highlight {
+        // Raw streaming — emit each token immediately as it arrives.
+        let result = provider
+            .complete_streaming(
+                messages,
+                options,
+                Box::new(|token| {
+                    print!("{token}");
+                    let _ = io::stdout().flush();
+                }),
+            )
+            .await?;
+        println!();
+        return Ok(result);
+    }
+
+    // Markdown rendering mode — buffer tokens, render after completion.
+    //
+    // We still want to show progress to the user, so we print a dim "…"
+    // indicator that gets overwritten once the full response arrives.
+    // Use a shared buffer via Arc<Mutex<String>>.
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let buf_clone = buf.clone();
+
+    // Show a progress indicator so the terminal doesn't look stuck.
+    eprint!("\x1b[2m…\x1b[0m");
+    let _ = io::stderr().flush();
 
     let result = provider
         .complete_streaming(
             messages,
             options,
-            Box::new(|token| {
-                print!("{token}");
-                let _ = io::stdout().flush();
+            Box::new(move |token| {
+                if let Ok(mut b) = buf_clone.lock() {
+                    b.push_str(token);
+                }
             }),
         )
         .await?;
-    println!();
+
+    // Erase the progress indicator (carriage return clears the line).
+    eprint!("\r\x1b[K");
+    let _ = io::stderr().flush();
+
+    // Render markdown on the fully-collected content and print.
+    let content = buf.lock().map(|b| b.clone()).unwrap_or_default();
+    let rendered = crate::markdown::render_markdown(&content, false);
+    print!("{rendered}");
+    let _ = io::stdout().flush();
+
     Ok(result)
 }
 
@@ -6362,7 +6411,7 @@ async fn handle_ai_plan(
     };
 
     eprintln!("-- Plan mode: investigating...");
-    let result = match stream_completion(provider.as_ref(), &messages, &options).await {
+    let result = match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -6501,7 +6550,7 @@ async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &Co
         temperature: 0.0,
     };
 
-    match stream_completion(provider.as_ref(), &messages, &options).await {
+    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -6671,7 +6720,7 @@ async fn handle_ai_explain(
     };
 
     println!();
-    match stream_completion(provider.as_ref(), &ai_messages, &options).await {
+    match stream_completion(provider.as_ref(), &ai_messages, &options, settings.no_highlight).await {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -6889,7 +6938,7 @@ async fn handle_ai_optimize(
     };
 
     println!();
-    match stream_completion(provider.as_ref(), &ai_messages, &options).await {
+    match stream_completion(provider.as_ref(), &ai_messages, &options, settings.no_highlight).await {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -7057,7 +7106,7 @@ async fn handle_ai_describe(
         temperature: 0.0,
     };
 
-    match stream_completion(provider.as_ref(), &messages, &options).await {
+    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -7142,7 +7191,7 @@ async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &Co
         temperature: 0.0,
     };
 
-    match stream_completion(provider.as_ref(), &messages, &options).await {
+    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
