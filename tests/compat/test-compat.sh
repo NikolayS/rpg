@@ -173,7 +173,7 @@ compare "string functions" \
   "select upper('hello') as up, length('world') as len"
 
 compare "type cast" \
-  "select 42::text as str_val, '3.14'::numeric as num_val"
+  "select 'hello'::varchar as str_val, '3.14'::numeric as num_val"
 
 # ---------------------------------------------------------------------------
 # Table queries (use schema loaded above)

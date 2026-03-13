@@ -233,7 +233,7 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
     // Calculate column widths: max(header width, max data width).
     let widths = column_widths(cols, rows, cfg);
 
-    // Header row — psql right-aligns headers for numeric columns too.
+    // Header row — psql center-aligns text headers and right-aligns numeric ones.
     write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
     // Separator.
     write_separator(out, &widths);
@@ -248,7 +248,7 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
                     .and_then(|v| v.as_deref().map(ToOwned::to_owned))
                     .unwrap_or_else(|| cfg.null_string.clone())
             },
-            true,
+            false,
         );
     }
 
@@ -286,13 +286,14 @@ fn column_widths(
 /// Write one row of the aligned table (header or data).
 ///
 /// `value_fn` maps `(column_meta, column_index) → String`.
-/// `is_data` controls right-alignment for numeric columns.
+/// `is_header` – when true, text columns are center-aligned (matching psql).
+/// Numeric columns are always right-aligned (both header and data rows).
 fn write_aligned_row<F>(
     out: &mut String,
     cols: &[ColumnMeta],
     widths: &[usize],
     value_fn: F,
-    is_data: bool,
+    is_header: bool,
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
@@ -308,14 +309,25 @@ fn write_aligned_row<F>(
             out.push_str(" | ");
         }
 
-        if is_data && col.is_numeric {
-            // Right-align: pad on the left.
+        if col.is_numeric {
+            // Right-align numeric columns (both headers and data).
             for _ in 0..padding {
                 out.push(' ');
             }
             out.push_str(&val);
+        } else if is_header {
+            // Center-align text headers (psql behaviour).
+            let left_pad = padding / 2;
+            let right_pad = padding - left_pad;
+            for _ in 0..left_pad {
+                out.push(' ');
+            }
+            out.push_str(&val);
+            for _ in 0..right_pad {
+                out.push(' ');
+            }
         } else {
-            // Left-align: pad on the right.
+            // Left-align text data.
             out.push_str(&val);
             for _ in 0..padding {
                 out.push(' ');
@@ -565,7 +577,7 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, ocfg: &OutputConfig, pcfg:
     let widths = column_widths(cols, rows, ocfg);
 
     // Header (suppressed in tuples-only mode).
-    // psql right-aligns headers for numeric columns, so pass is_data=true.
+    // psql center-aligns text headers and right-aligns numeric ones.
     if !pcfg.tuples_only {
         write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
         write_separator(out, &widths);
@@ -582,7 +594,7 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, ocfg: &OutputConfig, pcfg:
                     .and_then(|v| v.as_deref().map(ToOwned::to_owned))
                     .unwrap_or_else(|| ocfg.null_string.clone())
             },
-            true,
+            false,
         );
     }
 

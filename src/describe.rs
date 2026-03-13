@@ -86,6 +86,27 @@ async fn run_and_print_titled(
     echo_hidden: bool,
     title: Option<&str>,
 ) -> bool {
+    run_and_print_full(client, sql, echo_hidden, title, true).await
+}
+
+/// Like `run_and_print_titled` but suppresses the `(N rows)` footer.
+/// Used by `\d tablename` to match psql behaviour.
+async fn run_and_print_no_count(
+    client: &Client,
+    sql: &str,
+    echo_hidden: bool,
+    title: Option<&str>,
+) -> bool {
+    run_and_print_full(client, sql, echo_hidden, title, false).await
+}
+
+async fn run_and_print_full(
+    client: &Client,
+    sql: &str,
+    echo_hidden: bool,
+    title: Option<&str>,
+    show_row_count: bool,
+) -> bool {
     if echo_hidden {
         eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
     }
@@ -115,7 +136,7 @@ async fn run_and_print_titled(
                 }
             }
 
-            print_table(&col_names, &rows, title);
+            print_table_inner(&col_names, &rows, title, show_row_count);
         }
         Err(e) => {
             eprintln!("ERROR:  {e}");
@@ -135,20 +156,36 @@ async fn run_and_print_titled(
 ///  val  | val
 /// (N rows)
 /// ```
+///
+/// When `show_row_count` is `false` the `(N rows)` footer is suppressed (used
+/// by `\d tablename` to match psql behaviour).
+#[cfg(test)]
 fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
+    print_table_inner(col_names, rows, title, true);
+}
+
+fn print_table_inner(
+    col_names: &[String],
+    rows: &[Vec<String>],
+    title: Option<&str>,
+    show_row_count: bool,
+) {
     if col_names.is_empty() {
-        let n = rows.len();
-        let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})");
+        if show_row_count {
+            let n = rows.len();
+            let word = if n == 1 { "row" } else { "rows" };
+            println!("({n} {word})");
+        }
         return;
     }
 
-    // Compute column widths.
+    // Compute column widths (multi-line cell values: each line counts separately).
     let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
     for row in rows {
         for (i, val) in row.iter().enumerate() {
             if i < widths.len() {
-                widths[i] = widths[i].max(val.len());
+                let max_line = val.lines().map(str::len).max().unwrap_or(val.len());
+                widths[i] = widths[i].max(max_line);
             }
         }
     }
@@ -181,19 +218,58 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
     println!("-{}-", sep.join("-+-"));
 
-    // Data rows.
+    // Data rows — cells with embedded newlines are printed as psql continuation
+    // lines: the first sub-line is printed normally, subsequent sub-lines are
+    // printed with a `+` appended to the previous line and blank padding in the
+    // other columns.
+    let ncols = widths.len();
     for row in rows {
-        let cells: Vec<String> = row
+        // Split each cell into its constituent lines.
+        let cell_lines: Vec<Vec<&str>> = row
             .iter()
-            .enumerate()
-            .map(|(i, v)| format!("{:<width$}", v, width = *widths.get(i).unwrap_or(&v.len())))
+            .map(|v| {
+                let ls: Vec<&str> = v.lines().collect();
+                if ls.is_empty() {
+                    vec![""]
+                } else {
+                    ls
+                }
+            })
             .collect();
-        println!(" {} ", cells.join(" | "));
+
+        let max_lines = cell_lines.iter().map(Vec::len).max().unwrap_or(1);
+
+        for line_idx in 0..max_lines {
+            let cells: Vec<String> = (0..ncols)
+                .map(|col| {
+                    let w = widths[col];
+                    let text = cell_lines
+                        .get(col)
+                        .and_then(|ls| ls.get(line_idx))
+                        .copied()
+                        .unwrap_or("");
+                    // If this column has more lines after this one, append `+`.
+                    let has_more = cell_lines
+                        .get(col)
+                        .is_some_and(|ls| line_idx + 1 < ls.len());
+                    if has_more {
+                        // text + '+' right-padded to width
+                        let visible = format!("{text}+");
+                        format!("{visible:<w$}")
+                    } else {
+                        format!("{text:<w$}")
+                    }
+                })
+                .collect();
+            println!(" {} ", cells.join(" | "));
+        }
     }
 
-    let n = rows.len();
-    let word = if n == 1 { "row" } else { "rows" };
-    println!("({n} {word})");
+    if show_row_count {
+        let n = rows.len();
+        let word = if n == 1 { "row" } else { "rows" };
+        println!("({n} {word})");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +294,7 @@ fn system_schema_filter(system: bool) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
+#[allow(clippy::too_many_lines)]
 async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -> bool {
     // Build the relkind IN list: ('r','p')
     let kind_list: Vec<String> = relkinds.iter().map(|k| format!("'{k}'")).collect();
@@ -267,18 +344,72 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
            else c.relkind::text
        end";
 
+    // For \di (indexes), we need an extra Table column and index-specific joins.
+    let is_index_only = relkinds == ["i"];
+
     let sql = if meta.plus {
+        if is_index_only {
+            format!(
+                "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    {type_expr} as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    ct.relname as \"Table\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+join pg_catalog.pg_index as idx_i
+    on idx_i.indexrelid = c.oid
+join pg_catalog.pg_class as ct
+    on ct.oid = idx_i.indrelid
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+            )
+        } else {
+            format!(
+                "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    {type_expr} as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
+    coalesce(am.amname, '') as \"Access method\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_am as am
+    on am.oid = c.relam
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+            )
+        }
+    } else if is_index_only {
         format!(
             "select
     n.nspname as \"Schema\",
     c.relname as \"Name\",
     {type_expr} as \"Type\",
     pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
-    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
-    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+    ct.relname as \"Table\"
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
+join pg_catalog.pg_index as idx_i
+    on idx_i.indexrelid = c.oid
+join pg_catalog.pg_class as ct
+    on ct.oid = idx_i.indrelid
 where c.relkind in ({kind_in})
     {where_clause}
 order by 1, 2"
@@ -451,15 +582,37 @@ order by 1"
 async fn list_roles(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "r.rolname", None);
 
-    let where_clause = if name_filter.is_empty() {
-        String::new()
+    // When no pattern is specified, filter out pg_* system roles (matches psql behaviour).
+    let sys_role_filter = if meta.pattern.is_none() {
+        "r.rolname !~ '^pg_'"
     } else {
-        format!("where {name_filter}")
+        ""
     };
 
-    // psql shows "Role name", "Attributes", "Member of" — attributes are
-    // expressed as a comma-separated list of capability words, matching psql's
-    // \du output format.
+    let where_parts: Vec<&str> = [
+        if sys_role_filter.is_empty() {
+            None
+        } else {
+            Some(sys_role_filter)
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    // psql (PG16) shows "Role name" and "Attributes" only (no "Member of" column).
+    // Attributes are expressed as a comma-separated list of capability words.
     let sql = format!(
         "select
     r.rolname as \"Role name\",
@@ -470,18 +623,7 @@ async fn list_roles(client: &Client, meta: &ParsedMeta) -> bool {
     || case when not r.rolcanlogin then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb then ', Cannot login' else 'Cannot login' end else '' end
     || case when r.rolreplication then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin then ', Replication' else 'Replication' end else '' end
     || case when r.rolbypassrls then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin or r.rolreplication then ', Bypass RLS' else 'Bypass RLS' end else '' end
-    as \"Attributes\",
-    coalesce(
-        pg_catalog.array_to_string(
-            array(
-                select b.rolname
-                from pg_catalog.pg_auth_members as m
-                join pg_catalog.pg_roles as b on b.oid = m.roleid
-                where m.member = r.oid
-                order by 1
-            ), ', '
-        ), ''
-    ) as \"Member of\"
+    as \"Attributes\"
 from pg_catalog.pg_roles as r
 {where_clause}
 order by 1"
@@ -1053,8 +1195,11 @@ limit 1"
         (label, fq_name)
     };
 
-    println!("{obj_label} \"{display_name}\"");
-    run_and_print(client, &cols_sql, meta.echo_hidden).await;
+    // Build the centered title and pass it to run_and_print_no_count so it is
+    // centered above the column table — matching psql's \d output.  The row
+    // count footer is suppressed to match psql behaviour.
+    let table_title = format!("{obj_label} \"{display_name}\"");
+    run_and_print_no_count(client, &cols_sql, meta.echo_hidden, Some(&table_title)).await;
 
     // 2. Indexes on this table (Bug 1 applied: use name_part not obj_pattern).
     let idx_name_filter = crate::pattern::where_clause(Some(name_part), "tc.relname", None);
