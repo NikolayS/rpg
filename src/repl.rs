@@ -5972,7 +5972,7 @@ async fn dispatch_ai_command(
             _ => handle_ai_ask(client, prompt, settings, params, tx).await,
         }
     } else if input == "/fix" || input.starts_with("/fix ") {
-        handle_ai_fix(client, settings, params).await;
+        handle_ai_fix(client, settings, params, tx).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
         handle_ai_explain(client, query_arg, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
@@ -6497,13 +6497,46 @@ async fn handle_ai_plan(
     }
 }
 
+/// Extract the last SQL code block from a mixed text+SQL LLM response.
+///
+/// LLMs responding to `/fix` produce a mix of explanation and corrected SQL.
+/// This function scans for the last `` ```sql ... ``` `` fence (or plain
+/// `` ``` ... ``` `` fence) and returns the inner content, trimmed.  If no
+/// fences are found it returns `None`.
+fn extract_last_sql_block(text: &str) -> Option<&str> {
+    // Find the last opening fence.
+    let last_open = text.rfind("```")?;
+    let after_fence = &text[last_open + 3..];
+    // Skip optional language tag on the opening fence line.
+    let body_start = after_fence
+        .find('\n')
+        .map_or(after_fence, |i| &after_fence[i + 1..]);
+    // Find the closing fence.
+    let body_end = body_start.find("```")?;
+    let body = body_start[..body_end].trim();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
 /// Handle a `/fix` command end-to-end.
 ///
 /// Looks up the most recently failed query from [`ReplSettings::last_error`],
 /// sends it to the configured LLM with schema context, and prints an
-/// explanation plus a corrected SQL query.  Gracefully degrades when no
-/// prior error exists or when AI is not configured.
-async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &ConnParams) {
+/// explanation plus a corrected SQL query.  After streaming the response,
+/// if a corrected SQL block is detected the user is prompted
+/// `Execute? [Y/n]` (default yes) and the query is executed when confirmed.
+/// Gracefully degrades when no prior error exists or when AI is not
+/// configured.
+#[allow(clippy::too_many_lines)]
+async fn handle_ai_fix(
+    client: &Client,
+    settings: &mut ReplSettings,
+    params: &ConnParams,
+    tx: &mut TxState,
+) {
     // Require a prior error to fix.
     let last_error = if let Some(e) = &settings.last_error {
         e.clone()
@@ -6597,7 +6630,7 @@ async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &Co
         temperature: 0.0,
     };
 
-    match stream_completion(
+    let result = match stream_completion(
         provider.as_ref(),
         &messages,
         &options,
@@ -6605,8 +6638,34 @@ async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &Co
     )
     .await
     {
-        Ok(result) => record_token_usage(settings, &result),
-        Err(e) => eprintln!("AI error: {e}"),
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+    record_token_usage(settings, &result);
+
+    // If the response contains a corrected SQL block, offer to execute it.
+    if let Some(fix_sql) = extract_last_sql_block(&result.content) {
+        let choice = ask_yne_prompt("Execute? [Y/n/e] ", true);
+        match choice {
+            AskChoice::Yes => {
+                execute_query(client, fix_sql, settings, tx).await;
+            }
+            AskChoice::Edit => match crate::io::edit(fix_sql, None, None) {
+                Ok(edited) => {
+                    let edited = edited.trim();
+                    if edited.is_empty() {
+                        eprintln!("(empty — skipped)");
+                    } else {
+                        execute_query(client, edited, settings, tx).await;
+                    }
+                }
+                Err(e) => eprintln!("{e}"),
+            },
+            AskChoice::No => {}
+        }
     }
 }
 
