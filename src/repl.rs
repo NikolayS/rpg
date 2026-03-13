@@ -387,6 +387,11 @@ pub struct ConversationEntry {
     pub role: &'static str,
     /// The text content.
     pub content: String,
+    /// Whether this entry is an action record (executed query + result).
+    ///
+    /// Action entries survive compaction — they are never LLM-summarized.
+    /// Only FIFO-evicted when the total entry count exceeds `max_entries`.
+    pub is_action: bool,
 }
 
 /// Sliding-window conversation context for AI commands.
@@ -420,6 +425,7 @@ impl ConversationContext {
         self.entries.push(ConversationEntry {
             role: "user",
             content,
+            is_action: false,
         });
         self.trim();
     }
@@ -430,17 +436,23 @@ impl ConversationContext {
         self.entries.push(ConversationEntry {
             role: "assistant",
             content,
+            is_action: false,
         });
         self.trim();
     }
 
-    /// Record a SQL query and its result summary for context.
+    /// Record a SQL query and its result summary as an action entry.
+    ///
+    /// Action entries survive compaction — they are never LLM-summarized,
+    /// only FIFO-evicted. This ensures the AI always knows which queries
+    /// were actually executed and what happened.
     fn push_query_result(&mut self, sql: &str, result_summary: &str) {
         let content = format!("Executed SQL:\n```sql\n{sql}\n```\nResult: {result_summary}");
         self.approx_tokens += content.len() / 4;
         self.entries.push(ConversationEntry {
             role: "user",
             content,
+            is_action: true,
         });
         self.trim();
     }
@@ -460,8 +472,13 @@ impl ConversationContext {
             .collect()
     }
 
-    /// Compact the context: summarize older entries into a single summary,
-    /// keeping the most recent `keep` entries intact.
+    /// Compact the context: summarize older *conversation* entries into a
+    /// single summary, keeping the most recent `keep` entries and all
+    /// *action* entries intact.
+    ///
+    /// Action entries (`is_action == true`) are never summarized — they
+    /// survive compaction and remain in the context at their original
+    /// position. Only conversational entries are compressed.
     fn compact(&mut self, focus: Option<&str>) {
         use std::fmt::Write as _;
 
@@ -469,36 +486,51 @@ impl ConversationContext {
             return; // Nothing meaningful to compact.
         }
 
-        // Keep the last 4 entries, summarize the rest.
+        // Keep the last 4 entries, split the rest for compaction.
         let keep = 4;
         let split = self.entries.len().saturating_sub(keep);
         let old_entries: Vec<ConversationEntry> = self.entries.drain(..split).collect();
 
+        // Separate action entries (survive) from conversation entries (summarized).
+        let mut action_entries: Vec<ConversationEntry> = Vec::new();
+        let mut conversation_entries: Vec<ConversationEntry> = Vec::new();
+        for entry in old_entries {
+            if entry.is_action {
+                action_entries.push(entry);
+            } else {
+                conversation_entries.push(entry);
+            }
+        }
+
+        // Build summary from conversation entries only.
         let mut summary = String::from("Previous conversation summary:");
         if let Some(f) = focus {
             let _ = write!(summary, " (focus: {f})");
         }
         summary.push('\n');
 
-        for entry in &old_entries {
+        for entry in &conversation_entries {
             let preview: String = entry.content.chars().take(200).collect();
             let suffix = if entry.content.len() > 200 { "..." } else { "" };
             let _ = writeln!(summary, "- [{role}] {preview}{suffix}", role = entry.role);
         }
 
+        // Rebuild: summary + surviving action entries + kept entries.
+        let mut rebuilt = Vec::with_capacity(1 + action_entries.len() + self.entries.len());
+        rebuilt.push(ConversationEntry {
+            role: "user",
+            content: summary,
+            is_action: false,
+        });
+        rebuilt.append(&mut action_entries);
+        rebuilt.append(&mut self.entries);
+        self.entries = rebuilt;
+
         // Recalculate token count.
-        self.approx_tokens = summary.len() / 4;
+        self.approx_tokens = 0;
         for e in &self.entries {
             self.approx_tokens += e.content.len() / 4;
         }
-
-        self.entries.insert(
-            0,
-            ConversationEntry {
-                role: "user",
-                content: summary,
-            },
-        );
     }
 
     /// Clear all conversation history.
@@ -6888,6 +6920,8 @@ mod tests {
         assert_eq!(ctx.entries.len(), 1);
         assert!(ctx.entries[0].content.contains("SELECT 1"));
         assert!(ctx.entries[0].content.contains("1 row"));
+        // Query results are action entries.
+        assert!(ctx.entries[0].is_action);
     }
 
     #[test]
@@ -6961,6 +6995,69 @@ mod tests {
         }
         ctx.compact(Some("performance"));
         assert!(ctx.entries[0].content.contains("(focus: performance)"));
+    }
+
+    #[test]
+    fn conversation_context_push_user_not_action() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_user("hello".to_owned());
+        assert!(!ctx.entries[0].is_action);
+    }
+
+    #[test]
+    fn conversation_context_push_assistant_not_action() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_assistant("response".to_owned());
+        assert!(!ctx.entries[0].is_action);
+    }
+
+    #[test]
+    fn action_entries_survive_compaction() {
+        let mut ctx = ConversationContext::new();
+        // Add a mix of conversation and action entries.
+        for i in 0..8 {
+            ctx.push_user(format!("question {i}"));
+            ctx.push_assistant(format!("answer {i}"));
+            ctx.push_query_result(&format!("SELECT {i}"), &format!("{i} rows"));
+        }
+        // Total: 24 entries (8 user + 8 assistant + 8 actions).
+        assert_eq!(ctx.entries.len(), 24);
+
+        let action_count_before = ctx.entries.iter().filter(|e| e.is_action).count();
+        assert_eq!(action_count_before, 8);
+
+        ctx.compact(None);
+
+        // Action entries from the compacted range should survive.
+        let action_count_after = ctx.entries.iter().filter(|e| e.is_action).count();
+        // All 8 action entries should still be present (some in compacted
+        // range, some in the kept-last-4 range).
+        assert_eq!(action_count_after, action_count_before);
+
+        // Verify the summary does NOT contain "Executed SQL" (action content).
+        let summary = &ctx.entries[0].content;
+        assert!(summary.contains("Previous conversation summary"));
+        assert!(!summary.contains("Executed SQL"));
+    }
+
+    #[test]
+    fn action_entries_ordered_after_compaction() {
+        let mut ctx = ConversationContext::new();
+        for i in 0..6 {
+            ctx.push_user(format!("q{i}"));
+            ctx.push_query_result(&format!("SELECT {i}"), "ok");
+        }
+        // 12 entries total.
+        ctx.compact(None);
+
+        // Structure: summary + surviving actions + last 4 entries.
+        // First entry should be the summary.
+        assert!(!ctx.entries[0].is_action);
+        assert!(ctx.entries[0].content.contains("Previous conversation"));
+
+        // Action entries from compacted range should follow the summary.
+        let actions: Vec<&ConversationEntry> = ctx.entries.iter().filter(|e| e.is_action).collect();
+        assert_eq!(actions.len(), 6);
     }
 
     #[test]
