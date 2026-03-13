@@ -397,9 +397,25 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .max()
         .unwrap_or(0);
 
+    // Widest data row: `key_padded + " | " + value` = max_name_width + 3 + value_width.
+    // The expanded header must be padded to this width to match psql behaviour.
+    let max_data_width = rows
+        .iter()
+        .flat_map(|row| {
+            cols.iter().enumerate().map(move |(i, _col)| {
+                let val_len = row
+                    .get(i)
+                    .and_then(|v| v.as_deref())
+                    .map_or(0, display_width);
+                max_name_width + 3 + val_len
+            })
+        })
+        .max()
+        .unwrap_or(max_name_width + 3);
+
     for (rec_idx, row) in rows.iter().enumerate() {
         // Record header: `-[ RECORD N ]---`
-        write_expanded_header(out, rec_idx + 1, max_name_width);
+        write_expanded_header(out, rec_idx + 1, max_data_width);
 
         for (i, col) in cols.iter().enumerate() {
             let val = row
@@ -419,12 +435,13 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
 }
 
 /// Write the `-[ RECORD N ]---` header line for expanded output.
-fn write_expanded_header(out: &mut String, record_num: usize, name_col_width: usize) {
-    // Matches psql: `-[ RECORD 1 ]---`
-    // Dashes fill to the right so the total width matches the name column.
+///
+/// `max_data_width` is the width of the widest data row
+/// (`key_padded + " | " + value`). The header is padded with `-` to match
+/// that width, replicating psql behaviour.
+fn write_expanded_header(out: &mut String, record_num: usize, max_data_width: usize) {
     let prefix = format!("-[ RECORD {record_num} ]");
-    let total_left = name_col_width + 1; // +1 for the leading space in data rows
-    let dashes_needed = total_left.saturating_sub(prefix.len());
+    let dashes_needed = max_data_width.saturating_sub(prefix.len());
     let _ = write!(out, "{prefix}");
     for _ in 0..dashes_needed.max(1) {
         out.push('-');
@@ -1034,6 +1051,35 @@ mod tests {
         assert!(out.contains("-[ RECORD 2 ]"));
         assert!(out.contains("Alice"));
         assert!(out.contains("Bob"));
+    }
+
+    #[test]
+    fn test_expanded_header_width_matches_widest_row() {
+        // Regression test for GitHub issue #225.
+        //
+        // Data:
+        //   num      | 1
+        //   greeting | hello
+        //
+        // max_name_width = len("greeting") = 8
+        // widest row = "greeting | hello" = 8 + 3 + 5 = 16
+        // header base = "-[ RECORD 1 ]" = 13 chars
+        // expected header = "-[ RECORD 1 ]---" (13 + 3 dashes = 16 chars)
+        let rs = RowSet {
+            columns: vec![mk_col("num", false), mk_col("greeting", false)],
+            rows: vec![mk_row(&[Some("1"), Some("hello")])],
+        };
+        let mut out = String::new();
+        format_expanded(&mut out, &rs, &OutputConfig::default());
+
+        let first_line = out.lines().next().expect("output must not be empty");
+        // Header must be exactly 16 chars wide.
+        assert_eq!(
+            first_line.len(),
+            16,
+            "header line should be 16 chars wide, got: {first_line:?}"
+        );
+        assert_eq!(first_line, "-[ RECORD 1 ]---");
     }
 
     // -----------------------------------------------------------------------
