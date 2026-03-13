@@ -170,6 +170,13 @@ pub enum MetaCmd {
     ///
     /// `pattern` holds the optional file path.
     GoExecuteExpanded(Option<String>),
+    /// `\gexec` — execute the buffer, then execute each result cell as SQL.
+    ///
+    /// Each non-NULL cell value in the result set is sent to the server as a
+    /// separate SQL statement, row by row, column by column.  NULL cells are
+    /// silently skipped.  Errors in individual cell statements are printed but
+    /// do not stop processing of remaining cells.
+    GExec,
 
     // -- Watch (#47) -------------------------------------------------------
     /// `\watch [interval]` — re-execute the last query every N seconds.
@@ -906,18 +913,26 @@ fn parse_shell(input: &str) -> ParsedMeta {
 // \g / \gx parser (#46)
 // ---------------------------------------------------------------------------
 
-/// Parse `\g [file||cmd]`, `\gx [file]`, and `\gdesc`.
+/// Parse `\g [file||cmd]`, `\gx [file]`, `\gdesc`, and `\gexec`.
 ///
 /// Disambiguation order (longest match first):
-///   `gset`  → not handled here (unknown)
-///   `gexec` → not handled here (unknown)
+///   `gexec` → [`MetaCmd::GExec`]
 ///   `gdesc` → [`MetaCmd::GDesc`]
+///   `gset`  → not handled here (unknown)
 ///   `gx`    → [`MetaCmd::GoExecuteExpanded`]
 ///   `g`     → [`MetaCmd::GoExecute`]
 ///
-/// Any unknown `g`-prefixed command (e.g. `\gset`, `\gexec`) falls through
-/// to [`MetaCmd::Unknown`].
+/// Any unknown `g`-prefixed command (e.g. `\gset`) falls through to
+/// [`MetaCmd::Unknown`].
 fn parse_g_family(input: &str) -> ParsedMeta {
+    // `\gexec` — execute buffer, then execute each result cell as SQL.
+    // Checked before the generic long-prefix guard below.
+    if let Some(rest) = input.strip_prefix("gexec") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::GExec);
+        }
+    }
+
     // `\gdesc` — describe buffer columns without executing.
     if let Some(rest) = input.strip_prefix("gdesc") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -927,7 +942,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
 
     // Longer g-prefixed commands that must not be misread as \g.
     // Check them first so `\gset foo` → Unknown, not GoExecute("set foo").
-    for long_prefix in &["gset", "gexec"] {
+    for long_prefix in &["gset"] {
         if let Some(rest) = input.strip_prefix(long_prefix) {
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
@@ -1919,10 +1934,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_g_not_confused_with_gset_gexec() {
+    fn parse_g_not_confused_with_gset() {
         // These longer g-prefixed commands must NOT parse as GoExecute.
         assert!(matches!(parse("\\gset foo").cmd, MetaCmd::Unknown(_)));
-        assert!(matches!(parse("\\gexec").cmd, MetaCmd::Unknown(_)));
     }
 
     // -- \gdesc (#52) --------------------------------------------------------
@@ -1938,6 +1952,12 @@ mod tests {
             parse("\\gdesc").cmd,
             MetaCmd::GoExecuteExpanded(_)
         ));
+    }
+
+    #[test]
+    fn parse_gexec_is_gexec_not_go_execute() {
+        // \gexec must parse as GExec, not GoExecute or Unknown.
+        assert_eq!(parse("\\gexec").cmd, MetaCmd::GExec);
     }
 
     #[test]

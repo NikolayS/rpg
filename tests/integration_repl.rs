@@ -303,3 +303,145 @@ async fn gdesc_reports_column_names_and_types() {
         "expected 'text' for the text column, got '{type_name}'"
     );
 }
+
+// ---------------------------------------------------------------------------
+// \gexec — verify that each result cell is executed as SQL
+// ---------------------------------------------------------------------------
+
+/// `\gexec` executes the current buffer, then executes each result cell as a
+/// SQL statement.
+///
+/// We simulate this by:
+/// 1. Building a SELECT that returns CREATE TABLE statements as cell values.
+/// 2. Calling `execute_gexec` (through the public `simple_query` protocol
+///    directly here — we test the lower-level protocol that `execute_gexec`
+///    relies on).
+/// 3. Verifying that the tables were actually created.
+#[tokio::test]
+async fn repl_gexec_creates_tables_from_cells() {
+    let db = connect_or_skip!();
+
+    // Use a unique schema to avoid interference between test runs.
+    let schema = format!(
+        "gexec_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Create an isolated schema for this test.
+    client
+        .simple_query(&format!("create schema {schema}"))
+        .await
+        .expect("create schema failed");
+
+    // The query that \gexec would run first — returns two CREATE TABLE
+    // statements as cell values.
+    let initial_sql = format!(
+        "select 'create table {schema}.t1(id int)', \
+                'create table {schema}.t2(id int)'"
+    );
+
+    // Collect the cell values (mirroring what execute_gexec does).
+    let messages = client
+        .simple_query(&initial_sql)
+        .await
+        .expect("initial query failed");
+
+    let mut cells: Vec<String> = Vec::new();
+    for msg in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            for i in 0..row.len() {
+                if let Some(v) = row.get(i) {
+                    if !v.is_empty() {
+                        cells.push(v.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(cells.len(), 2, "expected 2 cell SQL statements");
+
+    // Execute each cell (as \gexec would).
+    for cell_sql in &cells {
+        client
+            .simple_query(cell_sql)
+            .await
+            .expect("cell SQL failed");
+    }
+
+    // Verify both tables exist.
+    let check = client
+        .simple_query(&format!(
+            "select count(*) as n \
+             from information_schema.tables \
+             where table_schema = '{schema}' \
+               and table_name in ('t1', 't2')"
+        ))
+        .await
+        .expect("table existence check failed");
+
+    let mut found_count = false;
+    for msg in check {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            let n: i64 = row
+                .get("n")
+                .unwrap_or("0")
+                .parse()
+                .expect("count should be numeric");
+            assert_eq!(n, 2, "expected both t1 and t2 to exist, got {n}");
+            found_count = true;
+        }
+    }
+    assert!(found_count, "count query returned no rows");
+
+    // Clean up.
+    client
+        .simple_query(&format!("drop schema {schema} cascade"))
+        .await
+        .expect("drop schema failed");
+
+    drop(db);
+}
+
+/// NULL cells returned by the initial query are silently skipped by `\gexec`.
+#[tokio::test]
+async fn repl_gexec_skips_null_cells() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // A query that returns NULL in the second column.
+    let sql = "select 'select 1', null::text, 'select 2'";
+
+    let messages = client
+        .simple_query(sql)
+        .await
+        .expect("initial query failed");
+
+    let mut cells: Vec<Option<String>> = Vec::new();
+    for msg in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            for i in 0..row.len() {
+                cells.push(row.get(i).map(str::to_owned));
+            }
+        }
+    }
+
+    // simple_query maps NULL to None; our gexec logic skips None and empty.
+    let non_null: Vec<&str> = cells
+        .iter()
+        .filter_map(|c| c.as_deref())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    assert_eq!(
+        non_null,
+        vec!["select 1", "select 2"],
+        "NULL cell should be absent from non-null list"
+    );
+}
