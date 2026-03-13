@@ -45,29 +45,17 @@ pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Optio
         MetaCmd::ListTablespaces => list_tablespaces(client, meta).await,
         MetaCmd::ListTypes => list_types(client, meta).await,
         MetaCmd::ListDomains => list_domains(client, meta).await,
-        // Less common commands — basic stubs
-        MetaCmd::ListPrivileges => stub_not_implemented("\\dp (list access privileges)"),
-        MetaCmd::ListConversions => stub_not_implemented("\\dc (list conversions)"),
-        MetaCmd::ListCasts => stub_not_implemented("\\dC (list casts)"),
-        MetaCmd::ListComments => stub_not_implemented("\\dd (list object comments)"),
-        MetaCmd::ListForeignServers => stub_not_implemented("\\des (list foreign servers)"),
-        MetaCmd::ListFdws => stub_not_implemented("\\dew (list foreign-data wrappers)"),
-        MetaCmd::ListForeignTablesViaFdw => {
-            stub_not_implemented("\\det (list foreign tables via FDW)")
-        }
-        MetaCmd::ListUserMappings => stub_not_implemented("\\deu (list user mappings)"),
+        MetaCmd::ListPrivileges => list_privileges(client, meta).await,
+        MetaCmd::ListConversions => list_conversions(client, meta).await,
+        MetaCmd::ListCasts => list_casts(client, meta).await,
+        MetaCmd::ListComments => list_comments(client, meta).await,
+        MetaCmd::ListForeignServers => list_foreign_servers(client, meta).await,
+        MetaCmd::ListFdws => list_fdws(client, meta).await,
+        MetaCmd::ListForeignTablesViaFdw => list_foreign_tables_via_fdw(client, meta).await,
+        MetaCmd::ListUserMappings => list_user_mappings(client, meta).await,
         // Non-describe commands should never reach this function.
         _ => false,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Stub helper
-// ---------------------------------------------------------------------------
-
-fn stub_not_implemented(label: &str) -> bool {
-    eprintln!("{label}: not yet implemented");
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -994,6 +982,473 @@ order by 1, 2"
     );
 
     run_and_print(client, &sql, meta.echo_hidden).await
+}
+
+// ---------------------------------------------------------------------------
+// \dp — list access privileges
+// ---------------------------------------------------------------------------
+
+/// List access privileges for relations (tables, views, sequences).
+///
+/// Matches psql's `\dp [pattern]` output: Schema, Name, Type, Access
+/// privileges, Column privileges, Policies.
+async fn list_privileges(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.relname", Some("n.nspname"));
+
+    let sys_filter = system_schema_filter(meta.system);
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter)
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    case c.relkind
+        when 'r' then 'table'
+        when 'p' then 'partitioned table'
+        when 'v' then 'view'
+        when 'm' then 'materialized view'
+        when 'S' then 'sequence'
+        when 'f' then 'foreign table'
+        else c.relkind::text
+    end as \"Type\",
+    coalesce(pg_catalog.array_to_string(c.relacl, E'\\n'), '') as \"Access privileges\",
+    coalesce(
+        (select pg_catalog.array_to_string(
+            pg_catalog.array_agg(
+                a.attname || ': ' || pg_catalog.array_to_string(a.attacl, E'\\n')
+            ), E'\\n')
+         from pg_catalog.pg_attribute as a
+         where a.attrelid = c.oid
+           and a.attacl is not null
+           and a.attnum > 0
+           and not a.attisdropped),
+        ''
+    ) as \"Column privileges\",
+    coalesce(
+        (select pg_catalog.array_to_string(
+            pg_catalog.array_agg(pol.polname || case pol.polpermissive
+                when true then '' else ' (RESTRICTIVE)' end),
+            E'\\n')
+         from pg_catalog.pg_policy as pol
+         where pol.polrelid = c.oid),
+        ''
+    ) as \"Policies\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("Access privileges")).await
+}
+
+// ---------------------------------------------------------------------------
+// \dd — list object descriptions/comments
+// ---------------------------------------------------------------------------
+
+/// List object descriptions (comments) for operators, functions, types, etc.
+///
+/// Matches psql's `\dd [pattern]` output: Schema, Name, Object, Description.
+/// Shows objects that have comments but are not shown by other `\d` commands.
+async fn list_comments(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "n.nspname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let extra_cond = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("and {}", where_parts.join("\n    and "))
+    };
+
+    // Operators
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    'operator' as \"Object\",
+    pg_catalog.obj_description(o.oid, 'pg_operator') as \"Description\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+where pg_catalog.obj_description(o.oid, 'pg_operator') is not null
+    {extra_cond}
+union all
+select
+    n.nspname as \"Schema\",
+    t.typname as \"Name\",
+    'type' as \"Object\",
+    pg_catalog.obj_description(t.oid, 'pg_type') as \"Description\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+where pg_catalog.obj_description(t.oid, 'pg_type') is not null
+    and t.typtype <> 'p'
+    and t.typname !~ '^_'
+    {extra_cond}
+order by 1, 3, 2"
+    );
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("Object descriptions")).await
+}
+
+// ---------------------------------------------------------------------------
+// \dC — list casts
+// ---------------------------------------------------------------------------
+
+/// List casts between data types.
+///
+/// Matches psql's `\dC [pattern]` output: Source type, Target type,
+/// Function, Implicit?
+async fn list_casts(client: &Client, meta: &ParsedMeta) -> bool {
+    // Filter on source or target type name when a pattern is given.
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "st.typname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        // Also match on target type name.
+        let target_filter = pattern::where_clause(meta.pattern.as_deref(), "tt.typname", None);
+        format!("where ({name_filter} or {target_filter})")
+    };
+
+    let sql = format!(
+        "select
+    pg_catalog.format_type(c.castsource, null) as \"Source type\",
+    pg_catalog.format_type(c.casttarget, null) as \"Target type\",
+    case when c.castfunc = 0 then '(binary coercible)'
+         else p.proname
+    end as \"Function\",
+    case c.castcontext
+        when 'e' then 'no'
+        when 'a' then 'in assignment'
+        when 'i' then 'yes'
+        else c.castcontext::text
+    end as \"Implicit?\"
+from pg_catalog.pg_cast as c
+left join pg_catalog.pg_type as st
+    on st.oid = c.castsource
+left join pg_catalog.pg_type as tt
+    on tt.oid = c.casttarget
+left join pg_catalog.pg_proc as p
+    on p.oid = c.castfunc
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of casts")).await
+}
+
+// ---------------------------------------------------------------------------
+// \dc — list conversions
+// ---------------------------------------------------------------------------
+
+/// List character set conversions.
+///
+/// Matches psql's `\dc [pattern]` output: Schema, Name, Source, Destination,
+/// Default?
+async fn list_conversions(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.conname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    c.conname as \"Name\",
+    pg_catalog.pg_encoding_to_char(c.conforencoding) as \"Source\",
+    pg_catalog.pg_encoding_to_char(c.contoencoding) as \"Destination\",
+    case when c.condefault then 'yes' else 'no' end as \"Default?\"
+from pg_catalog.pg_conversion as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.connamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of conversions")).await
+}
+
+// ---------------------------------------------------------------------------
+// \des — list foreign servers
+// ---------------------------------------------------------------------------
+
+/// List foreign servers.
+///
+/// Matches psql's `\des [pattern]` output: Name, Owner, Foreign-data wrapper.
+async fn list_foreign_servers(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "s.srvname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    s.srvname as \"Name\",
+    pg_catalog.pg_get_userbyid(s.srvowner) as \"Owner\",
+    w.fdwname as \"Foreign-data wrapper\",
+    s.srvtype as \"Type\",
+    s.srvversion as \"Version\",
+    pg_catalog.array_to_string(s.srvoptions, ', ') as \"FDW options\",
+    coalesce(pg_catalog.array_to_string(s.srvacl, E'\\n'), '') as \"Access privileges\"
+from pg_catalog.pg_foreign_server as s
+join pg_catalog.pg_foreign_data_wrapper as w
+    on w.oid = s.srvfdw
+{where_clause}
+order by 1"
+        )
+    } else {
+        format!(
+            "select
+    s.srvname as \"Name\",
+    pg_catalog.pg_get_userbyid(s.srvowner) as \"Owner\",
+    w.fdwname as \"Foreign-data wrapper\"
+from pg_catalog.pg_foreign_server as s
+join pg_catalog.pg_foreign_data_wrapper as w
+    on w.oid = s.srvfdw
+{where_clause}
+order by 1"
+        )
+    };
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of foreign servers"),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dew — list foreign-data wrappers
+// ---------------------------------------------------------------------------
+
+/// List foreign-data wrappers.
+///
+/// Matches psql's `\dew [pattern]` output: Name, Owner, Handler, Validator.
+async fn list_fdws(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "w.fdwname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    w.fdwname as \"Name\",
+    pg_catalog.pg_get_userbyid(w.fdwowner) as \"Owner\",
+    coalesce(h.proname, '-') as \"Handler\",
+    coalesce(v.proname, '-') as \"Validator\",
+    pg_catalog.array_to_string(w.fdwoptions, ', ') as \"FDW options\",
+    coalesce(pg_catalog.array_to_string(w.fdwacl, E'\\n'), '') as \"Access privileges\"
+from pg_catalog.pg_foreign_data_wrapper as w
+left join pg_catalog.pg_proc as h
+    on h.oid = w.fdwhandler
+left join pg_catalog.pg_proc as v
+    on v.oid = w.fdwvalidator
+{where_clause}
+order by 1"
+        )
+    } else {
+        format!(
+            "select
+    w.fdwname as \"Name\",
+    pg_catalog.pg_get_userbyid(w.fdwowner) as \"Owner\",
+    coalesce(h.proname, '-') as \"Handler\",
+    coalesce(v.proname, '-') as \"Validator\"
+from pg_catalog.pg_foreign_data_wrapper as w
+left join pg_catalog.pg_proc as h
+    on h.oid = w.fdwhandler
+left join pg_catalog.pg_proc as v
+    on v.oid = w.fdwvalidator
+{where_clause}
+order by 1"
+        )
+    };
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of foreign-data wrappers"),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \det — list foreign tables (via FDW)
+// ---------------------------------------------------------------------------
+
+/// List foreign tables registered via foreign-data wrappers.
+///
+/// Matches psql's `\det [pattern]` output: Schema, Table, Server.
+async fn list_foreign_tables_via_fdw(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.relname", Some("n.nspname"));
+
+    let sys_filter = system_schema_filter(meta.system);
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter)
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let extra_cond = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("and {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    c.relname as \"Table\",
+    s.srvname as \"Server\"
+from pg_catalog.pg_foreign_table as ft
+join pg_catalog.pg_class as c
+    on c.oid = ft.ftrelid
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+join pg_catalog.pg_foreign_server as s
+    on s.oid = ft.ftserver
+where c.relkind = 'f'
+    {extra_cond}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of foreign tables"),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \deu — list user mappings
+// ---------------------------------------------------------------------------
+
+/// List user mappings for foreign servers.
+///
+/// Matches psql's `\deu [pattern]` output: Server, User name.
+async fn list_user_mappings(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "s.srvname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let sql = format!(
+        "select
+    s.srvname as \"Server\",
+    pg_catalog.pg_get_userbyid(u.umuser) as \"User name\"
+from pg_catalog.pg_user_mapping as u
+join pg_catalog.pg_foreign_server as s
+    on s.oid = u.umserver
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of user mappings"),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
