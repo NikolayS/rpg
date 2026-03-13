@@ -3445,7 +3445,7 @@ async fn handle_line(
     if trimmed.starts_with('/') {
         stmt_buf.clear();
         stmt_buf.push_str(line);
-        dispatch_ai_command(trimmed, client, params, settings).await;
+        dispatch_ai_command(trimmed, client, params, settings, tx).await;
         return HandleLineResult::Continue;
     }
 
@@ -3818,13 +3818,14 @@ async fn dispatch_ai_command(
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
+    tx: &mut TxState,
 ) {
     if let Some(prompt) = input.strip_prefix("/ask").map(str::trim) {
         if prompt.is_empty() {
             eprintln!("Usage: /ask <natural language description>");
             return;
         }
-        handle_ai_ask(client, prompt, settings, params).await;
+        handle_ai_ask(client, prompt, settings, params, tx).await;
     } else if input == "/fix" || input.starts_with("/fix ") {
         handle_ai_fix(client, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
@@ -3839,16 +3840,61 @@ async fn dispatch_ai_command(
     }
 }
 
+/// Strip markdown code fences from LLM output.
+///
+/// LLMs sometimes wrap SQL in `` ```sql ... ``` `` blocks.  This function
+/// removes the fences and returns the inner content, trimmed.  If no fences
+/// are found, the original string is returned as-is.
+fn strip_sql_fences(s: &str) -> &str {
+    let trimmed = s.trim();
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // Skip optional language tag on the opening fence line.
+        let after_tag = rest.find('\n').map_or(rest, |i| &rest[i + 1..]);
+        // Remove closing fence.
+        let body = if let Some(pos) = after_tag.rfind("```") {
+            &after_tag[..pos]
+        } else {
+            after_tag
+        };
+        body.trim()
+    } else {
+        trimmed
+    }
+}
+
+/// Prompt the user with a yes/no question and return their answer.
+///
+/// `default_yes` controls what happens when the user presses Enter without
+/// typing anything: `true` → default is yes, `false` → default is no.
+fn ask_yn_prompt(prompt: &str, default_yes: bool) -> bool {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    let answer = input.trim().to_lowercase();
+    if answer.is_empty() {
+        return default_yes;
+    }
+    answer.starts_with('y')
+}
+
 /// Handle a `/ask <prompt>` command end-to-end.
 ///
 /// Checks AI configuration, builds schema context, sends the prompt to the
-/// configured LLM, and prints the generated SQL.  Gracefully degrades with
-/// a helpful message when AI is not configured.
+/// configured LLM, prints the generated SQL with syntax highlighting, and
+/// prompts `[Y/n]` to execute.  Read-only queries auto-execute when
+/// `ai.auto_execute_readonly` is set.
+#[allow(clippy::too_many_lines)]
 async fn handle_ai_ask(
     client: &Client,
     prompt: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &ConnParams,
+    tx: &mut TxState,
 ) {
     let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
 
@@ -3924,12 +3970,43 @@ async fn handle_ai_ask(
         temperature: 0.0,
     };
 
-    match provider.complete(&messages, &options).await {
-        Ok(result) => {
-            println!("{}", result.content);
-            // TODO: prompt user to execute, track token usage (#75)
+    let generated_sql = match provider.complete(&messages, &options).await {
+        Ok(result) => result.content,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
         }
-        Err(e) => eprintln!("AI error: {e}"),
+    };
+
+    // Strip markdown fences if present (LLMs sometimes wrap in ```sql ... ```).
+    let sql = strip_sql_fences(&generated_sql);
+
+    // Display with syntax highlighting when available.
+    if settings.no_highlight {
+        println!("{sql}");
+    } else {
+        println!("{}", crate::highlight::highlight_sql(sql));
+    }
+
+    // Decide whether to execute.
+    let read_only = !is_write_query(sql);
+    let auto_exec = read_only && settings.config.ai.auto_execute_readonly;
+
+    let should_execute = if auto_exec {
+        true
+    } else {
+        ask_yn_prompt(
+            if read_only {
+                "Execute? [Y/n] "
+            } else {
+                "Execute (write query)? [y/N] "
+            },
+            read_only,
+        )
+    };
+
+    if should_execute {
+        execute_query(client, sql, settings, tx).await;
     }
 }
 
@@ -5174,5 +5251,36 @@ mod tests {
         let tables =
             extract_table_names("SELECT * FROM users u1 JOIN users u2 ON u1.id = u2.partner_id");
         assert_eq!(tables, vec!["users"]);
+    }
+
+    // -- strip_sql_fences ------------------------------------------------------
+
+    #[test]
+    fn strip_fences_no_fences() {
+        assert_eq!(strip_sql_fences("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn strip_fences_sql_tag() {
+        assert_eq!(strip_sql_fences("```sql\nSELECT 1;\n```"), "SELECT 1;");
+    }
+
+    #[test]
+    fn strip_fences_no_tag() {
+        assert_eq!(strip_sql_fences("```\nSELECT 1;\n```"), "SELECT 1;");
+    }
+
+    #[test]
+    fn strip_fences_with_whitespace() {
+        assert_eq!(
+            strip_sql_fences("  ```sql\n  SELECT 1;  \n```  "),
+            "SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn strip_fences_no_closing_fence() {
+        // Gracefully handles missing closing fence.
+        assert_eq!(strip_sql_fences("```sql\nSELECT 1;"), "SELECT 1;");
     }
 }
