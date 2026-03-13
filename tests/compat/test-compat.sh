@@ -268,6 +268,36 @@ compare "\\dT" \
 # compare "\\dD" \
 #   "\\dD"
 
+compare "\\dp" \
+  "\\dp"
+
+compare "\\dd" \
+  "\\dd"
+
+compare "\\dC" \
+  "\\dC"
+
+compare "\\dc" \
+  "\\dc"
+
+compare "\\dy" \
+  "\\dy"
+
+compare "\\do" \
+  "\\do"
+
+compare "\\df+" \
+  "\\df+"
+
+compare "\\dT+" \
+  "\\dT+"
+
+compare "\\dx+" \
+  "\\dx+"
+
+compare "\\db+" \
+  "\\db+"
+
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
 # ---------------------------------------------------------------------------
