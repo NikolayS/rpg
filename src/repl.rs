@@ -72,9 +72,8 @@ fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
         Ok(val) if !val.is_empty() => Some(val),
         _ => {
             eprintln!(
-                "ERROR: environment variable '{}' is not set. \
-                 Set it with: export {}=\"your-api-key\"",
-                env_or_key, env_or_key
+                "ERROR: environment variable '{env_or_key}' is not set. \
+                 Set it with: export {env_or_key}=\"your-api-key\""
             );
             None
         }
