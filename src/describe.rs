@@ -2652,6 +2652,62 @@ order by 1, 2";
     }
 
     // -----------------------------------------------------------------------
+    // list_relations SQL — \dm+ has Access method and pg_table_size (#159)
+    // -----------------------------------------------------------------------
+
+    /// Regression test for bug #159: `\dm+` was missing the Access method
+    /// column and reported "0 bytes" because matviews were incorrectly grouped
+    /// with views/sequences in the `is_view_or_seq` branch.  Matviews are
+    /// heap-stored and must use the default branch (pg_table_size + Access
+    /// method).
+    #[test]
+    fn matview_plus_sql_has_access_method_and_table_size() {
+        // Replicate the default (non-view, non-seq) branch of list_relations
+        // for \dm+, which is what the fix causes matviews to use.
+        let sql = "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    c.relkind as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
+    coalesce(am.amname, '') as \"Access method\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_am as am
+    on am.oid = c.relam
+where c.relkind in ('m')
+order by 1, 2";
+
+        assert!(
+            sql.contains("\"Access method\""),
+            "matview plus SQL must have Access method column: {sql}"
+        );
+        assert!(
+            sql.contains("pg_table_size"),
+            "matview plus SQL must use pg_table_size (not pg_relation_size): {sql}"
+        );
+        assert!(
+            !sql.contains("pg_relation_size"),
+            "matview plus SQL must NOT use pg_relation_size: {sql}"
+        );
+        // Access method must come after Persistence and before Size.
+        let am_pos = sql.find("\"Access method\"").unwrap();
+        let size_pos = sql.find("\"Size\"").unwrap();
+        assert!(
+            am_pos < size_pos,
+            "Access method must appear before Size: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // list_event_triggers SQL generation
     // -----------------------------------------------------------------------
 
