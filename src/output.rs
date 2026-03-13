@@ -655,13 +655,18 @@ pub fn format_unaligned(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         out.push_str(&cfg.record_sep);
     }
 
-    for row in rows {
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push_str(&cfg.record_sep);
+        }
         let cells: Vec<String> = row
             .iter()
             .map(|v| v.as_deref().unwrap_or(&cfg.null_display).to_owned())
             .collect();
         out.push_str(&cells.join(&cfg.field_sep));
-        out.push_str(&cfg.record_sep);
+    }
+    if !rows.is_empty() {
+        out.push('\n');
     }
 
     if !cfg.tuples_only && cfg.footer {
@@ -1345,6 +1350,29 @@ mod tests {
         let mut out = String::new();
         format_unaligned(&mut out, &rs, &cfg);
         assert!(out.contains("[NULL]"), "null display: {out}");
+    }
+
+    /// Verify that a custom record separator is used between rows but not
+    /// appended after the last row — matching psql `-A -R '|' -t` behaviour.
+    #[test]
+    fn test_unaligned_no_trailing_record_sep() {
+        let rs = RowSet {
+            columns: vec![mk_col("n", false)],
+            rows: vec![
+                mk_row(&[Some("1")]),
+                mk_row(&[Some("2")]),
+                mk_row(&[Some("3")]),
+            ],
+        };
+        let cfg = PsetConfig {
+            record_sep: "|".to_owned(),
+            tuples_only: true,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_unaligned(&mut out, &rs, &cfg);
+        // Rows separated by `|`, final row ends with `\n` only (no trailing `|`).
+        assert_eq!(out, "1|2|3\n", "no trailing record sep: {out:?}");
     }
 
     // -----------------------------------------------------------------------
