@@ -848,6 +848,10 @@ order by 1"
 // \dx — list extensions
 // ---------------------------------------------------------------------------
 
+/// List installed extensions matching psql's `\dx [pattern]` output.
+///
+/// Basic columns: Name, Version, Default version, Schema, Description.
+/// Verbose (`\dx+`) additionally shows: Relocatable, Requires.
 async fn list_extensions(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "e.extname", None);
 
@@ -857,19 +861,50 @@ async fn list_extensions(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {name_filter}")
     };
 
-    // `+` does not add extra columns for extensions (same output either way).
-    let sql = format!(
-        "select
+    let sql = if meta.plus {
+        format!(
+            "select
     e.extname as \"Name\",
     e.extversion as \"Version\",
+    ae.default_version as \"Default version\",
+    n.nspname as \"Schema\",
+    case
+        when av.relocatable then 'yes'
+        else 'no'
+    end as \"Relocatable\",
+    coalesce(
+        pg_catalog.array_to_string(av.requires, ', '),
+        ''
+    ) as \"Requires\",
+    coalesce(pg_catalog.obj_description(e.oid, 'pg_extension'), '') as \"Description\"
+from pg_catalog.pg_extension as e
+join pg_catalog.pg_available_extensions() as ae(name, default_version, comment)
+    on ae.name = e.extname
+left join pg_catalog.pg_namespace as n
+    on n.oid = e.extnamespace
+left join pg_catalog.pg_available_extension_versions() as av(name, version, superuser, trusted, relocatable, schema, requires, comment)
+    on av.name = e.extname
+    and av.version = e.extversion
+{where_clause}
+order by 1"
+        )
+    } else {
+        format!(
+            "select
+    e.extname as \"Name\",
+    e.extversion as \"Version\",
+    ae.default_version as \"Default version\",
     n.nspname as \"Schema\",
     coalesce(pg_catalog.obj_description(e.oid, 'pg_extension'), '') as \"Description\"
 from pg_catalog.pg_extension as e
+join pg_catalog.pg_available_extensions() as ae(name, default_version, comment)
+    on ae.name = e.extname
 left join pg_catalog.pg_namespace as n
     on n.oid = e.extnamespace
 {where_clause}
 order by 1"
-    );
+        )
+    };
 
     run_and_print_titled(
         client,
@@ -884,6 +919,10 @@ order by 1"
 // \db — list tablespaces
 // ---------------------------------------------------------------------------
 
+/// List tablespaces matching psql's `\db [pattern]` output.
+///
+/// Basic columns: Name, Owner, Location.
+/// Verbose (`\db+`) adds: Access privileges, Options, Size, Description.
 async fn list_tablespaces(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "t.spcname", None);
 
@@ -893,15 +932,35 @@ async fn list_tablespaces(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {name_filter}")
     };
 
-    let sql = format!(
-        "select
+    let sql = if meta.plus {
+        format!(
+            "select
+    t.spcname as \"Name\",
+    pg_catalog.pg_get_userbyid(t.spcowner) as \"Owner\",
+    pg_catalog.pg_tablespace_location(t.oid) as \"Location\",
+    case
+        when pg_catalog.array_length(t.spcacl, 1) = 0
+            then '(none)'
+        else pg_catalog.array_to_string(t.spcacl, E'\\n')
+    end as \"Access privileges\",
+    t.spcoptions as \"Options\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_tablespace_size(t.oid)) as \"Size\",
+    pg_catalog.shobj_description(t.oid, 'pg_tablespace') as \"Description\"
+from pg_catalog.pg_tablespace as t
+{where_clause}
+order by 1"
+        )
+    } else {
+        format!(
+            "select
     t.spcname as \"Name\",
     pg_catalog.pg_get_userbyid(t.spcowner) as \"Owner\",
     pg_catalog.pg_tablespace_location(t.oid) as \"Location\"
 from pg_catalog.pg_tablespace as t
 {where_clause}
 order by 1"
-    );
+        )
+    };
 
     run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of tablespaces")).await
 }
