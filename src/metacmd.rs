@@ -100,6 +100,12 @@ pub enum MetaCmd {
     Set(String, String),
     /// `\unset name` — unset a variable.
     Unset(String),
+    /// `\prompt [text] name` — prompt the user for input and store in a variable.
+    ///
+    /// Payload: `(prompt_text, var_name)`.  When only one argument is given,
+    /// `prompt_text` is the empty string and `var_name` holds the argument.
+    /// The optional prompt text may be single- or double-quoted.
+    Prompt(String, String),
     /// `\pset [option [value]]` — set print option.
     Pset(String, Option<String>),
     /// `\a` — toggle aligned/unaligned output format.
@@ -337,6 +343,7 @@ impl MetaCmd {
             Self::Warn => "\\warn",
             Self::Encoding => "\\encoding",
             Self::Password => "\\password",
+            Self::Prompt(_, _) => "\\prompt",
             Self::Copy(_) => "\\copy",
             // Non-stub commands should never reach this.
             _ => "\\?",
@@ -526,6 +533,55 @@ fn parse_pset(input: &str) -> ParsedMeta {
     let option = parts.next().unwrap_or("").to_owned();
     let value = parts.next().map(|s| s.trim().to_owned());
     ParsedMeta::simple(MetaCmd::Pset(option, value))
+}
+
+/// Parse `\prompt [text] name`.
+///
+/// The optional prompt text may be quoted (single or double quotes).  When the
+/// first non-whitespace character is a quote, the text extends to the matching
+/// closing quote; otherwise the first whitespace-delimited token is the prompt
+/// text and the second is the variable name.  When only one unquoted token is
+/// present it is the variable name (empty prompt text).
+fn parse_prompt(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix("prompt") else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        // Bare `\prompt` with no variable name — unknown/error.
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    }
+
+    // Check for a quoted prompt string.
+    if rest.starts_with('"') || rest.starts_with('\'') {
+        let quote = rest.chars().next().unwrap();
+        let after_open = &rest[1..];
+        if let Some(close) = after_open.find(quote) {
+            let prompt_text = after_open[..close].to_owned();
+            let var_name = after_open[close + 1..].trim().to_owned();
+            if var_name.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::Prompt(prompt_text, var_name));
+        }
+        // Unterminated quote — treat everything after opening quote as prompt,
+        // which means no variable name: unknown.
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    }
+
+    // No quotes: split on whitespace.
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("").to_owned();
+    match parts.next().map(str::trim) {
+        Some(second) if !second.is_empty() => {
+            // Two tokens: first is prompt text, second is variable name.
+            ParsedMeta::simple(MetaCmd::Prompt(first, second.to_owned()))
+        }
+        _ => {
+            // One token: it is the variable name, no prompt text.
+            ParsedMeta::simple(MetaCmd::Prompt(String::new(), first))
+        }
+    }
 }
 
 /// Parse `\t [on|off]` — tuples-only toggle.
@@ -1091,6 +1147,12 @@ fn parse_p_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("plan") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::PlanMode);
+        }
+    }
+    // `\prompt [text] name` — prompt for input into a variable.
+    if let Some(rest) = input.strip_prefix("prompt") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return parse_prompt(input);
         }
     }
     parse_simple_or_unknown(input, "p", MetaCmd::PrintBuffer)
@@ -2235,6 +2297,55 @@ mod tests {
     fn parse_password_not_confused_with_print_buffer() {
         // \password starts with 'p', must not match \p
         assert_eq!(parse("\\password user").cmd, MetaCmd::Password);
+        assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
+    }
+
+    // -- \prompt (#203) -------------------------------------------------------
+
+    #[test]
+    fn parse_prompt_var_only() {
+        // One argument — it is the variable name, no prompt text.
+        assert_eq!(
+            parse("\\prompt myvar").cmd,
+            MetaCmd::Prompt(String::new(), "myvar".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_prompt_text_and_var() {
+        // Two unquoted tokens: first is prompt text, second is var name.
+        assert_eq!(
+            parse("\\prompt Enter: myvar").cmd,
+            MetaCmd::Prompt("Enter:".to_owned(), "myvar".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_prompt_single_quoted_text() {
+        assert_eq!(
+            parse("\\prompt 'Enter value: ' myvar").cmd,
+            MetaCmd::Prompt("Enter value: ".to_owned(), "myvar".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_prompt_double_quoted_text() {
+        assert_eq!(
+            parse("\\prompt \"Enter value: \" myvar").cmd,
+            MetaCmd::Prompt("Enter value: ".to_owned(), "myvar".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_prompt_bare_is_unknown() {
+        // Bare `\prompt` with no variable name is an error.
+        assert!(matches!(parse("\\prompt").cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_prompt_not_confused_with_print_buffer() {
+        // \prompt starts with 'p', must not match \p
+        assert!(matches!(parse("\\prompt myvar").cmd, MetaCmd::Prompt(_, _)));
         assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
     }
 

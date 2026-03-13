@@ -2594,6 +2594,34 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
     }
 }
 
+/// Apply a `\prompt [text] name` command.
+///
+/// Prints `prompt_text` to stderr (matching psql behaviour — the prompt goes
+/// to the tty, not stdout), reads one line from stdin, and stores the result
+/// in the variable `var_name`.  When stdin is not a terminal the prompt text
+/// is suppressed.
+fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) {
+    if io::stdin().is_terminal() && !prompt_text.is_empty() {
+        eprint!("{prompt_text}");
+        let _ = io::stderr().flush();
+    }
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line) {
+        Ok(0) => {
+            // EOF — store empty string.
+            settings.vars.set(var_name, "");
+        }
+        Ok(_) => {
+            // Strip the trailing newline that `read_line` includes.
+            let trimmed = line.trim_end_matches(['\n', '\r']);
+            settings.vars.set(var_name, trimmed);
+        }
+        Err(e) => {
+            eprintln!("\\prompt: {e}");
+        }
+    }
+}
+
 /// Apply a `\pset` command.
 #[allow(clippy::too_many_lines)]
 fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
@@ -3682,6 +3710,9 @@ async fn dispatch_meta(
         }
         MetaCmd::Unset(ref name) => {
             apply_unset(settings, name);
+        }
+        MetaCmd::Prompt(ref prompt_text, ref var_name) => {
+            apply_prompt(settings, prompt_text, var_name);
         }
         MetaCmd::Pset(ref option, ref value) => {
             apply_pset(settings, option, value.as_deref());
