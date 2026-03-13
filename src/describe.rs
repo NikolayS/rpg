@@ -385,9 +385,11 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     // For \di (indexes), we need an extra Table column and index-specific joins.
     let is_index_only = relkinds == ["i"];
 
-    // Views, materialized views, and sequences use pg_relation_size in verbose
-    // mode and omit the Access method column (but do show Persistence).
-    let is_view_or_seq = matches!(relkinds, ["v" | "m" | "S"]);
+    // Views and sequences omit the Access method column and use
+    // pg_relation_size in verbose mode.  Materialized views behave like tables
+    // (they are heap-stored on disk) so they include the Access method column
+    // and use pg_table_size — matching psql \dm+ output.
+    let is_view_or_seq = matches!(relkinds, ["v" | "S"]);
 
     let sql = if meta.plus {
         if is_index_only {
@@ -2432,12 +2434,13 @@ order by 2, 3"
     }
 
     // -----------------------------------------------------------------------
-    // list_relations SQL — \dv+/\dm+/\ds+ include Persistence column (#149)
+    // list_relations SQL — \dv+/\ds+ include Persistence column (#149)
     // -----------------------------------------------------------------------
 
-    /// Verify that the verbose SQL for views, materialized views, and sequences
-    /// includes the Persistence column (after Owner, before Size) to match psql
-    /// output.  Regression test for bug #149.
+    /// Verify that the verbose SQL for views and sequences includes the
+    /// Persistence column (after Owner, before Size) and does NOT include the
+    /// Access method column, to match psql \dv+ output.
+    /// Regression test for bug #149.
     #[test]
     fn view_plus_sql_has_persistence_column() {
         // Replicate the is_view_or_seq branch of list_relations for \dv+.
@@ -2479,6 +2482,68 @@ order by 1, 2";
         assert!(
             sql.contains("pg_relation_size"),
             "view plus SQL should use pg_relation_size: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_relations SQL — \dm+ Access method and pg_table_size (#159)
+    // -----------------------------------------------------------------------
+
+    /// Verify that the verbose SQL for materialized views includes the Access
+    /// method column and uses pg_table_size (not pg_relation_size), matching
+    /// psql \dm+ output.  Regression test for bug #159.
+    #[test]
+    fn matview_plus_sql_has_access_method_and_table_size() {
+        // Replicate the default (non-index, non-view_or_seq) branch of
+        // list_relations for \dm+.
+        let sql = "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    c.relkind as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
+    coalesce(am.amname, '') as \"Access method\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_am as am
+    on am.oid = c.relam
+where c.relkind in ('m')
+order by 1, 2";
+
+        // Access method column must be present for materialized views.
+        assert!(
+            sql.contains("\"Access method\""),
+            "matview plus SQL must have Access method column: {sql}"
+        );
+        // pg_table_size — same as psql uses for \dm+.
+        assert!(
+            sql.contains("pg_table_size"),
+            "matview plus SQL must use pg_table_size: {sql}"
+        );
+        assert!(
+            !sql.contains("pg_relation_size"),
+            "matview plus SQL must NOT use pg_relation_size: {sql}"
+        );
+        // Persistence must appear before Access method, which must appear
+        // before Size.
+        let persistence_pos = sql.find("\"Persistence\"").unwrap();
+        let access_pos = sql.find("\"Access method\"").unwrap();
+        let size_pos = sql.find("\"Size\"").unwrap();
+        assert!(
+            persistence_pos < access_pos,
+            "Persistence must appear before Access method: {sql}"
+        );
+        assert!(
+            access_pos < size_pos,
+            "Access method must appear before Size: {sql}"
         );
     }
 }
