@@ -247,7 +247,7 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     c.relname as \"Name\",
     {type_expr} as \"Type\",
     pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
-    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
     coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
@@ -481,7 +481,11 @@ async fn list_databases(client: &Client, meta: &ParsedMeta) -> bool {
     pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
     d.datcollate as \"Collate\",
     d.datctype as \"Ctype\",
-    pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.oid)) as \"Size\",
+    case
+        when pg_catalog.has_database_privilege(d.datname, 'CONNECT')
+        then pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))
+        else 'No Access'
+    end as \"Size\",
     t.spcname as \"Tablespace\",
     coalesce(pg_catalog.shobj_description(d.oid, 'pg_database'), '') as \"Description\"
 from pg_catalog.pg_database as d
@@ -688,10 +692,35 @@ async fn describe_object(client: &Client, meta: &ParsedMeta) -> bool {
 /// List all user-visible relations (tables, views, sequences, indexes, etc.)
 async fn list_all_relations(client: &Client, meta: &ParsedMeta) -> bool {
     let sys_filter = system_schema_filter(meta.system);
-    let where_clause = if sys_filter.is_empty() {
+
+    // When not showing system objects, also restrict to search_path-visible
+    // objects so that unqualified \d matches what the user normally sees.
+    let visibility_filter = if meta.system {
         String::new()
     } else {
-        format!("and {sys_filter}")
+        "pg_catalog.pg_table_is_visible(c.oid)".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter)
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let extra_conds = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("and {}", where_parts.join("\n    and "))
     };
 
     let sql = format!(
@@ -715,7 +744,7 @@ from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
 where c.relkind in ('r','p','i','I','S','v','m','f','c')
-    {where_clause}
+    {extra_conds}
 order by 1, 2"
     );
 
@@ -728,16 +757,54 @@ async fn describe_table(client: &Client, meta: &ParsedMeta, obj_pattern: &str) -
     // Split into (schema, name) parts.
     let (schema_part, name_part) = crate::pattern::split_schema(obj_pattern);
 
-    // Build the WHERE clause for the object lookup.
-    let name_cond = crate::pattern::where_clause(
-        Some(obj_pattern),
-        "c.relname",
-        if schema_part.is_some() {
-            Some("n.nspname")
-        } else {
-            None
-        },
-    );
+    // Bug 1: build separate schema and name conditions using the split parts,
+    // not the full obj_pattern, so the name column is never matched against
+    // a schema-qualified string.
+    let schema_col = match schema_part {
+        Some(s) if !s.is_empty() => Some("n.nspname"),
+        _ => None,
+    };
+    // Build the name condition from name_part only.
+    let name_filter = crate::pattern::where_clause(Some(name_part), "c.relname", None);
+    // Build the schema condition from schema_part only (if present and non-empty).
+    let schema_filter = if let Some(s) = schema_part {
+        crate::pattern::where_clause(if s.is_empty() { None } else { Some(s) }, "n.nspname", None)
+    } else {
+        String::new()
+    };
+
+    // Bug 2: when no schema is specified, add pg_table_is_visible tiebreaker
+    // so that search_path objects are preferred for unqualified names.
+    let visibility_filter = if schema_col.is_none() {
+        "pg_catalog.pg_table_is_visible(c.oid)"
+    } else {
+        ""
+    };
+
+    // Compose the full WHERE condition used in object-lookup subqueries.
+    let name_cond = {
+        let parts: Vec<&str> = [
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+            if schema_filter.is_empty() {
+                None
+            } else {
+                Some(schema_filter.as_str())
+            },
+            if visibility_filter.is_empty() {
+                None
+            } else {
+                Some(visibility_filter)
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        parts.join(" AND ")
+    };
 
     // 1. Columns
     let cols_sql = if meta.plus {
@@ -820,28 +887,93 @@ order by a.attnum"
         name_part.to_owned()
     };
 
-    println!("Table \"{display_name}\"");
+    // Bug 7: fetch relkind to determine the correct object-type label.
+    let relkind_sql = format!(
+        "select c.relkind::text
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+where {name_cond}
+limit 1"
+    );
+    let obj_label = {
+        let mut label = "Table";
+        if let Ok(msgs) = client.simple_query(&relkind_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    label = match row.get(0).unwrap_or("r") {
+                        "r" => "Table",
+                        "p" => "Partitioned table",
+                        "v" => "View",
+                        "m" => "Materialized view",
+                        "i" => "Index",
+                        "I" => "Partitioned index",
+                        "S" => "Sequence",
+                        "f" => "Foreign table",
+                        "c" => "Composite type",
+                        _ => "Relation",
+                    };
+                    break;
+                }
+            }
+        }
+        label
+    };
+
+    println!("{obj_label} \"{display_name}\"");
     run_and_print(client, &cols_sql, meta.echo_hidden).await;
 
-    // 2. Indexes on this table
-    let idx_name_cond = crate::pattern::where_clause(
-        Some(obj_pattern),
-        "tc.relname",
-        if schema_part.is_some() {
-            Some("tn.nspname")
-        } else {
-            None
-        },
-    );
+    // 2. Indexes on this table (Bug 1 applied: use name_part not obj_pattern).
+    let idx_name_filter = crate::pattern::where_clause(Some(name_part), "tc.relname", None);
+    let idx_schema_filter = if let Some(s) = schema_part {
+        crate::pattern::where_clause(
+            if s.is_empty() { None } else { Some(s) },
+            "tn.nspname",
+            None,
+        )
+    } else {
+        String::new()
+    };
+    let idx_visibility = if schema_col.is_none() {
+        "pg_catalog.pg_table_is_visible(tc.oid)"
+    } else {
+        ""
+    };
+    let idx_name_cond = {
+        let parts: Vec<&str> = [
+            if idx_name_filter.is_empty() {
+                None
+            } else {
+                Some(idx_name_filter.as_str())
+            },
+            if idx_schema_filter.is_empty() {
+                None
+            } else {
+                Some(idx_schema_filter.as_str())
+            },
+            if idx_visibility.is_empty() {
+                None
+            } else {
+                Some(idx_visibility)
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        parts.join(" AND ")
+    };
 
+    // Bug 3: check indisprimary BEFORE indisunique so PKs are labelled
+    // "PRIMARY KEY" rather than "UNIQUE PRIMARY KEY".
     let idx_sql = format!(
         "select
     i.relname as \"Index\",
     case
-        when ix.indisunique then 'UNIQUE ' else ''
-    end || case
-        when ix.indisprimary then 'PRIMARY KEY, ' else ''
-    end || am.amname as \"Type\",
+        when ix.indisprimary then 'PRIMARY KEY'
+        when ix.indisunique then 'UNIQUE'
+        else ''
+    end || ' ' || am.amname as \"Type\",
     pg_catalog.pg_get_indexdef(i.oid) as \"Definition\"
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
@@ -1165,10 +1297,11 @@ mod tests {
     #[test]
     fn plus_modifier_adds_size_column() {
         // Reconstruct SQL fragment for \dt+ and check for Size column.
+        // Uses pg_total_relation_size (correct for partitioned tables too).
         let sql = format!(
             "select\n    n.nspname as \"Schema\",\n    c.relname as \"Name\",\
             \n    {} as \"Type\",\n    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",\
-            \n    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",\
+            \n    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",\
             \n    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"",
             "c.relkind"
         );
@@ -1176,6 +1309,10 @@ mod tests {
         assert!(
             sql.contains("\"Description\""),
             "plus SQL should have Description: {sql}"
+        );
+        assert!(
+            sql.contains("pg_total_relation_size"),
+            "plus SQL should use pg_total_relation_size: {sql}"
         );
     }
 }
