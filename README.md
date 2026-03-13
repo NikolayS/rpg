@@ -4,7 +4,7 @@
 
 **Status:** Vision / pre-development  
 **Language:** Rust  
-**Org:** [PostgresAI](https://postgres.ai)
+**Org:** [DBLab Inc.](https://samo.sh)
 
 ---
 
