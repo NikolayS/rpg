@@ -498,14 +498,16 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
 
         // ------------------------------------------------------------------
-        // Fallback: consume one byte as Normal (e.g. '(', ')', ',', ';')
+        // Fallback: consume one character as Normal (may be multi-byte UTF-8)
+        // e.g. '(', ')', ',', ';', or Cyrillic/CJK/emoji characters.
         // ------------------------------------------------------------------
+        let ch_len = input[pos..].chars().next().map_or(1, char::len_utf8);
         tokens.push(Token {
             kind: TokenKind::Normal,
             start: pos,
-            end: pos + 1,
+            end: pos + ch_len,
         });
-        pos += 1;
+        pos += ch_len;
     }
 
     tokens
@@ -995,6 +997,58 @@ mod tests {
         let tokens = tokenize(input);
         let reconstructed: String = tokens.iter().map(|t| &input[t.start..t.end]).collect();
         assert_eq!(reconstructed, input);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-byte UTF-8 regression tests (Cyrillic, CJK, emoji)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tokenize_multibyte_does_not_panic() {
+        // Regression: fallback path must advance by char width, not 1 byte.
+        // 'ы' is a 2-byte UTF-8 character; slicing mid-char caused a panic.
+        let input = "ы";
+        let tokens = tokenize(input);
+        let reconstructed: String = tokens.iter().map(|t| &input[t.start..t.end]).collect();
+        assert_eq!(reconstructed, input);
+    }
+
+    #[test]
+    fn test_tokenize_cyrillic_in_query() {
+        // A comment containing Cyrillic text must tokenize without panic and
+        // round-trip exactly.
+        let input = "SELECT 1; -- проверка";
+        let tokens = tokenize(input);
+        let reconstructed: String = tokens.iter().map(|t| &input[t.start..t.end]).collect();
+        assert_eq!(reconstructed, input);
+    }
+
+    #[test]
+    fn test_tokenize_emoji_in_comment() {
+        // Emoji are 4-byte UTF-8 characters; ensure they are handled correctly.
+        let input = "SELECT 1; -- 🐘 PostgreSQL";
+        let tokens = tokenize(input);
+        let reconstructed: String = tokens.iter().map(|t| &input[t.start..t.end]).collect();
+        assert_eq!(reconstructed, input);
+    }
+
+    #[test]
+    fn test_tokenize_cjk_characters() {
+        // CJK characters are 3-byte UTF-8; verify round-trip correctness.
+        let input = "SELECT 1; -- 数据库";
+        let tokens = tokenize(input);
+        let reconstructed: String = tokens.iter().map(|t| &input[t.start..t.end]).collect();
+        assert_eq!(reconstructed, input);
+    }
+
+    #[test]
+    fn test_highlight_sql_multibyte_no_panic() {
+        // highlight_sql must not panic on multi-byte UTF-8 input and must
+        // preserve the original characters after ANSI stripping.
+        let input = "SELECT ы FROM users";
+        let result = highlight_sql(input, None);
+        let stripped = strip_ansi(result.as_ref());
+        assert_eq!(stripped, input);
     }
 
     // -----------------------------------------------------------------------
