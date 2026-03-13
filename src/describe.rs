@@ -180,12 +180,21 @@ fn print_table_inner(
     }
 
     // Compute column widths (multi-line cell values: each line counts separately).
+    // psql reserves an extra character for the `+` continuation marker in
+    // columns that contain multi-line values.
     let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
     for row in rows {
         for (i, val) in row.iter().enumerate() {
             if i < widths.len() {
-                let max_line = val.lines().map(str::len).max().unwrap_or(val.len());
-                widths[i] = widths[i].max(max_line);
+                let lines: Vec<&str> = val.lines().collect();
+                let max_line = lines.iter().map(|l| l.len()).max().unwrap_or(val.len());
+                // If multi-line, add 1 for the `+` marker (psql behaviour).
+                let effective = if lines.len() > 1 {
+                    max_line + 1
+                } else {
+                    max_line
+                };
+                widths[i] = widths[i].max(effective);
             }
         }
     }
@@ -368,7 +377,7 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     {type_expr} as \"Type\",
     pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
     ct.relname as \"Table\",
-    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
     coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
@@ -395,7 +404,7 @@ order by 1, 2"
         else c.relpersistence::text
     end as \"Persistence\",
     coalesce(am.amname, '') as \"Access method\",
-    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
     coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
@@ -1767,11 +1776,11 @@ order by 2, 3"
     #[test]
     fn plus_modifier_adds_size_column() {
         // Reconstruct SQL fragment for \dt+ and check for Size column.
-        // Uses pg_total_relation_size (correct for partitioned tables too).
+        // Uses pg_table_size to match psql \dt+ behaviour.
         let sql = format!(
             "select\n    n.nspname as \"Schema\",\n    c.relname as \"Name\",\
             \n    {} as \"Type\",\n    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",\
-            \n    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)) as \"Size\",\
+            \n    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",\
             \n    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"",
             "c.relkind"
         );
@@ -1781,8 +1790,8 @@ order by 2, 3"
             "plus SQL should have Description: {sql}"
         );
         assert!(
-            sql.contains("pg_total_relation_size"),
-            "plus SQL should use pg_total_relation_size: {sql}"
+            sql.contains("pg_table_size"),
+            "plus SQL should use pg_table_size: {sql}"
         );
     }
 }
