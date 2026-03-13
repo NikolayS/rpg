@@ -302,6 +302,10 @@ pub enum ExecMode {
     /// AI auto-executes within configured autonomy level.
     Yolo,
     /// Pure read-only observation — AI watches and reports.
+    ///
+    /// Currently used only for prompt display; `\observe` triggers a
+    /// one-shot observation loop rather than setting a persistent mode.
+    #[allow(dead_code)]
     Observe,
 }
 
@@ -2498,6 +2502,209 @@ async fn watch_query(client: &Client, sql: &str, interval_secs: f64, settings: &
     }
 }
 
+/// Run the observe loop — periodic database health snapshots.
+///
+/// Polls key diagnostic views every 10 seconds and prints a timestamped
+/// summary.  Exits on Ctrl-C.  After exiting, offers an AI-generated
+/// summary of the observation period.
+#[allow(clippy::too_many_lines)]
+async fn observe_loop(client: &Client, settings: &ReplSettings, params: &ConnParams) {
+    use std::fmt::Write as _;
+    use std::time::Duration;
+    use tokio::signal;
+    use tokio::time::sleep;
+
+    eprintln!("-- Observing (Ctrl-C to stop)...");
+
+    let mut snapshots: Vec<String> = Vec::new();
+    let interval = Duration::from_secs(10);
+
+    loop {
+        let ts = format_system_time(std::time::SystemTime::now());
+        let mut report = format!("{ts} |");
+
+        // 1. Connection count.
+        if let Ok(rows) = client
+            .simple_query(
+                "SELECT count(*) FILTER (WHERE state = 'active') AS active, \
+                 count(*) AS total \
+                 FROM pg_stat_activity WHERE backend_type = 'client backend'",
+            )
+            .await
+        {
+            for msg in &rows {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let active = row.get(0).unwrap_or("?");
+                    let total = row.get(1).unwrap_or("?");
+                    let _ = write!(report, " connections: {active} active / {total} total");
+                }
+            }
+        }
+
+        // 2. Top wait event.
+        if let Ok(rows) = client
+            .simple_query(
+                "SELECT wait_event_type || ':' || wait_event AS we, count(*) AS cnt \
+                 FROM pg_stat_activity \
+                 WHERE state = 'active' AND wait_event IS NOT NULL \
+                 GROUP BY 1 ORDER BY 2 DESC LIMIT 1",
+            )
+            .await
+        {
+            for msg in &rows {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let we = row.get(0).unwrap_or("?");
+                    let cnt = row.get(1).unwrap_or("?");
+                    let _ = write!(report, " | top wait: {we} ({cnt})");
+                }
+            }
+        }
+
+        // 3. Long-running queries (> 30s).
+        if let Ok(rows) = client
+            .simple_query(
+                "SELECT pid, \
+                 extract(epoch FROM now() - query_start)::int AS secs, \
+                 left(query, 60) AS q \
+                 FROM pg_stat_activity \
+                 WHERE state = 'active' \
+                 AND query_start < now() - interval '30 seconds' \
+                 AND backend_type = 'client backend' \
+                 ORDER BY query_start LIMIT 3",
+            )
+            .await
+        {
+            for msg in &rows {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let pid = row.get(0).unwrap_or("?");
+                    let secs = row.get(1).unwrap_or("?");
+                    let q = row.get(2).unwrap_or("?");
+                    let _ = write!(report, "\n  long query (pid {pid}, {secs}s): {q}");
+                }
+            }
+        }
+
+        // 4. Autovacuum activity.
+        if let Ok(rows) = client
+            .simple_query(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE backend_type = 'autovacuum worker'",
+            )
+            .await
+        {
+            for msg in &rows {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let cnt = row.get(0).unwrap_or("0");
+                    if cnt != "0" {
+                        let _ = write!(report, " | autovacuum workers: {cnt}");
+                    }
+                }
+            }
+        }
+
+        // 5. Replication lag (if streaming replication is active).
+        if let Ok(rows) = client
+            .simple_query(
+                "SELECT application_name, \
+                 pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint AS lag_bytes \
+                 FROM pg_stat_replication LIMIT 3",
+            )
+            .await
+        {
+            for msg in &rows {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let name = row.get(0).unwrap_or("?");
+                    let lag = row.get(1).unwrap_or("?");
+                    let _ = write!(report, " | repl lag ({name}): {lag} bytes");
+                }
+            }
+        }
+
+        eprintln!("{report}");
+        snapshots.push(report);
+
+        // Sleep for the interval, exit on Ctrl-C.
+        tokio::select! {
+            () = sleep(interval) => {},
+            _ = signal::ctrl_c() => {
+                break;
+            },
+        }
+    }
+
+    eprintln!("-- Observation ended ({} snapshots).", snapshots.len());
+
+    // Offer AI summary if configured and we have data.
+    if snapshots.is_empty() {
+        return;
+    }
+
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+    if provider_name.is_empty() {
+        return;
+    }
+
+    if !ask_yn_prompt("Generate AI summary? [Y/n] ", true) {
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    let observation_data = snapshots.join("\n");
+    let system_content = format!(
+        "You are a PostgreSQL expert analyzing database observation data.\n\
+         Database: {dbname}\n\n\
+         Rules:\n\
+         - Summarize the key findings from the observation period\n\
+         - Highlight any concerning patterns (connection pressure, long queries, lock contention)\n\
+         - Provide actionable recommendations\n\
+         - Be concise — this is a terminal report",
+        dbname = params.dbname,
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: format!(
+                "Here are the observation snapshots:\n\n{observation_data}\n\n\
+                 Please summarize the findings and recommendations."
+            ),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    eprintln!("\n-- Summary:");
+    if let Err(e) = stream_completion(provider.as_ref(), &messages, &options).await {
+        eprintln!("AI error: {e}");
+    }
+}
+
 /// Dispatch I/O and utility meta-commands (the `#33` family).
 ///
 /// Returns `Some(MetaResult)` if the command was handled, `None` if the
@@ -2765,7 +2972,8 @@ async fn dispatch_meta(
             return MetaResult::SetExecMode(ExecMode::Yolo);
         }
         MetaCmd::ObserveMode => {
-            return MetaResult::SetExecMode(ExecMode::Observe);
+            observe_loop(client, settings, params).await;
+            return MetaResult::Continue;
         }
         MetaCmd::InteractiveMode => {
             return MetaResult::SetExecMode(ExecMode::Interactive);
