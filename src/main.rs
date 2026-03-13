@@ -659,6 +659,10 @@ async fn main() {
                 }
             }
 
+            // Detect whether the connected role is a superuser so the prompt
+            // can show `#` instead of `>`.
+            settings.is_superuser = capabilities::detect_superuser(&client).await;
+
             let exit_code = if cli.daemon {
                 // Daemon mode: headless continuous monitoring.
                 let pid_path = cli

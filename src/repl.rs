@@ -393,7 +393,7 @@ pub fn build_prompt_from_settings(
         user: &params.user,
         host: &params.host,
         port: params.port,
-        is_superuser: false,
+        is_superuser: settings.is_superuser,
         tx,
         continuation,
         in_block_comment: false,
@@ -996,6 +996,12 @@ pub struct ReplSettings {
     /// Incremented after each successful query execution.  Persisted by
     /// `\session save` and `\session touch`.
     pub query_count: u32,
+    /// Whether the connected role is a superuser.
+    ///
+    /// Detected once after connection (and re-detected after `\c` reconnect)
+    /// by querying `current_setting('is_superuser')`.  Controls whether the
+    /// prompt shows `#` (superuser) or `>` (regular user).
+    pub is_superuser: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1061,6 +1067,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("current_file", &self.current_file)
             .field("session_id", &self.session_id)
             .field("query_count", &self.query_count)
+            .field("is_superuser", &self.is_superuser)
             .finish()
     }
 }
@@ -1109,6 +1116,7 @@ impl Default for ReplSettings {
             current_file: None,
             session_id: crate::session_store::new_session_id(),
             query_count: 0,
+            is_superuser: false,
         }
     }
 }
@@ -4734,6 +4742,9 @@ async fn run_readline_loop(
                         *tx = TxState::default();
                         buf.clear();
                         stmt_buf.clear();
+                        // Re-detect superuser status for the new connection.
+                        settings.is_superuser =
+                            crate::capabilities::detect_superuser(client).await;
                     }
                     HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                 }
@@ -4804,6 +4815,9 @@ async fn run_dumb_loop(
                             *params = new_params;
                             *tx = TxState::default();
                             buf.clear();
+                            // Re-detect superuser status for the new connection.
+                            settings.is_superuser =
+                                crate::capabilities::detect_superuser(client).await;
                         }
                         HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
@@ -4829,6 +4843,9 @@ async fn run_dumb_loop(
                                 *params = new_params;
                                 *tx = TxState::default();
                                 buf.clear();
+                                // Re-detect superuser status for the new connection.
+                                settings.is_superuser =
+                                    crate::capabilities::detect_superuser(client).await;
                             }
                             HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                         }

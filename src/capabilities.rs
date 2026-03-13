@@ -339,6 +339,23 @@ async fn detect_managed_provider(client: &tokio_postgres::Client) -> ManagedProv
     ManagedProvider::None
 }
 
+/// Query whether the current session role is a superuser.
+///
+/// Uses `current_setting('is_superuser')` which returns `'on'` for
+/// superusers and `'off'` for regular roles.  Defaults to `false` on
+/// any error so the prompt degrades gracefully.
+pub async fn detect_superuser(client: &tokio_postgres::Client) -> bool {
+    match client
+        .simple_query("select current_setting('is_superuser')")
+        .await
+    {
+        Ok(msgs) => first_row_col(&msgs)
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("on")),
+        Err(_) => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
