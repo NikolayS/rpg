@@ -248,3 +248,58 @@ async fn repl_timing_measures_query() {
         "elapsed time must be non-negative, got {elapsed_ms:.3} ms"
     );
 }
+
+// ---------------------------------------------------------------------------
+// \gdesc — describe buffer columns without executing (#52)
+// ---------------------------------------------------------------------------
+
+/// `\gdesc` describes the result columns of a query without executing it.
+///
+/// Uses `client.prepare()` (extended-protocol Describe) so no rows are
+/// produced and no side-effects occur on the server.
+#[tokio::test]
+async fn gdesc_reports_column_names_and_types() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // prepare() parses and type-checks the query without executing it.
+    let stmt = client
+        .prepare("select 1 as id, 'hello'::text as name")
+        .await
+        .expect("prepare failed");
+
+    let cols = stmt.columns();
+    assert_eq!(cols.len(), 2, "expected 2 columns from prepare");
+    assert_eq!(cols[0].name(), "id", "first column name must be 'id'");
+    assert_eq!(cols[1].name(), "name", "second column name must be 'name'");
+
+    // Resolve OIDs to display names the same way describe_buffer() does.
+    let oids: Vec<u32> = cols.iter().map(|c| c.type_().oid()).collect();
+    let select_exprs: Vec<String> = (1..=oids.len())
+        .map(|i| format!("pg_catalog.format_type(${i}, NULL)"))
+        .collect();
+    let type_query = format!("select {}", select_exprs.join(", "));
+
+    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = oids
+        .iter()
+        .map(|o| o as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+
+    let row = client
+        .query_one(&type_query, &oid_params)
+        .await
+        .expect("format_type query failed");
+
+    let type_id: String = row.get(0);
+    let type_name: String = row.get(1);
+
+    assert_eq!(
+        type_id, "integer",
+        "expected 'integer' for the int4 literal, got '{type_id}'"
+    );
+    assert_eq!(
+        type_name, "text",
+        "expected 'text' for the text column, got '{type_name}'"
+    );
+}

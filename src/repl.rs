@@ -680,6 +680,108 @@ async fn execute_piped(
 }
 
 // ---------------------------------------------------------------------------
+// \gdesc — describe buffer columns without executing (#52)
+// ---------------------------------------------------------------------------
+
+/// Describe the result columns of `buf` using the extended-protocol `Prepare`
+/// message (no rows are produced; no side-effects occur on the server).
+///
+/// Output format (matching psql):
+/// ```text
+///  Column | Type
+/// --------+---------
+///  id     | integer
+///  name   | text
+/// (2 rows)
+/// ```
+///
+/// Type names are resolved via `pg_catalog.format_type(oid, NULL)` so they
+/// match psql's display names (`integer` not `int4`, etc.).
+///
+/// When `buf` is empty, prints an informational message.
+/// On prepare error, prints the Postgres error message.
+async fn describe_buffer(client: &Client, buf: &str) {
+    if buf.is_empty() {
+        println!("Query buffer is empty.");
+        return;
+    }
+
+    let stmt = match client.prepare(buf).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            return;
+        }
+    };
+
+    let cols = stmt.columns();
+    if cols.is_empty() {
+        println!("This command doesn't return data.");
+        return;
+    }
+
+    // Collect (name, oid) pairs.
+    let col_info: Vec<(String, u32)> = cols
+        .iter()
+        .map(|c| (c.name().to_owned(), c.type_().oid()))
+        .collect();
+
+    // Resolve OIDs to display type names in a single query.
+    // Build: SELECT format_type($1, NULL), format_type($2, NULL), …
+    let select_exprs: Vec<String> = (1..=col_info.len())
+        .map(|i| format!("pg_catalog.format_type(${i}, NULL)"))
+        .collect();
+    let type_query = format!("select {}", select_exprs.join(", "));
+
+    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = col_info
+        .iter()
+        .map(|(_, oid)| oid as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+
+    let type_names: Vec<String> = match client.query_one(&type_query, &oid_params).await {
+        Ok(row) => (0..col_info.len())
+            .map(|i| row.get::<_, String>(i))
+            .collect(),
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            return;
+        }
+    };
+
+    // Compute column widths for aligned output.
+    let header_col = "Column";
+    let header_type = "Type";
+    let col_w = col_info
+        .iter()
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(0)
+        .max(header_col.len());
+    let type_w = type_names
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .max(header_type.len());
+
+    // Header.
+    println!(" {header_col:<col_w$} | {header_type:<type_w$}");
+    // Separator.
+    println!("-{}-+-{}-", "-".repeat(col_w), "-".repeat(type_w));
+    // Rows.
+    for ((name, _), type_name) in col_info.iter().zip(type_names.iter()) {
+        println!(" {name:<col_w$} | {type_name:<type_w$}");
+    }
+    // Footer.
+    let n = col_info.len();
+    if n == 1 {
+        println!("(1 row)");
+    } else {
+        println!("({n} rows)");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Non-interactive (piped / -c / -f) execution
 // ---------------------------------------------------------------------------
 
@@ -825,7 +927,25 @@ pub(crate) async fn exec_lines(
             // Dispatch meta-command (handles conditional tracking internally).
             let mut parsed = crate::metacmd::parse(line.trim());
             parsed.echo_hidden = settings.echo_hidden;
-            dispatch_meta(parsed, client, params, settings, tx).await;
+            let result = dispatch_meta(parsed, client, params, settings, tx).await;
+            // Handle buffer-aware results that exec_lines must act on directly.
+            match result {
+                MetaResult::ExecuteBuffer => {
+                    let sql = buf.trim().to_owned();
+                    buf.clear();
+                    if !sql.is_empty() && !execute_query(client, &sql, settings, tx).await {
+                        exit_code = 1;
+                        if settings.single_transaction {
+                            break 'lines;
+                        }
+                    }
+                }
+                MetaResult::DescribeBuffer => {
+                    // Buffer is NOT cleared after \gdesc.
+                    describe_buffer(client, buf.trim()).await;
+                }
+                _ => {}
+            }
         } else if settings.cond.is_active() {
             if !buf.is_empty() {
                 buf.push('\n');
@@ -1214,6 +1334,8 @@ pub enum MetaResult {
     ExecuteBufferExpanded,
     /// Execute the current buffer with expanded output written to a file (`\gx file`).
     ExecuteBufferExpandedToFile(String),
+    /// Describe the result columns of the buffer without executing it (`\gdesc`).
+    DescribeBuffer,
 }
 
 /// Default `\watch` interval in seconds.
@@ -1434,6 +1556,7 @@ async fn dispatch_io(
             };
             Some(result)
         }
+        MetaCmd::GDesc => Some(MetaResult::DescribeBuffer),
         _ => None,
     }
 }
@@ -1959,6 +2082,12 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::BufferUpdated
         }
+        MetaResult::DescribeBuffer => {
+            // Buffer is NOT cleared after \gdesc (same as psql).
+            let sql = buf.trim();
+            describe_buffer(client, sql).await;
+            HandleLineResult::Continue
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -2077,6 +2206,12 @@ async fn handle_line(
                     settings.pset.expanded = prev;
                 }
                 HandleLineResult::BufferUpdated
+            }
+            MetaResult::DescribeBuffer => {
+                // Buffer is NOT cleared after \gdesc (same as psql).
+                let sql = buf.trim().to_owned();
+                describe_buffer(client, &sql).await;
+                HandleLineResult::Continue
             }
             MetaResult::Continue => HandleLineResult::Continue,
         };
