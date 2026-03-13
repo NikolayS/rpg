@@ -5286,7 +5286,6 @@ fn print_bare_help() {
     );
 }
 
-
 /// Return `true` when `trimmed` is a bare `quit` or `exit` and the query
 /// buffer is empty (primary prompt, not mid-statement).
 ///
