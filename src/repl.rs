@@ -4272,7 +4272,17 @@ async fn dispatch_meta(
                             new_params.password.clone_from(&p.password);
                         }
                     }
-                    println!("{}", crate::connection::connection_info(&new_params));
+                    // Detect server version so we can show it when the
+                    // server endpoint changed (matches psql behaviour).
+                    let server_ver =
+                        crate::capabilities::detect_server_version_pub(&new_client).await;
+                    let msg = crate::connection::reconnect_info(
+                        crate::version_string(),
+                        server_ver.as_deref(),
+                        params,
+                        &new_params,
+                    );
+                    println!("{msg}");
                     return MetaResult::Reconnected(Box::new(new_client), new_params);
                 }
                 Err(e) => eprintln!("\\c: {e}"),
@@ -5268,6 +5278,7 @@ fn print_bare_help() {
                 \\q to quit"
     );
 }
+
 
 /// Return `true` when `trimmed` is a bare `quit` or `exit` and the query
 /// buffer is empty (primary prompt, not mid-statement).
