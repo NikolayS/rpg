@@ -240,12 +240,32 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
 ///
 /// Line numbers start at 1 for the `CREATE OR REPLACE VIEW` header line,
 /// matching psql's `\sv+` output exactly.
+///
+/// psql uses `%-*d` with `width = (int)log10(total_lines) + 8`, giving a
+/// left-aligned number in a fixed-width field followed directly by the line
+/// content — no tab character.
 fn print_view_def(header: &str, body: &str, plus: bool) {
     if plus {
+        let body_lines: Vec<&str> = body.lines().collect();
+        // Total lines = 1 (header) + body line count.
+        let total = 1 + body_lines.len();
+        // Width matches psql: floor(log10(total)) + 8, computed without
+        // floating point to satisfy clippy's cast lints.
+        let log = if total < 10 {
+            0usize
+        } else if total < 100 {
+            1
+        } else if total < 1000 {
+            2
+        } else {
+            3
+        };
+        let width = log + 8;
+
         // Header is line 1.
-        println!("{:>4}\t{header}", 1);
-        for (i, line) in body.lines().enumerate() {
-            println!("{:>4}\t{line}", i + 2);
+        println!("{:<width$}{header}", 1);
+        for (i, line) in body_lines.iter().enumerate() {
+            println!("{:<width$}{line}", i + 2);
         }
     } else {
         println!("{header}");
