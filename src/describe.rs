@@ -279,22 +279,23 @@ fn print_table_inner(
                         line.push(' ');
                     }
                     line.push('+');
+                } else if col_idx == ncols - 1 && !has_more {
+                    // Last column without continuation — no trailing padding (matches psql).
+                    line.push_str(text);
                 } else {
-                    // Normal cell (or last column — continuation handled below).
+                    // Normal cell — pad to column width.
                     let padded = format!("{text:<w$}");
                     line.push_str(&padded);
                 }
             }
 
-            // Trailing: for the last column with continuation, `+` replaces the
-            // trailing space (matching psql behaviour).
+            // Trailing: for the last column with continuation, `+` is appended
+            // after the padded value (matching psql behaviour).
             let last_has_more = cell_lines
                 .get(ncols - 1)
                 .is_some_and(|ls| line_idx + 1 < ls.len());
             if last_has_more {
                 line.push('+');
-            } else {
-                line.push(' ');
             }
 
             println!("{line}");
@@ -304,7 +305,7 @@ fn print_table_inner(
     if show_row_count {
         let n = rows.len();
         let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})");
+        println!("({n} {word})\n");
     }
 }
 
