@@ -1539,7 +1539,12 @@ order by 1, 2"
                 let pred_suffix = if idx_pred.is_empty() {
                     String::new()
                 } else {
-                    format!(" WHERE {idx_pred}")
+                    // pg_get_expr wraps in parens; psql strips the outer pair.
+                    let pred = match idx_pred.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                        Some(inner) => inner,
+                        None => idx_pred.as_str(),
+                    };
+                    format!(" WHERE {pred}")
                 };
 
                 println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}");
