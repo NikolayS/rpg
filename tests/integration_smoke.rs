@@ -227,6 +227,44 @@ fn query_multi_statement() {
     );
 }
 
+/// Multiple `-c` flags execute all commands in order and exit 0.
+///
+/// `samo -c "select 1 as a" -c "select 2 as b"` must produce both result
+/// sets — mirroring psql behaviour (issue #128).
+#[test]
+fn query_multiple_c_flags() {
+    let (stdout, _stderr, code) =
+        run_samo(&["-c", "select 1 as a", "-c", "select 2 as b"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 for multiple -c flags:\nstdout={stdout}"
+    );
+    assert!(
+        stdout.contains(" a ") || stdout.contains("| a"),
+        "missing first result set column 'a':\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" b ") || stdout.contains("| b"),
+        "missing second result set column 'b':\n{stdout}"
+    );
+}
+
+/// Multiple `-c` flags stop on the first error (psql-compatible).
+#[test]
+fn query_multiple_c_flags_stop_on_error() {
+    let (stdout, stderr, code) =
+        run_samo(&["-c", "SELEC 1", "-c", "select 2 as b"]);
+    assert_eq!(
+        code, 1,
+        "expected exit 1 when first -c errors:\nstdout={stdout}\nstderr={stderr}"
+    );
+    // The second command must not run — column 'b' should not appear.
+    assert!(
+        !stdout.contains(" b ") && !stdout.contains("| b"),
+        "second command must not execute after an error:\n{stdout}"
+    );
+}
+
 /// NULL values display as the configured null string (default: empty).
 #[test]
 fn query_null_display() {
