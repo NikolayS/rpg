@@ -2395,7 +2395,7 @@ mod tests {
 
     #[test]
     fn watch_interval_default_when_empty() {
-        assert_eq!(parse_watch_interval(""), WATCH_DEFAULT_INTERVAL);
+        assert!((parse_watch_interval("") - WATCH_DEFAULT_INTERVAL).abs() < f64::EPSILON);
     }
 
     #[test]
