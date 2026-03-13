@@ -712,7 +712,7 @@ async fn list_databases(client: &Client, meta: &ParsedMeta, pg_major_version: Op
         ""
     };
 
-    let acl = if ver >= 15 {
+    let acl = if ver >= 17 {
         "case when pg_catalog.array_length(d.datacl, 1) = 0 then '(none)' \
          else pg_catalog.array_to_string(d.datacl, E'\\n') end as \"Access privileges\""
     } else {

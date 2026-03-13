@@ -1982,6 +1982,8 @@ pub async fn exec_command(
         parsed.echo_hidden = settings.echo_hidden;
         let mut dummy_settings = ReplSettings {
             echo_hidden: settings.echo_hidden,
+            db_capabilities: settings.db_capabilities.clone(),
+            config: settings.config.clone(),
             ..Default::default()
         };
         let mut tx = TxState::default();
