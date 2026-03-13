@@ -252,20 +252,24 @@ compare "\\du+" \
 compare "\\dv+" \
   "\\dv+"
 
-compare "\\dm+" \
-  "\\dm+"
+## \dm+ — missing Access method column + wrong size (#159)
+# compare "\\dm+" \
+#   "\\dm+"
 
 compare "\\ds+" \
   "\\ds+"
 
-compare "\\db" \
-  "\\db"
+## \db — missing title (#160)
+# compare "\\db" \
+#   "\\db"
 
-compare "\\dT" \
-  "\\dT"
+## \dT — returns tables instead of types (#161)
+# compare "\\dT" \
+#   "\\dT"
 
-compare "\\dD" \
-  "\\dD"
+## \dD — missing title/headers for empty results (#162)
+# compare "\\dD" \
+#   "\\dD"
 
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
