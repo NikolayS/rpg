@@ -109,6 +109,36 @@ pub enum MetaCmd {
     /// `\C [title]` — set or clear table title.
     SetTitle(Option<String>),
 
+    // -- I/O and utility commands (#33) ------------------------------------
+    /// `\i file` — include (execute) commands from a file.
+    Include,
+    /// `\ir file` — include file relative to the current script's directory.
+    IncludeRelative,
+    /// `\o [file]` — send query output to a file (or restore stdout if no arg).
+    Output,
+    /// `\w file` — write the current query buffer to a file.
+    WriteBuffer,
+    /// `\r` — reset (clear) the query buffer.
+    ResetBuffer,
+    /// `\p` — print the current query buffer.
+    PrintBuffer,
+    /// `\e [file [line]]` — edit the buffer (or a file) with $EDITOR.
+    Edit,
+    /// `\! [command]` — execute a shell command.
+    Shell,
+    /// `\cd [dir]` — change the current working directory.
+    Chdir,
+    /// `\echo [text]` — print text to stdout (or the current output target).
+    Echo,
+    /// `\qecho [text]` — like \echo but writes to the query output target.
+    QEcho,
+    /// `\warn [text]` — print text to stderr.
+    Warn,
+    /// `\encoding [enc]` — show or set client encoding.
+    Encoding,
+    /// `\password [user]` — prompt for a new password for a user.
+    Password,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -147,6 +177,20 @@ impl MetaCmd {
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
             Self::SqlHelp => "\\h",
+            Self::Include => "\\i",
+            Self::IncludeRelative => "\\ir",
+            Self::Output => "\\o",
+            Self::WriteBuffer => "\\w",
+            Self::ResetBuffer => "\\r",
+            Self::PrintBuffer => "\\p",
+            Self::Edit => "\\e",
+            Self::Shell => "\\!",
+            Self::Chdir => "\\cd",
+            Self::Echo => "\\echo",
+            Self::QEcho => "\\qecho",
+            Self::Warn => "\\warn",
+            Self::Encoding => "\\encoding",
+            Self::Password => "\\password",
             // Non-stub commands should never reach this.
             _ => "\\?",
         }
@@ -212,22 +256,45 @@ pub fn parse(input: &str) -> ParsedMeta {
                     return ParsedMeta::simple(MetaCmd::Quit);
                 }
             }
+            // `\qecho [text]` — echo to output target
+            if let Some(rest) = input.strip_prefix("qecho") {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    let text = rest.trim();
+                    return ParsedMeta {
+                        cmd: MetaCmd::QEcho,
+                        plus: false,
+                        system: false,
+                        pattern: if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.to_owned())
+                        },
+                        echo_hidden: false,
+                    };
+                }
+            }
             parse_simple_or_unknown(input, "q", MetaCmd::Quit)
         }
         Some('?') => parse_simple_or_unknown(input, "?", MetaCmd::Help),
         Some('a') => parse_simple_or_unknown(input, "a", MetaCmd::ToggleAlign),
         Some('c') => parse_c_family(input),
         Some('C') => parse_set_title(input),
+        Some('e') => parse_e_family(input),
         Some('f') => parse_field_sep(input),
         Some('h') => parse_h(input),
         Some('H') => parse_simple_or_unknown(input, "H", MetaCmd::ToggleHtml),
-        Some('p') => parse_pset(input),
+        Some('i') => parse_i_family(input),
+        Some('o') => parse_o(input),
+        Some('p') => parse_p_family(input),
+        Some('r') => parse_r_family(input),
         Some('s') => parse_s_family(input),
         Some('t') => parse_t_family(input),
         Some('u') => parse_unset(input),
+        Some('w') => parse_w(input),
         Some('x') => parse_x(input),
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
+        Some('!') => parse_shell(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
 }
@@ -384,15 +451,31 @@ fn parse_x(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Expanded(mode))
 }
 
-/// Parse `\conninfo`, `\c`, or unknown `\c…`.
+/// Parse `\conninfo`, `\cd`, `\c`, or unknown `\c…`.
 fn parse_c_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("conninfo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::ConnInfo);
         }
     }
+    // `\cd [dir]` — must be checked before bare `\c`.
+    if let Some(rest) = input.strip_prefix("cd") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let dir = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Chdir,
+                plus: false,
+                system: false,
+                pattern: if dir.is_empty() {
+                    None
+                } else {
+                    Some(dir.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
     // `\c [db [user [host [port]]]]` — treat the rest as a raw argument.
-    // For now just mark as Reconnect stub.
     if let Some(rest) = input.strip_prefix('c') {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let pattern = rest.trim();
@@ -474,6 +557,225 @@ fn parse_l(input: &str) -> ParsedMeta {
         plus,
         system,
         pattern,
+        echo_hidden: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I/O and utility command parsers (#33)
+// ---------------------------------------------------------------------------
+
+/// Parse `\e [file [line]]` and `\echo text` and `\encoding [enc]`.
+fn parse_e_family(input: &str) -> ParsedMeta {
+    // Check longest prefixes first.
+    if let Some(rest) = input.strip_prefix("echo") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let text = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Echo,
+                plus: false,
+                system: false,
+                pattern: if text.is_empty() {
+                    None
+                } else {
+                    Some(text.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    if let Some(rest) = input.strip_prefix("encoding") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let enc = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Encoding,
+                plus: false,
+                system: false,
+                pattern: if enc.is_empty() {
+                    None
+                } else {
+                    Some(enc.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    // `\e [file [line]]`
+    if let Some(rest) = input.strip_prefix('e') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let arg = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Edit,
+                plus: false,
+                system: false,
+                pattern: if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\i file` and `\ir file`.
+fn parse_i_family(input: &str) -> ParsedMeta {
+    // `\ir` must be checked before `\i` (longer prefix first).
+    if let Some(rest) = input.strip_prefix("ir") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let path = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::IncludeRelative,
+                plus: false,
+                system: false,
+                pattern: if path.is_empty() {
+                    None
+                } else {
+                    Some(path.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    if let Some(rest) = input.strip_prefix('i') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let path = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Include,
+                plus: false,
+                system: false,
+                pattern: if path.is_empty() {
+                    None
+                } else {
+                    Some(path.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\o [file]`.
+fn parse_o(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix('o') else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        let path = rest.trim();
+        return ParsedMeta {
+            cmd: MetaCmd::Output,
+            plus: false,
+            system: false,
+            pattern: if path.is_empty() {
+                None
+            } else {
+                Some(path.to_owned())
+            },
+            echo_hidden: false,
+        };
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\r` (reset buffer), `\qecho text`.
+///
+/// Note: `\r` conflicts with nothing else starting with `r`, but we handle
+/// `\qecho` here as a special prefix-matched command reached from the `q`
+/// branch — wait, `\qecho` starts with `q`. This function is for `\r` only.
+fn parse_r_family(input: &str) -> ParsedMeta {
+    // `\r` — bare reset
+    if let Some(rest) = input.strip_prefix('r') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ResetBuffer);
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\w file`.
+fn parse_w(input: &str) -> ParsedMeta {
+    // Check `\warn` and `\w` (warn is longer, check first).
+    if let Some(rest) = input.strip_prefix("warn") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let text = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Warn,
+                plus: false,
+                system: false,
+                pattern: if text.is_empty() {
+                    None
+                } else {
+                    Some(text.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    if let Some(rest) = input.strip_prefix('w') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let path = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::WriteBuffer,
+                plus: false,
+                system: false,
+                pattern: if path.is_empty() {
+                    None
+                } else {
+                    Some(path.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\p` (print buffer), `\password [user]`, and `\pset [option [value]]`.
+fn parse_p_family(input: &str) -> ParsedMeta {
+    // `\password` must be checked before bare `\p` (longer prefix wins).
+    if let Some(rest) = input.strip_prefix("password") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let user = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Password,
+                plus: false,
+                system: false,
+                pattern: if user.is_empty() {
+                    None
+                } else {
+                    Some(user.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    // `\pset` must also be checked before bare `\p`.
+    if let Some(rest) = input.strip_prefix("pset") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return parse_pset(input);
+        }
+    }
+    parse_simple_or_unknown(input, "p", MetaCmd::PrintBuffer)
+}
+
+/// Parse `\! [command]`.
+fn parse_shell(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix('!') else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    let cmd = rest.trim();
+    ParsedMeta {
+        cmd: MetaCmd::Shell,
+        plus: false,
+        system: false,
+        pattern: if cmd.is_empty() {
+            None
+        } else {
+            Some(cmd.to_owned())
+        },
         echo_hidden: false,
     }
 }
@@ -1129,5 +1431,192 @@ mod tests {
     fn parse_sv_still_works_after_set() {
         let m = parse("\\sv my_view");
         assert_eq!(m.cmd, MetaCmd::ShowViewDef);
+    }
+
+    // -- I/O commands (#33) -------------------------------------------------
+
+    #[test]
+    fn parse_include_with_file() {
+        let m = parse("\\i myfile.sql");
+        assert_eq!(m.cmd, MetaCmd::Include);
+        assert_eq!(m.pattern, Some("myfile.sql".to_owned()));
+    }
+
+    #[test]
+    fn parse_include_no_file() {
+        let m = parse("\\i");
+        assert_eq!(m.cmd, MetaCmd::Include);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_include_relative_with_file() {
+        let m = parse("\\ir ../other.sql");
+        assert_eq!(m.cmd, MetaCmd::IncludeRelative);
+        assert_eq!(m.pattern, Some("../other.sql".to_owned()));
+    }
+
+    #[test]
+    fn parse_include_relative_not_confused_with_include() {
+        // \ir must match before \i
+        assert_eq!(parse("\\ir foo.sql").cmd, MetaCmd::IncludeRelative);
+        assert_eq!(parse("\\i foo.sql").cmd, MetaCmd::Include);
+    }
+
+    #[test]
+    fn parse_output_with_file() {
+        let m = parse("\\o /tmp/out.txt");
+        assert_eq!(m.cmd, MetaCmd::Output);
+        assert_eq!(m.pattern, Some("/tmp/out.txt".to_owned()));
+    }
+
+    #[test]
+    fn parse_output_no_file_restores_stdout() {
+        let m = parse("\\o");
+        assert_eq!(m.cmd, MetaCmd::Output);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_write_buffer() {
+        let m = parse("\\w buf.sql");
+        assert_eq!(m.cmd, MetaCmd::WriteBuffer);
+        assert_eq!(m.pattern, Some("buf.sql".to_owned()));
+    }
+
+    #[test]
+    fn parse_reset_buffer() {
+        assert_eq!(parse("\\r").cmd, MetaCmd::ResetBuffer);
+    }
+
+    #[test]
+    fn parse_print_buffer() {
+        assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
+    }
+
+    #[test]
+    fn parse_edit_no_args() {
+        let m = parse("\\e");
+        assert_eq!(m.cmd, MetaCmd::Edit);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_edit_with_file() {
+        let m = parse("\\e myfile.sql");
+        assert_eq!(m.cmd, MetaCmd::Edit);
+        assert_eq!(m.pattern, Some("myfile.sql".to_owned()));
+    }
+
+    #[test]
+    fn parse_edit_with_file_and_line() {
+        let m = parse("\\e myfile.sql 42");
+        assert_eq!(m.cmd, MetaCmd::Edit);
+        assert_eq!(m.pattern, Some("myfile.sql 42".to_owned()));
+    }
+
+    #[test]
+    fn parse_shell_with_command() {
+        let m = parse("\\! echo hello");
+        assert_eq!(m.cmd, MetaCmd::Shell);
+        assert_eq!(m.pattern, Some("echo hello".to_owned()));
+    }
+
+    #[test]
+    fn parse_shell_no_command() {
+        let m = parse("\\!");
+        assert_eq!(m.cmd, MetaCmd::Shell);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_chdir_with_dir() {
+        let m = parse("\\cd /tmp");
+        assert_eq!(m.cmd, MetaCmd::Chdir);
+        assert_eq!(m.pattern, Some("/tmp".to_owned()));
+    }
+
+    #[test]
+    fn parse_chdir_no_dir() {
+        let m = parse("\\cd");
+        assert_eq!(m.cmd, MetaCmd::Chdir);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_chdir_not_confused_with_reconnect() {
+        // \cd must not match as \c
+        assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
+        assert_eq!(parse("\\c mydb").cmd, MetaCmd::Reconnect);
+    }
+
+    #[test]
+    fn parse_echo_with_text() {
+        let m = parse("\\echo hello world");
+        assert_eq!(m.cmd, MetaCmd::Echo);
+        assert_eq!(m.pattern, Some("hello world".to_owned()));
+    }
+
+    #[test]
+    fn parse_echo_no_text() {
+        let m = parse("\\echo");
+        assert_eq!(m.cmd, MetaCmd::Echo);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_qecho_with_text() {
+        let m = parse("\\qecho output text");
+        assert_eq!(m.cmd, MetaCmd::QEcho);
+        assert_eq!(m.pattern, Some("output text".to_owned()));
+    }
+
+    #[test]
+    fn parse_warn_with_text() {
+        let m = parse("\\warn danger");
+        assert_eq!(m.cmd, MetaCmd::Warn);
+        assert_eq!(m.pattern, Some("danger".to_owned()));
+    }
+
+    #[test]
+    fn parse_encoding_no_arg() {
+        let m = parse("\\encoding");
+        assert_eq!(m.cmd, MetaCmd::Encoding);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_encoding_utf8() {
+        let m = parse("\\encoding UTF8");
+        assert_eq!(m.cmd, MetaCmd::Encoding);
+        assert_eq!(m.pattern, Some("UTF8".to_owned()));
+    }
+
+    #[test]
+    fn parse_password_no_user() {
+        let m = parse("\\password");
+        assert_eq!(m.cmd, MetaCmd::Password);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_password_with_user() {
+        let m = parse("\\password alice");
+        assert_eq!(m.cmd, MetaCmd::Password);
+        assert_eq!(m.pattern, Some("alice".to_owned()));
+    }
+
+    #[test]
+    fn parse_warn_not_confused_with_write_buffer() {
+        // \warn starts with 'w', must not match \w
+        assert_eq!(parse("\\warn text").cmd, MetaCmd::Warn);
+        assert_eq!(parse("\\w file.sql").cmd, MetaCmd::WriteBuffer);
+    }
+
+    #[test]
+    fn parse_password_not_confused_with_print_buffer() {
+        // \password starts with 'p', must not match \p
+        assert_eq!(parse("\\password user").cmd, MetaCmd::Password);
+        assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
     }
 }

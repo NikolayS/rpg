@@ -7,6 +7,7 @@ use clap::Parser;
 
 mod connection;
 mod describe;
+mod io;
 mod metacmd;
 #[allow(dead_code)]
 mod output;

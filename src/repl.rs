@@ -249,7 +249,6 @@ pub use crate::output::ExpandedMode;
 // ---------------------------------------------------------------------------
 
 /// Runtime-adjustable display settings.
-#[derive(Debug, Default)]
 pub struct ReplSettings {
     /// Whether to print query timing after each query.
     pub timing: bool,
@@ -261,6 +260,38 @@ pub struct ReplSettings {
     pub pset: crate::output::PsetConfig,
     /// Variable store (`\set` / `\unset`).
     pub vars: crate::vars::Variables,
+    /// Current output redirect target. When `Some`, query output and `\qecho`
+    /// text are written here instead of stdout.
+    pub output_target: Option<Box<dyn std::io::Write>>,
+}
+
+impl Default for ReplSettings {
+    fn default() -> Self {
+        Self {
+            timing: false,
+            expanded: ExpandedMode::default(),
+            echo_hidden: false,
+            pset: crate::output::PsetConfig::default(),
+            vars: crate::vars::Variables::new(),
+            output_target: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for ReplSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplSettings")
+            .field("timing", &self.timing)
+            .field("expanded", &self.expanded)
+            .field("echo_hidden", &self.echo_hidden)
+            .field("pset", &self.pset)
+            .field("vars", &self.vars)
+            .field(
+                "output_target",
+                &self.output_target.as_ref().map(|_| "<writer>"),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -873,12 +904,137 @@ pub enum MetaResult {
     Quit,
     /// The connection was replaced: caller must swap client and params.
     Reconnected(Box<tokio_postgres::Client>, ConnParams),
+    /// Clear the query buffer (`\r`).
+    ClearBuffer,
+    /// Print the query buffer (`\p`).
+    PrintBuffer,
+    /// Open the editor on the buffer; execute the result on close (`\e`).
+    EditBuffer,
+    /// Write the buffer to the given path (`\w file`).
+    WriteBufferToFile(String),
+}
+
+/// Dispatch I/O and utility meta-commands (the `#33` family).
+///
+/// Returns `Some(MetaResult)` if the command was handled, `None` if the
+/// command is not an I/O command (and the caller should continue matching).
+async fn dispatch_io(
+    parsed: &crate::metacmd::ParsedMeta,
+    client: &Client,
+    settings: &mut ReplSettings,
+) -> Option<MetaResult> {
+    use crate::metacmd::MetaCmd;
+
+    match parsed.cmd {
+        MetaCmd::Include => {
+            match parsed.pattern.as_deref() {
+                Some(path) => {
+                    crate::io::include_file(client, path, settings).await;
+                }
+                None => eprintln!("\\i: file name required"),
+            }
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::IncludeRelative => {
+            // In the interactive REPL \ir and \i behave identically; the
+            // distinction matters only when we already track a "current file"
+            // (future work).
+            match parsed.pattern.as_deref() {
+                Some(path) => {
+                    crate::io::include_file(client, path, settings).await;
+                }
+                None => eprintln!("\\ir: file name required"),
+            }
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Output => {
+            match crate::io::open_output(parsed.pattern.as_deref()) {
+                Ok(target) => {
+                    settings.output_target = target;
+                    if parsed.pattern.is_none() {
+                        println!("Output reset to stdout.");
+                    }
+                }
+                Err(e) => eprintln!("{e}"),
+            }
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::ResetBuffer => Some(MetaResult::ClearBuffer),
+        MetaCmd::PrintBuffer => Some(MetaResult::PrintBuffer),
+        MetaCmd::WriteBuffer => {
+            match parsed.pattern.as_deref() {
+                Some(path) => return Some(MetaResult::WriteBufferToFile(path.to_owned())),
+                None => eprintln!("\\w: file name required"),
+            }
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Edit => Some(MetaResult::EditBuffer),
+        MetaCmd::Shell => {
+            crate::io::shell_command(parsed.pattern.as_deref());
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Chdir => {
+            if let Err(e) = crate::io::change_dir(parsed.pattern.as_deref()) {
+                eprintln!("{e}");
+            }
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Echo => {
+            println!("{}", parsed.pattern.as_deref().unwrap_or(""));
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::QEcho => {
+            let text = parsed.pattern.as_deref().unwrap_or("");
+            if let Some(ref mut w) = settings.output_target {
+                let _ = writeln!(w, "{text}");
+            } else {
+                println!("{text}");
+            }
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Warn => {
+            eprintln!("{}", parsed.pattern.as_deref().unwrap_or(""));
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Encoding => {
+            crate::io::encoding(parsed.pattern.as_deref());
+            Some(MetaResult::Continue)
+        }
+        MetaCmd::Password => {
+            dispatch_password(parsed.pattern.as_deref());
+            Some(MetaResult::Continue)
+        }
+        _ => None,
+    }
+}
+
+/// Handle `\password [user]`.
+fn dispatch_password(user: Option<&str>) {
+    let u = user.unwrap_or("");
+    let prompt = if u.is_empty() {
+        "Enter new password: ".to_owned()
+    } else {
+        format!("Enter new password for user \"{u}\": ")
+    };
+    match rpassword::prompt_password(&prompt) {
+        Ok(pw) => {
+            let confirm = rpassword::prompt_password("Confirm new password: ").unwrap_or_default();
+            if pw == confirm {
+                println!("\\password: password change is not yet wired to the server");
+            } else {
+                eprintln!("\\password: passwords do not match");
+            }
+        }
+        Err(e) => eprintln!("\\password: {e}"),
+    }
 }
 
 /// Dispatch a parsed meta-command, applying any side-effects to `settings`.
 ///
 /// Returns a [`MetaResult`] indicating whether the loop should continue,
-/// exit, or replace the current connection.
+/// exit, or replace the current connection. Buffer-mutating commands
+/// (`\r`, `\p`, `\w`, `\e`) return special variants that the REPL loop
+/// handles where the buffer is accessible.
 async fn dispatch_meta(
     parsed: crate::metacmd::ParsedMeta,
     client: &Client,
@@ -886,6 +1042,11 @@ async fn dispatch_meta(
     settings: &mut ReplSettings,
 ) -> MetaResult {
     use crate::metacmd::MetaCmd;
+
+    // Try I/O commands first (they are the most numerous).
+    if let Some(result) = dispatch_io(&parsed, client, settings).await {
+        return result;
+    }
 
     match parsed.cmd {
         MetaCmd::Quit => return MetaResult::Quit,
@@ -1072,7 +1233,7 @@ async fn run_readline_loop(
                         buf.clear();
                         stmt_buf.clear();
                     }
-                    HandleLineResult::Continue => {}
+                    HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -1123,7 +1284,9 @@ async fn run_dumb_loop(
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 if line.trim_start().starts_with('\\') {
-                    match handle_backslash_dumb(line.trim(), client, params, settings).await {
+                    match handle_backslash_dumb(line.trim(), &mut buf, client, params, settings, tx)
+                        .await
+                    {
                         HandleLineResult::Quit => break,
                         HandleLineResult::Reconnected(new_client, new_params) => {
                             *client = *new_client;
@@ -1131,7 +1294,7 @@ async fn run_dumb_loop(
                             *tx = TxState::default();
                             buf.clear();
                         }
-                        HandleLineResult::Continue => {}
+                        HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
                 } else {
                     if !buf.is_empty() {
@@ -1167,20 +1330,60 @@ enum HandleLineResult {
     Quit,
     /// Connection replaced by `\c`.
     Reconnected(Box<tokio_postgres::Client>, ConnParams),
+    /// The buffer was modified by a meta-command (cleared, edited, etc.).
+    /// The new buffer content is supplied by the caller.
+    BufferUpdated,
 }
 
 /// Handle a single input line in the dumb loop (backslash commands).
+///
+/// Buffer-mutating commands (`\r`, `\p`, `\w`, `\e`) are handled inline
+/// here because the dumb loop owns the buffer directly.
 async fn handle_backslash_dumb(
     input: &str,
+    buf: &mut String,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
+    tx: &mut TxState,
 ) -> HandleLineResult {
     let mut parsed = crate::metacmd::parse(input);
     parsed.echo_hidden = settings.echo_hidden;
     match dispatch_meta(parsed, client, params, settings).await {
         MetaResult::Quit => HandleLineResult::Quit,
         MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
+        MetaResult::ClearBuffer => {
+            buf.clear();
+            println!("Query buffer reset (empty).");
+            HandleLineResult::BufferUpdated
+        }
+        MetaResult::PrintBuffer => {
+            if buf.is_empty() {
+                println!("Query buffer is empty.");
+            } else {
+                println!("{buf}");
+            }
+            HandleLineResult::Continue
+        }
+        MetaResult::WriteBufferToFile(path) => {
+            if let Err(e) = crate::io::write_buffer(buf, &path) {
+                eprintln!("{e}");
+            }
+            HandleLineResult::Continue
+        }
+        MetaResult::EditBuffer => {
+            match crate::io::edit(buf, None, None) {
+                Ok(new_content) => {
+                    let trimmed = new_content.trim().to_owned();
+                    if !trimmed.is_empty() {
+                        execute_query(client, &trimmed, settings, tx).await;
+                    }
+                    buf.clear();
+                }
+                Err(e) => eprintln!("{e}"),
+            }
+            HandleLineResult::BufferUpdated
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -1200,12 +1403,47 @@ async fn handle_line(
     tx: &mut TxState,
 ) -> HandleLineResult {
     if line.trim_start().starts_with('\\') {
-        // Backslash command — execute immediately.
+        // Backslash command — execute immediately, with access to the buffer.
         let mut parsed = crate::metacmd::parse(line.trim());
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings).await {
             MetaResult::Quit => HandleLineResult::Quit,
             MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
+            MetaResult::ClearBuffer => {
+                buf.clear();
+                stmt_buf.clear();
+                println!("Query buffer reset (empty).");
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::PrintBuffer => {
+                if buf.is_empty() {
+                    println!("Query buffer is empty.");
+                } else {
+                    println!("{buf}");
+                }
+                HandleLineResult::Continue
+            }
+            MetaResult::WriteBufferToFile(path) => {
+                if let Err(e) = crate::io::write_buffer(buf, &path) {
+                    eprintln!("{e}");
+                }
+                HandleLineResult::Continue
+            }
+            MetaResult::EditBuffer => {
+                // Write buffer to temp file, open editor, read back, execute.
+                match crate::io::edit(buf, None, None) {
+                    Ok(new_content) => {
+                        let trimmed = new_content.trim().to_owned();
+                        if !trimmed.is_empty() {
+                            execute_query(client, &trimmed, settings, tx).await;
+                        }
+                        buf.clear();
+                        stmt_buf.clear();
+                    }
+                    Err(e) => eprintln!("{e}"),
+                }
+                HandleLineResult::BufferUpdated
+            }
             MetaResult::Continue => HandleLineResult::Continue,
         };
     }
