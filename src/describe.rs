@@ -2854,7 +2854,7 @@ order by 1, 2, 3, 4";
         );
     }
 
-    /// Verify that the system filter excludes pg_catalog when `S` is not set.
+    /// Verify that the system filter excludes `pg_catalog` when `S` is not set.
     #[test]
     fn list_operators_system_filter_excludes_pg_catalog() {
         let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema')";
