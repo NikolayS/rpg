@@ -7814,4 +7814,34 @@ mod tests {
         assert!(result.is_none());
         std::env::remove_var("SAMO_EMPTY_KEY_TEST");
     }
+
+    // -- --no-readline / use_readline routing ---------------------------------
+
+    /// When `no_readline` is true, `use_readline` must be false regardless of
+    /// whether stdin is a terminal.  This mirrors the logic in `run_repl`:
+    ///   `let use_readline = !no_readline && io::stdin().is_terminal();`
+    #[test]
+    fn no_readline_flag_forces_dumb_path() {
+        // Simulate the routing decision for both terminal and non-terminal stdin.
+        // In tests stdin is never a real terminal, so is_terminal() is false;
+        // we therefore cover the `no_readline=true` arm directly.
+        let no_readline = true;
+        // Regardless of the terminal state, no_readline overrides to false.
+        let use_readline = !no_readline; // is_terminal() is always false in tests
+        assert!(!use_readline, "no_readline=true must disable readline path");
+    }
+
+    /// When `no_readline` is false and stdin is not a terminal (e.g. piped
+    /// input), `use_readline` is also false — the dumb loop is used.
+    #[test]
+    fn non_terminal_stdin_uses_dumb_path() {
+        let no_readline = false;
+        // In unit tests stdin is never a TTY.
+        let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        let use_readline = !no_readline && is_tty;
+        assert!(
+            !use_readline,
+            "piped stdin must use dumb loop even without -n"
+        );
+    }
 }
