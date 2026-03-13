@@ -2731,6 +2731,21 @@ mod tests {
         assert_eq!(m.pattern, Some("nonexistent".to_owned()));
     }
 
+    #[test]
+    fn parse_dba_progress() {
+        let m = parse("\\dba progress");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("progress".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_progress_vacuum() {
+        // Two-word subcommand: entire rest of line is the pattern.
+        let m = parse("\\dba progress vacuum");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("progress vacuum".to_owned()));
+    }
+
     // -- Named queries (#69) ------------------------------------------------
 
     #[test]

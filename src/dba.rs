@@ -78,11 +78,23 @@ pub async fn execute(
             dba_indexes(client, verbose, governance).await;
             true
         }
+        "progress" | "prog" => {
+            dba_progress(client, None).await;
+            true
+        }
         "" | "help" => {
             print_dba_help();
             true
         }
         _ => {
+            // Handle two-word subcommands: `\dba progress vacuum`, etc.
+            if let Some(rest) = subcommand
+                .strip_prefix("progress ")
+                .or_else(|| subcommand.strip_prefix("prog "))
+            {
+                dba_progress(client, Some(rest.trim())).await;
+                return true;
+            }
             eprintln!("\\dba: unknown subcommand \"{subcommand}\"");
             eprintln!("Try \\dba help for available subcommands.");
             false
@@ -240,8 +252,18 @@ fn print_dba_help() {
     println!("  \\dba cache-hit   Buffer cache hit ratios");
     println!("  \\dba replication Replication slot status");
     println!("  \\dba config      Non-default configuration parameters");
+    println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
     println!();
-    println!("Aliases: act, lock, wait, vac, ts, conn, idx, unused, seq, cache, repl, conf");
+    println!("Aliases: act, lock, wait, vac, ts, conn, idx, unused, seq, cache, repl, conf, prog");
+    println!();
+    println!("Progress sub-commands:");
+    println!("  \\dba progress             All in-progress operations");
+    println!("  \\dba progress vacuum      VACUUM progress");
+    println!("  \\dba progress analyze     ANALYZE progress");
+    println!("  \\dba progress create_index CREATE INDEX progress");
+    println!("  \\dba progress cluster     CLUSTER / VACUUM FULL progress");
+    println!("  \\dba progress copy        COPY progress");
+    println!("  \\dba progress basebackup  Base backup progress");
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +511,186 @@ async fn dba_indexes(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Progress monitoring (pg_stat_progress_*)
+// ---------------------------------------------------------------------------
+
+/// Show progress of long-running operations.
+///
+/// If `filter` is `None`, shows all in-progress operations.
+/// If `filter` is `Some("vacuum")`, shows only VACUUM progress, etc.
+async fn dba_progress(client: &Client, filter: Option<&str>) {
+    match filter {
+        None | Some("all") => {
+            dba_progress_vacuum(client).await;
+            dba_progress_analyze(client).await;
+            dba_progress_create_index(client).await;
+            dba_progress_cluster(client).await;
+            dba_progress_copy(client).await;
+            dba_progress_basebackup(client).await;
+        }
+        Some("vacuum" | "vac") => dba_progress_vacuum(client).await,
+        Some("analyze") => dba_progress_analyze(client).await,
+        Some("create_index" | "index" | "idx") => dba_progress_create_index(client).await,
+        Some("cluster") => dba_progress_cluster(client).await,
+        Some("copy") => dba_progress_copy(client).await,
+        Some("basebackup" | "backup") => dba_progress_basebackup(client).await,
+        Some(other) => {
+            eprintln!("\\dba progress: unknown operation \"{other}\"");
+            eprintln!("Available: vacuum, analyze, create_index, cluster, copy, basebackup");
+        }
+    }
+}
+
+async fn dba_progress_vacuum(client: &Client) {
+    let sql = "\
+        select \
+            p.pid, \
+            a.datname, \
+            p.relid::regclass as relation, \
+            p.phase, \
+            p.heap_blks_total, \
+            p.heap_blks_scanned, \
+            p.heap_blks_vacuumed, \
+            case when p.heap_blks_total > 0 \
+                 then round(100.0 * p.heap_blks_vacuumed \
+                          / p.heap_blks_total, 1) \
+                 else 0 end as pct_done, \
+            p.index_vacuum_count, \
+            p.max_dead_tuples, \
+            p.num_dead_tuples \
+        from pg_stat_progress_vacuum as p \
+        join pg_stat_activity as a \
+            on a.pid = p.pid \
+        order by p.pid";
+    eprintln!("-- VACUUM progress --");
+    run_and_print(client, sql).await;
+}
+
+async fn dba_progress_analyze(client: &Client) {
+    let sql = "\
+        select \
+            p.pid, \
+            a.datname, \
+            p.relid::regclass as relation, \
+            p.phase, \
+            p.sample_blks_total, \
+            p.sample_blks_scanned, \
+            case when p.sample_blks_total > 0 \
+                 then round(100.0 * p.sample_blks_scanned \
+                          / p.sample_blks_total, 1) \
+                 else 0 end as pct_done, \
+            p.ext_stats_total, \
+            p.ext_stats_computed, \
+            p.child_tables_total, \
+            p.child_tables_done \
+        from pg_stat_progress_analyze as p \
+        join pg_stat_activity as a \
+            on a.pid = p.pid \
+        order by p.pid";
+    eprintln!("-- ANALYZE progress --");
+    run_and_print(client, sql).await;
+}
+
+async fn dba_progress_create_index(client: &Client) {
+    let sql = "\
+        select \
+            p.pid, \
+            a.datname, \
+            p.relid::regclass as relation, \
+            p.index_relid::regclass as index, \
+            p.command, \
+            p.phase, \
+            p.lockers_total, \
+            p.lockers_done, \
+            p.blocks_total, \
+            p.blocks_done, \
+            case when p.blocks_total > 0 \
+                 then round(100.0 * p.blocks_done \
+                          / p.blocks_total, 1) \
+                 else 0 end as pct_done, \
+            p.tuples_total, \
+            p.tuples_done \
+        from pg_stat_progress_create_index as p \
+        join pg_stat_activity as a \
+            on a.pid = p.pid \
+        order by p.pid";
+    eprintln!("-- CREATE INDEX progress --");
+    run_and_print(client, sql).await;
+}
+
+async fn dba_progress_cluster(client: &Client) {
+    let sql = "\
+        select \
+            p.pid, \
+            a.datname, \
+            p.relid::regclass as relation, \
+            p.command, \
+            p.phase, \
+            p.heap_blks_total, \
+            p.heap_blks_scanned, \
+            case when p.heap_blks_total > 0 \
+                 then round(100.0 * p.heap_blks_scanned \
+                          / p.heap_blks_total, 1) \
+                 else 0 end as pct_done, \
+            p.heap_tuples_scanned, \
+            p.heap_tuples_written, \
+            p.index_rebuild_count \
+        from pg_stat_progress_cluster as p \
+        join pg_stat_activity as a \
+            on a.pid = p.pid \
+        order by p.pid";
+    eprintln!("-- CLUSTER / VACUUM FULL progress --");
+    run_and_print(client, sql).await;
+}
+
+async fn dba_progress_copy(client: &Client) {
+    let sql = "\
+        select \
+            p.pid, \
+            a.datname, \
+            p.relid::regclass as relation, \
+            p.command, \
+            p.type, \
+            p.bytes_processed, \
+            p.bytes_total, \
+            case when p.bytes_total > 0 \
+                 then round(100.0 * p.bytes_processed \
+                          / p.bytes_total, 1) \
+                 else null end as pct_done, \
+            p.tuples_processed, \
+            p.tuples_excluded \
+        from pg_stat_progress_copy as p \
+        join pg_stat_activity as a \
+            on a.pid = p.pid \
+        order by p.pid";
+    eprintln!("-- COPY progress --");
+    run_and_print(client, sql).await;
+}
+
+async fn dba_progress_basebackup(client: &Client) {
+    let sql = "\
+        select \
+            p.pid, \
+            p.phase, \
+            case when p.backup_total > 0 \
+                 then round(100.0 * p.backup_streamed \
+                          / p.backup_total, 1) \
+                 else null end as pct_done, \
+            pg_size_pretty(p.backup_streamed) as streamed, \
+            pg_size_pretty(p.backup_total) as total, \
+            p.tablespaces_total, \
+            p.tablespaces_streamed \
+        from pg_stat_progress_basebackup as p \
+        order by p.pid";
+    eprintln!("-- Base backup progress --");
+    run_and_print(client, sql).await;
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
 
 async fn dba_config(client: &Client, _verbose: bool) {
     let sql = "select \
