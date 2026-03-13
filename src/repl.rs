@@ -2366,8 +2366,11 @@ pub async fn exec_command(
     params: &crate::connection::ConnParams,
 ) -> i32 {
     // `quit` / `exit` passed via -c should exit cleanly (psql behaviour).
-    if is_quit_exit(sql.trim(), true) {
-        return 0;
+    {
+        let lower = sql.trim().to_ascii_lowercase();
+        if lower == "quit" || lower == "exit" {
+            return 0;
+        }
     }
     if sql.trim_start().starts_with('\\') {
         // Backslash meta-command in -c mode.
@@ -2542,8 +2545,11 @@ pub(crate) async fn exec_lines(
 
     'lines: for line in lines {
         // `quit` / `exit` bare words work in all modes (psql behaviour).
-        if is_quit_exit(line.trim(), buf.is_empty()) {
-            break 'lines;
+        if buf.is_empty() {
+            let lower = line.trim().to_ascii_lowercase();
+            if lower == "quit" || lower == "exit" {
+                break 'lines;
+            }
         }
         if line.trim_start().starts_with('\\') {
             // Interpolate variables in the meta-command line (psql behaviour:
@@ -4842,8 +4848,11 @@ async fn run_dumb_loop(
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 // `quit` / `exit` bare words exit in all modes.
-                if is_quit_exit(line.trim(), buf.is_empty()) {
-                    break;
+                if buf.is_empty() {
+                    let lower = line.trim().to_ascii_lowercase();
+                    if lower == "quit" || lower == "exit" {
+                        break;
+                    }
                 }
                 if line.trim_start().starts_with('\\') {
                     match handle_backslash_dumb(line.trim(), &mut buf, client, params, settings, tx)
