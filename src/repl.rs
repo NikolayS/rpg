@@ -2723,6 +2723,8 @@ fn print_help() {
     println!(
         r"Backslash commands:
   \q              quit samo
+  quit            quit samo (interactive mode only)
+  exit            quit samo (interactive mode only)
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
   \conninfo       show connection information
@@ -5214,6 +5216,16 @@ async fn handle_line(
 ) -> HandleLineResult {
     // AI commands use a `/` prefix and are handled before backslash commands.
     let trimmed = line.trim();
+
+    // `quit` and `exit` as bare words at the primary prompt exit interactively
+    // (PostgreSQL 11+ behaviour).  Only applies when the query buffer is empty
+    // (i.e. we are at the primary prompt, not mid-statement).
+    if buf.is_empty() {
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "quit" || lower == "exit" {
+            return HandleLineResult::Quit;
+        }
+    }
     if trimmed.starts_with('/') {
         stmt_buf.clear();
         stmt_buf.push_str(line);
@@ -8851,5 +8863,73 @@ mod tests {
             ..Default::default()
         };
         print_profiles(&config);
+    }
+
+    // -- quit/exit bare-word detection ----------------------------------------
+
+    /// Helper that mirrors the bare-word quit/exit logic from `handle_line`
+    /// without requiring a live DB connection.
+    fn bare_word_quits(line: &str, buf_empty: bool) -> bool {
+        let trimmed = line.trim();
+        if buf_empty {
+            let lower = trimmed.to_ascii_lowercase();
+            if lower == "quit" || lower == "exit" {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn quit_bare_word_empty_buf_quits() {
+        assert!(bare_word_quits("quit", true));
+    }
+
+    #[test]
+    fn exit_bare_word_empty_buf_quits() {
+        assert!(bare_word_quits("exit", true));
+    }
+
+    #[test]
+    fn quit_uppercase_empty_buf_quits() {
+        assert!(bare_word_quits("QUIT", true));
+    }
+
+    #[test]
+    fn exit_mixed_case_empty_buf_quits() {
+        assert!(bare_word_quits("Exit", true));
+    }
+
+    #[test]
+    fn quit_with_whitespace_empty_buf_quits() {
+        // Leading/trailing whitespace is stripped by `line.trim()`.
+        assert!(bare_word_quits("  quit  ", true));
+    }
+
+    #[test]
+    fn quit_mid_statement_does_not_quit() {
+        // Buffer is non-empty — we are in continuation mode.
+        assert!(!bare_word_quits("quit", false));
+    }
+
+    #[test]
+    fn exit_mid_statement_does_not_quit() {
+        assert!(!bare_word_quits("exit", false));
+    }
+
+    #[test]
+    fn quit_with_args_does_not_quit() {
+        // "quit foo" is not a bare word.
+        assert!(!bare_word_quits("quit foo", true));
+    }
+
+    #[test]
+    fn exit_with_args_does_not_quit() {
+        assert!(!bare_word_quits("exit now", true));
+    }
+
+    #[test]
+    fn regular_sql_does_not_trigger_quit() {
+        assert!(!bare_word_quits("select 1", true));
     }
 }
