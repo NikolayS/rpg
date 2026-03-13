@@ -16,6 +16,7 @@ mod config;
 mod connection;
 mod copy;
 mod crosstab;
+mod daemon;
 mod dba;
 mod describe;
 mod governance;
@@ -286,6 +287,22 @@ struct Cli {
     /// Generate `samo_ops` wrapper SQL and exit. Specify PG version (e.g. 14, 16).
     #[arg(long, value_name = "PG_VERSION", default_missing_value = "16", num_args = 0..=1)]
     generate_wrappers: Option<String>,
+
+    /// Run in daemon mode (headless continuous monitoring).
+    #[arg(long)]
+    daemon: bool,
+
+    /// Port for HTTP health check endpoint in daemon mode.
+    #[arg(long, value_name = "PORT")]
+    health_port: Option<u16>,
+
+    /// Slack webhook URL for daemon notifications.
+    #[arg(long, value_name = "URL")]
+    slack_webhook: Option<String>,
+
+    /// Path to PID file for daemon mode.
+    #[arg(long, value_name = "PATH")]
+    pid_file: Option<String>,
 }
 
 impl Cli {
@@ -601,7 +618,34 @@ async fn main() {
                 }
             }
 
-            let exit_code = if let Some(ref cmd) = cli.command {
+            let exit_code = if cli.daemon {
+                // Daemon mode: headless continuous monitoring.
+                let pid_path = cli
+                    .pid_file
+                    .as_ref()
+                    .map_or_else(daemon::default_pid_path, std::path::PathBuf::from);
+
+                if let Some(existing) = daemon::check_existing_pid(&pid_path) {
+                    eprintln!("samo: daemon already running (PID {existing})");
+                    std::process::exit(1);
+                }
+                if let Err(e) = daemon::write_pid_file(&pid_path) {
+                    eprintln!("samo: could not write PID file: {e}");
+                    std::process::exit(2);
+                }
+
+                let mut channels = vec![daemon::NotificationChannel::Stderr];
+                if let Some(ref url) = cli.slack_webhook {
+                    channels.push(daemon::NotificationChannel::Slack {
+                        webhook_url: url.clone(),
+                    });
+                }
+
+                daemon::run(&client, &cfg, &resolved.dbname, &channels, cli.health_port).await;
+
+                daemon::remove_pid_file(&pid_path);
+                0
+            } else if let Some(ref cmd) = cli.command {
                 // -c "SQL": execute single command and exit.
                 repl::exec_command(&client, cmd, &mut settings, &resolved).await
             } else if let Some(ref path) = cli.file {
