@@ -6,6 +6,7 @@
 use clap::Parser;
 
 mod ai;
+mod capabilities;
 mod complete;
 mod conditional;
 mod config;
@@ -569,6 +570,17 @@ async fn main() {
             }
 
             let mut settings = build_settings(&cli, &cfg);
+
+            // Detect database capabilities (pg_ash, server version, etc.).
+            settings.db_capabilities = capabilities::detect(&client).await;
+            if let capabilities::PgAshStatus::Available { ref version } =
+                settings.db_capabilities.pg_ash
+            {
+                if !cli.quiet && !is_scripting && !is_piped {
+                    let ver = version.as_deref().unwrap_or("unknown version");
+                    logging::info("capabilities", &format!("pg_ash detected: {ver}"));
+                }
+            }
 
             let exit_code = if let Some(ref cmd) = cli.command {
                 // -c "SQL": execute single command and exit.

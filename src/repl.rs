@@ -636,6 +636,10 @@ pub struct ReplSettings {
     /// Records every action proposed, executed, vetoed, or skipped
     /// during this session.  Never LLM-summarized (FIFO-evicted only).
     pub audit_log: crate::governance::AuditLog,
+    /// Detected database capabilities (extensions, version).
+    ///
+    /// Populated at connect time by [`crate::capabilities::detect`].
+    pub db_capabilities: crate::capabilities::DbCapabilities,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -692,6 +696,7 @@ impl std::fmt::Debug for ReplSettings {
             )
             .field("tokens_used", &self.tokens_used)
             .field("audit_log", &format!("{} entries", self.audit_log.len()))
+            .field("db_capabilities", &self.db_capabilities)
             .finish()
     }
 }
@@ -730,6 +735,7 @@ impl Default for ReplSettings {
             conversation: ConversationContext::new(),
             tokens_used: 0,
             audit_log: crate::governance::AuditLog::new(),
+            db_capabilities: crate::capabilities::DbCapabilities::default(),
         }
     }
 }
