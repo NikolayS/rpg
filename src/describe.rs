@@ -3126,8 +3126,7 @@ order by 1, 2, 3, 4";
     /// `pg_operator_is_visible`, matching psql's exact query.
     #[test]
     fn list_operators_system_filter_excludes_pg_catalog() {
-        let sys_filter =
-            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'";
+        let sys_filter = "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'";
         let visibility_filter = "pg_catalog.pg_operator_is_visible(o.oid)";
         let where_clause = format!("where {sys_filter}\n    and {visibility_filter}");
 
