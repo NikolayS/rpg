@@ -14,6 +14,8 @@ mod copy;
 mod crosstab;
 mod dba;
 mod describe;
+#[allow(dead_code)]
+mod governance;
 mod highlight;
 mod io;
 mod logging;
