@@ -2619,6 +2619,8 @@ fn print_help() {
 
 Session commands:
   \c [db [user [host [port]]]]  reconnect to database
+  \c @profile                   reconnect using a named profile
+  \profiles                     list all configured connection profiles
   \sf[+] <func>   show function source
   \sv[+] <view>   show view definition
   \h [command]    SQL syntax help
@@ -2674,6 +2676,81 @@ Auto-EXPLAIN:
   \\set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
   \\set EXPLAIN off      disable auto-EXPLAIN"
     );
+}
+
+/// Print all configured connection profiles in a table format.
+///
+/// Output format:
+/// ```text
+///  name       | host          | port | user     | dbname
+/// ------------+---------------+------+----------+--------
+///  production | 10.0.1.5      | 5432 | postgres | mydb
+/// ```
+fn print_profiles(config: &crate::config::Config) {
+    if config.connections.is_empty() {
+        println!("No connection profiles configured.");
+        println!("Add profiles to ~/.config/samo/config.toml under [connections.<name>].");
+        return;
+    }
+
+    // Collect and sort for stable output.
+    let mut profiles: Vec<(&String, &crate::config::ConnectionProfile)> =
+        config.connections.iter().collect();
+    profiles.sort_by_key(|(name, _)| name.as_str());
+
+    // Column widths (minimum = header length).
+    let w_name = profiles
+        .iter()
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // "name"
+    let w_host = profiles
+        .iter()
+        .map(|(_, p)| p.host.as_deref().unwrap_or("").len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // "host"
+    let w_port = 4_usize; // "port" header and "5432"
+    let w_user = profiles
+        .iter()
+        .map(|(_, p)| p.username.as_deref().unwrap_or("").len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // "user"
+    let w_dbname = profiles
+        .iter()
+        .map(|(_, p)| p.dbname.as_deref().unwrap_or("").len())
+        .max()
+        .unwrap_or(0)
+        .max(6); // "dbname"
+
+    let sep_name = "-".repeat(w_name);
+    let sep_host = "-".repeat(w_host);
+    let sep_port = "-".repeat(w_port);
+    let sep_user = "-".repeat(w_user);
+    let sep_dbname = "-".repeat(w_dbname);
+
+    // Header.
+    println!(
+        " {v_name:<w_name$} | {v_host:<w_host$} | {v_port:<w_port$} | {v_user:<w_user$} | {v_dbname:<w_dbname$}",
+        v_name = "name",
+        v_host = "host",
+        v_port = "port",
+        v_user = "user",
+        v_dbname = "dbname",
+    );
+    println!("-{sep_name}-+-{sep_host}-+-{sep_port}-+-{sep_user}-+-{sep_dbname}-");
+
+    for (name, profile) in &profiles {
+        let host = profile.host.as_deref().unwrap_or("");
+        let port = profile.port.map_or_else(String::new, |p| p.to_string());
+        let user = profile.username.as_deref().unwrap_or("");
+        let dbname = profile.dbname.as_deref().unwrap_or("");
+        println!(
+            " {name:<w_name$} | {host:<w_host$} | {port:<w_port$} | {user:<w_user$} | {dbname:<w_dbname$}",
+        );
+    }
 }
 
 /// Print the `PostgreSQL` copyright notice (matches psql `\copyright` output).
@@ -3822,6 +3899,9 @@ async fn dispatch_meta(
         MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
         MetaCmd::ConnInfo => {
             println!("{}", crate::connection::connection_info(params));
+        }
+        MetaCmd::ListProfiles => {
+            print_profiles(&settings.config);
         }
         MetaCmd::Copyright => {
             print_copyright();
@@ -8256,5 +8336,64 @@ mod tests {
             !use_readline,
             "piped stdin must use dumb loop even without -n"
         );
+    }
+
+    // -- print_profiles -------------------------------------------------------
+
+    /// `print_profiles` with an empty config should not panic.
+    #[test]
+    fn print_profiles_empty_config_does_not_panic() {
+        let config = crate::config::Config::default();
+        // Just verify no panic; we don't capture stdout in unit tests.
+        print_profiles(&config);
+    }
+
+    /// `print_profiles` with multiple profiles should not panic.
+    #[test]
+    fn print_profiles_with_profiles_does_not_panic() {
+        use crate::config::ConnectionProfile;
+        use std::collections::HashMap;
+        let mut connections = HashMap::new();
+        connections.insert(
+            "production".to_owned(),
+            ConnectionProfile {
+                host: Some("10.0.1.5".to_owned()),
+                port: Some(5432),
+                username: Some("postgres".to_owned()),
+                dbname: Some("mydb".to_owned()),
+                sslmode: Some("require".to_owned()),
+                password: None,
+            },
+        );
+        connections.insert(
+            "staging".to_owned(),
+            ConnectionProfile {
+                host: Some("staging.local".to_owned()),
+                port: Some(5432),
+                username: Some("app".to_owned()),
+                dbname: Some("mydb".to_owned()),
+                sslmode: None,
+                password: None,
+            },
+        );
+        let config = crate::config::Config {
+            connections,
+            ..Default::default()
+        };
+        print_profiles(&config);
+    }
+
+    /// A profile with all optional fields absent renders empty strings.
+    #[test]
+    fn print_profiles_minimal_profile_does_not_panic() {
+        use crate::config::ConnectionProfile;
+        use std::collections::HashMap;
+        let mut connections = HashMap::new();
+        connections.insert("local".to_owned(), ConnectionProfile::default());
+        let config = crate::config::Config {
+            connections,
+            ..Default::default()
+        };
+        print_profiles(&config);
     }
 }

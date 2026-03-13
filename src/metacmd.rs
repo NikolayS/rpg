@@ -289,6 +289,10 @@ pub enum MetaCmd {
     /// `\interactive` — return to interactive mode.
     InteractiveMode,
 
+    // -- Connection profiles -----------------------------------------------
+    /// `\profiles` — list all configured connection profiles.
+    ListProfiles,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -1147,6 +1151,12 @@ fn parse_p_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("plan") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::PlanMode);
+        }
+    }
+    // `\profiles` — list all configured connection profiles.
+    if let Some(rest) = input.strip_prefix("profiles") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ListProfiles);
         }
     }
     // `\prompt [text] name` — prompt for input into a variable.
@@ -3060,5 +3070,38 @@ mod tests {
     fn parse_observe_does_not_steal_o() {
         // Bare \o should still be Output, not ObserveMode
         assert_eq!(parse("\\o").cmd, MetaCmd::Output);
+    }
+
+    // -- \profiles -----------------------------------------------------------
+
+    #[test]
+    fn parse_profiles_bare() {
+        assert_eq!(parse("\\profiles").cmd, MetaCmd::ListProfiles);
+    }
+
+    #[test]
+    fn parse_profiles_with_leading_backslash() {
+        assert_eq!(parse("profiles").cmd, MetaCmd::ListProfiles);
+    }
+
+    #[test]
+    fn parse_profiles_does_not_steal_p() {
+        // Bare \p should still be PrintBuffer, not ListProfiles
+        assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
+    }
+
+    #[test]
+    fn parse_profiles_not_confused_with_pset() {
+        assert_eq!(
+            parse("\\pset format").cmd,
+            MetaCmd::Pset("format".to_owned(), None)
+        );
+        assert_eq!(parse("\\profiles").cmd, MetaCmd::ListProfiles);
+    }
+
+    #[test]
+    fn parse_profiles_not_confused_with_plan() {
+        assert_eq!(parse("\\plan").cmd, MetaCmd::PlanMode);
+        assert_eq!(parse("\\profiles").cmd, MetaCmd::ListProfiles);
     }
 }
