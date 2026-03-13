@@ -1191,10 +1191,6 @@ fn print_result_set_pset(
     use crate::query::{ColumnMeta, RowSet};
 
     if is_select && !col_names.is_empty() {
-        if !is_first {
-            let _ = writeln!(writer);
-        }
-
         // simple_query returns NULL as empty string; we wrap every cell
         // in Some to distinguish "empty string" from "NULL" at the pset
         // formatting layer (which uses null_display).  The distinction
@@ -1239,6 +1235,9 @@ fn print_result_set_pset(
 
         let mut out = String::new();
         format_rowset_pset(&mut out, &rs, pset);
+        // format_rowset_pset appends a trailing blank line so that output
+        // matches psql's consistent blank line after every result set.
+        // No extra separator is needed before subsequent results.
         let _ = writer.write_all(out.as_bytes());
     } else if !is_select {
         // Non-SELECT statement: show rows affected if > 0.
