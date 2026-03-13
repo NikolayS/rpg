@@ -581,7 +581,7 @@ async fn list_functions(client: &Client, meta: &ParsedMeta) -> bool {
     case when p.prosecdef then 'definer' else 'invoker' end as \"Security\",
     pg_catalog.array_to_string(p.proacl, E'\\n') as \"Access privileges\",
     l.lanname as \"Language\",
-    coalesce(p.prosrc, '') as \"Internal name\",
+    case when l.lanname in ('internal', 'c') then p.prosrc end as \"Internal name\",
     pg_catalog.obj_description(p.oid, 'pg_proc') as \"Description\"
 from pg_catalog.pg_proc as p
 left join pg_catalog.pg_namespace as n
