@@ -876,7 +876,7 @@ from pg_catalog.pg_tablespace as t
 order by 1"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of tablespaces")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -893,9 +893,10 @@ async fn list_types(client: &Client, meta: &ParsedMeta) -> bool {
         "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')".to_owned()
     };
 
-    // Exclude pseudo-types (typtype = 'p') and array types (starts with _)
-    // when no pattern is given, to keep output manageable.
-    let base_filter = "t.typtype <> 'p' and t.typname !~ '^_'";
+    // Show only composite, domain, enum, and range types; exclude array types
+    // (names starting with _) and table-backed composite types.
+    let base_filter = "t.typtype in ('c', 'd', 'e', 'r') and t.typname !~ '^_'\
+        \n    and (t.typrelid = 0 or (select c.relkind = 'c' from pg_catalog.pg_class as c where c.oid = t.typrelid))";
 
     let where_parts: Vec<&str> = [
         Some(base_filter),
@@ -928,7 +929,7 @@ left join pg_catalog.pg_namespace as n
 order by 1, 2"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of data types")).await
 }
 
 // ---------------------------------------------------------------------------
