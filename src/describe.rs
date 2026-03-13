@@ -53,6 +53,7 @@ pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Optio
         MetaCmd::ListFdws => list_fdws(client, meta).await,
         MetaCmd::ListForeignTablesViaFdw => list_foreign_tables_via_fdw(client, meta).await,
         MetaCmd::ListUserMappings => list_user_mappings(client, meta).await,
+        MetaCmd::ListEventTriggers => list_event_triggers(client, meta).await,
         // Non-describe commands should never reach this function.
         _ => false,
     }
@@ -1452,6 +1453,85 @@ order by 1, 2"
 }
 
 // ---------------------------------------------------------------------------
+// \dy — list event triggers
+// ---------------------------------------------------------------------------
+
+/// List event triggers.
+///
+/// Matches psql's `\dy [pattern]` output: Name, Event, Owner, Enabled,
+/// Function, Tags.  With `+`, also adds a Description column.
+///
+/// Event triggers are global objects (no schema qualifier).
+async fn list_event_triggers(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "e.evtname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    e.evtname as \"Name\",
+    e.evtevent as \"Event\",
+    pg_catalog.pg_get_userbyid(e.evtowner) as \"Owner\",
+    case e.evtenabled
+        when 'O' then 'enabled'
+        when 'R' then 'replica'
+        when 'A' then 'always'
+        when 'D' then 'disabled'
+    end as \"Enabled\",
+    e.evtfoid::pg_catalog.regproc as \"Function\",
+    pg_catalog.array_to_string(
+        array(
+            select x
+            from pg_catalog.unnest(e.evttags) as t(x)
+        ),
+        ', '
+    ) as \"Tags\",
+    coalesce(pg_catalog.obj_description(e.oid, 'pg_event_trigger'), '') as \"Description\"
+from pg_catalog.pg_event_trigger as e
+{where_clause}
+order by 1"
+        )
+    } else {
+        format!(
+            "select
+    e.evtname as \"Name\",
+    e.evtevent as \"Event\",
+    pg_catalog.pg_get_userbyid(e.evtowner) as \"Owner\",
+    case e.evtenabled
+        when 'O' then 'enabled'
+        when 'R' then 'replica'
+        when 'A' then 'always'
+        when 'D' then 'disabled'
+    end as \"Enabled\",
+    e.evtfoid::pg_catalog.regproc as \"Function\",
+    pg_catalog.array_to_string(
+        array(
+            select x
+            from pg_catalog.unnest(e.evttags) as t(x)
+        ),
+        ', '
+    ) as \"Tags\"
+from pg_catalog.pg_event_trigger as e
+{where_clause}
+order by 1"
+        )
+    };
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of event triggers"),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // \d [table] — describe a specific table, or list all relations
 // ---------------------------------------------------------------------------
 
@@ -2479,6 +2559,129 @@ order by 1, 2";
         assert!(
             sql.contains("pg_relation_size"),
             "view plus SQL should use pg_relation_size: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_event_triggers SQL generation
+    // -----------------------------------------------------------------------
+
+    /// Verify that the non-verbose SQL for `\dy` includes the six expected
+    /// columns and queries `pg_event_trigger`.
+    #[test]
+    fn list_event_triggers_sql_has_required_columns() {
+        let name_filter = pattern::where_clause(None, "e.evtname", None);
+        let where_clause = if name_filter.is_empty() {
+            String::new()
+        } else {
+            format!("where {name_filter}")
+        };
+
+        let sql = format!(
+            "select
+    e.evtname as \"Name\",
+    e.evtevent as \"Event\",
+    pg_catalog.pg_get_userbyid(e.evtowner) as \"Owner\",
+    case e.evtenabled
+        when 'O' then 'enabled'
+        when 'R' then 'replica'
+        when 'A' then 'always'
+        when 'D' then 'disabled'
+    end as \"Enabled\",
+    e.evtfoid::pg_catalog.regproc as \"Function\",
+    pg_catalog.array_to_string(
+        array(
+            select x
+            from pg_catalog.unnest(e.evttags) as t(x)
+        ),
+        ', '
+    ) as \"Tags\"
+from pg_catalog.pg_event_trigger as e
+{where_clause}
+order by 1"
+        );
+
+        assert!(sql.contains("\"Name\""), "SQL must have Name column: {sql}");
+        assert!(
+            sql.contains("\"Event\""),
+            "SQL must have Event column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Owner\""),
+            "SQL must have Owner column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Enabled\""),
+            "SQL must have Enabled column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Function\""),
+            "SQL must have Function column: {sql}"
+        );
+        assert!(sql.contains("\"Tags\""), "SQL must have Tags column: {sql}");
+        assert!(
+            sql.contains("pg_event_trigger"),
+            "SQL must query pg_event_trigger: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Description\""),
+            "non-verbose SQL must not have Description: {sql}"
+        );
+    }
+
+    /// Verify that verbose `\dy+` SQL adds a Description column via
+    /// `obj_description`.
+    #[test]
+    fn list_event_triggers_plus_sql_has_description_column() {
+        let sql = "select
+    e.evtname as \"Name\",
+    e.evtevent as \"Event\",
+    pg_catalog.pg_get_userbyid(e.evtowner) as \"Owner\",
+    case e.evtenabled
+        when 'O' then 'enabled'
+        when 'R' then 'replica'
+        when 'A' then 'always'
+        when 'D' then 'disabled'
+    end as \"Enabled\",
+    e.evtfoid::pg_catalog.regproc as \"Function\",
+    pg_catalog.array_to_string(
+        array(
+            select x
+            from pg_catalog.unnest(e.evttags) as t(x)
+        ),
+        ', '
+    ) as \"Tags\",
+    coalesce(pg_catalog.obj_description(e.oid, 'pg_event_trigger'), '') as \"Description\"
+from pg_catalog.pg_event_trigger as e
+order by 1";
+
+        assert!(
+            sql.contains("\"Description\""),
+            "verbose SQL must have Description column: {sql}"
+        );
+        assert!(
+            sql.contains("obj_description"),
+            "verbose SQL must use obj_description: {sql}"
+        );
+        assert!(
+            sql.contains("pg_event_trigger"),
+            "verbose SQL must query pg_event_trigger: {sql}"
+        );
+    }
+
+    /// Verify that a pattern filter is applied to `evtname`.
+    #[test]
+    fn list_event_triggers_pattern_filter_applied() {
+        let name_filter = pattern::where_clause(Some("my_trigger"), "e.evtname", None);
+        let where_clause = format!("where {name_filter}");
+
+        assert!(
+            where_clause.contains("e.evtname"),
+            "filter must reference e.evtname: {where_clause}"
+        );
+        assert!(
+            where_clause.contains("my_trigger"),
+            "filter must include pattern value: {where_clause}"
         );
     }
 }

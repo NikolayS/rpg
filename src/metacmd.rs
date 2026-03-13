@@ -76,6 +76,8 @@ pub enum MetaCmd {
     ListForeignTablesViaFdw,
     /// `\deu [pattern]` — list user mappings.
     ListUserMappings,
+    /// `\dy [pattern]` — list event triggers.
+    ListEventTriggers,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -313,6 +315,7 @@ impl MetaCmd {
             Self::ListFdws => "\\dew",
             Self::ListForeignTablesViaFdw => "\\det",
             Self::ListUserMappings => "\\deu",
+            Self::ListEventTriggers => "\\dy",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -573,7 +576,10 @@ fn parse_m_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\yolo` — enter YOLO execution mode.
+/// Parse `\y` family: `\yolo` and `\dy [+] [pattern]`.
+///
+/// Note: `\dy` starts with `d`, so it is handled in `parse_d_family` via the
+/// `D_SUBCMDS` table.  This function handles remaining `y`-prefixed commands.
 fn parse_y_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("yolo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -1375,6 +1381,7 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("dx", MetaCmd::ListExtensions),
     ("dd", MetaCmd::ListComments),
     ("dc", MetaCmd::ListConversions),
+    ("dy", MetaCmd::ListEventTriggers),
 ];
 
 /// Parse the `\d` family of commands.
@@ -1673,6 +1680,25 @@ mod tests {
     #[test]
     fn parse_deu_user_mappings() {
         assert_eq!(parse("\\deu").cmd, MetaCmd::ListUserMappings);
+    }
+
+    #[test]
+    fn parse_dy_event_triggers() {
+        assert_eq!(parse("\\dy").cmd, MetaCmd::ListEventTriggers);
+    }
+
+    #[test]
+    fn parse_dy_plus_modifier() {
+        let m = parse("\\dy+");
+        assert_eq!(m.cmd, MetaCmd::ListEventTriggers);
+        assert!(m.plus);
+    }
+
+    #[test]
+    fn parse_dy_with_pattern() {
+        let m = parse("\\dy my_trigger");
+        assert_eq!(m.cmd, MetaCmd::ListEventTriggers);
+        assert_eq!(m.pattern, Some("my_trigger".to_owned()));
     }
 
     #[test]
