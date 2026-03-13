@@ -161,10 +161,175 @@ impl TxState {
 // Prompt construction
 // ---------------------------------------------------------------------------
 
+/// Runtime context used by [`expand_prompt`] to substitute format codes.
+#[allow(clippy::struct_excessive_bools)]
+pub struct PromptContext<'a> {
+    /// Current database name (`%/`).
+    pub dbname: &'a str,
+    /// Connected user name (`%n`).
+    pub user: &'a str,
+    /// Full host name (`%M`).
+    pub host: &'a str,
+    /// Port number (`%>`).
+    pub port: u16,
+    /// Whether the connected role is a superuser (`%#`).
+    pub is_superuser: bool,
+    /// Current transaction state (used by `%R` and `%x`).
+    pub tx: TxState,
+    /// `true` when the prompt is for a continuation line, not the first line.
+    ///
+    /// Affects `%R`: first-line returns `=`, continuation returns `-`.
+    pub continuation: bool,
+    /// `true` when the cursor is inside a `/* … */` block comment.
+    ///
+    /// Affects `%R`: returns `*` when inside a block comment.
+    pub in_block_comment: bool,
+    /// `true` when single-line mode is active (`-S` / `\set SINGLELINE on`).
+    ///
+    /// Affects `%R`: returns `^` in single-line mode.
+    pub single_line_mode: bool,
+    /// `false` when the session is disconnected from the server.
+    ///
+    /// Affects `%R`: returns `!` when disconnected.
+    pub connected: bool,
+    /// Current input line number within the session (`%l`).
+    ///
+    /// Set to `0` when not tracked.
+    pub line_number: u64,
+    /// Backend process ID (`%p`).
+    ///
+    /// `None` when unknown (e.g. not yet queried).
+    pub backend_pid: Option<u32>,
+}
+
+/// Expand a psql-compatible prompt template string.
+///
+/// Recognises the following format codes (a subset of those documented
+/// in the psql manual):
+///
+/// | Code | Expansion                                                    |
+/// |------|--------------------------------------------------------------|
+/// | `%/` | Current database name                                        |
+/// | `%~` | Database name, or `~` when it equals the user name          |
+/// | `%n` | User name                                                    |
+/// | `%M` | Full host name                                               |
+/// | `%m` | Short host name (up to the first `.`)                        |
+/// | `%>` | Port number                                                  |
+/// | `%#` | `#` if superuser, `>` otherwise                             |
+/// | `%R` | Input status: `=` (normal), `-` (continuation),             |
+/// |      | `*` (block comment), `^` (single-line mode),                |
+/// |      | `!` (disconnected)                                          |
+/// | `%x` | Transaction status: empty (idle), `*` (in tx), `!` (failed) |
+/// | `%l` | Line number                                                  |
+/// | `%p` | Backend PID, or empty when unknown                          |
+/// | `%%` | Literal `%`                                                  |
+///
+/// Unrecognised `%X` sequences are passed through unchanged.
+pub fn expand_prompt(template: &str, ctx: &PromptContext<'_>) -> String {
+    let chars: Vec<char> = template.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] != '%' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // `%` at end of template — emit literally.
+        if i + 1 >= len {
+            out.push('%');
+            i += 1;
+            continue;
+        }
+
+        let code = chars[i + 1];
+        match code {
+            '%' => {
+                out.push('%');
+            }
+            '/' => {
+                out.push_str(ctx.dbname);
+            }
+            '~' => {
+                if ctx.dbname == ctx.user {
+                    out.push('~');
+                } else {
+                    out.push_str(ctx.dbname);
+                }
+            }
+            'n' => {
+                out.push_str(ctx.user);
+            }
+            'M' => {
+                out.push_str(ctx.host);
+            }
+            'm' => {
+                // Short host: everything before the first `.`.
+                let short = ctx
+                    .host
+                    .split_once('.')
+                    .map_or(ctx.host, |(left, _)| left);
+                out.push_str(short);
+            }
+            '>' => {
+                out.push_str(&ctx.port.to_string());
+            }
+            '#' => {
+                out.push(if ctx.is_superuser { '#' } else { '>' });
+            }
+            'R' => {
+                let ch = if !ctx.connected {
+                    '!'
+                } else if ctx.single_line_mode {
+                    '^'
+                } else if ctx.in_block_comment {
+                    '*'
+                } else if ctx.continuation {
+                    '-'
+                } else {
+                    '='
+                };
+                out.push(ch);
+            }
+            'x' => {
+                out.push_str(ctx.tx.infix());
+            }
+            'l' => {
+                out.push_str(&ctx.line_number.to_string());
+            }
+            'p' => {
+                if let Some(pid) = ctx.backend_pid {
+                    out.push_str(&pid.to_string());
+                }
+            }
+            other => {
+                // Unknown code — pass through verbatim.
+                out.push('%');
+                out.push(other);
+            }
+        }
+
+        i += 2;
+    }
+
+    out
+}
+
 /// Build the main prompt string from a database name and transaction state.
 ///
 /// Format: `dbname=>` (idle), `dbname=*>` (in-tx), `dbname=!>` (failed).
 /// Continuation uses `-` instead of `=` as the first separator.
+///
+/// Samo-specific execution and input mode tags (` plan`, ` text2sql`, etc.)
+/// are inserted as a literal prefix before the psql-compatible `%R%x%#`
+/// codes, so that [`expand_prompt`] drives the actual substitution.
+///
+/// Kept for use by tests and any external callers that need mode-tag logic.
+/// Interactive REPL loops use [`build_prompt_from_settings`] instead.
+#[allow(dead_code)]
 pub fn build_prompt(
     dbname: &str,
     tx: TxState,
@@ -172,7 +337,6 @@ pub fn build_prompt(
     input_mode: InputMode,
     exec_mode: ExecMode,
 ) -> String {
-    let infix = tx.infix();
     // Show the most specific non-default mode tag.  When the execution mode
     // is not Interactive it takes priority; otherwise we fall back to the
     // input mode (only non-default, i.e. text2sql, gets a tag).
@@ -185,11 +349,63 @@ pub fn build_prompt(
             InputMode::Sql => "",
         },
     };
-    if continuation {
-        format!("{dbname}{mode_tag}-{infix}> ")
-    } else {
-        format!("{dbname}{mode_tag}={infix}> ")
-    }
+    // Build a template equivalent to the default PROMPT1 (`%/%R%x%# `) but
+    // with the Samo mode tag injected as a literal between `%/` and `%R`.
+    let template = format!("%/{mode_tag}%R%x%# ");
+    let ctx = PromptContext {
+        dbname,
+        user: "",
+        host: "",
+        port: 5432,
+        is_superuser: false,
+        tx,
+        continuation,
+        in_block_comment: false,
+        single_line_mode: false,
+        connected: true,
+        line_number: 0,
+        backend_pid: None,
+    };
+    expand_prompt(&template, &ctx)
+}
+
+/// Build the prompt string by evaluating the PROMPT1 (or PROMPT2) variable
+/// from `settings` and expanding psql-compatible format codes.
+///
+/// Uses PROMPT2 when `continuation` is `true`.  Falls back to the default
+/// `%/%R%x%# ` if the variable has been unset.
+///
+/// Samo-specific mode tags are handled by [`build_prompt`]; callers that
+/// want full variable-driven prompts should use this function instead.
+pub fn build_prompt_from_settings(
+    settings: &ReplSettings,
+    params: &ConnParams,
+    tx: TxState,
+    continuation: bool,
+) -> String {
+    let var_name = if continuation { "PROMPT2" } else { "PROMPT1" };
+    let default_template = "%/%R%x%# ";
+    let template = settings
+        .vars
+        .get(var_name)
+        .unwrap_or(default_template)
+        .to_owned();
+
+    let ctx = PromptContext {
+        dbname: &params.dbname,
+        user: &params.user,
+        host: &params.host,
+        port: params.port,
+        is_superuser: false,
+        tx,
+        continuation,
+        in_block_comment: false,
+        single_line_mode: settings.single_line,
+        connected: true,
+        line_number: 0,
+        backend_pid: None,
+    };
+    expand_prompt(&template, &ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -3955,13 +4171,7 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
-        let prompt = build_prompt(
-            &params.dbname,
-            *tx,
-            !buf.is_empty(),
-            settings.input_mode,
-            settings.exec_mode,
-        );
+        let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
 
         match rl.readline(&prompt) {
             Ok(line) => {
@@ -4043,13 +4253,7 @@ async fn run_dumb_loop(
 
     loop {
         // Print prompt to stderr (so it doesn't mix with redirected output).
-        let prompt = build_prompt(
-            &params.dbname,
-            *tx,
-            !buf.is_empty(),
-            settings.input_mode,
-            settings.exec_mode,
-        );
+        let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
         eprint!("{prompt}");
         let _ = io::stderr().flush();
 
@@ -6956,6 +7160,219 @@ mod tests {
             ),
             "mydb plan=> "
         );
+    }
+
+    // -- expand_prompt ---------------------------------------------------------
+
+    fn make_ctx<'a>(
+        dbname: &'a str,
+        user: &'a str,
+        tx: TxState,
+        continuation: bool,
+    ) -> PromptContext<'a> {
+        PromptContext {
+            dbname,
+            user,
+            host: "localhost",
+            port: 5432,
+            is_superuser: false,
+            tx,
+            continuation,
+            in_block_comment: false,
+            single_line_mode: false,
+            connected: true,
+            line_number: 0,
+            backend_pid: None,
+        }
+    }
+
+    #[test]
+    fn expand_prompt_default_idle() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("%/%R%x%# ", &ctx), "mydb=> ");
+    }
+
+    #[test]
+    fn expand_prompt_default_in_tx() {
+        let ctx = make_ctx("mydb", "alice", TxState::InTransaction, false);
+        assert_eq!(expand_prompt("%/%R%x%# ", &ctx), "mydb=*> ");
+    }
+
+    #[test]
+    fn expand_prompt_default_failed_tx() {
+        let ctx = make_ctx("mydb", "alice", TxState::Failed, false);
+        assert_eq!(expand_prompt("%/%R%x%# ", &ctx), "mydb=!> ");
+    }
+
+    #[test]
+    fn expand_prompt_continuation() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, true);
+        assert_eq!(expand_prompt("%/%R%x%# ", &ctx), "mydb-> ");
+    }
+
+    #[test]
+    fn expand_prompt_percent_n_user() {
+        let ctx = make_ctx("mydb", "bob", TxState::Idle, false);
+        assert_eq!(expand_prompt("%n@%/", &ctx), "bob@mydb");
+    }
+
+    #[test]
+    fn expand_prompt_percent_m_short_host() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.host = "pg01.example.com";
+        assert_eq!(expand_prompt("%m", &ctx), "pg01");
+    }
+
+    #[test]
+    fn expand_prompt_percent_m_no_dot() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.host = "localhost";
+        assert_eq!(expand_prompt("%m", &ctx), "localhost");
+    }
+
+    #[test]
+    fn expand_prompt_percent_big_m_full_host() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.host = "pg01.example.com";
+        assert_eq!(expand_prompt("%M", &ctx), "pg01.example.com");
+    }
+
+    #[test]
+    fn expand_prompt_percent_gt_port() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("%>", &ctx), "5432");
+    }
+
+    #[test]
+    fn expand_prompt_percent_hash_not_superuser() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("%#", &ctx), ">");
+    }
+
+    #[test]
+    fn expand_prompt_percent_hash_superuser() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.is_superuser = true;
+        assert_eq!(expand_prompt("%#", &ctx), "#");
+    }
+
+    #[test]
+    fn expand_prompt_percent_tilde_different_db() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("%~", &ctx), "mydb");
+    }
+
+    #[test]
+    fn expand_prompt_percent_tilde_same_as_user() {
+        let ctx = make_ctx("alice", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("%~", &ctx), "~");
+    }
+
+    #[test]
+    fn expand_prompt_percent_p_with_pid() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.backend_pid = Some(12345);
+        assert_eq!(expand_prompt("%p", &ctx), "12345");
+    }
+
+    #[test]
+    fn expand_prompt_percent_p_no_pid() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("%p", &ctx), "");
+    }
+
+    #[test]
+    fn expand_prompt_percent_l_line_number() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.line_number = 7;
+        assert_eq!(expand_prompt("%l", &ctx), "7");
+    }
+
+    #[test]
+    fn expand_prompt_percent_percent_literal() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        assert_eq!(expand_prompt("100%%", &ctx), "100%");
+    }
+
+    #[test]
+    fn expand_prompt_unknown_code_passthrough() {
+        let ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        // %Z is not a recognised code — should pass through verbatim.
+        assert_eq!(expand_prompt("%Z", &ctx), "%Z");
+    }
+
+    #[test]
+    fn expand_prompt_r_block_comment() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.in_block_comment = true;
+        assert_eq!(expand_prompt("%R", &ctx), "*");
+    }
+
+    #[test]
+    fn expand_prompt_r_single_line_mode() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.single_line_mode = true;
+        assert_eq!(expand_prompt("%R", &ctx), "^");
+    }
+
+    #[test]
+    fn expand_prompt_r_disconnected() {
+        let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
+        ctx.connected = false;
+        assert_eq!(expand_prompt("%R", &ctx), "!");
+    }
+
+    // -- build_prompt_from_settings -------------------------------------------
+
+    #[test]
+    fn prompt_from_settings_default_prompt1() {
+        let settings = ReplSettings::default();
+        let params = ConnParams {
+            dbname: "mydb".to_owned(),
+            user: "alice".to_owned(),
+            ..ConnParams::default()
+        };
+        let result = build_prompt_from_settings(&settings, &params, TxState::Idle, false);
+        assert_eq!(result, "mydb=> ");
+    }
+
+    #[test]
+    fn prompt_from_settings_custom_prompt1() {
+        let mut settings = ReplSettings::default();
+        settings.vars.set("PROMPT1", "%n@%/>%x ");
+        let params = ConnParams {
+            dbname: "mydb".to_owned(),
+            user: "bob".to_owned(),
+            ..ConnParams::default()
+        };
+        let result = build_prompt_from_settings(&settings, &params, TxState::Idle, false);
+        assert_eq!(result, "bob@mydb> ");
+    }
+
+    #[test]
+    fn prompt_from_settings_uses_prompt2_for_continuation() {
+        let mut settings = ReplSettings::default();
+        settings.vars.set("PROMPT2", "... ");
+        let params = ConnParams {
+            dbname: "mydb".to_owned(),
+            user: "alice".to_owned(),
+            ..ConnParams::default()
+        };
+        let result = build_prompt_from_settings(&settings, &params, TxState::Idle, true);
+        assert_eq!(result, "... ");
+    }
+
+    #[test]
+    fn prompt_from_settings_prompt1_in_tx() {
+        let settings = ReplSettings::default();
+        let params = ConnParams {
+            dbname: "mydb".to_owned(),
+            user: "alice".to_owned(),
+            ..ConnParams::default()
+        };
+        let result =
+            build_prompt_from_settings(&settings, &params, TxState::InTransaction, false);
+        assert_eq!(result, "mydb=*> ");
     }
 
     // -- AutoExplain -----------------------------------------------------------
