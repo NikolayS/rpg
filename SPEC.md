@@ -1678,6 +1678,18 @@ samo/
 
 **Team model:** Each sprint is designed as a unit of work for one AI agent. Multiple sprints at the same depth level (e.g., S-0.1 and S-0.2) can run in parallel if they don't share files. Dependencies are explicit.
 
+### Implementation Principles
+
+**psql as the reference implementation.** PostgreSQL's source code is BSD-licensed and has been refined for 25+ years. Samo must leverage it, not reinvent it:
+
+1. **Catalog queries**: Use `psql -E` (`ECHO_HIDDEN`) to capture the exact SQL psql generates for each `\d` command on each supported PG version (14–18). Adapt those queries for Samo — do not write them from scratch. Reference: `src/bin/psql/describe.c`.
+
+2. **Behavioral logic**: Connection state machines, transaction tracking (via `ReadyForQuery` status byte), error handling, variable interpolation, and backslash command semantics must follow psql's implementation. Reference: `src/bin/psql/command.c`, `src/bin/psql/common.c`, `src/bin/psql/variables.c`.
+
+3. **Output formatting**: Aligned, unaligned, expanded, wrapped, CSV, HTML — match psql's exact formatting rules. Reference: `src/fe_utils/print.c`.
+
+4. **Iterative alignment**: A first-pass hand-written implementation is acceptable to unblock development, but subsequent iterations must align with psql's actual queries and logic.
+
 ---
 
 #### Sprint S-0.1: Project Scaffold & CI (1 week)
