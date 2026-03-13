@@ -314,6 +314,10 @@ pub struct ReplSettings {
     ///
     /// Defaults to `true`. Disable with `\set DESTRUCTIVE_WARNING off`.
     pub destructive_warning: bool,
+    /// Loaded TOML configuration (profiles, display defaults, etc.).
+    ///
+    /// Used by `\c @profile` to look up named connection profiles.
+    pub config: crate::config::Config,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -352,6 +356,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("no_highlight", &self.no_highlight)
             .field("pager_enabled", &self.pager_enabled)
             .field("destructive_warning", &self.destructive_warning)
+            .field("config_profiles", &self.config.connections.len())
             .finish()
     }
 }
@@ -382,6 +387,7 @@ impl Default for ReplSettings {
             pager_enabled: true,
             // Warn before destructive statements by default.
             destructive_warning: true,
+            config: crate::config::Config::default(),
         }
     }
 }
@@ -2619,8 +2625,62 @@ async fn dispatch_meta(
             None => eprintln!("\\sv: view name required"),
         },
         MetaCmd::Reconnect => {
-            match crate::session::reconnect(parsed.pattern.as_deref(), params).await {
-                Ok((new_client, new_params)) => {
+            // Detect `\c @profile` — look up profile from loaded config.
+            let pattern = parsed.pattern.as_deref();
+            let resolved_pattern: Option<std::borrow::Cow<str>> =
+                if let Some(p) = pattern.filter(|s| s.trim_start().starts_with('@')) {
+                    let name = p.trim_start()[1..].trim();
+                    if let Some(profile) = crate::config::get_profile(&settings.config, name) {
+                        // Build a synthetic \c argument string from the profile.
+                        // Fields absent from the profile are represented as `-`
+                        // (meaning "keep current value").
+                        let host = profile.host.as_deref().unwrap_or("-");
+                        let user = profile.username.as_deref().unwrap_or("-");
+                        let db = profile.dbname.as_deref().unwrap_or("-");
+                        let port_str;
+                        let port = match profile.port {
+                            Some(n) => {
+                                port_str = n.to_string();
+                                port_str.as_str()
+                            }
+                            None => "-",
+                        };
+                        Some(std::borrow::Cow::Owned(format!(
+                            "{db} {user} {host} {port}"
+                        )))
+                    } else {
+                        eprintln!("\\c: unknown profile \"@{name}\"");
+                        eprintln!(
+                            "Configure profiles in \
+                             ~/.config/samo/config.toml \
+                             under [connections.{name}]"
+                        );
+                        return MetaResult::Continue;
+                    }
+                } else {
+                    pattern.map(std::borrow::Cow::Borrowed)
+                };
+
+            match crate::session::reconnect(resolved_pattern.as_deref(), params).await {
+                Ok((new_client, mut new_params)) => {
+                    // If the target was a profile, carry forward its sslmode
+                    // and password when the profile specifies them.
+                    if let Some(p) = pattern
+                        .and_then(|s| {
+                            let t = s.trim_start();
+                            t.starts_with('@').then(|| &t[1..])
+                        })
+                        .and_then(|name| crate::config::get_profile(&settings.config, name.trim()))
+                    {
+                        if let Some(ref ssl) = p.sslmode {
+                            if let Ok(mode) = crate::connection::SslMode::parse(ssl) {
+                                new_params.sslmode = mode;
+                            }
+                        }
+                        if new_params.password.is_none() {
+                            new_params.password.clone_from(&p.password);
+                        }
+                    }
                     println!("{}", crate::connection::connection_info(&new_params));
                     return MetaResult::Reconnected(Box::new(new_client), new_params);
                 }

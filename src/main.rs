@@ -7,6 +7,7 @@ use clap::Parser;
 
 mod complete;
 mod conditional;
+mod config;
 mod connection;
 mod copy;
 mod crosstab;
@@ -352,10 +353,11 @@ fn open_log_file(path: &str) -> Box<dyn std::io::Write> {
     }
 }
 
-/// Build a [`repl::ReplSettings`] from the parsed CLI flags.
+/// Build a [`repl::ReplSettings`] from the parsed CLI flags and loaded config.
 ///
+/// Config values set defaults; CLI flags take precedence and override them.
 /// Exits the process (code 2) if file-opening operations fail.
-fn build_settings(cli: &Cli) -> repl::ReplSettings {
+fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     // Build PsetConfig from CLI flags.
     let mut pset = output::PsetConfig::default();
     if cli.csv {
@@ -407,6 +409,16 @@ fn build_settings(cli: &Cli) -> repl::ReplSettings {
     // -L / --log-queries: open log file.
     let log_file: Option<Box<dyn std::io::Write>> = cli.log_queries.as_deref().map(open_log_file);
 
+    // Apply config display defaults; explicit CLI flags take precedence.
+    //
+    // `--no-highlight` always wins over config.highlight (it is a bool flag,
+    // so we cannot distinguish "not provided" from "false"). For pager and
+    // timing the config default applies when the corresponding CLI override
+    // has not been set.
+    let no_highlight = cli.no_highlight || !cfg.display.highlight;
+    let pager_enabled = cfg.display.pager;
+    let timing = cfg.display.timing;
+
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
         pset,
@@ -420,7 +432,10 @@ fn build_settings(cli: &Cli) -> repl::ReplSettings {
         single_transaction: cli.single_transaction,
         quiet: cli.quiet,
         debug: cli.debug,
-        no_highlight: cli.no_highlight,
+        no_highlight,
+        pager_enabled,
+        timing,
+        config: cfg.clone(),
         ..Default::default()
     }
 }
@@ -433,7 +448,56 @@ fn build_settings(cli: &Cli) -> repl::ReplSettings {
 // to optimize thread count per operating mode (issue #2, finding #9).
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Load config hierarchy (system then user); non-fatal warnings are
+    // printed to stderr unless --quiet suppresses them.
+    let (cfg, config_warnings) = config::load_config();
+    for w in &config_warnings {
+        if !cli.quiet {
+            eprintln!("samo: warning: {w}");
+        }
+    }
+
+    // If the first positional argument starts with '@', treat it as a named
+    // connection profile.  CLI flags still take precedence over profile
+    // values — only fields that are not already set by flags are filled in.
+    let profile_name = cli
+        .dbname_pos
+        .as_deref()
+        .filter(|s| s.starts_with('@'))
+        .map(|s| s[1..].to_owned());
+
+    if let Some(ref name) = profile_name {
+        if let Some(profile) = config::get_profile(&cfg, name) {
+            if cli.host.is_none() {
+                cli.host.clone_from(&profile.host);
+            }
+            if cli.port.is_none() {
+                cli.port = profile.port;
+            }
+            if cli.dbname.is_none() {
+                cli.dbname.clone_from(&profile.dbname);
+            }
+            if cli.username.is_none() {
+                cli.username.clone_from(&profile.username);
+            }
+            if cli.sslmode.is_none() {
+                cli.sslmode.clone_from(&profile.sslmode);
+            }
+            // Clear the positional dbname so connection resolution does not
+            // misinterpret "@production" as a literal database name.
+            cli.dbname_pos = None;
+        } else {
+            eprintln!("samo: unknown profile \"@{name}\"");
+            eprintln!(
+                "Configure profiles in ~/.config/samo/config.toml \
+                 under [connections.{name}]"
+            );
+            std::process::exit(2);
+        }
+    }
+
     let opts = cli.conn_opts();
 
     // Resolve parameters once; pass into connect() so both display and the
@@ -455,7 +519,7 @@ async fn main() {
                 println!("{}", connection::connection_info(&resolved));
             }
 
-            let mut settings = build_settings(&cli);
+            let mut settings = build_settings(&cli, &cfg);
 
             let exit_code = if let Some(ref cmd) = cli.command {
                 // -c "SQL": execute single command and exit.

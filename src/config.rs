@@ -1,0 +1,452 @@
+//! TOML configuration file loading for Samo.
+//!
+//! Config hierarchy (later entries override earlier):
+//! 1. `/etc/samo/config.toml` (system-wide)
+//! 2. `~/.config/samo/config.toml` (user)
+//! 3. `SAMO_*` environment variables
+//! 4. CLI flags
+//! 5. `\set` commands (runtime)
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+// ---------------------------------------------------------------------------
+// Top-level config
+// ---------------------------------------------------------------------------
+
+/// Top-level config file structure.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// Display/output preferences.
+    pub display: DisplayConfig,
+    /// Safety and destructive-operation settings.
+    pub safety: SafetyConfig,
+    /// Named connection profiles (keyed by profile name).
+    #[serde(default)]
+    pub connections: HashMap<String, ConnectionProfile>,
+}
+
+// ---------------------------------------------------------------------------
+// Display settings
+// ---------------------------------------------------------------------------
+
+/// Display settings.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DisplayConfig {
+    /// Enable the built-in pager for long output. Default: `true`.
+    pub pager: bool,
+    /// Enable SQL syntax highlighting in the REPL. Default: `true`.
+    pub highlight: bool,
+    /// Print query timing after each statement. Default: `false`.
+    pub timing: bool,
+    /// Expanded display mode (like `\x`). Default: `false`.
+    pub expanded: bool,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            pager: true,
+            highlight: true,
+            timing: false,
+            expanded: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Safety settings
+// ---------------------------------------------------------------------------
+
+/// Safety / destructive-warning settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SafetyConfig {
+    /// Warn before executing destructive statements. Default: `true`.
+    pub destructive_warning: bool,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            destructive_warning: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection profile
+// ---------------------------------------------------------------------------
+
+/// A named connection profile used with `samo @profile` or `\c @profile`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ConnectionProfile {
+    /// Hostname or socket directory.
+    pub host: Option<String>,
+    /// Port number.
+    pub port: Option<u16>,
+    /// Database name.
+    pub dbname: Option<String>,
+    /// Username.
+    pub username: Option<String>,
+    /// SSL mode (`disable`, `prefer`, `require`).
+    pub sslmode: Option<String>,
+    /// Password (stored in plaintext — use `.pgpass` where possible).
+    pub password: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+/// Load config from the standard file hierarchy.
+///
+/// Merges system config then user config; later entries win. Returns the
+/// merged [`Config`] and any non-fatal warning strings (e.g. parse errors
+/// in the system config are warnings, not hard failures).
+pub fn load_config() -> (Config, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut config = Config::default();
+
+    // 1. System-wide config.
+    let system_path = PathBuf::from("/etc/samo/config.toml");
+    if system_path.exists() {
+        match load_file(&system_path) {
+            Ok(c) => config = merge_config(config, c),
+            Err(e) => warnings.push(format!("system config: {e}")),
+        }
+    }
+
+    // 2. User config.
+    if let Some(user_path) = user_config_path() {
+        if user_path.exists() {
+            match load_file(&user_path) {
+                Ok(c) => config = merge_config(config, c),
+                Err(e) => warnings.push(format!("user config: {e}")),
+            }
+        }
+    }
+
+    (config, warnings)
+}
+
+/// Return the path to the user config file, or `None` if the config
+/// directory cannot be determined.
+fn user_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("samo").join("config.toml"))
+}
+
+/// Read and parse a single TOML config file.
+fn load_file(path: &Path) -> Result<Config, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    toml::from_str(&content).map_err(|e| e.to_string())
+}
+
+/// Merge two configs, with `overlay` taking precedence over `base`.
+///
+/// For scalar fields the overlay wins.  For the `connections` map, overlay
+/// entries are inserted (overwriting any same-named base entries) so that
+/// the user config can override individual profiles without losing the rest.
+fn merge_config(base: Config, overlay: Config) -> Config {
+    Config {
+        display: DisplayConfig {
+            pager: overlay.display.pager,
+            highlight: overlay.display.highlight,
+            timing: overlay.display.timing,
+            expanded: overlay.display.expanded,
+        },
+        safety: SafetyConfig {
+            destructive_warning: overlay.safety.destructive_warning,
+        },
+        connections: {
+            let mut merged = base.connections;
+            merged.extend(overlay.connections);
+            merged
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profile lookup
+// ---------------------------------------------------------------------------
+
+/// Look up a named connection profile by name.
+///
+/// Returns `None` when no profile with that name exists.
+pub fn get_profile<'a>(config: &'a Config, name: &str) -> Option<&'a ConnectionProfile> {
+    config.connections.get(name)
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- TOML parsing --------------------------------------------------------
+
+    #[test]
+    fn parse_empty_config() {
+        let cfg: Config = toml::from_str("").expect("empty TOML should parse");
+        assert!(cfg.connections.is_empty());
+        assert!(cfg.display.pager); // default
+        assert!(cfg.display.highlight); // default
+        assert!(!cfg.display.timing);
+        assert!(!cfg.display.expanded);
+        assert!(cfg.safety.destructive_warning);
+    }
+
+    #[test]
+    fn parse_display_section() {
+        let toml_str = r"
+[display]
+pager = false
+highlight = false
+timing = true
+expanded = true
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(!cfg.display.pager);
+        assert!(!cfg.display.highlight);
+        assert!(cfg.display.timing);
+        assert!(cfg.display.expanded);
+    }
+
+    #[test]
+    fn parse_safety_section() {
+        let toml_str = r"
+[safety]
+destructive_warning = false
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(!cfg.safety.destructive_warning);
+    }
+
+    #[test]
+    fn parse_single_connection_profile() {
+        let toml_str = r#"
+[connections.production]
+host = "db.example.com"
+port = 5432
+dbname = "app_prod"
+username = "app"
+sslmode = "require"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let profile = cfg.connections.get("production").expect("profile missing");
+        assert_eq!(profile.host.as_deref(), Some("db.example.com"));
+        assert_eq!(profile.port, Some(5432));
+        assert_eq!(profile.dbname.as_deref(), Some("app_prod"));
+        assert_eq!(profile.username.as_deref(), Some("app"));
+        assert_eq!(profile.sslmode.as_deref(), Some("require"));
+        assert!(profile.password.is_none());
+    }
+
+    #[test]
+    fn parse_multiple_profiles() {
+        let toml_str = r#"
+[connections.staging]
+host = "staging.example.com"
+dbname = "app_staging"
+
+[connections.local]
+dbname = "mydb"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.connections.len(), 2);
+        assert!(cfg.connections.contains_key("staging"));
+        assert!(cfg.connections.contains_key("local"));
+    }
+
+    #[test]
+    fn parse_profile_with_password() {
+        let toml_str = r#"
+[connections.dev]
+host = "localhost"
+password = "secret"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let profile = cfg.connections.get("dev").expect("profile missing");
+        assert_eq!(profile.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn parse_partial_profile_has_defaults() {
+        let toml_str = r#"
+[connections.minimal]
+dbname = "testdb"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let profile = cfg.connections.get("minimal").expect("missing");
+        assert!(profile.host.is_none());
+        assert!(profile.port.is_none());
+        assert!(profile.username.is_none());
+        assert!(profile.sslmode.is_none());
+        assert!(profile.password.is_none());
+    }
+
+    // -- get_profile ---------------------------------------------------------
+
+    #[test]
+    fn get_profile_existing() {
+        let mut cfg = Config::default();
+        cfg.connections.insert(
+            "prod".into(),
+            ConnectionProfile {
+                host: Some("prod.db".into()),
+                ..Default::default()
+            },
+        );
+        let p = get_profile(&cfg, "prod").expect("should find profile");
+        assert_eq!(p.host.as_deref(), Some("prod.db"));
+    }
+
+    #[test]
+    fn get_profile_missing() {
+        let cfg = Config::default();
+        assert!(get_profile(&cfg, "nonexistent").is_none());
+    }
+
+    // -- merge_config --------------------------------------------------------
+
+    #[test]
+    fn merge_overlay_wins_scalars() {
+        let base = Config {
+            display: DisplayConfig {
+                pager: true,
+                highlight: true,
+                timing: false,
+                expanded: false,
+            },
+            safety: SafetyConfig {
+                destructive_warning: true,
+            },
+            connections: HashMap::new(),
+        };
+        let overlay = Config {
+            display: DisplayConfig {
+                pager: false,
+                highlight: false,
+                timing: true,
+                expanded: true,
+            },
+            safety: SafetyConfig {
+                destructive_warning: false,
+            },
+            connections: HashMap::new(),
+        };
+        let merged = merge_config(base, overlay);
+        assert!(!merged.display.pager);
+        assert!(!merged.display.highlight);
+        assert!(merged.display.timing);
+        assert!(merged.display.expanded);
+        assert!(!merged.safety.destructive_warning);
+    }
+
+    #[test]
+    fn merge_connections_overlay_adds_and_overrides() {
+        let mut base_conns = HashMap::new();
+        base_conns.insert(
+            "shared".into(),
+            ConnectionProfile {
+                host: Some("base-host".into()),
+                ..Default::default()
+            },
+        );
+        base_conns.insert(
+            "base-only".into(),
+            ConnectionProfile {
+                dbname: Some("basedb".into()),
+                ..Default::default()
+            },
+        );
+        let base = Config {
+            connections: base_conns,
+            ..Default::default()
+        };
+
+        let mut overlay_conns = HashMap::new();
+        overlay_conns.insert(
+            "shared".into(),
+            ConnectionProfile {
+                host: Some("overlay-host".into()),
+                ..Default::default()
+            },
+        );
+        overlay_conns.insert(
+            "overlay-only".into(),
+            ConnectionProfile {
+                dbname: Some("overlaydb".into()),
+                ..Default::default()
+            },
+        );
+        let overlay = Config {
+            connections: overlay_conns,
+            ..Default::default()
+        };
+
+        let merged = merge_config(base, overlay);
+        // Overlay wins for "shared".
+        assert_eq!(
+            merged.connections["shared"].host.as_deref(),
+            Some("overlay-host")
+        );
+        // Base-only key is preserved.
+        assert!(merged.connections.contains_key("base-only"));
+        // Overlay-only key is added.
+        assert!(merged.connections.contains_key("overlay-only"));
+    }
+
+    // -- @profile detection in CLI args -------------------------------------
+
+    #[test]
+    fn profile_name_detection_with_at_prefix() {
+        let dbname_pos = Some("@production".to_owned());
+        let profile_name = dbname_pos
+            .as_deref()
+            .filter(|s| s.starts_with('@'))
+            .map(|s| &s[1..]);
+        assert_eq!(profile_name, Some("production"));
+    }
+
+    #[test]
+    fn profile_name_detection_no_prefix() {
+        let dbname_pos = Some("mydb".to_owned());
+        let profile_name = dbname_pos
+            .as_deref()
+            .filter(|s| s.starts_with('@'))
+            .map(|s| &s[1..]);
+        assert!(profile_name.is_none());
+    }
+
+    #[test]
+    fn profile_name_detection_none() {
+        let dbname_pos: Option<String> = None;
+        let profile_name = dbname_pos
+            .as_deref()
+            .filter(|s| s.starts_with('@'))
+            .map(|s| &s[1..]);
+        assert!(profile_name.is_none());
+    }
+
+    // -- ConnectionProfile defaults -----------------------------------------
+
+    #[test]
+    fn connection_profile_all_defaults_none() {
+        let p = ConnectionProfile::default();
+        assert!(p.host.is_none());
+        assert!(p.port.is_none());
+        assert!(p.dbname.is_none());
+        assert!(p.username.is_none());
+        assert!(p.sslmode.is_none());
+        assert!(p.password.is_none());
+    }
+}
