@@ -207,6 +207,13 @@ pub enum MetaCmd {
     /// and passed to [`crate::copy::parse_copy_args`] at dispatch time.
     Copy(String),
 
+    // -- Cross-tabulation (#54) --------------------------------------------
+    /// `\crosstabview [colV [colH [colD [sortcolH]]]]` — execute the buffer
+    /// and pivot the result into a cross-tabulation table.
+    ///
+    /// `args` carries the raw argument string (may be empty).
+    CrosstabView(String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -521,11 +528,18 @@ fn parse_x(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Expanded(mode))
 }
 
-/// Parse `\conninfo`, `\copy`, `\cd`, `\c`, or unknown `\c…`.
+/// Parse `\conninfo`, `\crosstabview`, `\copy`, `\cd`, `\c`, or unknown `\c…`.
 fn parse_c_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("conninfo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::ConnInfo);
+        }
+    }
+    // `\crosstabview [args]` — must be checked before `\copy` and `\c` (longest match).
+    if let Some(rest) = input.strip_prefix("crosstabview") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let args = rest.trim().to_owned();
+            return ParsedMeta::simple(MetaCmd::CrosstabView(args));
         }
     }
     // `\copy args` — client-side COPY.  Must be checked before bare `\c`.
@@ -2079,5 +2093,45 @@ mod tests {
         assert!(matches!(parse("\\copy t FROM stdin").cmd, MetaCmd::Copy(_)));
         assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
         assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
+    }
+
+    // -- \crosstabview -------------------------------------------------------
+
+    #[test]
+    fn parse_crosstabview_bare() {
+        let m = parse("\\crosstabview");
+        assert_eq!(m.cmd, MetaCmd::CrosstabView(String::new()));
+    }
+
+    #[test]
+    fn parse_crosstabview_with_args() {
+        let m = parse("\\crosstabview row col val");
+        assert_eq!(m.cmd, MetaCmd::CrosstabView("row col val".to_owned()));
+    }
+
+    #[test]
+    fn parse_crosstabview_with_index_args() {
+        let m = parse("\\crosstabview 0 1 2");
+        assert_eq!(m.cmd, MetaCmd::CrosstabView("0 1 2".to_owned()));
+    }
+
+    #[test]
+    fn parse_crosstabview_not_confused_with_reconnect() {
+        // \c must still parse as Reconnect; \crosstabview uses the longer prefix.
+        assert_eq!(parse("\\c").cmd, MetaCmd::Reconnect);
+        assert_eq!(parse("\\c mydb").cmd, MetaCmd::Reconnect);
+        assert!(matches!(
+            parse("\\crosstabview").cmd,
+            MetaCmd::CrosstabView(_)
+        ));
+    }
+
+    #[test]
+    fn parse_crosstabview_not_confused_with_conninfo() {
+        assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+        assert!(matches!(
+            parse("\\crosstabview").cmd,
+            MetaCmd::CrosstabView(_)
+        ));
     }
 }

@@ -855,6 +855,82 @@ async fn execute_gset(
 }
 
 // ---------------------------------------------------------------------------
+// \crosstabview — execute buffer and pivot result into cross-tab table
+// ---------------------------------------------------------------------------
+
+/// Execute `buf`, pivot the result using `\crosstabview` rules, and print.
+///
+/// Column arguments are passed in `raw_args` (may be empty for defaults).
+/// The query must return at least 3 columns and all `(colV, colH)` pairs must
+/// be unique.  Any violation is printed as an error message without modifying
+/// the transaction state beyond what the query itself did.
+///
+/// The caller is responsible for clearing `buf` after this returns.
+async fn execute_crosstabview(
+    client: &Client,
+    buf: &str,
+    raw_args: &str,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) {
+    use tokio_postgres::SimpleQueryMessage;
+
+    let interpolated = settings.vars.interpolate(buf);
+    let sql_to_send = interpolated.as_str();
+
+    let result = match client.simple_query(sql_to_send).await {
+        Ok(messages) => {
+            let mut col_names: Vec<String> = Vec::new();
+            let mut rows: Vec<Vec<String>> = Vec::new();
+
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    if col_names.is_empty() {
+                        col_names = (0..row.len())
+                            .map(|i| {
+                                row.columns()
+                                    .get(i)
+                                    .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                            })
+                            .collect();
+                    }
+                    let vals: Vec<String> = (0..row.len())
+                        .map(|i| row.get(i).unwrap_or("").to_owned())
+                        .collect();
+                    rows.push(vals);
+                }
+            }
+
+            tx.update_from_sql(sql_to_send);
+            settings.last_query = Some(buf.to_owned());
+            Some((col_names, rows))
+        }
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            tx.on_error();
+            None
+        }
+    };
+
+    let Some((col_names, rows)) = result else {
+        return;
+    };
+
+    // Parse and apply the pivot specification.
+    let args = crate::crosstab::parse_args(raw_args);
+    match crate::crosstab::pivot(&col_names, &rows, &args) {
+        Ok((pivot_headers, pivot_rows)) => {
+            let mut out = String::new();
+            crate::crosstab::format_pivot(&mut out, &pivot_headers, &pivot_rows);
+            let _ = io::stdout().write_all(out.as_bytes());
+        }
+        Err(e) => {
+            eprintln!("{e}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // \gdesc — describe buffer columns without executing (#52)
 // ---------------------------------------------------------------------------
 
@@ -1088,6 +1164,7 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
 ///   conditionals; skipped for others when suppressed).
 /// - A SQL fragment → accumulated into `buf`; flushed when complete.
 ///   Skipped entirely when inside a suppressed branch.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn exec_lines(
     client: &Client,
     lines: impl Iterator<Item = String>,
@@ -1121,6 +1198,13 @@ pub(crate) async fn exec_lines(
                 MetaResult::DescribeBuffer => {
                     // Buffer is NOT cleared after \gdesc.
                     describe_buffer(client, buf.trim()).await;
+                }
+                MetaResult::CrosstabViewBuffer(args) => {
+                    let sql = buf.trim().to_owned();
+                    buf.clear();
+                    if !sql.is_empty() {
+                        execute_crosstabview(client, &sql, &args, settings, tx).await;
+                    }
                 }
                 _ => {}
             }
@@ -1159,6 +1243,13 @@ pub(crate) async fn exec_lines(
                     }
                     MetaResult::DescribeBuffer => {
                         describe_buffer(client, buf.trim()).await;
+                    }
+                    MetaResult::CrosstabViewBuffer(args) => {
+                        let sql = buf.trim().to_owned();
+                        buf.clear();
+                        if !sql.is_empty() {
+                            execute_crosstabview(client, &sql, &args, settings, tx).await;
+                        }
                     }
                     _ => {}
                 }
@@ -1557,6 +1648,11 @@ pub enum MetaResult {
     GExecBuffer,
     /// Execute the current buffer and store each column as a variable (`\gset [prefix]`).
     GSet(Option<String>),
+    /// Execute the buffer and display the result as a cross-tabulation table
+    /// (`\crosstabview [colV [colH [colD [sortcolH]]]]`).
+    ///
+    /// The inner `String` carries the raw argument string (may be empty).
+    CrosstabViewBuffer(String),
 }
 
 /// Default `\watch` interval in seconds.
@@ -1791,6 +1887,9 @@ async fn dispatch_io(
                 Err(e) => eprintln!("{e}"),
             }
             Some(MetaResult::Continue)
+        }
+        MetaCmd::CrosstabView(ref args) => {
+            Some(MetaResult::CrosstabViewBuffer(args.clone()))
         }
         _ => None,
     }
@@ -2469,6 +2568,14 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::BufferUpdated
         }
+        MetaResult::CrosstabViewBuffer(args) => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                execute_crosstabview(client, &sql, &args, settings, tx).await;
+            }
+            HandleLineResult::BufferUpdated
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -2613,6 +2720,15 @@ async fn handle_line(
                 }
                 HandleLineResult::BufferUpdated
             }
+            MetaResult::CrosstabViewBuffer(args) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_crosstabview(client, &sql, &args, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
             MetaResult::Continue => HandleLineResult::Continue,
         };
     }
@@ -2709,6 +2825,15 @@ async fn handle_line(
                 stmt_buf.clear();
                 if !sql.is_empty() {
                     execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::CrosstabViewBuffer(args) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_crosstabview(client, &sql, &args, settings, tx).await;
                 }
                 HandleLineResult::BufferUpdated
             }
