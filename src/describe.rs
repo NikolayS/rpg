@@ -1315,7 +1315,7 @@ mod tests {
     // describe_object lookup SQL
     // -----------------------------------------------------------------------
 
-    /// Verify that the lookup query used by describe_object includes the
+    /// Verify that the lookup query used by `describe_object` includes the
     /// pattern filter when a wildcard pattern is supplied (e.g. `\d t*`).
     #[test]
     fn describe_object_lookup_sql_includes_pattern_filter() {
