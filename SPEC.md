@@ -2762,11 +2762,11 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 
 **Goal:** Auto mode for a narrow set of safe, well-validated actions only.
 
-- [ ] RCA Auto (narrow): auto-cancel/terminate root blockers only (no auto-GUC changes)
-- [ ] Index health Auto (narrow): auto-REINDEX CONCURRENTLY only (no auto-DROP, no auto-CREATE)
-- [ ] Circuit breaker integration: sustained poor outcomes → auto-downgrade to Supervised
-- [ ] Auditor veto protocol: veto → downgrade this specific action to Supervised, alert user
-- [ ] Extended validation: minimum 30 successful Supervised actions with >85% Auditor approval before Auto promotion
+- [x] RCA Auto (narrow): auto-cancel/terminate root blockers only (no auto-GUC changes)
+- [x] Index health Auto (narrow): auto-REINDEX CONCURRENTLY only (no auto-DROP, no auto-CREATE)
+- [x] Circuit breaker integration: sustained poor outcomes → auto-downgrade to Supervised
+- [x] Auditor veto protocol: veto → downgrade this specific action to Supervised, alert user
+- [x] Extended validation: minimum 30 successful Supervised actions with >85% Auditor approval before Auto promotion
 
 **v1.1 Milestone:** Auto mode works for cancel/terminate and REINDEX only. No auto-drop of anything. Circuit breaker proven to work.
 
