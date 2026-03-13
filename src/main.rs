@@ -263,6 +263,14 @@ struct Cli {
     #[arg(long)]
     yolo: bool,
 
+    /// Bypass autonomy level checks in YOLO mode (dangerous).
+    ///
+    /// When combined with `--yolo`, write queries are auto-executed
+    /// regardless of the configured autonomy level. Use only when you
+    /// fully understand the consequences.
+    #[arg(long)]
+    i_know_what_im_doing: bool,
+
     /// Launch in observe mode. Optionally accepts a duration (e.g. `30m`, `2h`).
     /// With no value: observe indefinitely. With a value: observe then exit.
     #[arg(long, value_name = "DURATION", default_missing_value = "", num_args = 0..=1)]
@@ -479,6 +487,12 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
         pager_enabled,
         timing,
         config: cfg.clone(),
+        exec_mode: if cli.yolo {
+            repl::ExecMode::Yolo
+        } else {
+            repl::ExecMode::default()
+        },
+        i_know_what_im_doing: cli.i_know_what_im_doing,
         ..Default::default()
     }
 }
