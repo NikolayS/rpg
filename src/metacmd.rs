@@ -66,6 +66,8 @@ pub enum MetaCmd {
     ListConversions,
     /// `\dC [pattern]` — list casts.
     ListCasts,
+    /// `\do [pattern]` — list operators.
+    ListOperators,
     /// `\dd [pattern]` — list object comments.
     ListComments,
     /// `\des [pattern]` — list foreign servers.
@@ -308,6 +310,7 @@ impl MetaCmd {
             Self::ListDomains => "\\dD",
             Self::ListConversions => "\\dc",
             Self::ListCasts => "\\dC",
+            Self::ListOperators => "\\do",
             Self::ListComments => "\\dd",
             Self::ListForeignServers => "\\des",
             Self::ListFdws => "\\dew",
@@ -1375,6 +1378,7 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("dx", MetaCmd::ListExtensions),
     ("dd", MetaCmd::ListComments),
     ("dc", MetaCmd::ListConversions),
+    ("do", MetaCmd::ListOperators),
 ];
 
 /// Parse the `\d` family of commands.
@@ -1703,6 +1707,32 @@ mod tests {
     #[test]
     fn parse_dc_lowercase_conversions() {
         assert_eq!(parse("\\dc").cmd, MetaCmd::ListConversions);
+    }
+
+    #[test]
+    fn parse_do_operators() {
+        assert_eq!(parse("\\do").cmd, MetaCmd::ListOperators);
+    }
+
+    #[test]
+    fn parse_do_operators_with_pattern() {
+        let m = parse("\\do +");
+        assert_eq!(m.cmd, MetaCmd::ListOperators);
+        assert_eq!(m.pattern, Some("+".to_owned()));
+    }
+
+    #[test]
+    fn parse_do_operators_system_modifier() {
+        let m = parse("\\doS");
+        assert_eq!(m.cmd, MetaCmd::ListOperators);
+        assert!(m.system);
+    }
+
+    #[test]
+    fn parse_do_operators_plus_modifier() {
+        let m = parse("\\do+");
+        assert_eq!(m.cmd, MetaCmd::ListOperators);
+        assert!(m.plus);
     }
 
     #[test]

@@ -48,6 +48,7 @@ pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Optio
         MetaCmd::ListPrivileges => list_privileges(client, meta).await,
         MetaCmd::ListConversions => list_conversions(client, meta).await,
         MetaCmd::ListCasts => list_casts(client, meta).await,
+        MetaCmd::ListOperators => list_operators(client, meta).await,
         MetaCmd::ListComments => list_comments(client, meta).await,
         MetaCmd::ListForeignServers => list_foreign_servers(client, meta).await,
         MetaCmd::ListFdws => list_fdws(client, meta).await,
@@ -1238,6 +1239,91 @@ order by 1, 2"
     );
 
     run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of conversions")).await
+}
+
+// ---------------------------------------------------------------------------
+// \do — list operators
+// ---------------------------------------------------------------------------
+
+/// List operators.
+///
+/// Matches psql's `\do [pattern]` output: Schema, Name, Left arg type,
+/// Right arg type, Result type, and (verbose) Description.
+///
+/// For PG 14+, `oprkind` has only 'b' (binary) and 'l' (left-unary).
+/// Right-unary ('r') was removed in PG 14.
+async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "o.oprname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    case when o.oprkind = 'l' then pg_catalog.format_type(o.oprright, null)
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\",
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'), '') as \"Description\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+{where_clause}
+order by 1, 2, 3, 4"
+        )
+    } else {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    case when o.oprkind = 'l' then pg_catalog.format_type(o.oprright, null)
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+{where_clause}
+order by 1, 2, 3, 4"
+        )
+    };
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of operators")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2480,5 +2566,147 @@ order by 1, 2";
             sql.contains("pg_relation_size"),
             "view plus SQL should use pg_relation_size: {sql}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_operators SQL generation
+    // -----------------------------------------------------------------------
+
+    /// Build the non-verbose SQL for `\do` and verify key fragments.
+    #[test]
+    fn list_operators_sql_has_required_columns() {
+        let meta = meta(MetaCmd::ListOperators, false, false, None);
+
+        let name_filter =
+            pattern::where_clause(meta.pattern.as_deref(), "o.oprname", Some("n.nspname"));
+        let sys_filter = if meta.system {
+            String::new()
+        } else {
+            "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        };
+        let where_parts: Vec<&str> = [
+            if sys_filter.is_empty() {
+                None
+            } else {
+                Some(sys_filter.as_str())
+            },
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("where {}", where_parts.join("\n    and "))
+        };
+
+        let sql = format!(
+            "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    case when o.oprkind = 'l' then pg_catalog.format_type(o.oprright, null)
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+{where_clause}
+order by 1, 2, 3, 4"
+        );
+
+        assert!(sql.contains("\"Schema\""), "sql should have Schema: {sql}");
+        assert!(sql.contains("\"Name\""), "sql should have Name: {sql}");
+        assert!(
+            sql.contains("\"Left arg type\""),
+            "sql should have Left arg type: {sql}"
+        );
+        assert!(
+            sql.contains("\"Right arg type\""),
+            "sql should have Right arg type: {sql}"
+        );
+        assert!(
+            sql.contains("\"Result type\""),
+            "sql should have Result type: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Description\""),
+            "non-verbose sql should NOT have Description: {sql}"
+        );
+        assert!(
+            sql.contains("pg_catalog.pg_operator"),
+            "sql should query pg_operator: {sql}"
+        );
+        assert!(
+            sql.contains("order by 1, 2, 3, 4"),
+            "sql should order by 1,2,3,4: {sql}"
+        );
+    }
+
+    /// Verify that the verbose SQL for `\do+` adds the Description column.
+    #[test]
+    fn list_operators_plus_sql_has_description() {
+        let meta = meta(MetaCmd::ListOperators, true, false, None);
+
+        let sql = format!(
+            "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    case when o.oprkind = 'l' then pg_catalog.format_type(o.oprright, null)
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\",
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'), '') as \"Description\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+order by 1, 2, 3, 4"
+        );
+
+        assert!(meta.plus, "meta.plus should be true for verbose operators");
+        assert!(
+            sql.contains("\"Description\""),
+            "verbose sql should have Description: {sql}"
+        );
+        assert!(
+            sql.contains("obj_description"),
+            "verbose sql should use obj_description: {sql}"
+        );
+    }
+
+    /// Verify that the system filter is omitted when `meta.system` is true.
+    #[test]
+    fn list_operators_system_flag_omits_sys_filter() {
+        let meta = meta(MetaCmd::ListOperators, false, true, None);
+
+        let sys_filter = if meta.system {
+            String::new()
+        } else {
+            "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        };
+
+        assert!(
+            sys_filter.is_empty(),
+            "system flag should suppress schema filter"
+        );
+    }
+
+    /// Verify that a pattern is applied as a WHERE filter on operator name.
+    #[test]
+    fn list_operators_pattern_filter() {
+        let f = pattern::where_clause(Some("int*"), "o.oprname", Some("n.nspname"));
+        assert!(f.contains("LIKE"), "expected LIKE for wildcard: {f}");
+        assert!(f.contains("o.oprname"), "expected filter on oprname: {f}");
     }
 }
