@@ -254,7 +254,6 @@ pub use crate::output::ExpandedMode;
 // ---------------------------------------------------------------------------
 
 /// Runtime-adjustable display settings.
-#[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ReplSettings {
     /// Whether to print query timing after each query.
@@ -305,6 +304,12 @@ pub struct ReplSettings {
     ///
     /// Set by `--no-highlight` CLI flag or `\set HIGHLIGHT off`.
     pub no_highlight: bool,
+    /// Whether the built-in pager is enabled.
+    ///
+    /// Defaults to `true`. Disable with `\set PAGER off` or by setting the
+    /// `PAGER` environment variable to an external pager command.
+    /// Only activates in interactive mode (not with `-c`, `-f`, or piped input).
+    pub pager_enabled: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -341,7 +346,36 @@ impl std::fmt::Debug for ReplSettings {
                 &format!("{} stmts", self.named_statements.len()),
             )
             .field("no_highlight", &self.no_highlight)
+            .field("pager_enabled", &self.pager_enabled)
             .finish()
+    }
+}
+
+impl Default for ReplSettings {
+    fn default() -> Self {
+        Self {
+            timing: false,
+            expanded: ExpandedMode::default(),
+            echo_hidden: false,
+            pset: crate::output::PsetConfig::default(),
+            vars: crate::vars::Variables::new(),
+            output_target: None,
+            log_file: None,
+            echo_queries: false,
+            echo_errors: false,
+            single_step: false,
+            single_line: false,
+            single_transaction: false,
+            quiet: false,
+            debug: false,
+            cond: crate::conditional::ConditionalState::default(),
+            last_query: None,
+            pending_bind_params: None,
+            named_statements: HashMap::new(),
+            no_highlight: false,
+            // Pager is enabled by default in interactive mode.
+            pager_enabled: true,
+        }
     }
 }
 
@@ -979,6 +1013,104 @@ async fn execute_piped(
         }
         Err(e) => eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
     }
+}
+
+/// Execute a SQL string in interactive mode, routing output through the
+/// built-in pager when appropriate.
+///
+/// When `settings.pager_enabled` is `true` and the formatted output exceeds
+/// the current terminal height, the output is displayed in the built-in TUI
+/// pager instead of being written directly to stdout.
+///
+/// This wrapper is used only by the interactive REPL loops.  Non-interactive
+/// paths (`-c`, `-f`, piped stdin) call `execute_query` directly.
+async fn execute_query_interactive(
+    client: &Client,
+    sql: &str,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) -> bool {
+    // Only intercept when pager is enabled and no output redirection is active.
+    if !settings.pager_enabled || settings.output_target.is_some() {
+        return execute_query(client, sql, settings, tx).await;
+    }
+
+    // Capture output into a buffer.
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = CapturingWriter(std::sync::Arc::clone(&shared));
+    let prev = settings.output_target.take();
+    settings.output_target = Some(Box::new(writer));
+    let ok = execute_query(client, sql, settings, tx).await;
+    settings.output_target = prev;
+
+    let captured = std::sync::Arc::try_unwrap(shared)
+        .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
+        .into_inner()
+        .unwrap_or_default();
+
+    let text = String::from_utf8_lossy(&captured);
+
+    // Determine terminal height; fall back to 24 if unavailable.
+    let term_rows = crossterm::terminal::size()
+        .map(|(_, h)| h as usize)
+        .unwrap_or(24);
+
+    if crate::pager::needs_paging(&text, term_rows.saturating_sub(2)) {
+        if let Err(e) = crate::pager::run_pager(&text) {
+            eprintln!("samo: pager error: {e}");
+            // Fallback: print directly.
+            let _ = io::stdout().write_all(&captured);
+        }
+    } else {
+        let _ = io::stdout().write_all(&captured);
+    }
+
+    ok
+}
+
+/// Execute a SQL string using the extended query protocol in interactive mode,
+/// routing output through the built-in pager when appropriate.
+async fn execute_query_extended_interactive(
+    client: &Client,
+    sql: &str,
+    params: &[String],
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) -> bool {
+    // Only intercept when pager is enabled and no output redirection is active.
+    if !settings.pager_enabled || settings.output_target.is_some() {
+        return execute_query_extended(client, sql, params, settings, tx).await;
+    }
+
+    // Capture output into a buffer.
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = CapturingWriter(std::sync::Arc::clone(&shared));
+    let prev = settings.output_target.take();
+    settings.output_target = Some(Box::new(writer));
+    let ok = execute_query_extended(client, sql, params, settings, tx).await;
+    settings.output_target = prev;
+
+    let captured = std::sync::Arc::try_unwrap(shared)
+        .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
+        .into_inner()
+        .unwrap_or_default();
+
+    let text = String::from_utf8_lossy(&captured);
+
+    let term_rows = crossterm::terminal::size()
+        .map(|(_, h)| h as usize)
+        .unwrap_or(24);
+
+    if crate::pager::needs_paging(&text, term_rows.saturating_sub(2)) {
+        if let Err(e) = crate::pager::run_pager(&text) {
+            eprintln!("samo: pager error: {e}");
+            let _ = io::stdout().write_all(&captured);
+        }
+    } else {
+        let _ = io::stdout().write_all(&captured);
+    }
+
+    ok
 }
 
 /// Execute `buf`, then execute each non-NULL result cell as a separate SQL
@@ -1802,6 +1934,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror HIGHLIGHT into the settings flag.
     if name == "HIGHLIGHT" {
         settings.no_highlight = value == "off";
+    }
+    // Mirror PAGER on/off into the pager_enabled flag.
+    if name == "PAGER" {
+        settings.pager_enabled = value != "off";
     }
 }
 
@@ -2768,7 +2904,7 @@ async fn run_dumb_loop(
                         if complete {
                             let sql = buf.trim().to_owned();
                             if !sql.is_empty() {
-                                execute_query(client, &sql, settings, tx).await;
+                                execute_query_interactive(client, &sql, settings, tx).await;
                             }
                             buf.clear();
                         }
@@ -2954,7 +3090,7 @@ async fn handle_backslash_dumb(
                 Ok(new_content) => {
                     let trimmed = new_content.trim().to_owned();
                     if !trimmed.is_empty() {
-                        execute_query(client, &trimmed, settings, tx).await;
+                        execute_query_interactive(client, &trimmed, settings, tx).await;
                     }
                     buf.clear();
                 }
@@ -2967,9 +3103,10 @@ async fn handle_backslash_dumb(
             buf.clear();
             if !sql.is_empty() {
                 if let Some(bind_params) = settings.pending_bind_params.take() {
-                    execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                    execute_query_extended_interactive(client, &sql, &bind_params, settings, tx)
+                        .await;
                 } else {
-                    execute_query(client, &sql, settings, tx).await;
+                    execute_query_interactive(client, &sql, settings, tx).await;
                 }
             }
             HandleLineResult::BufferUpdated
@@ -2998,9 +3135,10 @@ async fn handle_backslash_dumb(
                 settings.expanded = ExpandedMode::On;
                 settings.pset.expanded = ExpandedMode::On;
                 if let Some(bind_params) = settings.pending_bind_params.take() {
-                    execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                    execute_query_extended_interactive(client, &sql, &bind_params, settings, tx)
+                        .await;
                 } else {
-                    execute_query(client, &sql, settings, tx).await;
+                    execute_query_interactive(client, &sql, settings, tx).await;
                 }
                 settings.expanded = prev;
                 settings.pset.expanded = prev;
@@ -3075,7 +3213,7 @@ async fn handle_backslash_dumb(
         MetaResult::ClosePrepared(name) => {
             if settings.named_statements.remove(&name).is_some() {
                 let deallocate = format!("deallocate {name}");
-                execute_query(client, &deallocate, settings, tx).await;
+                execute_query_interactive(client, &deallocate, settings, tx).await;
             } else {
                 eprintln!("\\close_prepared: prepared statement \"{name}\" does not exist");
             }
@@ -3137,7 +3275,7 @@ async fn handle_line(
                     Ok(new_content) => {
                         let trimmed = new_content.trim().to_owned();
                         if !trimmed.is_empty() {
-                            execute_query(client, &trimmed, settings, tx).await;
+                            execute_query_interactive(client, &trimmed, settings, tx).await;
                         }
                         buf.clear();
                         stmt_buf.clear();
@@ -3152,9 +3290,16 @@ async fn handle_line(
                 stmt_buf.clear();
                 if !sql.is_empty() {
                     if let Some(bind_params) = settings.pending_bind_params.take() {
-                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                        execute_query_extended_interactive(
+                            client,
+                            &sql,
+                            &bind_params,
+                            settings,
+                            tx,
+                        )
+                        .await;
                     } else {
-                        execute_query(client, &sql, settings, tx).await;
+                        execute_query_interactive(client, &sql, settings, tx).await;
                     }
                 }
                 HandleLineResult::BufferUpdated
@@ -3186,9 +3331,16 @@ async fn handle_line(
                     settings.expanded = ExpandedMode::On;
                     settings.pset.expanded = ExpandedMode::On;
                     if let Some(bind_params) = settings.pending_bind_params.take() {
-                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                        execute_query_extended_interactive(
+                            client,
+                            &sql,
+                            &bind_params,
+                            settings,
+                            tx,
+                        )
+                        .await;
                     } else {
-                        execute_query(client, &sql, settings, tx).await;
+                        execute_query_interactive(client, &sql, settings, tx).await;
                     }
                     settings.expanded = prev;
                     settings.pset.expanded = prev;
@@ -3267,7 +3419,7 @@ async fn handle_line(
             MetaResult::ClosePrepared(name) => {
                 if settings.named_statements.remove(&name).is_some() {
                     let deallocate = format!("deallocate {name}");
-                    execute_query(client, &deallocate, settings, tx).await;
+                    execute_query_interactive(client, &deallocate, settings, tx).await;
                 } else {
                     eprintln!(
                         "\\close_prepared: prepared statement \"{name}\" \
@@ -3317,9 +3469,16 @@ async fn handle_line(
                 stmt_buf.clear();
                 if !sql.is_empty() {
                     if let Some(bind_params) = settings.pending_bind_params.take() {
-                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                        execute_query_extended_interactive(
+                            client,
+                            &sql,
+                            &bind_params,
+                            settings,
+                            tx,
+                        )
+                        .await;
                     } else {
-                        execute_query(client, &sql, settings, tx).await;
+                        execute_query_interactive(client, &sql, settings, tx).await;
                     }
                 }
                 HandleLineResult::BufferUpdated
@@ -3351,9 +3510,16 @@ async fn handle_line(
                     settings.expanded = ExpandedMode::On;
                     settings.pset.expanded = ExpandedMode::On;
                     if let Some(bind_params) = settings.pending_bind_params.take() {
-                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
+                        execute_query_extended_interactive(
+                            client,
+                            &sql,
+                            &bind_params,
+                            settings,
+                            tx,
+                        )
+                        .await;
                     } else {
-                        execute_query(client, &sql, settings, tx).await;
+                        execute_query_interactive(client, &sql, settings, tx).await;
                     }
                     settings.expanded = prev;
                     settings.pset.expanded = prev;
@@ -3416,7 +3582,7 @@ async fn handle_line(
     if complete {
         let sql = buf.trim().to_owned();
         if !sql.is_empty() {
-            execute_query(client, &sql, settings, tx).await;
+            execute_query_interactive(client, &sql, settings, tx).await;
         }
         buf.clear();
         // stmt_buf is cleared by the caller after adding to history.
