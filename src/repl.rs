@@ -1701,9 +1701,9 @@ Describe commands (stubs; see #27 for full implementation):
 fn print_copyright() {
     println!(
         "PostgreSQL Database Management System
-(formerly known as Postgres, then as Postgres95)
+(also known as Postgres, formerly known as Postgres95)
 
-Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
 
 Portions Copyright (c) 1994, The Regents of the University of California
 
