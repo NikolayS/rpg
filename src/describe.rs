@@ -164,6 +164,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     print_table_inner(col_names, rows, title, true);
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_table_inner(
     col_names: &[String],
     rows: &[Vec<String>],
@@ -180,21 +181,12 @@ fn print_table_inner(
     }
 
     // Compute column widths (multi-line cell values: each line counts separately).
-    // psql reserves an extra character for the `+` continuation marker in
-    // columns that contain multi-line values.
     let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
     for row in rows {
         for (i, val) in row.iter().enumerate() {
             if i < widths.len() {
-                let lines: Vec<&str> = val.lines().collect();
-                let max_line = lines.iter().map(|l| l.len()).max().unwrap_or(val.len());
-                // If multi-line, add 1 for the `+` marker (psql behaviour).
-                let effective = if lines.len() > 1 {
-                    max_line + 1
-                } else {
-                    max_line
-                };
-                widths[i] = widths[i].max(effective);
+                let max_line = val.lines().map(str::len).max().unwrap_or(val.len());
+                widths[i] = widths[i].max(max_line);
             }
         }
     }
@@ -238,9 +230,8 @@ fn print_table_inner(
     println!("-{}-", sep.join("-+-"));
 
     // Data rows — cells with embedded newlines are printed as psql continuation
-    // lines: the first sub-line is printed normally, subsequent sub-lines are
-    // printed with a `+` appended to the previous line and blank padding in the
-    // other columns.
+    // lines.  For the last column, `+` replaces the trailing space.  For middle
+    // columns, `+` is placed within the cell width.
     let ncols = widths.len();
     for row in rows {
         // Split each cell into its constituent lines.
@@ -259,30 +250,51 @@ fn print_table_inner(
         let max_lines = cell_lines.iter().map(Vec::len).max().unwrap_or(1);
 
         for line_idx in 0..max_lines {
-            let cells: Vec<String> = (0..ncols)
-                .map(|col| {
-                    let w = widths[col];
-                    let text = cell_lines
-                        .get(col)
-                        .and_then(|ls| ls.get(line_idx))
-                        .copied()
-                        .unwrap_or("");
-                    // If this column has more lines after this one, append `+`.
-                    let has_more = cell_lines
-                        .get(col)
-                        .is_some_and(|ls| line_idx + 1 < ls.len());
-                    if has_more {
-                        // psql pads text to column width, then places `+` at
-                        // the end (so `+` is at position `w`).  The overall
-                        // field is `w` chars wide; the last char is `+`.
-                        let text_pad = w.saturating_sub(1).saturating_sub(text.len());
-                        format!("{text}{}+", " ".repeat(text_pad))
-                    } else {
-                        format!("{text:<w$}")
+            let mut line = String::new();
+            for (col_idx, &w) in widths.iter().enumerate() {
+                let text = cell_lines
+                    .get(col_idx)
+                    .and_then(|ls| ls.get(line_idx))
+                    .copied()
+                    .unwrap_or("");
+                let has_more = cell_lines
+                    .get(col_idx)
+                    .is_some_and(|ls| line_idx + 1 < ls.len());
+
+                // Column separator.
+                if col_idx == 0 {
+                    line.push(' ');
+                } else {
+                    line.push_str(" | ");
+                }
+
+                if has_more && col_idx < ncols - 1 {
+                    // Middle column with continuation: `+` within cell width.
+                    let text_pad = w.saturating_sub(1).saturating_sub(text.len());
+                    line.push_str(text);
+                    for _ in 0..text_pad {
+                        line.push(' ');
                     }
-                })
-                .collect();
-            println!(" {} ", cells.join(" | "));
+                    line.push('+');
+                } else {
+                    // Normal cell (or last column — continuation handled below).
+                    let padded = format!("{text:<w$}");
+                    line.push_str(&padded);
+                }
+            }
+
+            // Trailing: for the last column with continuation, `+` replaces the
+            // trailing space (matching psql behaviour).
+            let last_has_more = cell_lines
+                .get(ncols - 1)
+                .is_some_and(|ls| line_idx + 1 < ls.len());
+            if last_has_more {
+                line.push('+');
+            } else {
+                line.push(' ');
+            }
+
+            println!("{line}");
         }
     }
 
