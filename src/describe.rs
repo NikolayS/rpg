@@ -467,21 +467,7 @@ order by 1, 2"
         )
     };
 
-    let title = relations_title(relkinds);
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some(title)).await
-}
-
-/// Map a relkind slice to the appropriate display title.
-fn relations_title(relkinds: &[&str]) -> &'static str {
-    match relkinds {
-        ["r", "p"] => "List of tables",
-        ["i"] => "List of indexes",
-        ["S"] => "List of sequences",
-        ["v"] => "List of views",
-        ["m"] => "List of materialized views",
-        ["f"] => "List of foreign tables",
-        _ => "List of relations",
-    }
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of relations")).await
 }
 
 // ---------------------------------------------------------------------------
