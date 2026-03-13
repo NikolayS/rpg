@@ -2740,8 +2740,9 @@ fn print_help() {
         r"
 Backslash commands:
   \q              quit samo
-  quit            quit samo
-  exit            quit samo
+  quit            quit samo (interactive mode only)
+  exit            quit samo (interactive mode only)
+  help            show this help overview (interactive mode only)
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
   \conninfo       show connection information
@@ -5253,6 +5254,21 @@ async fn handle_backslash_dumb(
     }
 }
 
+/// Print the bare-word `help` message, matching psql's output.
+///
+/// Shown when the user types `help` at an empty prompt, directing them to
+/// the standard backslash commands for further assistance.
+fn print_bare_help() {
+    println!(
+        "You are using samo, the command-line interface to PostgreSQL.\n\
+         Type:  \\copyright for distribution terms\n       \
+                \\h for help with SQL commands\n       \
+                \\? for help with samo commands\n       \
+                \\g or terminate with semicolon to execute query\n       \
+                \\q to quit"
+    );
+}
+
 /// Return `true` when `trimmed` is a bare `quit` or `exit` and the query
 /// buffer is empty (primary prompt, not mid-statement).
 ///
@@ -5289,6 +5305,11 @@ async fn handle_line(
     // `quit` / `exit` bare words: handled in all modes via `is_quit_exit`.
     if is_quit_exit(trimmed, buf.is_empty()) {
         return HandleLineResult::Quit;
+    }
+    // `help` bare word: matches psql — show usage hint at primary prompt.
+    if buf.is_empty() && trimmed.eq_ignore_ascii_case("help") {
+        print_bare_help();
+        return HandleLineResult::Continue;
     }
     if trimmed.starts_with('/') {
         stmt_buf.clear();
