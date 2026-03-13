@@ -948,6 +948,10 @@ order by 1, 2"
 // \dD — list domains
 // ---------------------------------------------------------------------------
 
+/// List domain types matching psql's `\dD [pattern]` output.
+///
+/// Basic columns: Schema, Name, Type, Collation, Nullable, Default, Check.
+/// Verbose (`\dD+`) adds: Access privileges, Description.
 async fn list_domains(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "t.typname", Some("n.nspname"));
@@ -955,9 +959,10 @@ async fn list_domains(client: &Client, meta: &ParsedMeta) -> bool {
     let sys_filter = if meta.system {
         String::new()
     } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
     };
 
+    let visibility_filter = "pg_catalog.pg_type_is_visible(t.oid)";
     let base_filter = "t.typtype = 'd'";
 
     let where_parts: Vec<&str> = [
@@ -967,6 +972,7 @@ async fn list_domains(client: &Client, meta: &ParsedMeta) -> bool {
         } else {
             Some(sys_filter.as_str())
         },
+        Some(visibility_filter),
         if name_filter.is_empty() {
             None
         } else {
@@ -979,20 +985,68 @@ async fn list_domains(client: &Client, meta: &ParsedMeta) -> bool {
 
     let where_clause = format!("where {}", where_parts.join("\n    and "));
 
-    let sql = format!(
-        "select
+    let sql = if meta.plus {
+        format!(
+            "select
     n.nspname as \"Schema\",
     t.typname as \"Name\",
     pg_catalog.format_type(t.typbasetype, t.typtypmod) as \"Type\",
-    case when t.typnotnull then 'not null' else '' end as \"Nullable\",
+    (select c.collname
+     from pg_catalog.pg_collation as c, pg_catalog.pg_type as bt
+     where c.oid = t.typcollation
+       and bt.oid = t.typbasetype
+       and t.typcollation <> bt.typcollation) as \"Collation\",
+    case when t.typnotnull then 'not null' end as \"Nullable\",
     t.typdefault as \"Default\",
-    coalesce(pg_catalog.obj_description(t.oid, 'pg_type'), '') as \"Description\"
+    pg_catalog.array_to_string(array(
+        select pg_catalog.pg_get_constraintdef(r.oid, true)
+        from pg_catalog.pg_constraint as r
+        where t.oid = r.contypid
+          and r.contype = 'c'
+        order by r.conname
+    ), ' ') as \"Check\",
+    case when pg_catalog.array_length(t.typacl, 1) = 0
+         then '(none)'
+         else pg_catalog.array_to_string(t.typacl, E'\\n')
+    end as \"Access privileges\",
+    d.description as \"Description\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+left join pg_catalog.pg_description as d
+    on d.classoid = t.tableoid
+   and d.objoid = t.oid
+   and d.objsubid = 0
+{where_clause}
+order by 1, 2"
+        )
+    } else {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    t.typname as \"Name\",
+    pg_catalog.format_type(t.typbasetype, t.typtypmod) as \"Type\",
+    (select c.collname
+     from pg_catalog.pg_collation as c, pg_catalog.pg_type as bt
+     where c.oid = t.typcollation
+       and bt.oid = t.typbasetype
+       and t.typcollation <> bt.typcollation) as \"Collation\",
+    case when t.typnotnull then 'not null' end as \"Nullable\",
+    t.typdefault as \"Default\",
+    pg_catalog.array_to_string(array(
+        select pg_catalog.pg_get_constraintdef(r.oid, true)
+        from pg_catalog.pg_constraint as r
+        where t.oid = r.contypid
+          and r.contype = 'c'
+        order by r.conname
+    ), ' ') as \"Check\"
 from pg_catalog.pg_type as t
 left join pg_catalog.pg_namespace as n
     on n.oid = t.typnamespace
 {where_clause}
 order by 1, 2"
-    );
+        )
+    };
 
     run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of domains")).await
 }
@@ -2940,6 +2994,157 @@ order by 1, 2, 3, 4";
         assert!(
             where_clause.contains("my_op"),
             "filter must include pattern value: {where_clause}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_domains SQL generation
+    // -----------------------------------------------------------------------
+
+    /// Verify that the non-verbose SQL for `\dD` includes the seven expected
+    /// columns (Schema, Name, Type, Collation, Nullable, Default, Check) and
+    /// does NOT include Description or Access privileges.
+    #[test]
+    fn list_domains_sql_has_required_columns() {
+        let sys_filter =
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned();
+        let visibility_filter = "pg_catalog.pg_type_is_visible(t.oid)";
+        let base_filter = "t.typtype = 'd'";
+        let where_parts: Vec<&str> = [
+            Some(base_filter),
+            Some(sys_filter.as_str()),
+            Some(visibility_filter),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let where_clause = format!("where {}", where_parts.join("\n    and "));
+
+        let sql = format!(
+            "select
+    n.nspname as \"Schema\",
+    t.typname as \"Name\",
+    pg_catalog.format_type(t.typbasetype, t.typtypmod) as \"Type\",
+    (select c.collname
+     from pg_catalog.pg_collation as c, pg_catalog.pg_type as bt
+     where c.oid = t.typcollation
+       and bt.oid = t.typbasetype
+       and t.typcollation <> bt.typcollation) as \"Collation\",
+    case when t.typnotnull then 'not null' end as \"Nullable\",
+    t.typdefault as \"Default\",
+    pg_catalog.array_to_string(array(
+        select pg_catalog.pg_get_constraintdef(r.oid, true)
+        from pg_catalog.pg_constraint as r
+        where t.oid = r.contypid
+          and r.contype = 'c'
+        order by r.conname
+    ), ' ') as \"Check\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+{where_clause}
+order by 1, 2"
+        );
+
+        assert!(
+            sql.contains("\"Schema\""),
+            "SQL must have Schema column: {sql}"
+        );
+        assert!(sql.contains("\"Name\""), "SQL must have Name column: {sql}");
+        assert!(sql.contains("\"Type\""), "SQL must have Type column: {sql}");
+        assert!(
+            sql.contains("\"Collation\""),
+            "SQL must have Collation column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Nullable\""),
+            "SQL must have Nullable column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Default\""),
+            "SQL must have Default column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Check\""),
+            "SQL must have Check column: {sql}"
+        );
+        assert!(
+            sql.contains("pg_get_constraintdef"),
+            "SQL must use pg_get_constraintdef for Check: {sql}"
+        );
+        assert!(
+            sql.contains("pg_type_is_visible"),
+            "SQL must use pg_type_is_visible: {sql}"
+        );
+        assert!(
+            sql.contains("typcollation"),
+            "SQL must query typcollation for Collation: {sql}"
+        );
+        assert!(
+            !sql.contains("'not null' else ''"),
+            "Nullable must not use else branch (must be NULL not empty string): {sql}"
+        );
+        assert!(
+            !sql.contains("\"Description\""),
+            "non-verbose SQL must not have Description: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Access privileges\""),
+            "non-verbose SQL must not have Access privileges: {sql}"
+        );
+    }
+
+    /// Verify that verbose `\dD+` SQL adds Access privileges and Description
+    /// columns, and joins to `pg_description`.
+    #[test]
+    fn list_domains_plus_sql_has_extra_columns() {
+        let sql = "select
+    n.nspname as \"Schema\",
+    t.typname as \"Name\",
+    pg_catalog.format_type(t.typbasetype, t.typtypmod) as \"Type\",
+    (select c.collname
+     from pg_catalog.pg_collation as c, pg_catalog.pg_type as bt
+     where c.oid = t.typcollation
+       and bt.oid = t.typbasetype
+       and t.typcollation <> bt.typcollation) as \"Collation\",
+    case when t.typnotnull then 'not null' end as \"Nullable\",
+    t.typdefault as \"Default\",
+    pg_catalog.array_to_string(array(
+        select pg_catalog.pg_get_constraintdef(r.oid, true)
+        from pg_catalog.pg_constraint as r
+        where t.oid = r.contypid
+          and r.contype = 'c'
+        order by r.conname
+    ), ' ') as \"Check\",
+    case when pg_catalog.array_length(t.typacl, 1) = 0
+         then '(none)'
+         else pg_catalog.array_to_string(t.typacl, E'\\n')
+    end as \"Access privileges\",
+    d.description as \"Description\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+left join pg_catalog.pg_description as d
+    on d.classoid = t.tableoid
+   and d.objoid = t.oid
+   and d.objsubid = 0
+order by 1, 2";
+
+        assert!(
+            sql.contains("\"Access privileges\""),
+            "verbose SQL must have Access privileges column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Description\""),
+            "verbose SQL must have Description column: {sql}"
+        );
+        assert!(
+            sql.contains("pg_description"),
+            "verbose SQL must join pg_description: {sql}"
+        );
+        assert!(
+            sql.contains("typacl"),
+            "verbose SQL must reference typacl for Access privileges: {sql}"
         );
     }
 }
