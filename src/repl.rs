@@ -631,6 +631,10 @@ pub struct ReplSettings {
     /// Tracks total input + output tokens consumed.  When a `token_budget`
     /// is configured, AI calls are refused once this exceeds the budget.
     pub tokens_used: u64,
+    /// Detected database capabilities (extensions, version).
+    ///
+    /// Populated at connect time by [`crate::capabilities::detect`].
+    pub db_capabilities: crate::capabilities::DbCapabilities,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -686,6 +690,7 @@ impl std::fmt::Debug for ReplSettings {
                 ),
             )
             .field("tokens_used", &self.tokens_used)
+            .field("db_capabilities", &self.db_capabilities)
             .finish()
     }
 }
@@ -723,6 +728,7 @@ impl Default for ReplSettings {
             last_error: None,
             conversation: ConversationContext::new(),
             tokens_used: 0,
+            db_capabilities: crate::capabilities::DbCapabilities::default(),
         }
     }
 }
