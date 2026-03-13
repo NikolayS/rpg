@@ -564,6 +564,95 @@ pub async fn execute_query(
 }
 
 // ---------------------------------------------------------------------------
+// \g / \gx buffer execution helpers (#46)
+// ---------------------------------------------------------------------------
+
+/// Execute `buf` and write output to `path`, creating or truncating the file.
+///
+/// The caller is responsible for clearing `buf` after this returns.
+async fn execute_to_file(
+    client: &Client,
+    buf: &str,
+    path: &str,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) {
+    match std::fs::File::create(path) {
+        Ok(file) => {
+            let prev = settings.output_target.take();
+            settings.output_target = Some(Box::new(file));
+            execute_query(client, buf, settings, tx).await;
+            settings.output_target = prev;
+        }
+        Err(e) => eprintln!("\\g: cannot open file \"{path}\": {e}"),
+    }
+}
+
+/// A [`Write`] wrapper backed by a shared `Arc<Mutex<Vec<u8>>>` so that the
+/// captured bytes can be retrieved after the writer is boxed and erased.
+struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl io::Write for CapturingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Execute `buf` and pipe output through the shell command `cmd` (after `|`).
+///
+/// Uses `sh -c` so the full shell command string is interpreted correctly.
+/// The caller is responsible for clearing `buf` after this returns.
+async fn execute_piped(
+    client: &Client,
+    buf: &str,
+    cmd: &str,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    // Strip the leading `|` and trim whitespace.
+    let shell_cmd = cmd.trim_start_matches('|').trim();
+
+    // Capture query output into a shared buffer, then pipe it to the child.
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = CapturingWriter(std::sync::Arc::clone(&shared));
+
+    let prev = settings.output_target.take();
+    settings.output_target = Some(Box::new(writer));
+    execute_query(client, buf, settings, tx).await;
+    settings.output_target = prev;
+
+    let captured = std::sync::Arc::try_unwrap(shared)
+        .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
+        .into_inner()
+        .unwrap_or_default();
+
+    match Command::new("sh")
+        .arg("-c")
+        .arg(shell_cmd)
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(&captured);
+            }
+            let _ = child.wait();
+        }
+        Err(e) => eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Non-interactive (piped / -c / -f) execution
 // ---------------------------------------------------------------------------
 
@@ -1088,12 +1177,23 @@ pub enum MetaResult {
     },
     /// Write the buffer to the given path (`\w file`).
     WriteBufferToFile(String),
+    /// Execute the current buffer and direct output to stdout (`\g`).
+    ExecuteBuffer,
+    /// Execute the current buffer and write output to a file (`\g file`).
+    ExecuteBufferToFile(String),
+    /// Execute the current buffer, piping output through a shell command (`\g |cmd`).
+    ExecuteBufferPiped(String),
+    /// Execute the current buffer with expanded output for this query only (`\gx`).
+    ExecuteBufferExpanded,
+    /// Execute the current buffer with expanded output written to a file (`\gx file`).
+    ExecuteBufferExpandedToFile(String),
 }
 
 /// Dispatch I/O and utility meta-commands (the `#33` family).
 ///
 /// Returns `Some(MetaResult)` if the command was handled, `None` if the
 /// command is not an I/O command (and the caller should continue matching).
+#[allow(clippy::too_many_lines)]
 async fn dispatch_io(
     parsed: &crate::metacmd::ParsedMeta,
     client: &Client,
@@ -1190,6 +1290,23 @@ async fn dispatch_io(
         MetaCmd::Password => {
             dispatch_password(parsed.pattern.as_deref());
             Some(MetaResult::Continue)
+        }
+        MetaCmd::GoExecute(ref target) => {
+            let result = match target.as_deref() {
+                None => MetaResult::ExecuteBuffer,
+                Some(t) if t.starts_with('|') => {
+                    MetaResult::ExecuteBufferPiped(t.to_owned())
+                }
+                Some(f) => MetaResult::ExecuteBufferToFile(f.to_owned()),
+            };
+            Some(result)
+        }
+        MetaCmd::GoExecuteExpanded(ref target) => {
+            let result = match target.as_deref() {
+                None => MetaResult::ExecuteBufferExpanded,
+                Some(f) => MetaResult::ExecuteBufferExpandedToFile(f.to_owned()),
+            };
+            Some(result)
         }
         _ => None,
     }
@@ -1652,6 +1769,56 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::BufferUpdated
         }
+        MetaResult::ExecuteBuffer => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                execute_query(client, &sql, settings, tx).await;
+            }
+            HandleLineResult::BufferUpdated
+        }
+        MetaResult::ExecuteBufferToFile(path) => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                execute_to_file(client, &sql, &path, settings, tx).await;
+            }
+            HandleLineResult::BufferUpdated
+        }
+        MetaResult::ExecuteBufferPiped(cmd) => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                execute_piped(client, &sql, &cmd, settings, tx).await;
+            }
+            HandleLineResult::BufferUpdated
+        }
+        MetaResult::ExecuteBufferExpanded => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                let prev = settings.expanded;
+                settings.expanded = ExpandedMode::On;
+                settings.pset.expanded = ExpandedMode::On;
+                execute_query(client, &sql, settings, tx).await;
+                settings.expanded = prev;
+                settings.pset.expanded = prev;
+            }
+            HandleLineResult::BufferUpdated
+        }
+        MetaResult::ExecuteBufferExpandedToFile(path) => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                let prev = settings.expanded;
+                settings.expanded = ExpandedMode::On;
+                settings.pset.expanded = ExpandedMode::On;
+                execute_to_file(client, &sql, &path, settings, tx).await;
+                settings.expanded = prev;
+                settings.pset.expanded = prev;
+            }
+            HandleLineResult::BufferUpdated
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -1661,6 +1828,7 @@ async fn handle_backslash_dumb(
 /// `stmt_buf` accumulates the full multi-line statement for history recording.
 ///
 /// Returns a [`HandleLineResult`] indicating how the loop should proceed.
+#[allow(clippy::too_many_lines)]
 async fn handle_line(
     line: &str,
     buf: &mut String,
@@ -1709,6 +1877,61 @@ async fn handle_line(
                         stmt_buf.clear();
                     }
                     Err(e) => eprintln!("{e}"),
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBuffer => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_query(client, &sql, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferToFile(path) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_to_file(client, &sql, &path, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferPiped(cmd) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_piped(client, &sql, &cmd, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferExpanded => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    let prev = settings.expanded;
+                    settings.expanded = ExpandedMode::On;
+                    settings.pset.expanded = ExpandedMode::On;
+                    execute_query(client, &sql, settings, tx).await;
+                    settings.expanded = prev;
+                    settings.pset.expanded = prev;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::ExecuteBufferExpandedToFile(path) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    let prev = settings.expanded;
+                    settings.expanded = ExpandedMode::On;
+                    settings.pset.expanded = ExpandedMode::On;
+                    execute_to_file(client, &sql, &path, settings, tx).await;
+                    settings.expanded = prev;
+                    settings.pset.expanded = prev;
                 }
                 HandleLineResult::BufferUpdated
             }

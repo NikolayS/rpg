@@ -153,6 +153,24 @@ pub enum MetaCmd {
     /// `\endif` — end a conditional block.
     Endif,
 
+    // -- Execution variants (#46) ------------------------------------------
+    /// `\g [file||command]` — execute buffer, optionally redirect output.
+    ///
+    /// - `\g` → execute to stdout (same as `;`)
+    /// - `\g filename` → execute, write output to file
+    /// - `\g |command` → execute, pipe output through shell command
+    ///
+    /// `pattern` holds the file path or pipe target (with leading `|`), or
+    /// `None` for plain stdout execution.
+    GoExecute(Option<String>),
+    /// `\gx [file]` — execute buffer with expanded output for this query only.
+    ///
+    /// - `\gx` → expanded output to stdout
+    /// - `\gx filename` → expanded output to file
+    ///
+    /// `pattern` holds the optional file path.
+    GoExecuteExpanded(Option<String>),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -306,6 +324,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('u') => parse_unset(input),
         Some('w') => parse_w(input),
         Some('x') => parse_x(input),
+        Some('g') => parse_g_family(input),
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
         Some('!') => parse_shell(input),
@@ -848,6 +867,71 @@ fn parse_shell(input: &str) -> ParsedMeta {
         },
         echo_hidden: false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// \g / \gx parser (#46)
+// ---------------------------------------------------------------------------
+
+/// Parse `\g [file||cmd]` and `\gx [file]`.
+///
+/// Disambiguation order (longest match first):
+///   `gset` → not handled here (unknown)
+///   `gexec` → not handled here (unknown)
+///   `gdesc` → not handled here (unknown)
+///   `gx`   → [`MetaCmd::GoExecuteExpanded`]
+///   `g`    → [`MetaCmd::GoExecute`]
+///
+/// Any unknown `g`-prefixed command (e.g. `\gset`, `\gexec`) falls through
+/// to [`MetaCmd::Unknown`].
+fn parse_g_family(input: &str) -> ParsedMeta {
+    // Longer g-prefixed commands that must not be misread as \g.
+    // Check them first so `\gset foo` → Unknown, not GoExecute("set foo").
+    for long_prefix in &["gset", "gexec", "gdesc"] {
+        if let Some(rest) = input.strip_prefix(long_prefix) {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+        }
+    }
+
+    // `\gx [file]` — expanded execute; must be checked before bare `\g`.
+    if let Some(rest) = input.strip_prefix("gx") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let arg = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::GoExecuteExpanded(if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.to_owned())
+                }),
+                plus: false,
+                system: false,
+                pattern: None,
+                echo_hidden: false,
+            };
+        }
+    }
+
+    // `\g [file||cmd]`
+    if let Some(rest) = input.strip_prefix('g') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let arg = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::GoExecute(if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.to_owned())
+                }),
+                plus: false,
+                system: false,
+                pattern: None,
+                echo_hidden: false,
+            };
+        }
+    }
+
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1757,5 +1841,52 @@ mod tests {
         let m = parse("\\if on");
         assert_eq!(m.cmd, MetaCmd::If);
         assert_eq!(m.pattern, Some("on".to_owned()));
+    }
+
+    // -- \g / \gx (issue #46) ------------------------------------------------
+
+    #[test]
+    fn parse_g_bare() {
+        let m = parse("\\g");
+        assert_eq!(m.cmd, MetaCmd::GoExecute(None));
+    }
+
+    #[test]
+    fn parse_g_to_file() {
+        let m = parse("\\g /tmp/out");
+        assert_eq!(m.cmd, MetaCmd::GoExecute(Some("/tmp/out".to_owned())));
+    }
+
+    #[test]
+    fn parse_g_piped() {
+        let m = parse("\\g |sort");
+        assert_eq!(m.cmd, MetaCmd::GoExecute(Some("|sort".to_owned())));
+    }
+
+    #[test]
+    fn parse_gx_bare() {
+        let m = parse("\\gx");
+        assert_eq!(m.cmd, MetaCmd::GoExecuteExpanded(None));
+    }
+
+    #[test]
+    fn parse_gx_to_file() {
+        let m = parse("\\gx /tmp/out");
+        assert_eq!(m.cmd, MetaCmd::GoExecuteExpanded(Some("/tmp/out".to_owned())));
+    }
+
+    #[test]
+    fn parse_g_not_confused_with_gset_gexec_gdesc() {
+        // These longer g-prefixed commands must NOT parse as GoExecute.
+        assert!(matches!(parse("\\gset foo").cmd, MetaCmd::Unknown(_)));
+        assert!(matches!(parse("\\gexec").cmd, MetaCmd::Unknown(_)));
+        assert!(matches!(parse("\\gdesc").cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_gx_not_confused_with_g() {
+        // \gx must not fall through to \g.
+        assert!(matches!(parse("\\gx").cmd, MetaCmd::GoExecuteExpanded(_)));
+        assert!(matches!(parse("\\g").cmd, MetaCmd::GoExecute(_)));
     }
 }
