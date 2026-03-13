@@ -6682,7 +6682,9 @@ mod tests {
         ctx.compact(None);
         // Should have: 1 summary + 4 recent = 5 entries.
         assert_eq!(ctx.entries.len(), 5);
-        assert!(ctx.entries[0].content.contains("Previous conversation summary"));
+        assert!(ctx.entries[0]
+            .content
+            .contains("Previous conversation summary"));
     }
 
     #[test]
