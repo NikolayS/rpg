@@ -17,6 +17,7 @@ use tokio_postgres::Client;
 /// `subcommand` is the first word after `\dba` (e.g. `"activity"`, `"locks"`).
 /// `verbose` is `true` when the `+` modifier was specified.
 /// `governance` is used for Supervised mode checks (index health proposals).
+/// `capabilities` provides version-gated feature detection.
 ///
 /// Returns `true` if the subcommand was recognised, `false` otherwise.
 pub async fn execute(
@@ -24,6 +25,7 @@ pub async fn execute(
     subcommand: &str,
     verbose: bool,
     governance: Option<&crate::config::GovernanceConfig>,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
 ) -> bool {
     match subcommand {
         "activity" | "act" => {
@@ -80,6 +82,10 @@ pub async fn execute(
         }
         "progress" | "prog" => {
             dba_progress(client, None).await;
+            true
+        }
+        "io" => {
+            dba_io(client, verbose, capabilities).await;
             true
         }
         "" | "help" => {
@@ -253,6 +259,7 @@ fn print_dba_help() {
     println!("  \\dba replication Replication slot status");
     println!("  \\dba config      Non-default configuration parameters");
     println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
+    println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
     println!();
     println!("Aliases: act, lock, wait, vac, ts, conn, idx, unused, seq, cache, repl, conf, prog");
     println!();
@@ -686,6 +693,77 @@ async fn dba_progress_basebackup(client: &Client) {
         order by p.pid";
     eprintln!("-- Base backup progress --");
     run_and_print(client, sql).await;
+}
+
+// ---------------------------------------------------------------------------
+// I/O statistics (pg_stat_io, PG 16+)
+// ---------------------------------------------------------------------------
+
+async fn dba_io(
+    client: &Client,
+    verbose: bool,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
+) {
+    let has_io = capabilities.is_some_and(crate::capabilities::DbCapabilities::has_pg_stat_io);
+    if !has_io {
+        let ver = capabilities
+            .and_then(|c| c.server_version.as_deref())
+            .unwrap_or("unknown");
+        eprintln!(
+            "\\dba io: pg_stat_io requires PostgreSQL 16+. \
+             Current server version: {ver}"
+        );
+        return;
+    }
+
+    if verbose {
+        // Verbose: full breakdown including zero-activity rows.
+        let sql = "\
+            select \
+                backend_type, \
+                object, \
+                context, \
+                reads, \
+                read_time, \
+                writes, \
+                write_time, \
+                writebacks, \
+                writeback_time, \
+                extends, \
+                extend_time, \
+                hits, \
+                evictions, \
+                reuses, \
+                fsyncs, \
+                fsync_time, \
+                stats_reset \
+            from pg_stat_io \
+            order by backend_type, object, context";
+        run_and_print(client, sql).await;
+    } else {
+        // Non-verbose: only rows with actual activity.
+        let sql = "\
+            select \
+                backend_type, \
+                object, \
+                context, \
+                reads, \
+                read_time, \
+                writes, \
+                write_time, \
+                hits, \
+                evictions, \
+                fsyncs, \
+                fsync_time \
+            from pg_stat_io \
+            where reads > 0 \
+               or writes > 0 \
+               or hits > 0 \
+               or evictions > 0 \
+               or fsyncs > 0 \
+            order by reads + writes + hits desc";
+        run_and_print(client, sql).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
