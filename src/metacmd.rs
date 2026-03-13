@@ -240,6 +240,10 @@ pub enum MetaCmd {
     /// `args` carries the raw argument string (may be empty).
     CrosstabView(String),
 
+    // -- Info commands ------------------------------------------------------
+    /// `\copyright` — show PostgreSQL copyright and distribution terms.
+    Copyright,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -555,7 +559,7 @@ fn parse_x(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Expanded(mode))
 }
 
-/// Parse `\conninfo`, `\crosstabview`, `\copy`, `\close_prepared`, `\cd`, `\c`, or unknown `\c…`.
+/// Parse `\conninfo`, `\crosstabview`, `\copy`, `\close_prepared`, `\copyright`, `\cd`, `\c`, or unknown `\c…`.
 fn parse_c_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("conninfo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -567,6 +571,12 @@ fn parse_c_family(input: &str) -> ParsedMeta {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let args = rest.trim().to_owned();
             return ParsedMeta::simple(MetaCmd::CrosstabView(args));
+        }
+    }
+    // `\copyright` — must be checked before `\copy` and `\cd`.
+    if let Some(rest) = input.strip_prefix("copyright") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Copyright);
         }
     }
     // `\copy args` — client-side COPY.  Must be checked before bare `\c`.
@@ -2412,5 +2422,19 @@ mod tests {
             parse("\\crosstabview").cmd,
             MetaCmd::CrosstabView(_)
         ));
+    }
+
+    // -- \copyright ----------------------------------------------------------
+
+    #[test]
+    fn parse_copyright() {
+        assert_eq!(parse("\\copyright").cmd, MetaCmd::Copyright);
+    }
+
+    #[test]
+    fn parse_copyright_not_confused_with_conninfo_or_copy() {
+        assert_eq!(parse("\\copyright").cmd, MetaCmd::Copyright);
+        assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+        assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
     }
 }
