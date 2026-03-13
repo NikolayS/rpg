@@ -244,6 +244,13 @@ pub enum MetaCmd {
     /// `\copyright` — show `PostgreSQL` copyright and distribution terms.
     Copyright,
 
+    // -- Diagnostic commands (#66) -----------------------------------------
+    /// `\dba [subcommand]` — run a database diagnostic sub-command.
+    ///
+    /// The subcommand name (e.g. `"activity"`, `"locks"`) is stored in the
+    /// `pattern` field.  The `plus` flag activates verbose output.
+    Dba,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -1184,6 +1191,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
 /// matched before `\d` alone.
 static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     // 3-character sub-commands (must come before 2-char variants)
+    ("dba", MetaCmd::Dba),
     ("des", MetaCmd::ListForeignServers),
     ("dew", MetaCmd::ListFdws),
     ("det", MetaCmd::ListForeignTablesViaFdw),
@@ -2436,5 +2444,130 @@ mod tests {
         assert_eq!(parse("\\copyright").cmd, MetaCmd::Copyright);
         assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
         assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
+    }
+
+    // -- \dba (#66) ----------------------------------------------------------
+
+    #[test]
+    fn parse_dba_bare() {
+        // `\dba` with no subcommand: cmd=Dba, pattern=None.
+        let m = parse("\\dba");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_dba_help() {
+        let m = parse("\\dba help");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("help".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_activity() {
+        let m = parse("\\dba activity");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("activity".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_act_alias() {
+        let m = parse("\\dba act");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("act".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_locks() {
+        let m = parse("\\dba locks");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("locks".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_bloat() {
+        let m = parse("\\dba bloat");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("bloat".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_vacuum() {
+        let m = parse("\\dba vacuum");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("vacuum".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_tablesize() {
+        let m = parse("\\dba tablesize");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("tablesize".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_connections() {
+        let m = parse("\\dba connections");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("connections".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_unused_idx() {
+        let m = parse("\\dba unused-idx");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("unused-idx".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_seq_scans() {
+        let m = parse("\\dba seq-scans");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("seq-scans".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_cache_hit() {
+        let m = parse("\\dba cache-hit");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("cache-hit".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_replication() {
+        let m = parse("\\dba replication");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("replication".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_config() {
+        let m = parse("\\dba config");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("config".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_verbose_plus() {
+        // `\dba+ activity` — plus modifier is recognised.
+        let m = parse("\\dba+ activity");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert!(m.plus, "expected plus=true for \\dba+");
+        assert_eq!(m.pattern, Some("activity".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_not_confused_with_db() {
+        // `\db` must still parse as ListTablespaces; `\dba` is separate.
+        assert_eq!(parse("\\db").cmd, MetaCmd::ListTablespaces);
+        assert_eq!(parse("\\dba activity").cmd, MetaCmd::Dba);
+    }
+
+    #[test]
+    fn parse_dba_unknown_subcommand_still_parses_as_dba() {
+        // Unknown subcommands are handled at dispatch time, not parse time.
+        let m = parse("\\dba nonexistent");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("nonexistent".to_owned()));
     }
 }

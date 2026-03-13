@@ -10,6 +10,7 @@ mod conditional;
 mod connection;
 mod copy;
 mod crosstab;
+mod dba;
 mod describe;
 mod highlight;
 mod io;

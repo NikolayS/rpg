@@ -2497,6 +2497,11 @@ async fn dispatch_meta(
                 }
             }
         }
+        // Diagnostic commands — delegate to the dba module.
+        MetaCmd::Dba => {
+            let subcommand = parsed.pattern.as_deref().unwrap_or("");
+            crate::dba::execute(client, subcommand, parsed.plus).await;
+        }
         // Describe-family commands — delegate to the describe module.
         ref describe_cmd
             if matches!(
