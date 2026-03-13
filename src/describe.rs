@@ -562,17 +562,32 @@ async fn list_functions(client: &Client, meta: &ParsedMeta) -> bool {
     pg_catalog.pg_get_function_result(p.oid) as \"Result data type\",
     pg_catalog.pg_get_function_arguments(p.oid) as \"Argument data types\",
     case p.prokind
-        when 'f' then 'func'
-        when 'p' then 'proc'
         when 'a' then 'agg'
         when 'w' then 'window'
-        else p.prokind::text
+        when 'p' then 'proc'
+        else 'func'
     end as \"Type\",
+    case
+        when p.provolatile = 'i' then 'immutable'
+        when p.provolatile = 's' then 'stable'
+        when p.provolatile = 'v' then 'volatile'
+    end as \"Volatility\",
+    case
+        when p.proparallel = 'r' then 'restricted'
+        when p.proparallel = 's' then 'safe'
+        when p.proparallel = 'u' then 'unsafe'
+    end as \"Parallel\",
+    pg_catalog.pg_get_userbyid(p.proowner) as \"Owner\",
     case when p.prosecdef then 'definer' else 'invoker' end as \"Security\",
-    coalesce(pg_catalog.obj_description(p.oid, 'pg_proc'), '') as \"Description\"
+    pg_catalog.array_to_string(p.proacl, E'\\n') as \"Access privileges\",
+    l.lanname as \"Language\",
+    coalesce(p.prosrc, '') as \"Internal name\",
+    pg_catalog.obj_description(p.oid, 'pg_proc') as \"Description\"
 from pg_catalog.pg_proc as p
 left join pg_catalog.pg_namespace as n
     on n.oid = p.pronamespace
+left join pg_catalog.pg_language as l
+    on l.oid = p.prolang
 {where_clause}
 order by 1, 2, 4"
         )
