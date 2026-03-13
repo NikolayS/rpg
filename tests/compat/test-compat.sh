@@ -312,6 +312,21 @@ compare_flags "unaligned csv from table" \
   --csv -c "select id, name from users order by id limit 3"
 
 # ---------------------------------------------------------------------------
+# CLI flag combinations
+# ---------------------------------------------------------------------------
+
+## --json is a samo-specific extension — psql doesn't support it
+# compare_flags "json output" \
+#   --json -c "select 1 as a, 'hello' as b"
+
+compare_flags "unaligned with custom field separator" \
+  -A -F '|' -c "select 1 as a, 2 as b, 3 as c"
+
+## trailing record separator bug (#236)
+# compare_flags "unaligned with custom record separator" \
+#   -A -R '|' -t -c "select generate_series(1,3) as n"
+
+# ---------------------------------------------------------------------------
 # Expanded display mode
 # ---------------------------------------------------------------------------
 
