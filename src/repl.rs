@@ -5800,7 +5800,7 @@ async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &Co
     eprintln!("Collecting diagnostic data...");
 
     // Detect pg_ash availability from capabilities (set at connect time).
-    let pg_ash_available = false; // Placeholder until capabilities module is merged.
+    let pg_ash_available = settings.db_capabilities.pg_ash.is_available();
 
     let snapshot = crate::rca::collect_snapshot(client, pg_ash_available).await;
 
