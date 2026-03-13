@@ -3829,8 +3829,8 @@ async fn dispatch_ai_command(
         handle_ai_fix(client, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
         handle_ai_explain(client, query_arg, settings, params).await;
-    } else if input == "/optimize" || input.starts_with("/optimize ") {
-        eprintln!("/optimize: not yet implemented");
+    } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
+        handle_ai_optimize(client, query_arg, settings, params).await;
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
@@ -4178,6 +4178,228 @@ async fn handle_ai_explain(
     );
 
     let user_content = format!("Query:\n{target_query}\n\nEXPLAIN ANALYZE output:\n{plan_text}");
+
+    let ai_messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: user_content,
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    println!();
+    match provider.complete(&ai_messages, &options).await {
+        Ok(result) => println!("{}", result.content),
+        Err(e) => eprintln!("AI error: {e}"),
+    }
+}
+
+/// Extract table names referenced by `FROM` and `JOIN` clauses.
+///
+/// Best-effort heuristic parser — handles common patterns including
+/// schema-qualified names but does not aim for full SQL parsing.
+/// Used by `/optimize` to query `pg_stat_user_tables`.
+fn extract_table_names(sql: &str) -> Vec<String> {
+    let upper = sql.to_uppercase();
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+    let upper_tokens: Vec<String> = upper.split_whitespace().map(String::from).collect();
+    let mut tables = Vec::new();
+
+    let mut i = 0;
+    while i < upper_tokens.len() {
+        let is_from = upper_tokens[i] == "FROM";
+        let is_join = upper_tokens[i].ends_with("JOIN") && upper_tokens[i] != "DISJOIN";
+
+        if (is_from || is_join) && i + 1 < tokens.len() {
+            let candidate = tokens[i + 1];
+            // Skip sub-selects: FROM (SELECT ...)
+            if !candidate.starts_with('(') {
+                let clean = candidate.trim_end_matches([',', ')', ';']);
+                if !clean.is_empty() {
+                    tables.push(clean.to_owned());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    tables.sort();
+    tables.dedup();
+    tables
+}
+
+/// Handle a `/optimize [query]` command end-to-end.
+///
+/// 1. Resolves the target query: inline arg or `last_query`.
+/// 2. Runs `EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT TEXT)`.
+/// 3. Gathers `pg_stat_user_tables` stats for referenced tables.
+/// 4. Sends plan + stats + schema context to the LLM for optimization
+///    suggestions (index creation, query rewrites, join order changes).
+#[allow(clippy::too_many_lines)]
+async fn handle_ai_optimize(
+    client: &Client,
+    query_arg: &str,
+    settings: &ReplSettings,
+    params: &ConnParams,
+) {
+    // Resolve target query.
+    let target_query = if query_arg.is_empty() {
+        if let Some(q) = settings.last_query.as_deref() {
+            q.to_owned()
+        } else {
+            eprintln!(
+                "/optimize: no query to optimize. \
+                 Run a query first or provide one: /optimize SELECT ..."
+            );
+            return;
+        }
+    } else {
+        query_arg.to_owned()
+    };
+
+    // Run EXPLAIN ANALYZE (wrapped in BEGIN/ROLLBACK for write queries).
+    let explain_sql = build_explain_sql(&target_query);
+
+    let raw_messages = match client.simple_query(&explain_sql).await {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            return;
+        }
+    };
+
+    // Collect plan lines.
+    let mut plan_lines: Vec<String> = Vec::new();
+    for msg in &raw_messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            if let Some(line) = row.get(0) {
+                plan_lines.push(line.to_owned());
+            }
+        }
+    }
+
+    if plan_lines.is_empty() {
+        eprintln!("/optimize: EXPLAIN returned no output");
+        return;
+    }
+
+    let plan_text = plan_lines.join("\n");
+    println!("{plan_text}");
+
+    // Gather table statistics for referenced tables.
+    let table_names = extract_table_names(&target_query);
+    let mut stats_text = String::new();
+
+    if !table_names.is_empty() {
+        let in_list: String = table_names
+            .iter()
+            .map(|t| {
+                let escaped = t.replace('\'', "''");
+                format!("'{escaped}'")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let stats_sql = format!(
+            "SELECT schemaname || '.' || relname AS table_name, \
+                    n_live_tup, n_dead_tup, \
+                    seq_scan, seq_tup_read, \
+                    idx_scan, idx_tup_fetch, \
+                    last_vacuum::text, last_analyze::text \
+             FROM pg_stat_user_tables \
+             WHERE relname IN ({in_list}) \
+                OR schemaname || '.' || relname IN ({in_list}) \
+             ORDER BY relname"
+        );
+
+        if let Ok(msgs) = client.simple_query(&stats_sql).await {
+            let mut stat_rows = Vec::new();
+            for msg in &msgs {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    let cols: Vec<String> = (0..9)
+                        .map(|i| row.get(i).unwrap_or("(null)").to_owned())
+                        .collect();
+                    stat_rows.push(cols.join(" | "));
+                }
+            }
+            if !stat_rows.is_empty() {
+                stats_text = format!(
+                    "\n\nTable statistics (table | live_tup | dead_tup | \
+                     seq_scan | seq_tup_read | idx_scan | idx_tup_fetch | \
+                     last_vacuum | last_analyze):\n{}",
+                    stat_rows.join("\n")
+                );
+            }
+        }
+    }
+
+    // AI optimization — skip gracefully when AI is not configured.
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+    if provider_name.is_empty() {
+        eprintln!(
+            "\nAI not configured — showing raw plan only. \
+             Add an [ai] section to ~/.config/samo/config.toml for optimization suggestions."
+        );
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    let system_content = format!(
+        "You are a PostgreSQL performance optimization expert. \
+         Analyse the query, its EXPLAIN ANALYZE plan, and table statistics, \
+         then provide actionable optimization suggestions.\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n\n\
+         Rules:\n\
+         - Identify the most expensive operations in the plan\n\
+         - Suggest specific CREATE INDEX statements when beneficial\n\
+         - Suggest query rewrites (join order, CTEs, subquery elimination)\n\
+         - Note any sequential scans on large tables\n\
+         - Estimate the expected improvement for each suggestion\n\
+         - Output suggestions ordered by expected impact (highest first)",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let user_content = format!(
+        "Query:\n```sql\n{target_query}\n```\n\n\
+         EXPLAIN ANALYZE output:\n{plan_text}{stats_text}"
+    );
 
     let ai_messages = vec![
         crate::ai::Message {
@@ -4892,5 +5114,65 @@ mod tests {
         // We test the predicate here; the async handler itself requires a DB.
         let would_bail = settings.last_error.is_none();
         assert!(would_bail);
+    }
+
+    // -- extract_table_names ---------------------------------------------------
+
+    #[test]
+    fn extract_tables_simple_select() {
+        let tables = extract_table_names("SELECT * FROM users WHERE id = 1");
+        assert_eq!(tables, vec!["users"]);
+    }
+
+    #[test]
+    fn extract_tables_join() {
+        let tables =
+            extract_table_names("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id");
+        assert_eq!(tables, vec!["orders", "users"]);
+    }
+
+    #[test]
+    fn extract_tables_left_join() {
+        let tables = extract_table_names(
+            "SELECT * FROM products LEFT JOIN categories ON products.cat_id = categories.id",
+        );
+        assert_eq!(tables, vec!["categories", "products"]);
+    }
+
+    #[test]
+    fn extract_tables_schema_qualified() {
+        let tables = extract_table_names("SELECT * FROM public.users");
+        assert_eq!(tables, vec!["public.users"]);
+    }
+
+    #[test]
+    fn extract_tables_multiple_from() {
+        let tables = extract_table_names("SELECT * FROM a, b WHERE a.id = b.a_id");
+        // Only first token after FROM is captured; comma-separated second
+        // table "b" is not preceded by FROM/JOIN so it's not found.
+        // This is a known limitation of the heuristic parser.
+        assert!(tables.contains(&"a".to_owned()));
+    }
+
+    #[test]
+    fn extract_tables_subselect_skipped() {
+        let tables =
+            extract_table_names("SELECT * FROM (SELECT id FROM inner_t) sub JOIN outer_t ON true");
+        // The sub-select is skipped (starts with '('), but outer_t is captured.
+        assert!(tables.contains(&"outer_t".to_owned()));
+        assert!(!tables.contains(&"(SELECT".to_owned()));
+    }
+
+    #[test]
+    fn extract_tables_empty() {
+        let tables = extract_table_names("SELECT 1");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_deduplicates() {
+        let tables =
+            extract_table_names("SELECT * FROM users u1 JOIN users u2 ON u1.id = u2.partner_id");
+        assert_eq!(tables, vec!["users"]);
     }
 }
