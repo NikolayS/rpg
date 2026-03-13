@@ -280,10 +280,12 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
 
 /// Calculate per-column display widths (in terminal columns, accounting for
 /// Unicode multi-byte / wide characters).
-fn column_widths(
+///
+/// `null_str` is the display string for NULL values (used to compute widths).
+fn column_widths_with_null(
     cols: &[ColumnMeta],
     rows: &[Vec<Option<String>>],
-    cfg: &OutputConfig,
+    null_str: &str,
 ) -> Vec<usize> {
     let mut widths: Vec<usize> = cols.iter().map(|c| display_width(&c.name)).collect();
 
@@ -292,7 +294,7 @@ fn column_widths(
             if i >= widths.len() {
                 break;
             }
-            let cell_str = cell.as_deref().unwrap_or(&cfg.null_string);
+            let cell_str = cell.as_deref().unwrap_or(null_str);
             let w = display_width(cell_str);
             if w > widths[i] {
                 widths[i] = w;
@@ -303,17 +305,35 @@ fn column_widths(
     widths
 }
 
-/// Write one row of the aligned table (header or data).
+/// Calculate per-column display widths (in terminal columns, accounting for
+/// Unicode multi-byte / wide characters).
+fn column_widths(
+    cols: &[ColumnMeta],
+    rows: &[Vec<Option<String>>],
+    cfg: &OutputConfig,
+) -> Vec<usize> {
+    column_widths_with_null(cols, rows, &cfg.null_string)
+}
+
+/// Write one row of the aligned table (header or data) with a given border
+/// style.
+///
+/// - `border 0`: columns separated by two spaces, no leading/trailing margin.
+/// - `border 1` (default): ` col1 | col2 ` — leading space, ` | ` between
+///   columns, trailing space.
+/// - `border 2`: `| col1 | col2 |` — `| ` prefix, ` | ` between columns,
+///   ` |` suffix.
 ///
 /// `value_fn` maps `(column_meta, column_index) → String`.
 /// `is_header` – when true, text columns are center-aligned (matching psql).
 /// Numeric columns are always right-aligned (both header and data rows).
-fn write_aligned_row<F>(
+fn write_aligned_row_border<F>(
     out: &mut String,
     cols: &[ColumnMeta],
     widths: &[usize],
     value_fn: F,
     is_header: bool,
+    border: u8,
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
@@ -323,10 +343,29 @@ fn write_aligned_row<F>(
         let val_width = display_width(&val);
         let padding = w.saturating_sub(val_width);
 
-        if i == 0 {
-            out.push(' ');
-        } else {
-            out.push_str(" | ");
+        match border {
+            0 => {
+                // border 0: no outer margins, columns separated by two spaces.
+                if i > 0 {
+                    out.push_str("  ");
+                }
+            }
+            2 => {
+                // border 2: leading `| ` then ` | ` between columns.
+                if i == 0 {
+                    out.push_str("| ");
+                } else {
+                    out.push_str(" | ");
+                }
+            }
+            _ => {
+                // border 1 (default): leading space, ` | ` between columns.
+                if i == 0 {
+                    out.push(' ');
+                } else {
+                    out.push_str(" | ");
+                }
+            }
         }
 
         if col.is_numeric {
@@ -354,30 +393,98 @@ fn write_aligned_row<F>(
             }
         }
     }
-    // psql pads every cell including the last column with a trailing space.
-    out.push(' ');
+
+    match border {
+        0 => {
+            // border 0: no trailing margin.
+        }
+        2 => {
+            // border 2: ` |` suffix.
+            out.push_str(" |");
+        }
+        _ => {
+            // border 1: trailing space.
+            out.push(' ');
+        }
+    }
     out.push('\n');
 }
 
-/// Write the `----+--------` separator line.
-fn write_separator(out: &mut String, widths: &[usize]) {
-    for (i, &w) in widths.iter().enumerate() {
-        if i == 0 {
-            for _ in 0..=w {
+/// Write one row of the aligned table (header or data).
+///
+/// `value_fn` maps `(column_meta, column_index) → String`.
+/// `is_header` – when true, text columns are center-aligned (matching psql).
+/// Numeric columns are always right-aligned (both header and data rows).
+fn write_aligned_row<F>(
+    out: &mut String,
+    cols: &[ColumnMeta],
+    widths: &[usize],
+    value_fn: F,
+    is_header: bool,
+) where
+    F: Fn(&ColumnMeta, usize) -> String,
+{
+    write_aligned_row_border(out, cols, widths, value_fn, is_header, 1);
+}
+
+/// Write the separator line between the header and data rows.
+///
+/// - `border 0`: `-- ------` (dashes per column, two spaces between).
+/// - `border 1` (default): `----+-------` (dashes, `-+-` between columns,
+///   leading/trailing dash for margin).
+/// - `border 2`: `+----+-------+` (full box, `+` at both ends and between
+///   columns).
+fn write_separator_border(out: &mut String, widths: &[usize], border: u8) {
+    match border {
+        0 => {
+            // border 0: each column is `w` dashes, separated by two spaces.
+            for (i, &w) in widths.iter().enumerate() {
+                if i > 0 {
+                    out.push_str("  ");
+                }
+                for _ in 0..w {
+                    out.push('-');
+                }
+            }
+            out.push('\n');
+        }
+        2 => {
+            // border 2: `+---+------+` full box.
+            for &w in widths {
+                out.push('+');
+                // One dash of padding on each side plus `w` dashes for content.
+                for _ in 0..w + 2 {
+                    out.push('-');
+                }
+            }
+            out.push_str("+\n");
+        }
+        _ => {
+            // border 1: `----+-------`
+            for (i, &w) in widths.iter().enumerate() {
+                if i == 0 {
+                    for _ in 0..=w {
+                        out.push('-');
+                    }
+                } else {
+                    out.push_str("-+-");
+                    for _ in 0..w {
+                        out.push('-');
+                    }
+                }
+            }
+            // Trailing dash to close the last column.
+            if !widths.is_empty() {
                 out.push('-');
             }
-        } else {
-            out.push_str("-+-");
-            for _ in 0..w {
-                out.push('-');
-            }
+            out.push('\n');
         }
     }
-    // Trailing dash to close the last column.
-    if !widths.is_empty() {
-        out.push('-');
-    }
-    out.push('\n');
+}
+
+/// Write the `----+--------` separator line (border 1).
+fn write_separator(out: &mut String, widths: &[usize]) {
+    write_separator_border(out, widths, 1);
 }
 
 /// Write `(N rows)` / `(1 row)` / `(0 rows)`.
@@ -619,12 +726,13 @@ pub fn display_width(s: &str) -> usize {
 // Aligned table with PsetConfig (handles tuples_only + footer)
 // ---------------------------------------------------------------------------
 
-/// Aligned table formatter that honours `PsetConfig` for tuples-only and
-/// footer suppression.  Delegates column-width calculation to the shared
-/// [`column_widths`] helper.
-fn format_aligned_pset(out: &mut String, rs: &RowSet, ocfg: &OutputConfig, pcfg: &PsetConfig) {
+/// Aligned table formatter that honours `PsetConfig` for border style,
+/// tuples-only mode, footer suppression, and null display string.
+fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;
+    let border = pcfg.border;
+    let null_str = &pcfg.null_display;
 
     if cols.is_empty() {
         if !pcfg.tuples_only && pcfg.footer {
@@ -633,28 +741,40 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, ocfg: &OutputConfig, pcfg:
         return;
     }
 
-    let widths = column_widths(cols, rows, ocfg);
+    let widths = column_widths_with_null(cols, rows, null_str);
+
+    // border 2: top border line `+----+------+` before the header.
+    if border == 2 && !pcfg.tuples_only {
+        write_separator_border(out, &widths, border);
+    }
 
     // Header (suppressed in tuples-only mode).
     // psql center-aligns text headers and right-aligns numeric ones.
     if !pcfg.tuples_only {
-        write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
-        write_separator(out, &widths);
+        write_aligned_row_border(out, cols, &widths, |col, _| col.name.clone(), true, border);
+        write_separator_border(out, &widths, border);
     }
 
     // Data rows.
     for row in rows {
-        write_aligned_row(
+        let null = null_str.clone();
+        write_aligned_row_border(
             out,
             cols,
             &widths,
             |_col, cell_idx| {
                 row.get(cell_idx)
                     .and_then(|v| v.as_deref().map(ToOwned::to_owned))
-                    .unwrap_or_else(|| ocfg.null_string.clone())
+                    .unwrap_or_else(|| null.clone())
             },
             false,
+            border,
         );
+    }
+
+    // border 2: bottom border line after the last data row.
+    if border == 2 {
+        write_separator_border(out, &widths, border);
     }
 
     // Footer.
