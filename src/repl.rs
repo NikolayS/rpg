@@ -3572,7 +3572,7 @@ async fn dispatch_meta(
         // Diagnostic commands — delegate to the dba module.
         MetaCmd::Dba => {
             let subcommand = parsed.pattern.as_deref().unwrap_or("");
-            crate::dba::execute(
+            let ai_context = crate::dba::execute(
                 client,
                 subcommand,
                 parsed.plus,
@@ -3580,6 +3580,10 @@ async fn dispatch_meta(
                 Some(&settings.db_capabilities),
             )
             .await;
+            // AI interpretation when the command returns context (e.g. \dba waits+).
+            if let Some(ref context) = ai_context {
+                interpret_dba_output(context, subcommand, settings).await;
+            }
         }
         // Named queries (#69).
         MetaCmd::NamedSave(ref name, ref query) => {
@@ -4831,6 +4835,70 @@ async fn interpret_auto_explain(
         temperature: 0.0,
     };
 
+    if let Ok(result) = provider.complete(&messages, &options).await {
+        record_token_usage(settings, &result);
+        let interpretation = result.content.trim();
+        if !interpretation.is_empty() {
+            eprintln!("\x1b[2m{interpretation}\x1b[0m");
+        }
+    }
+}
+
+/// Interpret `\dba` diagnostic output with AI.
+///
+/// Called when a `\dba` command returns AI context (e.g. `\dba waits+`).
+/// Produces a brief analysis of the diagnostic data. Skips silently when
+/// AI is not configured.
+async fn interpret_dba_output(context: &str, subcommand: &str, settings: &mut ReplSettings) {
+    if check_token_budget(settings) {
+        return;
+    }
+
+    let provider_name = match settings.config.ai.provider.as_deref() {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("-- AI interpretation requires [ai] provider to be configured");
+            return;
+        }
+    };
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let Ok(provider) = crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) else {
+        return;
+    };
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: "You are a PostgreSQL performance expert. \
+                      Analyze the diagnostic output below and give a brief (3-5 sentence) \
+                      interpretation. Focus on: dominant wait events, potential bottlenecks, \
+                      and one actionable recommendation if applicable."
+                .to_owned(),
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: format!("\\dba {subcommand} output:\n\n{context}"),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: 400,
+        temperature: 0.0,
+    };
+
+    eprintln!("-- AI interpreting wait events...");
     if let Ok(result) = provider.complete(&messages, &options).await {
         record_token_usage(settings, &result);
         let interpretation = result.content.trim();

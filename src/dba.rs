@@ -19,78 +19,75 @@ use tokio_postgres::Client;
 /// `governance` is used for Supervised mode checks (index health proposals).
 /// `capabilities` provides version-gated feature detection.
 ///
-/// Returns `true` if the subcommand was recognised, `false` otherwise.
+/// Returns optional text for AI interpretation (e.g. `\dba waits+`).
 pub async fn execute(
     client: &Client,
     subcommand: &str,
     verbose: bool,
     governance: Option<&crate::config::GovernanceConfig>,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-) -> bool {
+) -> Option<String> {
     match subcommand {
         "activity" | "act" => {
             dba_activity(client, verbose).await;
-            true
+            None
         }
         "locks" | "lock" => {
             dba_locks(client, verbose).await;
-            true
+            None
         }
         "bloat" => {
             dba_bloat(client, verbose).await;
-            true
+            None
         }
         "vacuum" | "vac" => {
             dba_vacuum(client, verbose).await;
-            true
+            None
         }
         "tablesize" | "ts" => {
             dba_tablesize(client, verbose).await;
-            true
+            None
         }
         "connections" | "conn" => {
             dba_connections(client, verbose).await;
-            true
+            None
         }
         "unused-idx" | "unused" => {
             dba_unused_indexes(client, verbose).await;
-            true
+            None
         }
         "seq-scans" | "seq" => {
             dba_seq_scans(client, verbose).await;
-            true
+            None
         }
         "cache-hit" | "cache" => {
             dba_cache_hit(client, verbose).await;
-            true
+            None
         }
         "replication" | "repl" => {
             dba_replication(client, verbose).await;
-            true
+            None
         }
         "config" | "conf" => {
             dba_config(client, verbose).await;
-            true
+            None
         }
-        "waits" | "wait" => {
-            dba_waits(client, verbose).await;
-            true
-        }
+        "waits" | "wait" => dba_waits(client, verbose).await,
         "indexes" | "idx" => {
             dba_indexes(client, verbose, governance).await;
-            true
+            None
         }
         "progress" | "prog" => {
             dba_progress(client, None).await;
-            true
+            None
         }
         "io" => {
             dba_io(client, verbose, capabilities).await;
-            true
+            None
         }
         "" | "help" => {
             print_dba_help();
-            true
+            None
         }
         _ => {
             // Handle two-word subcommands: `\dba progress vacuum`, etc.
@@ -99,11 +96,11 @@ pub async fn execute(
                 .or_else(|| subcommand.strip_prefix("prog "))
             {
                 dba_progress(client, Some(rest.trim())).await;
-                return true;
+                return None;
             }
             eprintln!("\\dba: unknown subcommand \"{subcommand}\"");
             eprintln!("Try \\dba help for available subcommands.");
-            false
+            None
         }
     }
 }
@@ -247,7 +244,7 @@ fn print_dba_help() {
     println!("\\dba diagnostic commands:");
     println!("  \\dba activity    Active queries and sessions");
     println!("  \\dba locks       Lock tree (blocked/blocking)");
-    println!("  \\dba waits       Wait event breakdown");
+    println!("  \\dba waits       Wait event breakdown (+ for AI interpretation)");
     println!("  \\dba bloat       Table bloat estimates");
     println!("  \\dba vacuum      Vacuum status and dead tuples");
     println!("  \\dba tablesize   Largest tables");
@@ -482,7 +479,8 @@ async fn dba_replication(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_waits(client: &Client, _verbose: bool) {
+/// Returns AI context text when `verbose` is true.
+async fn dba_waits(client: &Client, verbose: bool) -> Option<String> {
     let sql = "SELECT \
         coalesce(wait_event_type, 'CPU/Running') AS wait_type, \
         coalesce(wait_event, 'active') AS wait_event, \
@@ -496,6 +494,35 @@ async fn dba_waits(client: &Client, _verbose: bool) {
     ORDER BY sessions DESC \
     LIMIT 25";
     run_and_print(client, sql).await;
+
+    if !verbose {
+        return None;
+    }
+
+    // Collect the same data as text for AI interpretation.
+    let Ok(messages) = client.simple_query(sql).await else {
+        return None;
+    };
+
+    let mut lines = Vec::new();
+    for msg in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            let wait_type = row.get(0).unwrap_or("?");
+            let wait_event = row.get(1).unwrap_or("?");
+            let sessions = row.get(2).unwrap_or("0");
+            let active = row.get(3).unwrap_or("0");
+            let slow = row.get(4).unwrap_or("0");
+            lines.push(format!(
+                "{wait_type}/{wait_event}: {sessions} sessions ({active} active, {slow} slow)"
+            ));
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 async fn dba_indexes(
