@@ -27,6 +27,7 @@ mod pager;
 mod pattern;
 #[allow(dead_code)]
 mod query;
+mod rca;
 mod repl;
 mod safety;
 mod session;
