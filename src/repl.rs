@@ -911,6 +911,21 @@ pub struct ReplSettings {
     /// `PAGER` environment variable to an external pager command.
     /// Only activates in interactive mode (not with `-c`, `-f`, or piped input).
     pub pager_enabled: bool,
+    /// External pager command to run instead of the built-in TUI pager.
+    ///
+    /// `None` uses the built-in pager.  `Some(cmd)` spawns `cmd` via a shell
+    /// and pipes output to its stdin.
+    ///
+    /// Set by `\set PAGER <cmd>` when `<cmd>` is not `on`/`off`, or
+    /// initialised from the `PAGER` environment variable at startup.
+    pub pager_command: Option<String>,
+    /// Minimum number of result lines before the pager activates.
+    ///
+    /// When `> 0`, the pager only activates if the output exceeds *both*
+    /// the terminal height *and* this threshold.  Defaults to `0` (disabled).
+    ///
+    /// Set by `\pset pager_min_lines N`.
+    pub pager_min_lines: usize,
     /// Warn before executing destructive statements (DROP, TRUNCATE, etc.).
     ///
     /// Defaults to `true`. Disable with `\set DESTRUCTIVE_WARNING off`.
@@ -1009,6 +1024,8 @@ impl std::fmt::Debug for ReplSettings {
             )
             .field("no_highlight", &self.no_highlight)
             .field("pager_enabled", &self.pager_enabled)
+            .field("pager_command", &self.pager_command)
+            .field("pager_min_lines", &self.pager_min_lines)
             .field("destructive_warning", &self.destructive_warning)
             .field("safety_enabled", &self.safety_enabled)
             .field("config_profiles", &self.config.connections.len())
@@ -1061,6 +1078,8 @@ impl Default for ReplSettings {
             no_highlight: false,
             // Pager is enabled by default in interactive mode.
             pager_enabled: true,
+            pager_command: None,
+            pager_min_lines: 0,
             // Warn before destructive statements by default.
             destructive_warning: true,
             // Safety prompts enabled by default.
@@ -1868,12 +1887,12 @@ async fn execute_query_interactive(
         .map(|(_, h)| h as usize)
         .unwrap_or(24);
 
-    if crate::pager::needs_paging(&text, term_rows.saturating_sub(2)) {
-        if let Err(e) = crate::pager::run_pager(&text) {
-            eprintln!("samo: pager error: {e}");
-            // Fallback: print directly.
-            let _ = io::stdout().write_all(&captured);
-        }
+    if crate::pager::needs_paging_with_min(
+        &text,
+        term_rows.saturating_sub(2),
+        settings.pager_min_lines,
+    ) {
+        run_pager_for_text(settings, &text, &captured);
     } else {
         let _ = io::stdout().write_all(&captured);
     }
@@ -1914,16 +1933,34 @@ async fn execute_query_extended_interactive(
         .map(|(_, h)| h as usize)
         .unwrap_or(24);
 
-    if crate::pager::needs_paging(&text, term_rows.saturating_sub(2)) {
-        if let Err(e) = crate::pager::run_pager(&text) {
-            eprintln!("samo: pager error: {e}");
-            let _ = io::stdout().write_all(&captured);
-        }
+    if crate::pager::needs_paging_with_min(
+        &text,
+        term_rows.saturating_sub(2),
+        settings.pager_min_lines,
+    ) {
+        run_pager_for_text(settings, &text, &captured);
     } else {
         let _ = io::stdout().write_all(&captured);
     }
 
     ok
+}
+
+/// Activate the appropriate pager for `text`.
+///
+/// Uses the external pager command when `settings.pager_command` is set,
+/// falling back to the built-in TUI pager otherwise.  On any pager error,
+/// falls back to printing directly to stdout.
+fn run_pager_for_text(settings: &ReplSettings, text: &str, raw_bytes: &[u8]) {
+    if let Some(ref cmd) = settings.pager_command {
+        if let Err(e) = crate::pager::run_pager_external(cmd, text) {
+            eprintln!("samo: pager error: {e}");
+            let _ = io::stdout().write_all(raw_bytes);
+        }
+    } else if let Err(e) = crate::pager::run_pager(text) {
+        eprintln!("samo: pager error: {e}");
+        let _ = io::stdout().write_all(raw_bytes);
+    }
 }
 
 /// Execute `buf`, then execute each non-NULL result cell as a separate SQL
@@ -2864,9 +2901,22 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "HIGHLIGHT" {
         settings.no_highlight = value == "off";
     }
-    // Mirror PAGER on/off into the pager_enabled flag.
+    // Mirror PAGER into pager_enabled / pager_command.
     if name == "PAGER" {
-        settings.pager_enabled = value != "off";
+        match value {
+            "off" => {
+                settings.pager_enabled = false;
+                settings.pager_command = None;
+            }
+            "on" => {
+                settings.pager_enabled = true;
+                settings.pager_command = None;
+            }
+            cmd => {
+                settings.pager_enabled = true;
+                settings.pager_command = Some(cmd.to_owned());
+            }
+        }
     }
     // Mirror DESTRUCTIVE_WARNING on/off into the destructive_warning flag.
     if name == "DESTRUCTIVE_WARNING" {
@@ -3036,6 +3086,14 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 "Expanded display is {}.",
                 expanded_mode_str(settings.pset.expanded)
             );
+        }
+        "pager_min_lines" => {
+            if let Some(n) = value.and_then(|s| s.parse::<usize>().ok()) {
+                settings.pager_min_lines = n;
+                println!("Pager minimum lines is {n}.");
+            } else {
+                eprintln!("\\pset: invalid pager_min_lines value");
+            }
         }
         other => {
             eprintln!("\\pset: unknown option \"{other}\"");

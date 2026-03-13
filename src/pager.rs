@@ -19,7 +19,8 @@
 //! horizontal scrolling. A `│` separator is drawn between frozen and
 //! scrollable columns. The status bar shows "Frozen: N" when N > 0.
 
-use std::io;
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -68,6 +69,30 @@ pub fn run_pager(content: &str) -> io::Result<()> {
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
 
     result
+}
+
+/// Pipe `content` to an external pager command.
+///
+/// Spawns `cmd` as a child process, writes all of `content` to its stdin,
+/// drops stdin (signalling EOF), and waits for the child to exit.
+///
+/// Returns `Ok(())` if the child was spawned and exited (any exit code is
+/// treated as success from the caller's perspective — the pager ran).
+/// Returns an `Err` if the child could not be spawned.
+pub fn run_pager_external(cmd: &str, content: &str) -> io::Result<()> {
+    let mut child = Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        // Best-effort write; ignore partial-write errors (e.g. the user
+        // quit the pager before reading all output).
+        let _ = stdin.write_all(content.as_bytes());
+    }
+
+    child.wait()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +765,25 @@ pub fn needs_paging(content: &str, rows: usize) -> bool {
     content.lines().count() > rows
 }
 
+/// Check whether `content` needs paging, also honouring a `min_lines`
+/// threshold.
+///
+/// Returns `true` only when **both** conditions hold:
+/// - The content exceeds the terminal height (`rows`).
+/// - The content line count exceeds `min_lines` (when `min_lines > 0`).
+///
+/// When `min_lines` is 0 the threshold is disabled and the result is
+/// identical to [`needs_paging`].
+pub fn needs_paging_with_min(content: &str, rows: usize, min_lines: usize) -> bool {
+    if !needs_paging(content, rows) {
+        return false;
+    }
+    if min_lines > 0 && content.lines().count() <= min_lines {
+        return false;
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -748,7 +792,7 @@ pub fn needs_paging(content: &str, rows: usize) -> bool {
 mod tests {
     use super::{
         detect_col_boundaries, find_matches, first_match_from, is_divider_line, last_match_before,
-        needs_paging,
+        needs_paging, needs_paging_with_min,
     };
 
     // --- needs_paging ---
@@ -985,5 +1029,49 @@ mod tests {
             .collect();
         assert_eq!(boundaries, expected);
         assert_eq!(boundaries.len(), 2);
+    }
+
+    // --- needs_paging_with_min ---
+
+    #[test]
+    fn test_needs_paging_with_min_zero_disabled() {
+        // min_lines = 0 → same as needs_paging.
+        let content = "line1\nline2\nline3\nline4";
+        assert!(needs_paging_with_min(content, 3, 0));
+    }
+
+    #[test]
+    fn test_needs_paging_with_min_fits_in_terminal() {
+        // Content fits in terminal → no paging even with large min_lines.
+        let content = "line1\nline2\nline3";
+        assert!(!needs_paging_with_min(content, 24, 0));
+    }
+
+    #[test]
+    fn test_needs_paging_with_min_exceeds_terminal_below_min() {
+        // 4 lines, terminal = 3, but min_lines = 10 → no paging.
+        let content = "line1\nline2\nline3\nline4";
+        assert!(!needs_paging_with_min(content, 3, 10));
+    }
+
+    #[test]
+    fn test_needs_paging_with_min_exceeds_both() {
+        // 10 lines, terminal = 3, min_lines = 5 → needs paging.
+        let content = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10";
+        assert!(needs_paging_with_min(content, 3, 5));
+    }
+
+    #[test]
+    fn test_needs_paging_with_min_exact_min() {
+        // 5 lines, terminal = 3, min_lines = 5 → 5 <= 5, so no paging.
+        let content = "1\n2\n3\n4\n5";
+        assert!(!needs_paging_with_min(content, 3, 5));
+    }
+
+    #[test]
+    fn test_needs_paging_with_min_just_above_min() {
+        // 6 lines, terminal = 3, min_lines = 5 → paging activated.
+        let content = "1\n2\n3\n4\n5\n6";
+        assert!(needs_paging_with_min(content, 3, 5));
     }
 }

@@ -478,6 +478,13 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     let pager_enabled = cfg.display.pager;
     let timing = cfg.display.timing;
 
+    // Initialise pager_command from the PAGER environment variable.
+    // A non-empty PAGER that is not "on"/"off" sets an external pager.
+    // An empty or absent PAGER leaves the built-in pager as default.
+    let pager_command = std::env::var("PAGER")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "on" && v != "off");
+
     // Keep ReplSettings.expanded in sync with pset.expanded so that both the
     // REPL path and the -c path see a consistent expanded mode.
     let expanded = pset.expanded;
@@ -498,6 +505,7 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
         debug: cli.debug,
         no_highlight,
         pager_enabled,
+        pager_command,
         timing,
         config: cfg.clone(),
         exec_mode: if cli.yolo {
