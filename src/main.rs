@@ -42,9 +42,9 @@ mod repl;
 mod safety;
 mod session;
 mod setup;
+mod vars;
 #[allow(dead_code)]
 mod verification;
-mod vars;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
@@ -649,7 +649,15 @@ async fn main() {
                     });
                 }
 
-                daemon::run(&client, &cfg, &resolved.dbname, &channels, cli.health_port, cli.github_repo.as_deref()).await;
+                daemon::run(
+                    &client,
+                    &cfg,
+                    &resolved.dbname,
+                    &channels,
+                    cli.health_port,
+                    cli.github_repo.as_deref(),
+                )
+                .await;
 
                 daemon::remove_pid_file(&pid_path);
                 0

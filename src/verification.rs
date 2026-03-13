@@ -50,9 +50,7 @@ pub async fn verify_action(client: &Client, action: &ActionType) -> Verification
     match action {
         ActionType::CancelQuery { pid } => verify_cancel(client, *pid).await,
         ActionType::TerminateBackend { pid } => verify_terminate(client, *pid).await,
-        ActionType::SetSessionGuc { name, value } => {
-            verify_session_guc(client, name, value).await
-        }
+        ActionType::SetSessionGuc { name, value } => verify_session_guc(client, name, value).await,
         ActionType::AlterSystemSet { name, value } => {
             verify_alter_system(client, name, value).await
         }
@@ -98,9 +96,9 @@ async fn verify_terminate(client: &Client, pid: i32) -> VerificationResult {
     );
     match client.simple_query(&sql).await {
         Ok(messages) => {
-            let has_row = messages.iter().any(|m| {
-                matches!(m, tokio_postgres::SimpleQueryMessage::Row(_))
-            });
+            let has_row = messages
+                .iter()
+                .any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)));
             if has_row {
                 VerificationResult::NotConfirmed {
                     detail: format!("PID {pid} is still present after terminate"),
@@ -167,9 +165,7 @@ async fn verify_alter_system(client: &Client, name: &str, expected: &str) -> Ver
                         };
                     }
                     return VerificationResult::NotConfirmed {
-                        detail: format!(
-                            "{name} = {actual} in auto.conf (expected {expected})"
-                        ),
+                        detail: format!("{name} = {actual} in auto.conf (expected {expected})"),
                     };
                 }
             }
@@ -186,14 +182,12 @@ async fn verify_alter_system(client: &Client, name: &str, expected: &str) -> Ver
 
 /// Verify that ALTER SYSTEM RESET removed the setting.
 async fn verify_alter_system_reset(client: &Client, name: &str) -> VerificationResult {
-    let sql = format!(
-        "SELECT 1 FROM pg_file_settings WHERE name = '{name}' AND applied"
-    );
+    let sql = format!("SELECT 1 FROM pg_file_settings WHERE name = '{name}' AND applied");
     match client.simple_query(&sql).await {
         Ok(messages) => {
-            let has_row = messages.iter().any(|m| {
-                matches!(m, tokio_postgres::SimpleQueryMessage::Row(_))
-            });
+            let has_row = messages
+                .iter()
+                .any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)));
             if has_row {
                 VerificationResult::NotConfirmed {
                     detail: format!("{name} still present in postgresql.auto.conf"),
