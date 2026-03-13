@@ -2349,14 +2349,43 @@ pub async fn exec_command(
         let interpolated = settings.vars.interpolate(sql.trim());
         let mut parsed = crate::metacmd::parse(&interpolated);
         parsed.echo_hidden = settings.echo_hidden;
-        let mut dummy_settings = ReplSettings {
-            echo_hidden: settings.echo_hidden,
-            db_capabilities: settings.db_capabilities.clone(),
-            config: settings.config.clone(),
-            ..Default::default()
-        };
         let mut tx = TxState::default();
-        dispatch_meta(parsed, client, params, &mut dummy_settings, &mut tx).await;
+        let result = dispatch_meta(parsed, client, params, settings, &mut tx).await;
+        // Handle results that produce output or modify settings.
+        match result {
+            MetaResult::ShowMode => {
+                let input_label = match settings.input_mode {
+                    InputMode::Sql => "sql",
+                    InputMode::Text2Sql => "text2sql",
+                };
+                let exec_label = match settings.exec_mode {
+                    ExecMode::Interactive => "interactive",
+                    ExecMode::Plan => "plan",
+                    ExecMode::Yolo => "yolo",
+                    ExecMode::Observe => "observe",
+                };
+                eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+            }
+            MetaResult::SetInputMode(mode) => {
+                settings.input_mode = mode;
+                let label = match mode {
+                    InputMode::Sql => "sql",
+                    InputMode::Text2Sql => "text2sql",
+                };
+                eprintln!("Input mode: {label}");
+            }
+            MetaResult::SetExecMode(mode) => {
+                settings.exec_mode = mode;
+                let label = match mode {
+                    ExecMode::Interactive => "interactive",
+                    ExecMode::Plan => "plan",
+                    ExecMode::Yolo => "yolo",
+                    ExecMode::Observe => "observe",
+                };
+                eprintln!("Execution mode: {label}");
+            }
+            _ => {}
+        }
         return 0;
     }
     let mut tx = TxState::default();
