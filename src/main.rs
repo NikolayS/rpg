@@ -17,6 +17,7 @@ mod io;
 mod metacmd;
 #[allow(dead_code)]
 mod output;
+mod pager;
 mod pattern;
 #[allow(dead_code)]
 mod query;
