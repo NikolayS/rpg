@@ -250,6 +250,21 @@ pub fn is_complete(buf: &str) -> bool {
 pub use crate::output::ExpandedMode;
 
 // ---------------------------------------------------------------------------
+// Last-error context (used by /fix)
+// ---------------------------------------------------------------------------
+
+/// Context captured when a query fails, so `/fix` can explain and correct it.
+#[derive(Debug, Clone)]
+pub struct LastError {
+    /// The SQL query that failed.
+    pub query: String,
+    /// Human-readable error message from the server.
+    pub error_message: String,
+    /// Optional SQLSTATE code (e.g. `"42703"` for undefined column).
+    pub sqlstate: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // REPL settings (mutable at runtime via backslash commands)
 // ---------------------------------------------------------------------------
 
@@ -318,6 +333,12 @@ pub struct ReplSettings {
     ///
     /// Used by `\c @profile` to look up named connection profiles.
     pub config: crate::config::Config,
+    /// Context from the most-recently failed query.
+    ///
+    /// Populated whenever a query returns an error; cleared on the next
+    /// successful execution.  Used by `/fix` to provide the LLM with the
+    /// query and error details.
+    pub last_error: Option<LastError>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -357,6 +378,10 @@ impl std::fmt::Debug for ReplSettings {
             .field("pager_enabled", &self.pager_enabled)
             .field("destructive_warning", &self.destructive_warning)
             .field("config_profiles", &self.config.connections.len())
+            .field(
+                "last_error",
+                &self.last_error.as_ref().map(|e| e.error_message.as_str()),
+            )
             .finish()
     }
 }
@@ -388,6 +413,7 @@ impl Default for ReplSettings {
             // Warn before destructive statements by default.
             destructive_warning: true,
             config: crate::config::Config::default(),
+            last_error: None,
         }
     }
 }
@@ -545,6 +571,7 @@ fn confirm_single_step(sql: &str) -> bool {
 /// then renders output using `settings.pset`.
 ///
 /// Returns `true` on success, `false` if the query produced a SQL error.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_query(
     client: &Client,
     sql: &str,
@@ -664,6 +691,15 @@ pub async fn execute_query(
             }
             eprintln!("ERROR:  {e}");
             tx.on_error();
+
+            // Capture context for /fix.
+            let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            settings.last_error = Some(LastError {
+                query: sql_to_send.to_owned(),
+                error_message: e.to_string(),
+                sqlstate,
+            });
+
             false
         }
     };
@@ -677,6 +713,8 @@ pub async fn execute_query(
     // Store as the last successfully executed query (used by `\watch`).
     if success {
         settings.last_query = Some(sql.to_owned());
+        // Clear last_error on success so /fix isn't stale.
+        settings.last_error = None;
     }
 
     success
@@ -747,6 +785,12 @@ pub async fn execute_query_extended(
             }
             eprintln!("ERROR:  {e}");
             tx.on_error();
+            let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            settings.last_error = Some(LastError {
+                query: sql_to_send.to_owned(),
+                error_message: e.to_string(),
+                sqlstate,
+            });
             return false;
         }
     };
@@ -828,6 +872,15 @@ pub async fn execute_query_extended(
             }
             eprintln!("ERROR:  {e}");
             tx.on_error();
+
+            // Capture context for /fix.
+            let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            settings.last_error = Some(LastError {
+                query: sql_to_send.to_owned(),
+                error_message: e.to_string(),
+                sqlstate,
+            });
+
             false
         }
     };
@@ -839,6 +892,8 @@ pub async fn execute_query_extended(
 
     if success {
         settings.last_query = Some(sql.to_owned());
+        // Clear last_error on success so /fix isn't stale.
+        settings.last_error = None;
     }
 
     success
@@ -3755,9 +3810,9 @@ async fn handle_line(
 ///
 /// Recognised commands:
 /// - `/ask <prompt>` — generate SQL from natural language
-/// - `/fix` — explain and fix the last error (stub)
+/// - `/fix` — explain and fix the last error
 /// - `/explain [query]` — explain query plan with AI interpretation
-/// - `/optimize [query]` — suggest query optimizations (stub)
+/// - `/optimize [query]` — suggest query optimizations
 async fn dispatch_ai_command(
     input: &str,
     client: &Client,
@@ -3771,7 +3826,7 @@ async fn dispatch_ai_command(
         }
         handle_ai_ask(client, prompt, settings, params).await;
     } else if input == "/fix" || input.starts_with("/fix ") {
-        eprintln!("/fix: not yet implemented");
+        handle_ai_fix(client, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
         handle_ai_explain(client, query_arg, settings, params).await;
     } else if input == "/optimize" || input.starts_with("/optimize ") {
@@ -3873,6 +3928,119 @@ async fn handle_ai_ask(
         Ok(result) => {
             println!("{}", result.content);
             // TODO: prompt user to execute, track token usage (#75)
+        }
+        Err(e) => eprintln!("AI error: {e}"),
+    }
+}
+
+/// Handle a `/fix` command end-to-end.
+///
+/// Looks up the most recently failed query from [`ReplSettings::last_error`],
+/// sends it to the configured LLM with schema context, and prints an
+/// explanation plus a corrected SQL query.  Gracefully degrades when no
+/// prior error exists or when AI is not configured.
+async fn handle_ai_fix(client: &Client, settings: &ReplSettings, params: &ConnParams) {
+    // Require a prior error to fix.
+    let last_error = if let Some(e) = &settings.last_error {
+        e.clone()
+    } else {
+        eprintln!("No recent error to fix. Run a query first.");
+        return;
+    };
+
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+
+    if provider_name.is_empty() {
+        eprintln!(
+            "AI not configured. \
+             Add an [ai] section to ~/.config/samo/config.toml"
+        );
+        eprintln!("Supported providers: anthropic, openai, ollama");
+        eprintln!("Example:");
+        eprintln!("  [ai]");
+        eprintln!("  provider = \"anthropic\"");
+        eprintln!("  api_key_env = \"ANTHROPIC_API_KEY\"");
+        return;
+    }
+
+    // Resolve the API key from the configured environment variable.
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Build a compact schema description for the system prompt.
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    // Format the SQLSTATE hint if available.
+    let sqlstate_hint = last_error
+        .sqlstate
+        .as_deref()
+        .map(|s| format!(" (SQLSTATE {s})"))
+        .unwrap_or_default();
+
+    let system_content = format!(
+        "You are a PostgreSQL expert. \
+         Explain SQL errors and provide corrected queries.\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n\n\
+         Rules:\n\
+         - First, briefly explain what caused the error (1-2 sentences)\n\
+         - Then output the corrected SQL query\n\
+         - Use standard PostgreSQL syntax\n\
+         - Keep the corrected query as close to the original intent as possible",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let user_content = format!(
+        "The following query failed{sqlstate_hint}:\n\n\
+         ```sql\n{query}\n```\n\n\
+         Error: {error}",
+        query = last_error.query,
+        error = last_error.error_message,
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: user_content,
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    match provider.complete(&messages, &options).await {
+        Ok(result) => {
+            println!("{}", result.content);
         }
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -4669,5 +4837,60 @@ mod tests {
         let sql = build_explain_sql("DELETE FROM t WHERE id = 1");
         assert!(sql.starts_with("begin;"));
         assert!(sql.ends_with("rollback;"));
+    }
+
+    // -- LastError and /fix ---------------------------------------------------
+
+    #[test]
+    fn last_error_construction() {
+        let err = LastError {
+            query: "select * from nonexistent_table".to_owned(),
+            error_message: "relation \"nonexistent_table\" does not exist".to_owned(),
+            sqlstate: Some("42P01".to_owned()),
+        };
+        assert_eq!(err.query, "select * from nonexistent_table");
+        assert!(err.error_message.contains("does not exist"));
+        assert_eq!(err.sqlstate.as_deref(), Some("42P01"));
+    }
+
+    #[test]
+    fn last_error_without_sqlstate() {
+        let err = LastError {
+            query: "select 1 +".to_owned(),
+            error_message: "syntax error at end of input".to_owned(),
+            sqlstate: None,
+        };
+        assert!(err.sqlstate.is_none());
+    }
+
+    #[test]
+    fn repl_settings_last_error_default_is_none() {
+        let s = ReplSettings::default();
+        assert!(s.last_error.is_none());
+    }
+
+    #[test]
+    fn last_error_clone() {
+        let err = LastError {
+            query: "select 1".to_owned(),
+            error_message: "some error".to_owned(),
+            sqlstate: Some("42601".to_owned()),
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned.query, err.query);
+        assert_eq!(cloned.error_message, err.error_message);
+        assert_eq!(cloned.sqlstate, err.sqlstate);
+    }
+
+    #[test]
+    fn fix_no_error_message_check() {
+        // When last_error is None, the /fix handler should print "No recent
+        // error to fix." -- verify the condition matches.
+        let settings = ReplSettings::default();
+        assert!(settings.last_error.is_none());
+        // The handler checks: if last_error.is_none() -> print message and return.
+        // We test the predicate here; the async handler itself requires a DB.
+        let would_bail = settings.last_error.is_none();
+        assert!(would_bail);
     }
 }
