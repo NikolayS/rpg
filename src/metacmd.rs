@@ -8,7 +8,7 @@
 //! - Optional pattern argument extracted after the modifiers.
 //! - `echo_hidden` flag threads through from [`crate::repl::ReplSettings`].
 
-use crate::repl::ExpandedMode;
+use crate::output::ExpandedMode;
 
 // ---------------------------------------------------------------------------
 // MetaCmd enum
@@ -86,6 +86,28 @@ pub enum MetaCmd {
     Reconnect,
     /// `\h [command]` — SQL syntax help.
     SqlHelp,
+
+    // -- Variable commands (issue #32) ------------------------------------
+    /// `\set [name [value]]` — set or display variables.
+    ///
+    /// Payload: `(name, value)` when both are given; `(name, "")` when only
+    /// the name is given (displays the variable); `("", "")` when bare (lists
+    /// all variables).
+    Set(String, String),
+    /// `\unset name` — unset a variable.
+    Unset(String),
+    /// `\pset [option [value]]` — set print option.
+    Pset(String, Option<String>),
+    /// `\a` — toggle aligned/unaligned output format.
+    ToggleAlign,
+    /// `\t [on|off]` — toggle or set tuples-only mode.
+    TuplesOnly(Option<bool>),
+    /// `\f [sep]` — set field separator for unaligned output.
+    FieldSep(Option<String>),
+    /// `\H` — toggle HTML output mode.
+    ToggleHtml,
+    /// `\C [title]` — set or clear table title.
+    SetTitle(Option<String>),
 
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
@@ -193,13 +215,19 @@ pub fn parse(input: &str) -> ParsedMeta {
             parse_simple_or_unknown(input, "q", MetaCmd::Quit)
         }
         Some('?') => parse_simple_or_unknown(input, "?", MetaCmd::Help),
+        Some('a') => parse_simple_or_unknown(input, "a", MetaCmd::ToggleAlign),
         Some('c') => parse_c_family(input),
+        Some('C') => parse_set_title(input),
+        Some('f') => parse_field_sep(input),
         Some('h') => parse_h(input),
+        Some('H') => parse_simple_or_unknown(input, "H", MetaCmd::ToggleHtml),
+        Some('p') => parse_pset(input),
+        Some('s') => parse_s_family(input),
+        Some('t') => parse_t_family(input),
+        Some('u') => parse_unset(input),
         Some('x') => parse_x(input),
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
-        Some('s') => parse_sf_sv(input),
-        Some('t') => parse_timing(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
 }
@@ -221,18 +249,124 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     }
 }
 
-/// Parse `\timing [on|off]`.
-fn parse_timing(input: &str) -> ParsedMeta {
-    let Some(rest) = input.strip_prefix("timing") else {
+/// Dispatch `s`-family commands: `\set`, `\sf`, `\sv`.
+fn parse_s_family(input: &str) -> ParsedMeta {
+    if let Some(after) = input.strip_prefix("set") {
+        if after.is_empty() || after.starts_with(char::is_whitespace) {
+            return parse_set(input);
+        }
+    }
+    parse_sf_sv(input)
+}
+
+/// Parse `\set [name [value]]`.
+fn parse_set(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix("set") else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
-    let arg = rest.trim();
-    let mode = match arg.to_lowercase().as_str() {
-        "on" => Some(true),
-        "off" => Some(false),
-        _ => None,
+    // Bare `\set` — list all variables.
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return ParsedMeta::simple(MetaCmd::Set(String::new(), String::new()));
+    }
+    // `\set name` or `\set name value`
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").to_owned();
+    let value = parts.next().map_or("", str::trim).to_owned();
+    ParsedMeta::simple(MetaCmd::Set(name, value))
+}
+
+/// Parse `\unset name`.
+fn parse_unset(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix("unset") else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
-    ParsedMeta::simple(MetaCmd::Timing(mode))
+    let name = rest.trim().to_owned();
+    if name.is_empty() {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    }
+    ParsedMeta::simple(MetaCmd::Unset(name))
+}
+
+/// Parse `\pset [option [value]]`.
+fn parse_pset(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix("pset") else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return ParsedMeta::simple(MetaCmd::Pset(String::new(), None));
+    }
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let option = parts.next().unwrap_or("").to_owned();
+    let value = parts.next().map(|s| s.trim().to_owned());
+    ParsedMeta::simple(MetaCmd::Pset(option, value))
+}
+
+/// Parse `\t [on|off]` — tuples-only toggle.
+///
+/// This function is called only when the `t` arm is reached; it must
+/// distinguish `\t` from `\timing` by checking for the full word.
+fn parse_t_family(input: &str) -> ParsedMeta {
+    // `\timing …` takes priority over `\t`
+    if let Some(rest) = input.strip_prefix("timing") {
+        let arg = rest.trim();
+        let mode = match arg.to_lowercase().as_str() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        };
+        return ParsedMeta::simple(MetaCmd::Timing(mode));
+    }
+    // `\t [on|off]`
+    if let Some(rest) = input.strip_prefix('t') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let arg = rest.trim();
+            let mode = match arg.to_lowercase().as_str() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            };
+            return ParsedMeta::simple(MetaCmd::TuplesOnly(mode));
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\f [sep]` — field separator.
+///
+/// `\f` must be followed by nothing, whitespace, or the separator itself.
+/// If the character immediately after `f` is a letter (e.g. `\foo`), it is
+/// an unknown command, not a field-separator command.
+fn parse_field_sep(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix('f') else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    // Reject if `f` is immediately followed by another letter/digit (e.g. `\foo`).
+    if rest.starts_with(|c: char| c.is_alphanumeric()) {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    }
+    let sep = rest.trim();
+    let value = if sep.is_empty() {
+        None
+    } else {
+        Some(sep.to_owned())
+    };
+    ParsedMeta::simple(MetaCmd::FieldSep(value))
+}
+
+/// Parse `\C [title]` — set table title.
+fn parse_set_title(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix('C') else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    let title = rest.trim();
+    let value = if title.is_empty() {
+        None
+    } else {
+        Some(title.to_owned())
+    };
+    ParsedMeta::simple(MetaCmd::SetTitle(value))
 }
 
 /// Parse `\x [on|off|auto]`.
@@ -462,7 +596,7 @@ fn parse_modifiers_and_pattern(rest: &str) -> (bool, bool, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::ExpandedMode;
+    use crate::output::ExpandedMode;
 
     // Helper: parse and return (cmd, plus, system, pattern).
     fn p(input: &str) -> (MetaCmd, bool, bool, Option<String>) {
@@ -864,5 +998,136 @@ mod tests {
     #[test]
     fn parse_without_leading_backslash() {
         assert_eq!(parse("q").cmd, MetaCmd::Quit);
+    }
+
+    // -- Variable commands (issue #32) ---------------------------------------
+
+    #[test]
+    fn parse_set_bare() {
+        assert_eq!(
+            parse("\\set").cmd,
+            MetaCmd::Set(String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn parse_set_name_only() {
+        assert_eq!(
+            parse("\\set FOO").cmd,
+            MetaCmd::Set("FOO".to_owned(), String::new())
+        );
+    }
+
+    #[test]
+    fn parse_set_name_value() {
+        assert_eq!(
+            parse("\\set FOO bar").cmd,
+            MetaCmd::Set("FOO".to_owned(), "bar".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_set_value_with_spaces() {
+        // Second token onwards is the value, trimmed.
+        assert_eq!(
+            parse("\\set X hello world").cmd,
+            MetaCmd::Set("X".to_owned(), "hello world".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_unset_name() {
+        assert_eq!(parse("\\unset FOO").cmd, MetaCmd::Unset("FOO".to_owned()));
+    }
+
+    #[test]
+    fn parse_pset_bare() {
+        assert_eq!(parse("\\pset").cmd, MetaCmd::Pset(String::new(), None));
+    }
+
+    #[test]
+    fn parse_pset_option_only() {
+        assert_eq!(
+            parse("\\pset format").cmd,
+            MetaCmd::Pset("format".to_owned(), None)
+        );
+    }
+
+    #[test]
+    fn parse_pset_option_value() {
+        assert_eq!(
+            parse("\\pset format csv").cmd,
+            MetaCmd::Pset("format".to_owned(), Some("csv".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_toggle_align() {
+        assert_eq!(parse("\\a").cmd, MetaCmd::ToggleAlign);
+    }
+
+    #[test]
+    fn parse_tuples_only_bare() {
+        assert_eq!(parse("\\t").cmd, MetaCmd::TuplesOnly(None));
+    }
+
+    #[test]
+    fn parse_tuples_only_on() {
+        assert_eq!(parse("\\t on").cmd, MetaCmd::TuplesOnly(Some(true)));
+    }
+
+    #[test]
+    fn parse_tuples_only_off() {
+        assert_eq!(parse("\\t off").cmd, MetaCmd::TuplesOnly(Some(false)));
+    }
+
+    #[test]
+    fn parse_field_sep_bare() {
+        assert_eq!(parse("\\f").cmd, MetaCmd::FieldSep(None));
+    }
+
+    #[test]
+    fn parse_field_sep_with_value() {
+        assert_eq!(parse("\\f ,").cmd, MetaCmd::FieldSep(Some(",".to_owned())));
+    }
+
+    #[test]
+    fn parse_toggle_html() {
+        assert_eq!(parse("\\H").cmd, MetaCmd::ToggleHtml);
+    }
+
+    #[test]
+    fn parse_set_title_bare() {
+        assert_eq!(parse("\\C").cmd, MetaCmd::SetTitle(None));
+    }
+
+    #[test]
+    fn parse_set_title_with_value() {
+        assert_eq!(
+            parse("\\C My Table").cmd,
+            MetaCmd::SetTitle(Some("My Table".to_owned()))
+        );
+    }
+
+    // timing must still work via the t-family dispatcher
+    #[test]
+    fn parse_timing_still_works() {
+        assert_eq!(parse("\\timing on").cmd, MetaCmd::Timing(Some(true)));
+        assert_eq!(parse("\\timing off").cmd, MetaCmd::Timing(Some(false)));
+        assert_eq!(parse("\\timing").cmd, MetaCmd::Timing(None));
+    }
+
+    // \sf and \sv must still work after adding \set
+    #[test]
+    fn parse_sf_still_works_after_set() {
+        let m = parse("\\sf my_func");
+        assert_eq!(m.cmd, MetaCmd::ShowFunctionSource);
+        assert_eq!(m.pattern, Some("my_func".to_owned()));
+    }
+
+    #[test]
+    fn parse_sv_still_works_after_set() {
+        let m = parse("\\sv my_view");
+        assert_eq!(m.cmd, MetaCmd::ShowViewDef);
     }
 }

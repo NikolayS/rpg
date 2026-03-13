@@ -240,15 +240,9 @@ pub fn is_complete(buf: &str) -> bool {
 // Backslash command types
 // ---------------------------------------------------------------------------
 
-/// Expanded display mode argument.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ExpandedMode {
-    On,
-    #[default]
-    Off,
-    Auto,
-    Toggle,
-}
+// ExpandedMode is defined in output.rs and re-exported here for backward
+// compatibility with code that imports from repl.
+pub use crate::output::ExpandedMode;
 
 // ---------------------------------------------------------------------------
 // REPL settings (mutable at runtime via backslash commands)
@@ -263,6 +257,10 @@ pub struct ReplSettings {
     pub expanded: ExpandedMode,
     /// Whether to echo internally-generated SQL to stdout (`-E` / `--echo-hidden`).
     pub echo_hidden: bool,
+    /// Print configuration (`\pset` and CLI flags).
+    pub pset: crate::output::PsetConfig,
+    /// Variable store (`\set` / `\unset`).
+    pub vars: crate::vars::Variables,
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +283,7 @@ pub fn history_file() -> Option<PathBuf> {
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
 
-/// Print a single result set (column-aligned table with header and row count).
+/// Print a single result set using the active [`PsetConfig`].
 ///
 /// `col_names` and `rows` describe the result set. `had_rows` indicates
 /// whether any `Row` messages were received (distinguishes an empty SELECT
@@ -293,56 +291,49 @@ pub fn history_file() -> Option<PathBuf> {
 /// `is_first` is `false` when this is a subsequent result set in a
 /// multi-statement query, in which case a blank separator line is printed
 /// before the table (matching psql behaviour).
-fn print_result_set(
+fn print_result_set_pset(
     col_names: &[String],
     rows: &[Vec<String>],
     had_rows: bool,
     rows_affected: u64,
     is_first: bool,
+    pset: &crate::output::PsetConfig,
 ) {
+    use crate::output::format_rowset_pset;
+    use crate::query::{ColumnMeta, RowSet};
+
     if had_rows {
         if !col_names.is_empty() {
             if !is_first {
                 println!();
             }
 
-            // Compute column widths.
-            let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
-            for row in rows {
-                for (i, val) in row.iter().enumerate() {
-                    if i < widths.len() {
-                        widths[i] = widths[i].max(val.len());
-                    }
-                }
-            }
-
-            // Header row
-            let header: Vec<String> = col_names
+            // Build a RowSet from the raw string data.
+            let columns: Vec<ColumnMeta> = col_names
                 .iter()
-                .enumerate()
-                .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+                .map(|n| ColumnMeta {
+                    name: n.clone(),
+                    is_numeric: false,
+                })
                 .collect();
-            println!(" {} ", header.join(" | "));
+            // simple_query returns NULL as empty string; we wrap every cell
+            // in Some to distinguish "empty string" from "NULL" at the pset
+            // formatting layer (which uses null_display).  The distinction
+            // is lost at this protocol level; a future migration to the
+            // extended query protocol (issue #21) will fix this.
+            let row_data: Vec<Vec<Option<String>>> = rows
+                .iter()
+                .map(|r| r.iter().map(|v| Some(v.clone())).collect())
+                .collect();
 
-            // Separator
-            let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
-            println!("-{}-", sep.join("-+-"));
+            let rs = RowSet {
+                columns,
+                rows: row_data,
+            };
 
-            // Data rows
-            for row in rows {
-                let cells: Vec<String> = row
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        format!("{:<width$}", v, width = *widths.get(i).unwrap_or(&v.len()))
-                    })
-                    .collect();
-                println!(" {} ", cells.join(" | "));
-            }
-
-            let nrows = rows.len();
-            let row_word = if nrows == 1 { "row" } else { "rows" };
-            println!("({nrows} {row_word})");
+            let mut out = String::new();
+            format_rowset_pset(&mut out, &rs, pset);
+            print!("{out}");
         }
     } else {
         // Non-SELECT statement: show rows affected if > 0.
@@ -355,10 +346,10 @@ fn print_result_set(
     }
 }
 
-/// Execute a SQL string using `simple_query` and print a basic result.
+/// Execute a SQL string using `simple_query` and print results.
 ///
-/// This is a stub implementation. Issue #19 will replace this with proper
-/// column-aligned output formatting.
+/// Interpolates variables from `settings.vars` before sending to the server,
+/// then renders output using `settings.pset`.
 ///
 /// Returns `true` on success, `false` if the query produced a SQL error.
 pub async fn execute_query(
@@ -367,13 +358,17 @@ pub async fn execute_query(
     settings: &ReplSettings,
     tx: &mut TxState,
 ) -> bool {
+    // Interpolate variables before sending.
+    let interpolated = settings.vars.interpolate(sql);
+    let sql_to_send = interpolated.as_str();
+
     let start = if settings.timing {
         Some(Instant::now())
     } else {
         None
     };
 
-    let success = match client.simple_query(sql).await {
+    let success = match client.simple_query(sql_to_send).await {
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
@@ -402,7 +397,14 @@ pub async fn execute_query(
                     SimpleQueryMessage::CommandComplete(n) => {
                         // Flush the current result set, then reset for next
                         // statement in a multi-statement query.
-                        print_result_set(&col_names, &rows, had_rows, n, result_set_index == 0);
+                        print_result_set_pset(
+                            &col_names,
+                            &rows,
+                            had_rows,
+                            n,
+                            result_set_index == 0,
+                            &settings.pset,
+                        );
                         result_set_index += 1;
                         col_names.clear();
                         rows.clear();
@@ -413,7 +415,7 @@ pub async fn execute_query(
             }
 
             // Update transaction state based on what SQL was sent.
-            tx.update_from_sql(sql);
+            tx.update_from_sql(sql_to_send);
 
             true
         }
@@ -619,6 +621,242 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     );
 }
 
+/// Apply a `\set` command.
+///
+/// - `\set` (bare) — print all variables sorted by name.
+/// - `\set name` — print one variable.
+/// - `\set name value` — assign.
+///
+/// Special case: when `ECHO_HIDDEN` is set to `on`, update `settings.echo_hidden`.
+fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
+    if name.is_empty() {
+        // List all variables.
+        let mut pairs: Vec<(&String, &String)> = settings.vars.all().iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in pairs {
+            println!("{k} = '{v}'");
+        }
+        return;
+    }
+    if value.is_empty() {
+        // Display one variable.
+        match settings.vars.get(name) {
+            Some(v) => println!("{name} = '{v}'"),
+            None => eprintln!("{name} is not set"),
+        }
+        return;
+    }
+    settings.vars.set(name, value);
+    // Mirror ECHO_HIDDEN into the settings flag.
+    if name == "ECHO_HIDDEN" {
+        settings.echo_hidden = value == "on";
+    }
+}
+
+/// Apply an `\unset` command.
+fn apply_unset(settings: &mut ReplSettings, name: &str) {
+    if settings.vars.unset(name) {
+        // Mirror ECHO_HIDDEN.
+        if name == "ECHO_HIDDEN" {
+            settings.echo_hidden = false;
+        }
+    } else {
+        eprintln!("\\unset: variable {name} was not set");
+    }
+}
+
+/// Apply a `\pset` command.
+#[allow(clippy::too_many_lines)]
+fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
+    use crate::output::{OutputFormat, PsetConfig};
+
+    if option.is_empty() {
+        // Display all pset options.
+        print_pset_status(&settings.pset);
+        return;
+    }
+
+    match option {
+        "format" => {
+            let fmt = match value.unwrap_or("") {
+                "aligned" => OutputFormat::Aligned,
+                "unaligned" => OutputFormat::Unaligned,
+                "csv" => OutputFormat::Csv,
+                "json" => OutputFormat::Json,
+                "html" => OutputFormat::Html,
+                "wrapped" => OutputFormat::Wrapped,
+                other => {
+                    eprintln!("\\pset: unknown format \"{other}\"");
+                    return;
+                }
+            };
+            settings.pset.format = fmt;
+            println!("Output format is {}.", format_name(&settings.pset.format));
+        }
+        "border" => {
+            if let Some(v) = value.and_then(|s| s.parse::<u8>().ok()) {
+                settings.pset.border = v.min(2);
+                println!("Border style is {}.", settings.pset.border);
+            } else {
+                eprintln!("\\pset: invalid border value");
+            }
+        }
+        "null" => {
+            let display = value.unwrap_or("").to_owned();
+            println!("Null display is \"{display}\".");
+            settings.pset.null_display = display;
+        }
+        "fieldsep" => {
+            let sep = value.unwrap_or("|").to_owned();
+            println!("Field separator is \"{sep}\".");
+            settings.pset.field_sep = sep;
+        }
+        "recordsep" => {
+            let sep = value.unwrap_or("\n").to_owned();
+            settings.pset.record_sep = sep;
+            println!("Record separator is set.");
+        }
+        "tuples_only" | "t" => {
+            settings.pset.tuples_only = bool_value(value, settings.pset.tuples_only);
+            let state = if settings.pset.tuples_only {
+                "on"
+            } else {
+                "off"
+            };
+            println!("Tuples only is {state}.");
+        }
+        "footer" => {
+            settings.pset.footer = bool_value(value, settings.pset.footer);
+            let state = if settings.pset.footer { "on" } else { "off" };
+            println!("Default footer is {state}.");
+        }
+        "title" => {
+            settings.pset.title = value.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+            match &settings.pset.title {
+                Some(t) => println!("Title is \"{t}\"."),
+                None => println!("Title is not set."),
+            }
+        }
+        "expanded" | "x" => {
+            let mode = match value.unwrap_or("").to_lowercase().as_str() {
+                "on" => ExpandedMode::On,
+                "off" => ExpandedMode::Off,
+                "auto" => ExpandedMode::Auto,
+                _ => {
+                    // Toggle.
+                    if settings.pset.expanded == ExpandedMode::On {
+                        ExpandedMode::Off
+                    } else {
+                        ExpandedMode::On
+                    }
+                }
+            };
+            settings.pset.expanded = mode;
+            println!(
+                "Expanded display is {}.",
+                expanded_mode_str(settings.pset.expanded)
+            );
+        }
+        other => {
+            eprintln!("\\pset: unknown option \"{other}\"");
+        }
+    }
+
+    // Keep ReplSettings.expanded in sync.
+    settings.expanded = settings.pset.expanded;
+    let _ = PsetConfig::default; // suppress unused-import lint
+}
+
+/// Parse a boolean value for pset options: `on`/`true`/`1` → true, else toggle.
+fn bool_value(value: Option<&str>, current: bool) -> bool {
+    match value.map(str::to_lowercase).as_deref() {
+        Some("on" | "true" | "1") => true,
+        Some("off" | "false" | "0") => false,
+        _ => !current,
+    }
+}
+
+/// Return a short human-readable name for an `OutputFormat`.
+fn format_name(fmt: &crate::output::OutputFormat) -> &'static str {
+    use crate::output::OutputFormat;
+    match fmt {
+        OutputFormat::Aligned => "aligned",
+        OutputFormat::Unaligned => "unaligned",
+        OutputFormat::Csv => "csv",
+        OutputFormat::Json => "json",
+        OutputFormat::Html => "html",
+        OutputFormat::Wrapped => "wrapped",
+    }
+}
+
+/// Print a summary of the current `PsetConfig` (matching psql `\pset` output).
+fn print_pset_status(pset: &crate::output::PsetConfig) {
+    println!("border         = {}", pset.border);
+    println!("expanded       = {}", expanded_mode_str(pset.expanded));
+    println!("fieldsep       = \"{}\"", pset.field_sep);
+    println!(
+        "footer         = {}",
+        if pset.footer { "on" } else { "off" }
+    );
+    println!("format         = {}", format_name(&pset.format));
+    println!("null           = \"{}\"", pset.null_display);
+    println!(
+        "tuples_only    = {}",
+        if pset.tuples_only { "on" } else { "off" }
+    );
+    match &pset.title {
+        Some(t) => println!("title          = \"{t}\""),
+        None => println!("title          = (not set)"),
+    }
+}
+
+/// Apply `\a` — toggle between aligned and unaligned output.
+fn apply_toggle_align(settings: &mut ReplSettings) {
+    use crate::output::OutputFormat;
+    settings.pset.format = match settings.pset.format {
+        OutputFormat::Aligned => OutputFormat::Unaligned,
+        _ => OutputFormat::Aligned,
+    };
+    println!("Output format is {}.", format_name(&settings.pset.format));
+}
+
+/// Apply `\t [on|off]` — tuples-only mode.
+fn apply_tuples_only(settings: &mut ReplSettings, mode: Option<bool>) {
+    settings.pset.tuples_only = mode.unwrap_or(!settings.pset.tuples_only);
+    let state = if settings.pset.tuples_only {
+        "on"
+    } else {
+        "off"
+    };
+    println!("Tuples only is {state}.");
+}
+
+/// Apply `\f [sep]` — field separator.
+fn apply_field_sep(settings: &mut ReplSettings, sep: Option<&str>) {
+    let new_sep = sep.unwrap_or("|").to_owned();
+    println!("Field separator is \"{new_sep}\".");
+    settings.pset.field_sep = new_sep;
+}
+
+/// Apply `\H` — toggle HTML output.
+fn apply_toggle_html(settings: &mut ReplSettings) {
+    use crate::output::OutputFormat;
+    settings.pset.format = match settings.pset.format {
+        OutputFormat::Html => OutputFormat::Aligned,
+        _ => OutputFormat::Html,
+    };
+    println!("Output format is {}.", format_name(&settings.pset.format));
+}
+
+/// Apply `\C [title]` — set or clear table title.
+fn apply_set_title(settings: &mut ReplSettings, title: Option<&str>) {
+    settings.pset.title = title.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+    match &settings.pset.title {
+        Some(t) => println!("Title is \"{t}\"."),
+        None => println!("Title is not set."),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MetaResult — outcome of a dispatched meta-command
 // ---------------------------------------------------------------------------
@@ -680,6 +918,31 @@ async fn dispatch_meta(
                 }
                 Err(e) => eprintln!("\\c: {e}"),
             }
+        }
+        // Variable commands (issue #32).
+        MetaCmd::Set(ref name, ref value) => {
+            apply_set(settings, name, value);
+        }
+        MetaCmd::Unset(ref name) => {
+            apply_unset(settings, name);
+        }
+        MetaCmd::Pset(ref option, ref value) => {
+            apply_pset(settings, option, value.as_deref());
+        }
+        MetaCmd::ToggleAlign => {
+            apply_toggle_align(settings);
+        }
+        MetaCmd::TuplesOnly(mode) => {
+            apply_tuples_only(settings, mode);
+        }
+        MetaCmd::FieldSep(ref sep) => {
+            apply_field_sep(settings, sep.as_deref());
+        }
+        MetaCmd::ToggleHtml => {
+            apply_toggle_html(settings);
+        }
+        MetaCmd::SetTitle(ref title) => {
+            apply_set_title(settings, title.as_deref());
         }
         // Describe-family commands — delegate to the describe module.
         ref describe_cmd

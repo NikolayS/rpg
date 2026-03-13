@@ -3,7 +3,7 @@
 //! Produces psql-compatible output:
 //! - Aligned table (default)
 //! - Expanded (`\x`) output
-//! - Unaligned / CSV (future)
+//! - Unaligned, CSV, JSON, HTML
 //! - Error display with position marker
 //! - Timing footer (`Time: X.XXX ms`)
 
@@ -13,6 +13,24 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult};
+
+// ---------------------------------------------------------------------------
+// ExpandedMode (shared between output, repl, and metacmd)
+// ---------------------------------------------------------------------------
+
+/// Expanded display mode (`\x`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExpandedMode {
+    /// Always use expanded format.
+    On,
+    /// Always use normal (table) format.
+    #[default]
+    Off,
+    /// Automatically switch to expanded when table doesn't fit.
+    Auto,
+    /// Toggle between `On` and `Off`.
+    Toggle,
+}
 
 // ---------------------------------------------------------------------------
 // Output configuration
@@ -40,6 +58,109 @@ pub struct OutputConfig {
     /// Show verbose error detail including SQLSTATE.
     /// psql does not show SQLSTATE by default; set this for `\set VERBOSITY verbose`.
     pub verbose_errors: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Output format enum
+// ---------------------------------------------------------------------------
+
+/// The rendering format for query result sets (mirrors psql `\pset format`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Column-aligned table (psql default).
+    #[default]
+    Aligned,
+    /// Unaligned: fields separated by `field_sep`, no padding.
+    Unaligned,
+    /// RFC 4180 comma-separated values.
+    Csv,
+    /// JSON array of objects.
+    Json,
+    /// HTML `<table>` element.
+    Html,
+    /// Like aligned but wraps long values (same as aligned for now).
+    Wrapped,
+}
+
+// ---------------------------------------------------------------------------
+// PsetConfig — \pset and CLI-driven print configuration
+// ---------------------------------------------------------------------------
+
+/// Print settings controlled by `\pset`, `\a`, `\t`, `\f`, `\H`, `\C`, etc.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct PsetConfig {
+    /// Output format.
+    pub format: OutputFormat,
+    /// Border style: 0 = no border, 1 = inner borders, 2 = full box.
+    pub border: u8,
+    /// String shown for NULL values (default: `""`).
+    pub null_display: String,
+    /// Field separator for unaligned output (default `|`).
+    pub field_sep: String,
+    /// Record separator for unaligned output (default `\n`).
+    pub record_sep: String,
+    /// Suppress headers and footers.
+    pub tuples_only: bool,
+    /// Show row-count footer (default `true`).
+    pub footer: bool,
+    /// Optional table title (printed above the table).
+    pub title: Option<String>,
+    /// Expanded display mode.
+    pub expanded: ExpandedMode,
+}
+
+impl Default for PsetConfig {
+    fn default() -> Self {
+        Self {
+            format: OutputFormat::Aligned,
+            border: 1,
+            null_display: String::new(),
+            field_sep: "|".to_owned(),
+            record_sep: "\n".to_owned(),
+            tuples_only: false,
+            footer: true,
+            title: None,
+            expanded: ExpandedMode::Off,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level pset-aware formatter
+// ---------------------------------------------------------------------------
+
+/// Format a single [`RowSet`] using the active [`PsetConfig`].
+pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
+    // Title line (if set).
+    if let Some(ref title) = cfg.title {
+        let _ = writeln!(out, "{title}");
+    }
+
+    match &cfg.format {
+        OutputFormat::Aligned | OutputFormat::Wrapped => {
+            if cfg.expanded == ExpandedMode::On {
+                let ocfg = OutputConfig {
+                    null_string: cfg.null_display.clone(),
+                    expanded: true,
+                    tuples_only: cfg.tuples_only,
+                    ..Default::default()
+                };
+                format_expanded(out, rs, &ocfg);
+            } else {
+                let ocfg = OutputConfig {
+                    null_string: cfg.null_display.clone(),
+                    tuples_only: cfg.tuples_only,
+                    ..Default::default()
+                };
+                format_aligned_pset(out, rs, &ocfg, cfg);
+            }
+        }
+        OutputFormat::Unaligned => format_unaligned(out, rs, cfg),
+        OutputFormat::Csv => format_csv(out, rs, cfg),
+        OutputFormat::Json => format_json(out, rs, cfg),
+        OutputFormat::Html => format_html(out, rs, cfg),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +542,254 @@ pub fn display_width(s: &str) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Aligned table with PsetConfig (handles tuples_only + footer)
+// ---------------------------------------------------------------------------
+
+/// Aligned table formatter that honours `PsetConfig` for tuples-only and
+/// footer suppression.  Delegates column-width calculation to the shared
+/// [`column_widths`] helper.
+fn format_aligned_pset(out: &mut String, rs: &RowSet, ocfg: &OutputConfig, pcfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    if cols.is_empty() {
+        if !pcfg.tuples_only && pcfg.footer {
+            write_row_count(out, rows.len());
+        }
+        return;
+    }
+
+    let widths = column_widths(cols, rows, ocfg);
+
+    // Header (suppressed in tuples-only mode).
+    if !pcfg.tuples_only {
+        write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), false);
+        write_separator(out, &widths);
+    }
+
+    // Data rows.
+    for row in rows {
+        write_aligned_row(
+            out,
+            cols,
+            &widths,
+            |_col, cell_idx| {
+                row.get(cell_idx)
+                    .and_then(|v| v.as_deref().map(ToOwned::to_owned))
+                    .unwrap_or_else(|| ocfg.null_string.clone())
+            },
+            true,
+        );
+    }
+
+    // Footer.
+    if !pcfg.tuples_only && pcfg.footer {
+        write_row_count(out, rows.len());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unaligned formatter
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] in unaligned mode: fields separated by `cfg.field_sep`.
+///
+/// The output matches psql `-A`: header line (unless tuples-only), then one
+/// data row per line with `field_sep` between fields.
+pub fn format_unaligned(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    if !cfg.tuples_only {
+        // Header.
+        let header: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+        out.push_str(&header.join(&cfg.field_sep));
+        out.push_str(&cfg.record_sep);
+    }
+
+    for row in rows {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|v| v.as_deref().unwrap_or(&cfg.null_display).to_owned())
+            .collect();
+        out.push_str(&cells.join(&cfg.field_sep));
+        out.push_str(&cfg.record_sep);
+    }
+
+    if !cfg.tuples_only && cfg.footer {
+        let n = rows.len();
+        let word = if n == 1 { "row" } else { "rows" };
+        let _ = writeln!(out, "({n} {word})");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CSV formatter  (RFC 4180)
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] as RFC 4180 CSV.
+///
+/// Fields that contain a comma, double-quote, or newline are wrapped in
+/// double-quotes with any embedded double-quotes doubled.
+/// Header row is always emitted (psql behaviour with `\pset format csv`).
+pub fn format_csv(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    if !cfg.tuples_only {
+        let header: Vec<String> = cols.iter().map(|c| csv_field(&c.name)).collect();
+        out.push_str(&header.join(","));
+        out.push('\n');
+    }
+
+    for row in rows {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|v| csv_field(v.as_deref().unwrap_or(&cfg.null_display)))
+            .collect();
+        out.push_str(&cells.join(","));
+        out.push('\n');
+    }
+}
+
+/// RFC 4180: wrap in double-quotes if the value contains `,`, `"`, `\n`, or `\r`.
+fn csv_field(val: &str) -> String {
+    if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+        let escaped = val.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        val.to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON formatter
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] as a JSON array of objects.
+///
+/// Each row becomes `{"col1": "val1", "col2": "val2"}`.
+/// NULL values are rendered as JSON `null`.
+/// String values are JSON-escaped.
+pub fn format_json(out: &mut String, rs: &RowSet, _cfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    out.push('[');
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        if row_idx > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        for (col_idx, col) in cols.iter().enumerate() {
+            if col_idx > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            out.push_str(&json_escape(&col.name));
+            out.push_str("\":");
+            match row.get(col_idx).and_then(|v| v.as_deref()) {
+                Some(val) => {
+                    out.push('"');
+                    out.push_str(&json_escape(val));
+                    out.push('"');
+                }
+                None => {
+                    // NULL → JSON null (ignore cfg.null_display for JSON).
+                    out.push_str("null");
+                }
+            }
+        }
+        out.push('}');
+    }
+
+    out.push(']');
+    out.push('\n');
+}
+
+/// JSON-escape a string: escape `"`, `\`, and control characters.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// HTML formatter
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] as an HTML `<table>` element.
+///
+/// Produces a minimal but valid table: `<thead>` with `<th>` cells and
+/// `<tbody>` with `<td>` cells.  Values are HTML-escaped.
+pub fn format_html(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    if let Some(ref title) = cfg.title {
+        let _ = writeln!(out, "<caption>{}</caption>", html_escape(title));
+    }
+
+    out.push_str("<table>\n");
+
+    if !cfg.tuples_only {
+        out.push_str("<thead><tr>");
+        for col in cols {
+            out.push_str("<th>");
+            out.push_str(&html_escape(&col.name));
+            out.push_str("</th>");
+        }
+        out.push_str("</tr></thead>\n");
+    }
+
+    out.push_str("<tbody>\n");
+    for row in rows {
+        out.push_str("<tr>");
+        for (col_idx, _col) in cols.iter().enumerate() {
+            let val = row
+                .get(col_idx)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(&cfg.null_display);
+            out.push_str("<td>");
+            out.push_str(&html_escape(val));
+            out.push_str("</td>");
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</tbody>\n");
+    out.push_str("</table>\n");
+}
+
+/// HTML-escape: replace `<`, `>`, `&`, `"`, `'` with entities.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -700,5 +1069,200 @@ mod tests {
         let out = format_outcome(&outcome, &cfg);
         assert!(out.contains("Time:"), "missing timing: {out}");
         assert!(out.contains("ms"), "missing 'ms': {out}");
+    }
+
+    // -----------------------------------------------------------------------
+    // CSV format
+    // -----------------------------------------------------------------------
+
+    fn mk_rowset_ab() -> RowSet {
+        RowSet {
+            columns: vec![mk_col("a", false), mk_col("b", false)],
+            rows: vec![
+                mk_row(&[Some("1"), Some("2")]),
+                mk_row(&[Some("3"), Some("4")]),
+            ],
+        }
+    }
+
+    #[test]
+    fn test_csv_basic() {
+        let rs = mk_rowset_ab();
+        let mut out = String::new();
+        format_csv(&mut out, &rs, &PsetConfig::default());
+        assert_eq!(out, "a,b\n1,2\n3,4\n");
+    }
+
+    #[test]
+    fn test_csv_field_with_comma() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[Some("a,b")])],
+        };
+        let mut out = String::new();
+        format_csv(&mut out, &rs, &PsetConfig::default());
+        // Field containing comma must be double-quoted.
+        assert!(out.contains("\"a,b\""), "expected quoted field: {out}");
+    }
+
+    #[test]
+    fn test_csv_field_with_double_quote() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[Some("say \"hi\"")])],
+        };
+        let mut out = String::new();
+        format_csv(&mut out, &rs, &PsetConfig::default());
+        // Embedded double-quotes must be doubled.
+        assert!(
+            out.contains("\"say \"\"hi\"\"\""),
+            "expected RFC 4180 escaping: {out}"
+        );
+    }
+
+    #[test]
+    fn test_csv_tuples_only_suppresses_header() {
+        let rs = mk_rowset_ab();
+        let cfg = PsetConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_csv(&mut out, &rs, &cfg);
+        assert!(!out.starts_with("a,"), "header must be suppressed: {out}");
+        assert!(out.contains("1,2"), "data must be present: {out}");
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_json_basic() {
+        let rs = mk_rowset_ab();
+        let mut out = String::new();
+        format_json(&mut out, &rs, &PsetConfig::default());
+        // Must be parseable JSON (structural check).
+        assert!(out.starts_with('['), "must start with [: {out}");
+        assert!(out.trim_end().ends_with(']'), "must end with ]: {out}");
+        assert!(out.contains("\"a\""), "must contain key 'a': {out}");
+        assert!(out.contains("\"1\""), "must contain value '1': {out}");
+    }
+
+    #[test]
+    fn test_json_null_becomes_json_null() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[None])],
+        };
+        let mut out = String::new();
+        format_json(&mut out, &rs, &PsetConfig::default());
+        assert!(out.contains(":null"), "NULL should be JSON null: {out}");
+    }
+
+    #[test]
+    fn test_json_escapes_special_chars() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[Some("say \"hi\"\nnewline")])],
+        };
+        let mut out = String::new();
+        format_json(&mut out, &rs, &PsetConfig::default());
+        assert!(out.contains("\\\""), "must escape double-quote: {out}");
+        assert!(out.contains("\\n"), "must escape newline: {out}");
+    }
+
+    #[test]
+    fn test_json_empty_rows() {
+        let rs = RowSet {
+            columns: vec![mk_col("a", false)],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        format_json(&mut out, &rs, &PsetConfig::default());
+        assert_eq!(out.trim(), "[]");
+    }
+
+    // -----------------------------------------------------------------------
+    // HTML format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_html_basic() {
+        let rs = mk_rowset_ab();
+        let mut out = String::new();
+        format_html(&mut out, &rs, &PsetConfig::default());
+        assert!(out.contains("<table>"), "missing <table>: {out}");
+        assert!(out.contains("<th>a</th>"), "missing <th>a</th>: {out}");
+        assert!(out.contains("<td>1</td>"), "missing <td>1</td>: {out}");
+        assert!(out.contains("</table>"), "missing </table>: {out}");
+    }
+
+    #[test]
+    fn test_html_escapes_special_chars() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[Some("<b>bold</b> & \"quoted\"")])],
+        };
+        let mut out = String::new();
+        format_html(&mut out, &rs, &PsetConfig::default());
+        assert!(out.contains("&lt;b&gt;"), "must escape <: {out}");
+        assert!(out.contains("&amp;"), "must escape &: {out}");
+        assert!(out.contains("&quot;"), "must escape \": {out}");
+    }
+
+    #[test]
+    fn test_html_tuples_only_suppresses_header() {
+        let rs = mk_rowset_ab();
+        let cfg = PsetConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_html(&mut out, &rs, &cfg);
+        assert!(!out.contains("<thead>"), "thead must be suppressed: {out}");
+        assert!(out.contains("<td>"), "data must be present: {out}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unaligned format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unaligned_basic() {
+        let rs = mk_rowset_ab();
+        let mut out = String::new();
+        format_unaligned(&mut out, &rs, &PsetConfig::default());
+        // Default field separator is `|`.
+        assert!(out.contains("a|b"), "header with | separator: {out}");
+        assert!(out.contains("1|2"), "data with | separator: {out}");
+    }
+
+    #[test]
+    fn test_unaligned_custom_separator() {
+        let rs = mk_rowset_ab();
+        let cfg = PsetConfig {
+            field_sep: ",".to_owned(),
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_unaligned(&mut out, &rs, &cfg);
+        assert!(out.contains("a,b"), "custom sep in header: {out}");
+        assert!(out.contains("1,2"), "custom sep in data: {out}");
+    }
+
+    #[test]
+    fn test_unaligned_null_display() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[None])],
+        };
+        let cfg = PsetConfig {
+            null_display: "[NULL]".to_owned(),
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_unaligned(&mut out, &rs, &cfg);
+        assert!(out.contains("[NULL]"), "null display: {out}");
     }
 }
