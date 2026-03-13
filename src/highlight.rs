@@ -13,7 +13,7 @@ pub enum TokenKind {
     Keyword,
     /// String literal (`'...'` or `$$...$$`)
     StringLiteral,
-    /// Numeric literal (42, 3.14, 1e10)
+    /// Numeric literal (42, 3.14, 1e10, 0xFF)
     Number,
     /// Comment (`--` or `/* ... */`)
     Comment,
@@ -21,6 +21,8 @@ pub enum TokenKind {
     BackslashCmd,
     /// Operator (`+`, `-`, `*`, `/`, `=`, `<`, `>`, etc.)
     Operator,
+    /// Schema object (table or column name known from the cache).
+    SchemaObject,
     /// Regular identifier or other text
     Normal,
 }
@@ -203,6 +205,7 @@ fn ansi_color(kind: TokenKind) -> &'static str {
         TokenKind::Comment => "\x1b[2;37m",      // dim gray
         TokenKind::BackslashCmd => "\x1b[1;35m", // bold magenta
         TokenKind::Operator => "\x1b[36m",       // cyan
+        TokenKind::SchemaObject => "\x1b[1;33m", // bold yellow (table/column names)
         TokenKind::Normal => "",                 // no color
     }
 }
@@ -372,12 +375,28 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
 
         // ------------------------------------------------------------------
-        // Numeric literal: digit or .digit (e.g. 42, 3.14, .5, 1e10)
+        // Numeric literal: digit or .digit (e.g. 42, 3.14, .5, 1e10, 0xFF)
         // ------------------------------------------------------------------
         if bytes[pos].is_ascii_digit()
             || (bytes[pos] == b'.' && pos + 1 < len && bytes[pos + 1].is_ascii_digit())
         {
             let start = pos;
+            // Hex literal: 0x… or 0X…
+            if bytes[pos] == b'0'
+                && pos + 1 < len
+                && (bytes[pos + 1] == b'x' || bytes[pos + 1] == b'X')
+            {
+                pos += 2; // consume '0x'
+                while pos < len && bytes[pos].is_ascii_hexdigit() {
+                    pos += 1;
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Number,
+                    start,
+                    end: pos,
+                });
+                continue;
+            }
             // Integer / decimal part.
             while pos < len && bytes[pos].is_ascii_digit() {
                 pos += 1;
@@ -535,12 +554,41 @@ fn consume_operator(bytes: &[u8], pos: usize) -> usize {
 
 /// Highlight SQL text by wrapping tokens in ANSI escape sequences.
 ///
+/// `schema_names` is an optional set of lowercase identifiers (table and
+/// column names) that should be rendered as [`TokenKind::SchemaObject`]
+/// instead of `Normal`.  Pass `None` (or an empty slice) to disable
+/// schema-aware identifier colouring.
+///
 /// Returns a [`std::borrow::Cow`] — borrows the original if no highlighting
 /// is needed (all tokens are `Normal`), or returns an owned `String`
 /// otherwise.
-pub fn highlight_sql(input: &str) -> std::borrow::Cow<'_, str> {
+pub fn highlight_sql<'a>(
+    input: &'a str,
+    schema_names: Option<&std::collections::HashSet<String>>,
+) -> std::borrow::Cow<'a, str> {
     let tokens = tokenize(input);
-    if tokens.iter().all(|t| t.kind == TokenKind::Normal) {
+
+    // Determine whether any token needs colouring (considering schema too).
+    let needs_color = tokens.iter().any(|t| {
+        if t.kind != TokenKind::Normal {
+            return true;
+        }
+        // Check if a Normal identifier token is a known schema object.
+        if let Some(names) = schema_names {
+            let text = &input[t.start..t.end];
+            // Only identifiers (start with alpha/_) qualify.
+            if text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                return names.contains(&text.to_lowercase());
+            }
+        }
+        false
+    });
+
+    if !needs_color {
         return std::borrow::Cow::Borrowed(input);
     }
 
@@ -548,7 +596,27 @@ pub fn highlight_sql(input: &str) -> std::borrow::Cow<'_, str> {
     let mut out = String::with_capacity(input.len() + tokens.len() * 10);
     for token in &tokens {
         let text = &input[token.start..token.end];
-        let color = ansi_color(token.kind);
+        let kind = if token.kind == TokenKind::Normal {
+            // Promote identifiers that match a schema object.
+            if let Some(names) = schema_names {
+                if text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && names.contains(&text.to_lowercase())
+                {
+                    TokenKind::SchemaObject
+                } else {
+                    TokenKind::Normal
+                }
+            } else {
+                TokenKind::Normal
+            }
+        } else {
+            token.kind
+        };
+
+        let color = ansi_color(kind);
         if color.is_empty() {
             out.push_str(text);
         } else {
@@ -705,6 +773,27 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_number_hex() {
+        let tokens = token_kinds("0xFF");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0], (TokenKind::Number, "0xFF"));
+    }
+
+    #[test]
+    fn test_tokenize_number_hex_lowercase() {
+        let tokens = token_kinds("0xdeadbeef");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0], (TokenKind::Number, "0xdeadbeef"));
+    }
+
+    #[test]
+    fn test_tokenize_number_hex_upper_prefix() {
+        let tokens = token_kinds("0X1A2B");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0], (TokenKind::Number, "0X1A2B"));
+    }
+
+    #[test]
     fn test_tokenize_backslash_cmd() {
         let tokens = token_kinds(r"\dt");
         assert_eq!(tokens.len(), 1);
@@ -787,7 +876,7 @@ mod tests {
     #[test]
     fn test_highlight_sql_no_color_for_plain() {
         // A plain identifier (no keywords) should return Cow::Borrowed.
-        let result = highlight_sql("identifier");
+        let result = highlight_sql("identifier", None);
         assert!(
             matches!(result, std::borrow::Cow::Borrowed(_)),
             "expected Borrowed for plain identifier"
@@ -796,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_highlight_sql_keywords_colored() {
-        let result = highlight_sql("SELECT 1");
+        let result = highlight_sql("SELECT 1", None);
         // Result must contain ANSI bold-blue escape for SELECT.
         assert!(
             result.contains("\x1b[1;34m"),
@@ -807,7 +896,7 @@ mod tests {
 
     #[test]
     fn test_highlight_sql_reset_after_token() {
-        let result = highlight_sql("SELECT 1");
+        let result = highlight_sql("SELECT 1", None);
         // After each colored token there must be a reset.
         assert!(result.contains(ANSI_RESET), "expected ANSI reset code");
     }
@@ -816,9 +905,36 @@ mod tests {
     fn test_highlight_sql_covers_all_input() {
         // Strip ANSI codes from output; result must equal the original input.
         let input = "SELECT name FROM users WHERE id = 1";
-        let colored = highlight_sql(input);
+        let colored = highlight_sql(input, None);
         let stripped = strip_ansi(colored.as_ref());
         assert_eq!(stripped, input);
+    }
+
+    #[test]
+    fn test_highlight_sql_schema_object_colored() {
+        // A known table name should receive SchemaObject (bold yellow) color.
+        let mut names = std::collections::HashSet::new();
+        names.insert("users".to_owned());
+        let result = highlight_sql("SELECT * FROM users", Some(&names));
+        // Bold yellow = "\x1b[1;33m"
+        assert!(
+            result.contains("\x1b[1;33m"),
+            "expected bold-yellow ANSI code for schema object"
+        );
+        let stripped = strip_ansi(result.as_ref());
+        assert_eq!(stripped, "SELECT * FROM users");
+    }
+
+    #[test]
+    fn test_highlight_sql_schema_object_case_insensitive() {
+        // Table name in upper case should still match lowercase cache entry.
+        let mut names = std::collections::HashSet::new();
+        names.insert("users".to_owned());
+        let result = highlight_sql("FROM USERS", Some(&names));
+        assert!(
+            result.contains("\x1b[1;33m"),
+            "expected bold-yellow for uppercase USERS matching 'users' in cache"
+        );
     }
 
     // -----------------------------------------------------------------------

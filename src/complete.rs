@@ -862,7 +862,20 @@ impl Validator for SamoHelper {}
 impl Highlighter for SamoHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
         if self.highlight_enabled() {
-            crate::highlight::highlight_sql(line)
+            // Build a set of known schema object names (tables + columns) for
+            // schema-aware identifier colouring.  We do this inline on each
+            // keystroke so it stays fresh after a cache reload; the lock is
+            // held only for the duration of the set construction.
+            let schema_names: Option<std::collections::HashSet<String>> =
+                self.cache.read().ok().map(|cache| {
+                    cache
+                        .tables
+                        .iter()
+                        .map(|t| t.name.to_lowercase())
+                        .chain(cache.columns.iter().map(|c| c.name.to_lowercase()))
+                        .collect()
+                });
+            crate::highlight::highlight_sql(line, schema_names.as_ref())
         } else {
             std::borrow::Cow::Borrowed(line)
         }
