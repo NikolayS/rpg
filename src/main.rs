@@ -670,6 +670,7 @@ async fn main() {
                 println!("{}", version_string());
                 println!("Type \\? for help, \\q to quit.");
                 println!("{}", connection::connection_info(&resolved));
+                println!();
             }
 
             let mut settings = build_settings(&cli, &cfg);
