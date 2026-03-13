@@ -685,11 +685,8 @@ pub async fn execute_query_extended(
             use crate::query::{ColumnMeta, RowSet};
 
             if !rows.is_empty() || !stmt.columns().is_empty() {
-                let col_names: Vec<String> = stmt
-                    .columns()
-                    .iter()
-                    .map(|c| c.name().to_owned())
-                    .collect();
+                let col_names: Vec<String> =
+                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
                 let row_data: Vec<Vec<Option<String>>> = rows
                     .iter()
@@ -814,11 +811,8 @@ async fn execute_named_stmt(
             use crate::query::{ColumnMeta, RowSet};
 
             if !rows.is_empty() || !stmt.columns().is_empty() {
-                let col_names: Vec<String> = stmt
-                    .columns()
-                    .iter()
-                    .map(|c| c.name().to_owned())
-                    .collect();
+                let col_names: Vec<String> =
+                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
                 let row_data: Vec<Vec<Option<String>>> = rows
                     .iter()
@@ -1488,13 +1482,8 @@ pub(crate) async fn exec_lines(
                     let sql = buf.trim().to_owned();
                     buf.clear();
                     if !sql.is_empty() {
-                        let ok = if let Some(bp) =
-                            settings.pending_bind_params.take()
-                        {
-                            execute_query_extended(
-                                client, &sql, &bp, settings, tx,
-                            )
-                            .await
+                        let ok = if let Some(bp) = settings.pending_bind_params.take() {
+                            execute_query_extended(client, &sql, &bp, settings, tx).await
                         } else {
                             execute_query(client, &sql, settings, tx).await
                         };
@@ -1540,11 +1529,7 @@ pub(crate) async fn exec_lines(
                     }
                 }
                 MetaResult::BindNamedExec(name, params) => {
-                    if !execute_named_stmt(
-                        client, &name, &params, settings, tx,
-                    )
-                    .await
-                    {
+                    if !execute_named_stmt(client, &name, &params, settings, tx).await {
                         exit_code = 1;
                         if settings.single_transaction {
                             break 'lines;
@@ -1554,11 +1539,7 @@ pub(crate) async fn exec_lines(
                 MetaResult::ClosePrepared(name) => {
                     if settings.named_statements.remove(&name).is_some() {
                         let deallocate = format!("deallocate {name}");
-                        if !execute_query(
-                            client, &deallocate, settings, tx,
-                        )
-                        .await
-                        {
+                        if !execute_query(client, &deallocate, settings, tx).await {
                             exit_code = 1;
                             if settings.single_transaction {
                                 break 'lines;
@@ -1587,20 +1568,14 @@ pub(crate) async fn exec_lines(
                 let interpolated_meta = settings.vars.interpolate(meta_part);
                 let mut parsed = crate::metacmd::parse(&interpolated_meta);
                 parsed.echo_hidden = settings.echo_hidden;
-                let result =
-                    dispatch_meta(parsed, client, params, settings, tx).await;
+                let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
                     MetaResult::ExecuteBuffer => {
                         let sql = buf.trim().to_owned();
                         buf.clear();
                         if !sql.is_empty() {
-                            let ok = if let Some(bp) =
-                                settings.pending_bind_params.take()
-                            {
-                                execute_query_extended(
-                                    client, &sql, &bp, settings, tx,
-                                )
-                                .await
+                            let ok = if let Some(bp) = settings.pending_bind_params.take() {
+                                execute_query_extended(client, &sql, &bp, settings, tx).await
                             } else {
                                 execute_query(client, &sql, settings, tx).await
                             };
@@ -1616,14 +1591,7 @@ pub(crate) async fn exec_lines(
                         let sql = buf.trim().to_owned();
                         buf.clear();
                         if !sql.is_empty() {
-                            execute_gset(
-                                client,
-                                &sql,
-                                prefix.as_deref(),
-                                settings,
-                                tx,
-                            )
-                            .await;
+                            execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
                         }
                     }
                     MetaResult::DescribeBuffer => {
@@ -1640,11 +1608,7 @@ pub(crate) async fn exec_lines(
                         settings.pending_bind_params = Some(params);
                     }
                     MetaResult::BindNamedExec(name, params) => {
-                        if !execute_named_stmt(
-                            client, &name, &params, settings, tx,
-                        )
-                        .await
-                        {
+                        if !execute_named_stmt(client, &name, &params, settings, tx).await {
                             exit_code = 1;
                             if settings.single_transaction {
                                 break 'lines;
@@ -2926,14 +2890,7 @@ async fn handle_backslash_dumb(
             buf.clear();
             if !sql.is_empty() {
                 if let Some(bind_params) = settings.pending_bind_params.take() {
-                    execute_query_extended(
-                        client,
-                        &sql,
-                        &bind_params,
-                        settings,
-                        tx,
-                    )
-                    .await;
+                    execute_query_extended(client, &sql, &bind_params, settings, tx).await;
                 } else {
                     execute_query(client, &sql, settings, tx).await;
                 }
@@ -2964,14 +2921,7 @@ async fn handle_backslash_dumb(
                 settings.expanded = ExpandedMode::On;
                 settings.pset.expanded = ExpandedMode::On;
                 if let Some(bind_params) = settings.pending_bind_params.take() {
-                    execute_query_extended(
-                        client,
-                        &sql,
-                        &bind_params,
-                        settings,
-                        tx,
-                    )
-                    .await;
+                    execute_query_extended(client, &sql, &bind_params, settings, tx).await;
                 } else {
                     execute_query(client, &sql, settings, tx).await;
                 }
@@ -3124,17 +3074,8 @@ async fn handle_line(
                 buf.clear();
                 stmt_buf.clear();
                 if !sql.is_empty() {
-                    if let Some(bind_params) =
-                        settings.pending_bind_params.take()
-                    {
-                        execute_query_extended(
-                            client,
-                            &sql,
-                            &bind_params,
-                            settings,
-                            tx,
-                        )
-                        .await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
                     } else {
                         execute_query(client, &sql, settings, tx).await;
                     }
@@ -3167,17 +3108,8 @@ async fn handle_line(
                     let prev = settings.expanded;
                     settings.expanded = ExpandedMode::On;
                     settings.pset.expanded = ExpandedMode::On;
-                    if let Some(bind_params) =
-                        settings.pending_bind_params.take()
-                    {
-                        execute_query_extended(
-                            client,
-                            &sql,
-                            &bind_params,
-                            settings,
-                            tx,
-                        )
-                        .await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
                     } else {
                         execute_query(client, &sql, settings, tx).await;
                     }
@@ -3220,8 +3152,7 @@ async fn handle_line(
                 buf.clear();
                 stmt_buf.clear();
                 if !sql.is_empty() {
-                    execute_gset(client, &sql, prefix.as_deref(), settings, tx)
-                        .await;
+                    execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
                 }
                 HandleLineResult::BufferUpdated
             }
@@ -3245,9 +3176,7 @@ async fn handle_line(
                 } else {
                     match client.prepare(&sql).await {
                         Ok(stmt) => {
-                            settings
-                                .named_statements
-                                .insert(name.clone(), stmt);
+                            settings.named_statements.insert(name.clone(), stmt);
                         }
                         Err(e) => eprintln!("ERROR:  {e}"),
                     }
@@ -3310,17 +3239,8 @@ async fn handle_line(
                 buf.clear();
                 stmt_buf.clear();
                 if !sql.is_empty() {
-                    if let Some(bind_params) =
-                        settings.pending_bind_params.take()
-                    {
-                        execute_query_extended(
-                            client,
-                            &sql,
-                            &bind_params,
-                            settings,
-                            tx,
-                        )
-                        .await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
                     } else {
                         execute_query(client, &sql, settings, tx).await;
                     }
@@ -3353,17 +3273,8 @@ async fn handle_line(
                     let prev = settings.expanded;
                     settings.expanded = ExpandedMode::On;
                     settings.pset.expanded = ExpandedMode::On;
-                    if let Some(bind_params) =
-                        settings.pending_bind_params.take()
-                    {
-                        execute_query_extended(
-                            client,
-                            &sql,
-                            &bind_params,
-                            settings,
-                            tx,
-                        )
-                        .await;
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended(client, &sql, &bind_params, settings, tx).await;
                     } else {
                         execute_query(client, &sql, settings, tx).await;
                     }
@@ -3391,14 +3302,7 @@ async fn handle_line(
                 buf.clear();
                 stmt_buf.clear();
                 if !sql.is_empty() {
-                    execute_gset(
-                        client,
-                        &sql,
-                        prefix.as_deref(),
-                        settings,
-                        tx,
-                    )
-                    .await;
+                    execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
                 }
                 HandleLineResult::BufferUpdated
             }

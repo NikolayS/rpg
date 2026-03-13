@@ -233,7 +233,6 @@ pub enum MetaCmd {
     /// Sends `DEALLOCATE stmt_name` and removes it from the local map.
     ClosePrepared(String),
 
-
     // -- Cross-tabulation (#54) --------------------------------------------
     /// `\crosstabview [colV [colH [colD [sortcolH]]]]` — execute the buffer
     /// and pivot the result into a cross-tabulation table.
@@ -584,7 +583,6 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
             }
             return ParsedMeta::simple(MetaCmd::ClosePrepared(name));
-
         }
     }
     // `\cd [dir]` — must be checked before bare `\c`.
@@ -2244,7 +2242,10 @@ mod tests {
     #[test]
     fn parse_bind_not_confused_with_bind_named() {
         // \bind_named must not fall through to \bind.
-        assert!(!matches!(parse("\\bind_named my_stmt 1").cmd, MetaCmd::Bind(_)));
+        assert!(!matches!(
+            parse("\\bind_named my_stmt 1").cmd,
+            MetaCmd::Bind(_)
+        ));
     }
 
     // -- \bind_named (#57) ---------------------------------------------------
@@ -2367,7 +2368,10 @@ mod tests {
 
     #[test]
     fn split_params_mixed() {
-        assert_eq!(split_params("42 'foo bar' baz"), vec!["42", "foo bar", "baz"]);
+        assert_eq!(
+            split_params("42 'foo bar' baz"),
+            vec!["42", "foo bar", "baz"]
+        );
     }
 
     // -- \crosstabview -------------------------------------------------------
