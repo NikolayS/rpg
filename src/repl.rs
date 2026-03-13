@@ -3371,8 +3371,10 @@ fn parse_watch_interval(s: &str) -> f64 {
 ///
 /// Example: `Thu Mar 13 19:00:00 2026`
 ///
-/// Uses `libc::localtime_r` to convert to local time so the output
-/// matches the user's timezone, consistent with psql behaviour.
+/// On Unix, uses `libc::localtime_r` to convert to local time so the
+/// output matches the user's timezone, consistent with psql behaviour.
+/// On Windows, falls back to UTC (local-time conversion via POSIX
+/// `localtime_r` is not available on that platform).
 fn format_system_time(now: std::time::SystemTime) -> String {
     const WDAY: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MON: [&str; 12] = [
@@ -3382,29 +3384,71 @@ fn format_system_time(now: std::time::SystemTime) -> String {
     use std::time::{Duration, UNIX_EPOCH};
 
     let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    // libc::time_t is i64 on 64-bit platforms; Unix timestamps fit safely.
-    #[allow(clippy::cast_possible_wrap)]
-    let unix_secs: libc::time_t = duration.as_secs() as libc::time_t;
 
-    // SAFETY: localtime_r is thread-safe and only reads the time_t we pass.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::localtime_r(&raw const unix_secs, &raw mut tm);
+    // Windows path: pure-Rust UTC computation.
+    // localtime_r is POSIX-only and unavailable on Windows; UTC is an
+    // acceptable fallback for the \watch timestamp display on Windows.
+    #[cfg(windows)]
+    return {
+        let secs = duration.as_secs();
+
+        // Decompose unix timestamp into calendar fields (UTC).
+        // Algorithm: http://howardhinnant.github.io/date_algorithms.html
+        let days = secs / 86_400;
+        let time_of_day = secs % 86_400;
+        let hour = (time_of_day / 3_600) as u32;
+        let min = ((time_of_day % 3_600) / 60) as u32;
+        let sec = (time_of_day % 60) as u32;
+
+        // days since Unix epoch → civil date (Gregorian proleptic)
+        let z = days as i64 + 719_468;
+        let era: i64 = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = (z - era * 146_097) as u64;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+
+        // Day-of-week: 0=Sun (Unix epoch was a Thursday = 4)
+        let wday_idx = ((days + 4) % 7) as usize;
+        let mon = MON[(m - 1).clamp(0, 11) as usize];
+        let wday = WDAY[wday_idx.clamp(0, 6)];
+
+        format!("{wday} {mon} {d:2} {hour:02}:{min:02}:{sec:02} {y}")
+    };
+
+    // Unix path: use libc::localtime_r for local-time conversion.
+    // `#[allow(deprecated)]` silences the musl time_t 32→64-bit transition
+    // warning; the cast is correct on all 64-bit targets Samo ships for.
+    #[cfg(not(windows))]
+    {
+        #[allow(deprecated)]
+        #[allow(clippy::cast_possible_wrap)]
+        let unix_secs: libc::time_t = duration.as_secs() as libc::time_t;
+
+        // SAFETY: localtime_r is thread-safe and only reads the time_t we pass.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::localtime_r(&raw const unix_secs, &raw mut tm);
+        }
+
+        // clamp() guarantees the index is in-bounds; the value was already
+        // non-negative so the cast to usize is safe.
+        #[allow(clippy::cast_sign_loss)]
+        let wday = WDAY[tm.tm_wday.clamp(0, 6) as usize];
+        #[allow(clippy::cast_sign_loss)]
+        let mon = MON[tm.tm_mon.clamp(0, 11) as usize];
+        let day = tm.tm_mday;
+        let hour = tm.tm_hour;
+        let min = tm.tm_min;
+        let sec = tm.tm_sec;
+        let year = tm.tm_year + 1900;
+
+        format!("{wday} {mon} {day:2} {hour:02}:{min:02}:{sec:02} {year}")
     }
-
-    // clamp() guarantees the index is in-bounds; the value was already
-    // non-negative so the cast to usize is safe.
-    #[allow(clippy::cast_sign_loss)]
-    let wday = WDAY[tm.tm_wday.clamp(0, 6) as usize];
-    #[allow(clippy::cast_sign_loss)]
-    let mon = MON[tm.tm_mon.clamp(0, 11) as usize];
-    let day = tm.tm_mday;
-    let hour = tm.tm_hour;
-    let min = tm.tm_min;
-    let sec = tm.tm_sec;
-    let year = tm.tm_year + 1900;
-
-    format!("{wday} {mon} {day:2} {hour:02}:{min:02}:{sec:02} {year}")
 }
 
 /// Re-execute `sql` repeatedly, printing a timestamp header before each run.
