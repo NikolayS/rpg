@@ -965,9 +965,10 @@ mod tests {
 
     #[test]
     fn parse_unknown_command() {
+        // Unknown commands store the name WITHOUT a leading backslash.
         assert_eq!(
             crate::metacmd::parse("\\foo").cmd,
-            crate::metacmd::MetaCmd::Unknown("\\foo".to_owned())
+            crate::metacmd::MetaCmd::Unknown("foo".to_owned())
         );
     }
 

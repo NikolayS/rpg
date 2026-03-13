@@ -15,7 +15,7 @@ use crate::repl::ExpandedMode;
 // ---------------------------------------------------------------------------
 
 /// Recognised backslash meta-command types.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaCmd {
     // -- Existing commands --------------------------------------------------
     /// `\q` — quit the REPL.
@@ -183,7 +183,15 @@ pub fn parse(input: &str) -> ParsedMeta {
 
     // Dispatch on the first character.
     match input.chars().next() {
-        Some('q') => parse_simple_or_unknown(input, "q", MetaCmd::Quit),
+        Some('q') => {
+            // Accept both `\q` and `\quit` (psql supports both).
+            if let Some(rest) = input.strip_prefix("quit") {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    return ParsedMeta::simple(MetaCmd::Quit);
+                }
+            }
+            parse_simple_or_unknown(input, "q", MetaCmd::Quit)
+        }
         Some('?') => parse_simple_or_unknown(input, "?", MetaCmd::Help),
         Some('c') => parse_c_family(input),
         Some('h') => parse_simple_or_unknown(input, "h", MetaCmd::SqlHelp),
@@ -192,7 +200,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('d') => parse_d_family(input),
         Some('s') => parse_sf_sv(input),
         Some('t') => parse_timing(input),
-        _ => ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}"))),
+        _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
 }
 
@@ -209,14 +217,14 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
         ParsedMeta::simple(cmd)
     } else {
-        ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}")))
+        ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
     }
 }
 
 /// Parse `\timing [on|off]`.
 fn parse_timing(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix("timing") else {
-        return ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}")));
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
     let arg = rest.trim();
     let mode = match arg.to_lowercase().as_str() {
@@ -230,7 +238,7 @@ fn parse_timing(input: &str) -> ParsedMeta {
 /// Parse `\x [on|off|auto]`.
 fn parse_x(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix('x') else {
-        return ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}")));
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
     let arg = rest.trim();
     let mode = match arg.to_lowercase().as_str() {
@@ -267,7 +275,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
             };
         }
     }
-    ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}")))
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
 /// Parse `\sf` and `\sv`.
@@ -304,30 +312,21 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             };
         }
     }
-    ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}")))
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
 /// Parse `\l [pattern]` — list databases.
 fn parse_l(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix('l') else {
-        return ParsedMeta::simple(MetaCmd::Unknown(format!("\\{input}")));
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
-    // Parse optional `+` modifier.
-    let (plus, after_mod) = if let Some(stripped) = rest.strip_prefix('+') {
-        (true, stripped)
-    } else {
-        (false, rest)
-    };
-    let pattern = after_mod.trim();
+    // Use the shared modifier parser so `\lS`, `\l+S`, `\lS+` all work.
+    let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
     ParsedMeta {
         cmd: MetaCmd::ListDatabases,
         plus,
-        system: false,
-        pattern: if pattern.is_empty() {
-            None
-        } else {
-            Some(pattern.to_owned())
-        },
+        system,
+        pattern,
         echo_hidden: false,
     }
 }
@@ -378,14 +377,13 @@ fn parse_d_family(input: &str) -> ParsedMeta {
     // `input` has already had the leading `\` stripped.
 
     // Try each sub-command prefix (they all include the leading `d`).
-    for (prefix, _) in D_SUBCMDS {
-        if let Some(rest) = try_strip_prefix_case_sensitive(input, prefix) {
+    // `D_SUBCMDS` is ordered longest-first so greedy matching is correct.
+    for (prefix, cmd) in D_SUBCMDS {
+        if let Some(rest) = input.strip_prefix(prefix) {
             // `rest` is whatever follows the sub-command token, e.g. `+S users`.
             let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
-            // We need to get the MetaCmd variant — look it up again.
-            let cmd = d_subcmd_for_prefix(prefix);
             return ParsedMeta {
-                cmd,
+                cmd: cmd.clone(),
                 plus,
                 system,
                 pattern,
@@ -404,49 +402,6 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         pattern,
         echo_hidden: false,
     }
-}
-
-/// Case-sensitive prefix stripping — standard `str::strip_prefix` always
-/// matches literally, which is what we need.
-fn try_strip_prefix_case_sensitive<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    s.strip_prefix(prefix)
-}
-
-/// Return the [`MetaCmd`] for a known `\d` sub-command prefix.
-///
-/// Panics if `prefix` is not in [`D_SUBCMDS`] (programming error).
-fn d_subcmd_for_prefix(prefix: &str) -> MetaCmd {
-    for (p, _) in D_SUBCMDS {
-        if *p == prefix {
-            // We need to construct the enum value — since MetaCmd is not
-            // Copy, we match again to produce a fresh value.
-            return match *p {
-                "des" => MetaCmd::ListForeignServers,
-                "dew" => MetaCmd::ListFdws,
-                "det" => MetaCmd::ListForeignTablesViaFdw,
-                "deu" => MetaCmd::ListUserMappings,
-                "dT" => MetaCmd::ListTypes,
-                "dE" => MetaCmd::ListForeignTables,
-                "dD" => MetaCmd::ListDomains,
-                "dC" => MetaCmd::ListCasts,
-                "dt" => MetaCmd::ListTables,
-                "di" => MetaCmd::ListIndexes,
-                "ds" => MetaCmd::ListSequences,
-                "dv" => MetaCmd::ListViews,
-                "dm" => MetaCmd::ListMatViews,
-                "df" => MetaCmd::ListFunctions,
-                "dn" => MetaCmd::ListSchemas,
-                "du" | "dg" => MetaCmd::ListRoles,
-                "dp" => MetaCmd::ListPrivileges,
-                "db" => MetaCmd::ListTablespaces,
-                "dx" => MetaCmd::ListExtensions,
-                "dd" => MetaCmd::ListComments,
-                "dc" => MetaCmd::ListConversions,
-                _ => unreachable!("unknown prefix {prefix}"),
-            };
-        }
-    }
-    unreachable!("prefix {prefix} not found in D_SUBCMDS");
 }
 
 /// Parse optional `+` and `S` modifier characters from the beginning of
@@ -513,6 +468,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_quit_long_form() {
+        // `\quit` must be accepted as an alias for `\q`.
+        assert_eq!(parse("\\quit").cmd, MetaCmd::Quit);
+    }
+
+    #[test]
     fn parse_help() {
         assert_eq!(parse("\\?").cmd, MetaCmd::Help);
     }
@@ -556,7 +517,9 @@ mod tests {
 
     #[test]
     fn parse_unknown() {
-        assert_eq!(parse("\\foo").cmd, MetaCmd::Unknown("\\foo".to_owned()));
+        // Unknown commands store the name WITHOUT a leading backslash.
+        // The display layer (dispatch_meta) adds `\` when printing.
+        assert_eq!(parse("\\foo").cmd, MetaCmd::Unknown("foo".to_owned()));
     }
 
     // -- \l ------------------------------------------------------------------
@@ -581,6 +544,30 @@ mod tests {
         let m = parse("\\l mydb");
         assert_eq!(m.cmd, MetaCmd::ListDatabases);
         assert_eq!(m.pattern, Some("mydb".to_owned()));
+    }
+
+    #[test]
+    fn parse_list_databases_system() {
+        let m = parse("\\lS");
+        assert_eq!(m.cmd, MetaCmd::ListDatabases);
+        assert!(m.system);
+        assert!(!m.plus);
+    }
+
+    #[test]
+    fn parse_list_databases_plus_system() {
+        let m = parse("\\l+S");
+        assert_eq!(m.cmd, MetaCmd::ListDatabases);
+        assert!(m.plus);
+        assert!(m.system);
+    }
+
+    #[test]
+    fn parse_list_databases_system_plus() {
+        let m = parse("\\lS+");
+        assert_eq!(m.cmd, MetaCmd::ListDatabases);
+        assert!(m.plus);
+        assert!(m.system);
     }
 
     // -- \dt -----------------------------------------------------------------
