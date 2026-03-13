@@ -20,6 +20,7 @@ use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult
 
 /// Controls how query results are rendered.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OutputConfig {
     /// String to display for SQL NULL values (psql default: empty string).
     pub null_string: String,
@@ -27,6 +28,18 @@ pub struct OutputConfig {
     pub timing: bool,
     /// Whether to use expanded (`\x`) output instead of aligned table.
     pub expanded: bool,
+    /// Unaligned output mode (-A).  When `true`, cells are separated by
+    /// `field_separator` rather than being padded to column widths.
+    // TODO(issue #21): wire into format_aligned / format_expanded
+    #[allow(dead_code)]
+    pub no_align: bool,
+    /// Tuples-only mode (-t).  Suppresses column headers and row-count footer.
+    // TODO(issue #21): suppress header/footer when true
+    #[allow(dead_code)]
+    pub tuples_only: bool,
+    /// Show verbose error detail including SQLSTATE.
+    /// psql does not show SQLSTATE by default; set this for `\set VERBOSITY verbose`.
+    pub verbose_errors: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +198,8 @@ fn write_aligned_row<F>(
             }
         }
     }
+    // psql pads every cell including the last column with a trailing space.
+    out.push(' ');
     out.push('\n');
 }
 
@@ -313,7 +328,14 @@ pub fn format_command_tag(out: &mut String, ct: &CommandTag) {
 ///                ^
 /// HINT:  Perhaps you meant ...
 /// ```
-pub fn format_pg_error(err: &tokio_postgres::Error, original_sql: Option<&str>) -> String {
+///
+/// SQLSTATE is omitted unless `cfg.verbose_errors` is `true` (matching psql's
+/// default behaviour; psql only shows SQLSTATE with `\set VERBOSITY verbose`).
+pub fn format_pg_error(
+    err: &tokio_postgres::Error,
+    original_sql: Option<&str>,
+    cfg: &OutputConfig,
+) -> String {
     let mut out = String::new();
 
     if let Some(db_err) = err.as_db_error() {
@@ -337,8 +359,10 @@ pub fn format_pg_error(err: &tokio_postgres::Error, original_sql: Option<&str>) 
             let _ = writeln!(out, "HINT:  {hint}");
         }
 
-        // SQLSTATE (always present for DB errors).
-        let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+        // SQLSTATE: only shown in verbose mode (psql default: hidden).
+        if cfg.verbose_errors {
+            let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+        }
     } else {
         // Non-server error (I/O, protocol, …).
         let _ = writeln!(out, "ERROR:  {err}");

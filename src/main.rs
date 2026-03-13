@@ -269,8 +269,27 @@ impl Cli {
     }
 
     /// Build output configuration from CLI flags.
-    fn output_config() -> output::OutputConfig {
-        output::OutputConfig::default()
+    fn output_config(&self) -> output::OutputConfig {
+        // Warn about output format flags that are not yet implemented.
+        if self.csv {
+            eprintln!("samo: --csv is not yet supported, using default output");
+        }
+        if self.json {
+            eprintln!("samo: --json is not yet supported, using default output");
+        }
+
+        output::OutputConfig {
+            no_align: self.no_align,
+            tuples_only: self.tuples_only,
+            ..Default::default()
+        }
+    }
+
+    /// Returns `true` when running in a non-interactive scripting mode
+    /// (`-c`, `-f`, or piped stdin).  Connection info is suppressed in these
+    /// modes to match psql behaviour.
+    fn is_scripting_mode(&self) -> bool {
+        self.command.is_some() || self.file.is_some()
     }
 }
 
@@ -318,11 +337,15 @@ async fn main() {
 
     match connection::connect(params, &opts).await {
         Ok((client, resolved)) => {
-            if !cli.quiet {
+            // Print connection info only in interactive mode.
+            // In -c / -f / piped-stdin mode psql does not print it.
+            let is_piped = !cli.interactive && !stdin_is_tty();
+            let interactive = !cli.is_scripting_mode() && !is_piped;
+            if !cli.quiet && interactive {
                 println!("{}", connection::connection_info(&resolved));
             }
 
-            let cfg = Cli::output_config();
+            let cfg = cli.output_config();
 
             // Dispatch: -c → execute command and exit.
             if let Some(ref sql) = cli.command {
@@ -335,7 +358,7 @@ async fn main() {
             }
 
             // Dispatch: piped stdin (non-TTY, non-interactive).
-            if !cli.interactive && !stdin_is_tty() {
+            if is_piped {
                 let mut sql = String::new();
                 std::io::stdin()
                     .read_to_string(&mut sql)
@@ -372,7 +395,7 @@ async fn run_sql_and_exit(client: &tokio_postgres::Client, sql: &str, cfg: &outp
             std::process::exit(0);
         }
         Err(query::QueryError::Postgres(ref pg_err)) => {
-            let msg = output::format_pg_error(pg_err, Some(sql));
+            let msg = output::format_pg_error(pg_err, Some(sql), cfg);
             eprint!("{msg}");
             std::process::exit(1);
         }
@@ -384,20 +407,32 @@ async fn run_sql_and_exit(client: &tokio_postgres::Client, sql: &str, cfg: &outp
 }
 
 /// Read SQL from a file, execute it, print output, exit.
+///
+/// The file is read once and the SQL string is reused for both execution
+/// and error-position display, avoiding a TOCTOU race where the file could
+/// change between the first and second read.
 async fn run_file_and_exit(
     client: &tokio_postgres::Client,
     path: &str,
     cfg: &output::OutputConfig,
 ) {
-    match query::execute_file(client, path).await {
+    // Read the file once up-front so we have the SQL for error position display.
+    let sql = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("samo: could not read \"{path}\": {e}");
+            std::process::exit(1);
+        }
+    };
+
+    match query::execute_sql(client, &sql).await {
         Ok(outcome) => {
             let formatted = output::format_outcome(&outcome, cfg);
             print!("{formatted}");
             std::process::exit(0);
         }
         Err(query::QueryError::Postgres(ref pg_err)) => {
-            let sql = std::fs::read_to_string(path).unwrap_or_default();
-            let msg = output::format_pg_error(pg_err, Some(&sql));
+            let msg = output::format_pg_error(pg_err, Some(&sql), cfg);
             eprint!("{msg}");
             std::process::exit(1);
         }

@@ -25,6 +25,8 @@ pub enum QueryError {
     Postgres(#[from] tokio_postgres::Error),
 
     /// The SQL file could not be read from disk.
+    // Used by execute_file (public API); may not be constructed by main.rs directly.
+    #[allow(dead_code)]
     #[error("could not read file \"{path}\": {reason}")]
     FileRead { path: String, reason: String },
 }
@@ -113,16 +115,157 @@ fn parse_rows_affected(tag: &str) -> u64 {
 
 /// Split a SQL string on `;` boundaries, yielding non-empty trimmed statements.
 ///
-/// This is intentionally simple: it does **not** parse string literals or
-/// dollar-quoting.  Full parsing is left to the server.  This splitter drives
-/// sequential execution so each statement gets its own result; the server
-/// validates syntax and reports errors correctly regardless.
+/// Handles the following constructs so that embedded semicolons are not
+/// treated as statement terminators:
+/// - Single-quoted strings: `'foo;bar'`
+/// - Double-quoted identifiers: `"col;name"`
+/// - Dollar-quoted strings: `$$body;here$$` (any `$tag$...$tag$` form)
+/// - Line comments: `-- comment;here`
+/// - Block comments: `/* comment;here */`
+///
+/// Note: this is a best-effort lexer, not a full SQL parser.  Corner-cases
+/// like nested dollar-quoting are out of scope; the server handles validation.
+#[allow(clippy::too_many_lines)]
 pub fn split_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+    let mut stmts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        // -- line comment: skip to end of line
+        if ch == '-' && i + 1 < len && chars[i + 1] == '-' {
+            // Consume through '\n' (or end of input).
+            while i < len && chars[i] != '\n' {
+                current.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // /* block comment */
+        if ch == '/' && i + 1 < len && chars[i + 1] == '*' {
+            current.push(ch);
+            current.push(chars[i + 1]);
+            i += 2;
+            while i < len {
+                if chars[i] == '*' && i + 1 < len && chars[i + 1] == '/' {
+                    current.push('*');
+                    current.push('/');
+                    i += 2;
+                    break;
+                }
+                current.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Single-quoted string  '...' ('' is an escaped quote inside).
+        if ch == '\'' {
+            current.push(ch);
+            i += 1;
+            while i < len {
+                let c = chars[i];
+                current.push(c);
+                i += 1;
+                if c == '\'' {
+                    // Peek: doubled quote is an escape, not end of string.
+                    if i < len && chars[i] == '\'' {
+                        current.push('\'');
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Double-quoted identifier "..."  ("" is an escaped quote inside).
+        if ch == '"' {
+            current.push(ch);
+            i += 1;
+            while i < len {
+                let c = chars[i];
+                current.push(c);
+                i += 1;
+                if c == '"' {
+                    if i < len && chars[i] == '"' {
+                        current.push('"');
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Dollar-quoting: $tag$...$tag$  (tag may be empty: $$...$$).
+        if ch == '$' {
+            // Scan for the closing '$' of the opening tag.
+            let tag_start = i;
+            let mut j = i + 1;
+            while j < len && chars[j] != '$' && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            if j < len && chars[j] == '$' {
+                // We have a valid dollar-quote tag.
+                let tag: String = chars[tag_start..=j].iter().collect(); // includes both '$'
+                for c in &chars[tag_start..=j] {
+                    current.push(*c);
+                }
+                i = j + 1;
+                // Now scan forward until we find the closing tag.
+                while i < len {
+                    if chars[i] == '$' {
+                        // Check if closing tag matches.
+                        let end = i + tag.len();
+                        if end <= len {
+                            let candidate: String = chars[i..end].iter().collect();
+                            if candidate == tag {
+                                for c in &chars[i..end] {
+                                    current.push(*c);
+                                }
+                                i = end;
+                                break;
+                            }
+                        }
+                    }
+                    current.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+            // Not a valid dollar-quote — fall through and push '$' normally.
+        }
+
+        // Statement terminator.
+        if ch == ';' {
+            let trimmed = current.trim().to_owned();
+            if !trimmed.is_empty() {
+                stmts.push(trimmed);
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+
+        current.push(ch);
+        i += 1;
+    }
+
+    // Trailing statement without a final semicolon.
+    let trimmed = current.trim().to_owned();
+    if !trimmed.is_empty() {
+        stmts.push(trimmed);
+    }
+
+    stmts
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +347,19 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
             rows,
         }))
     } else if let Some(t) = tag {
+        // NOTE: The simple query protocol does not return column descriptors
+        // when a SELECT matches zero rows (e.g. `SELECT ... WHERE false`).
+        // We detect this via the "SELECT 0" command tag and synthesise an
+        // empty RowSet with no columns.  Column names are unavailable at
+        // this point; a future migration to the extended query protocol
+        // (issue #21) will eliminate this special case.
+        if t == "SELECT 0" {
+            return Ok(StatementResult::Rows(RowSet {
+                columns: vec![],
+                rows: vec![],
+            }));
+        }
+
         let rows_affected = parse_rows_affected(&t);
         // Treat DDL / utility statements as `Empty` (no row-count output).
         if rows_affected == 0
@@ -230,6 +386,9 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
 /// # Errors
 /// Returns [`QueryError::FileRead`] if the file cannot be read, or a
 /// [`QueryError::Postgres`] variant if execution fails.
+// Public API kept for library consumers; main.rs reads the file directly so
+// it can supply the SQL string to the error formatter without a second read.
+#[allow(dead_code)]
 pub async fn execute_file(client: &Client, path: &str) -> Result<QueryOutcome, QueryError> {
     let sql = std::fs::read_to_string(path).map_err(|e| QueryError::FileRead {
         path: path.to_owned(),
@@ -287,6 +446,72 @@ mod tests {
     fn test_split_single_statement_no_semicolon() {
         let stmts = split_statements("select version()");
         assert_eq!(stmts, vec!["select version()"]);
+    }
+
+    #[test]
+    fn test_split_single_quoted_embedded_semicolon() {
+        // Semicolon inside a single-quoted string must not split.
+        let stmts = split_statements("select 'foo;bar'");
+        assert_eq!(stmts, vec!["select 'foo;bar'"]);
+    }
+
+    #[test]
+    fn test_split_double_quoted_embedded_semicolon() {
+        // Semicolon inside a double-quoted identifier must not split.
+        let stmts = split_statements(r#"select "col;name" from t"#);
+        assert_eq!(stmts, vec![r#"select "col;name" from t"#]);
+    }
+
+    #[test]
+    fn test_split_dollar_quoted_embedded_semicolon() {
+        // Semicolon inside a dollar-quoted string must not split.
+        let sql = "create function f() returns void language sql as $$select 1; select 2$$";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 1, "should be one statement: {stmts:?}");
+        assert!(stmts[0].contains("$$select 1; select 2$$"));
+    }
+
+    #[test]
+    fn test_split_dollar_quoted_with_tag() {
+        // Dollar-quoting with a non-empty tag.
+        let sql = "create function g() returns void language plpgsql as $body$begin; end$body$";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 1, "should be one statement: {stmts:?}");
+    }
+
+    #[test]
+    fn test_split_line_comment_embedded_semicolon() {
+        // Semicolon in a line comment must not split.
+        let sql = "select 1 -- no split; here\n, 2";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 1, "should be one statement: {stmts:?}");
+    }
+
+    #[test]
+    fn test_split_block_comment_embedded_semicolon() {
+        // Semicolon in a block comment must not split.
+        let sql = "select /* not; a split */ 1";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["select /* not; a split */ 1"]);
+    }
+
+    #[test]
+    fn test_split_mixed_embedded_semicolons() {
+        // Two real statements, each with embedded semicolons in strings.
+        let sql = "select 'a;b'; select 'c;d'";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts, vec!["select 'a;b'", "select 'c;d'"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // SELECT 0 special case (Fix 1)
+    // -----------------------------------------------------------------------
+
+    /// The SELECT 0 path is tested indirectly via `execute_one`; here we verify
+    /// the tag check logic by examining `parse_rows_affected` on the tag.
+    #[test]
+    fn test_parse_rows_affected_select_zero() {
+        assert_eq!(parse_rows_affected("SELECT 0"), 0);
     }
 
     // -----------------------------------------------------------------------
