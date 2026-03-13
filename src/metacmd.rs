@@ -241,7 +241,7 @@ pub enum MetaCmd {
     CrosstabView(String),
 
     // -- Info commands ------------------------------------------------------
-    /// `\copyright` — show PostgreSQL copyright and distribution terms.
+    /// `\copyright` — show `PostgreSQL` copyright and distribution terms.
     Copyright,
 
     // -- Fallback ----------------------------------------------------------

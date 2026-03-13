@@ -1697,7 +1697,7 @@ Describe commands (stubs; see #27 for full implementation):
     );
 }
 
-/// Print the PostgreSQL copyright notice (matches psql `\copyright` output).
+/// Print the `PostgreSQL` copyright notice (matches psql `\copyright` output).
 fn print_copyright() {
     println!(
         "PostgreSQL Database Management System
