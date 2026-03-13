@@ -17,6 +17,8 @@ mod dba;
 mod describe;
 mod governance;
 mod highlight;
+#[allow(dead_code)]
+mod index_health;
 mod io;
 mod logging;
 mod metacmd;
