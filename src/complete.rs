@@ -480,12 +480,13 @@ const BACKSLASH_CMDS: &[&str] = &[
 pub(crate) enum CompletionContext {
     /// Default: offer SQL keywords.
     Keyword,
-    /// After FROM / JOIN / INTO / UPDATE / TABLE / `\d`.
+    /// After FROM / JOIN / INTO / UPDATE / TABLE / `\d` / ALTER TABLE /
+    /// DROP TABLE / INSERT INTO / CREATE INDEX ON.
     TableName,
-    /// After SELECT / WHERE / ON / HAVING / ORDER BY / GROUP BY,
-    /// or after a `table.` prefix.
+    /// After SELECT / WHERE / ON (in JOIN) / HAVING / ORDER BY / GROUP BY /
+    /// UPDATE...SET, or after a `table.` prefix.
     ColumnName {
-        /// Table names extracted from the FROM clause, if any.
+        /// Table names extracted from the FROM / UPDATE clause, if any.
         tables: Vec<String>,
     },
     /// After `schema_name.` — complete objects in that schema.
@@ -495,7 +496,7 @@ pub(crate) enum CompletionContext {
     },
     /// After `\c` / `\connect`.
     DatabaseName,
-    /// After SET / RESET / SHOW.
+    /// After SET / RESET / SHOW (top-level GUC, not UPDATE...SET).
     GucParam,
     /// After a lone `\` — complete the command name.
     BackslashCmd,
@@ -555,8 +556,64 @@ fn extract_from_tables(sql_upper: &str) -> Vec<String> {
     tables
 }
 
+/// Return `true` when `toks` contains `UPDATE` before any intervening FROM or
+/// JOIN or SELECT, scanning backward from `idx`.  Used to distinguish
+/// `UPDATE t SET col` (`ColumnName`) from bare `SET guc` (`GucParam`).
+fn preceded_by_update(toks: &[String], idx: usize) -> bool {
+    for tok in toks[..idx].iter().rev() {
+        match tok.as_str() {
+            "UPDATE" => return true,
+            // A SELECT/INSERT/DELETE/WITH resets scope.
+            "SELECT" | "INSERT" | "DELETE" | "WITH" => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Extract the table name from `UPDATE tablename SET ...` (best-effort).
+fn extract_update_table(toks: &[String]) -> Option<String> {
+    for (i, tok) in toks.iter().enumerate() {
+        if tok == "UPDATE" {
+            if let Some(next) = toks.get(i + 1) {
+                let name = next.trim_end_matches(',');
+                let bare = if let Some((_, after)) = name.split_once('.') {
+                    after
+                } else {
+                    name
+                };
+                if !bare.is_empty() && bare.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return Some(bare.to_lowercase());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Decide what kind of completion is appropriate given the text before the
 /// cursor.
+///
+/// Context detection is token-based (no full SQL parse).  The algorithm walks
+/// the token list backward to find the most recent "context keyword" and uses
+/// one look-back token to resolve ambiguous multi-word patterns:
+///
+/// | Pattern before cursor | Context |
+/// |---|---|
+/// | `SELECT` / `WHERE` / `HAVING` / `ON` (JOIN) | ColumnName |
+/// | `ORDER BY` / `GROUP BY` | ColumnName |
+/// | `UPDATE t SET` | ColumnName (from `t`) |
+/// | `FROM` / `JOIN` / `INTO` / `TABLE` / `UPDATE` | TableName |
+/// | `ALTER TABLE` / `DROP TABLE` | TableName |
+/// | `INSERT INTO` | TableName |
+/// | `CREATE INDEX ON` | TableName |
+/// | `SET` / `RESET` / `SHOW` (top-level) | GucParam |
+/// | `\c` / `\connect` | DatabaseName |
+/// | `\d` / `\dt` / `\dv` / `\di` / `\dm` / `\dE` | TableName |
+/// | `\i` / `\ir` | FileName |
+/// | `\` (partial command) | BackslashCmd |
+/// | otherwise | Keyword |
+#[allow(clippy::too_many_lines)]
 pub fn detect_context(line: &str, pos: usize) -> CompletionContext {
     let before = &line[..pos];
 
@@ -575,9 +632,14 @@ pub fn detect_context(line: &str, pos: usize) -> CompletionContext {
         {
             return CompletionContext::DatabaseName;
         }
-        // \d → TableName (schema object)
-        if after_slash.starts_with("d ") || after_slash == "d" {
-            return CompletionContext::TableName;
+        // \d / \dt / \dv / \di / \dm / \ds / \dE / \dS / \dT / \du / \dg /
+        // \dn / \df / \da / \db / \dp / \dF / \dC / \dD → TableName
+        if after_slash.starts_with('d') {
+            let rest = after_slash.trim_start_matches(|c: char| c.is_alphanumeric());
+            // rest should be empty (still typing) or start with a space (arg).
+            if rest.is_empty() || rest.starts_with(' ') {
+                return CompletionContext::TableName;
+            }
         }
         // \i / \ir → FileName
         if after_slash.starts_with("ir ") || after_slash.starts_with("i ") {
@@ -619,32 +681,91 @@ pub fn detect_context(line: &str, pos: usize) -> CompletionContext {
     let upper = before.to_uppercase();
     let toks = tokens_upper(before);
 
-    // Find the last significant keyword that drives context.
-    // Walk backwards through tokens to find the most recent context keyword.
-    let mut last_kw: Option<&str> = None;
-    for tok in toks.iter().rev() {
-        match tok.trim_end_matches(',') {
+    // Walk backward with explicit index so we can peek at earlier tokens for
+    // multi-word patterns like "CREATE INDEX ON" and "UPDATE t SET".
+    let mut kw_idx: Option<usize> = None;
+    let mut last_kw_upper: Option<&str> = None;
+
+    for i in (0..toks.len()).rev() {
+        match toks[i].trim_end_matches(',') {
+            // ---------------------------------------------------------------
+            // Table-name triggers
+            // ---------------------------------------------------------------
             "FROM" | "JOIN" | "INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS" | "OUTER"
-            | "LATERAL" | "INTO" | "TABLE" | "UPDATE" => {
-                last_kw = Some("FROM");
+            | "LATERAL" | "INTO" | "UPDATE" => {
+                kw_idx = Some(i);
+                last_kw_upper = Some("FROM");
                 break;
             }
-            "SELECT" | "WHERE" | "ON" | "HAVING" | "BY" => {
-                last_kw = Some("SELECT");
+            // TABLE alone triggers TableName only when preceded by ALTER, DROP,
+            // or as a standalone `TABLE tablename` shorthand.
+            "TABLE" => {
+                kw_idx = Some(i);
+                last_kw_upper = Some("FROM"); // TABLE → suggest table names
                 break;
             }
-            "SET" | "RESET" | "SHOW" => {
-                last_kw = Some("SET");
+            // ON is ambiguous: it's ColumnName in JOIN conditions but TableName
+            // in "CREATE INDEX ON".  Peek at earlier tokens.
+            "ON" => {
+                // Check whether this ON follows "INDEX" (possibly with an index
+                // name between them): CREATE [UNIQUE] INDEX [name] ON.
+                let is_index_on = toks[..i]
+                    .iter()
+                    .rev()
+                    .any(|t| t == "INDEX" || t == "REINDEX");
+                if is_index_on {
+                    kw_idx = Some(i);
+                    last_kw_upper = Some("FROM"); // CREATE INDEX ON → TableName
+                } else {
+                    kw_idx = Some(i);
+                    last_kw_upper = Some("SELECT"); // JOIN ... ON → ColumnName
+                }
+                break;
+            }
+            // ---------------------------------------------------------------
+            // Column-name triggers
+            // ---------------------------------------------------------------
+            "SELECT" | "WHERE" | "HAVING" | "BY" => {
+                kw_idx = Some(i);
+                last_kw_upper = Some("SELECT");
+                break;
+            }
+            // SET is a column trigger in UPDATE context, otherwise GUC.
+            "SET" => {
+                if preceded_by_update(&toks, i) {
+                    kw_idx = Some(i);
+                    last_kw_upper = Some("SET_UPDATE"); // UPDATE...SET → ColumnName
+                } else {
+                    kw_idx = Some(i);
+                    last_kw_upper = Some("SET"); // bare SET → GucParam
+                }
+                break;
+            }
+            // ---------------------------------------------------------------
+            // GUC triggers
+            // ---------------------------------------------------------------
+            "RESET" | "SHOW" => {
+                kw_idx = Some(i);
+                last_kw_upper = Some("SET");
                 break;
             }
             _ => {}
         }
     }
 
-    match last_kw {
+    let _ = kw_idx; // stored for potential future use (e.g. range-based lookups)
+
+    match last_kw_upper {
         Some("FROM") => CompletionContext::TableName,
         Some("SELECT") => {
             let tables = extract_from_tables(&upper);
+            CompletionContext::ColumnName { tables }
+        }
+        Some("SET_UPDATE") => {
+            // Columns from the UPDATE target table.
+            let tables = extract_update_table(&toks)
+                .map(|t| vec![t])
+                .unwrap_or_default();
             CompletionContext::ColumnName { tables }
         }
         Some("SET") => CompletionContext::GucParam,
@@ -1232,5 +1353,454 @@ mod tests {
         assert_eq!(start, dot_pos);
         let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
         assert!(names.contains(&"users"), "expected 'users' in {names:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // New context scenarios — pgcli-style
+    // -----------------------------------------------------------------------
+
+    // --- INSERT INTO → TableName ---
+
+    #[test]
+    fn test_detect_context_insert_into() {
+        let line = "INSERT INTO ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_insert_into_lowercase() {
+        let line = "insert into ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    // --- ALTER TABLE / DROP TABLE → TableName ---
+
+    #[test]
+    fn test_detect_context_alter_table() {
+        let line = "ALTER TABLE ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_drop_table() {
+        let line = "DROP TABLE ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_drop_table_lowercase() {
+        let line = "drop table ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    // --- CREATE INDEX ON → TableName ---
+
+    #[test]
+    fn test_detect_context_create_index_on() {
+        let line = "CREATE INDEX ON ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_create_index_named_on() {
+        // CREATE INDEX idx_name ON → should still be TableName
+        let line = "CREATE INDEX idx_users_email ON ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_create_unique_index_on() {
+        let line = "CREATE UNIQUE INDEX ON ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_create_index_lowercase() {
+        let line = "create index on ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    // --- JOIN ... ON → ColumnName (not TableName) ---
+
+    #[test]
+    fn test_detect_context_join_on_is_column() {
+        // "JOIN foo ON" → should be ColumnName (join condition), not TableName
+        let line = "SELECT * FROM orders JOIN users ON ";
+        let ctx = detect_context(line, line.len());
+        assert!(
+            matches!(ctx, CompletionContext::ColumnName { .. }),
+            "expected ColumnName, got {ctx:?}"
+        );
+    }
+
+    // --- UPDATE ... SET → ColumnName (from UPDATE target) ---
+
+    #[test]
+    fn test_detect_context_update_set_is_column() {
+        let line = "UPDATE users SET ";
+        let ctx = detect_context(line, line.len());
+        assert!(
+            matches!(ctx, CompletionContext::ColumnName { .. }),
+            "expected ColumnName after UPDATE...SET, got {ctx:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_context_update_set_carries_table() {
+        // The ColumnName context should include the UPDATE target table.
+        let line = "UPDATE users SET ";
+        let ctx = detect_context(line, line.len());
+        match ctx {
+            CompletionContext::ColumnName { tables } => {
+                assert!(
+                    tables.contains(&"users".to_owned()),
+                    "expected 'users' in tables, got {tables:?}"
+                );
+            }
+            other => panic!("expected ColumnName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_detect_context_update_set_lowercase() {
+        let line = "update orders set ";
+        let ctx = detect_context(line, line.len());
+        assert!(
+            matches!(ctx, CompletionContext::ColumnName { .. }),
+            "expected ColumnName after update...set, got {ctx:?}"
+        );
+    }
+
+    // --- Bare SET / RESET / SHOW → GucParam (not ColumnName) ---
+
+    #[test]
+    fn test_detect_context_bare_set_is_guc() {
+        // Top-level SET without UPDATE → GUC parameter.
+        let line = "SET ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::GucParam);
+    }
+
+    // --- ORDER BY / GROUP BY → ColumnName ---
+
+    #[test]
+    fn test_detect_context_order_by() {
+        let line = "SELECT id FROM users ORDER BY ";
+        let ctx = detect_context(line, line.len());
+        assert!(
+            matches!(ctx, CompletionContext::ColumnName { .. }),
+            "expected ColumnName after ORDER BY, got {ctx:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_context_group_by() {
+        let line = "SELECT status, count(*) FROM orders GROUP BY ";
+        let ctx = detect_context(line, line.len());
+        assert!(
+            matches!(ctx, CompletionContext::ColumnName { .. }),
+            "expected ColumnName after GROUP BY, got {ctx:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_context_order_by_carries_from_tables() {
+        // Tables from FROM clause should be available in ORDER BY context.
+        let line = "SELECT id FROM users ORDER BY ";
+        let ctx = detect_context(line, line.len());
+        match ctx {
+            CompletionContext::ColumnName { tables } => {
+                assert!(
+                    tables.contains(&"users".to_owned()),
+                    "expected 'users' in tables, got {tables:?}"
+                );
+            }
+            other => panic!("expected ColumnName, got {other:?}"),
+        }
+    }
+
+    // --- \dt / \dv / \di → TableName ---
+
+    #[test]
+    fn test_detect_context_backslash_dt() {
+        let line = r"\dt ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_backslash_dv() {
+        let line = r"\dv ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_backslash_di() {
+        let line = r"\di ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    #[test]
+    fn test_detect_context_backslash_dm() {
+        let line = r"\dm ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    // --- Case insensitivity ---
+
+    #[test]
+    fn test_detect_context_mixed_case_select() {
+        let line = "Select * From users Where ";
+        let ctx = detect_context(line, line.len());
+        assert!(
+            matches!(ctx, CompletionContext::ColumnName { .. }),
+            "expected ColumnName (mixed case), got {ctx:?}"
+        );
+    }
+
+    #[test]
+    fn test_detect_context_mixed_case_from() {
+        let line = "select * From ";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(ctx, CompletionContext::TableName);
+    }
+
+    // --- Schema-qualified table in INSERT INTO ---
+
+    #[test]
+    fn test_detect_context_schema_qualified_insert() {
+        let line = "INSERT INTO public.";
+        let ctx = detect_context(line, line.len());
+        assert_eq!(
+            ctx,
+            CompletionContext::SchemaObject {
+                schema: "public".to_owned()
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_update_table tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_update_table_simple() {
+        let toks = tokens_upper("UPDATE users SET");
+        let result = extract_update_table(&toks);
+        assert_eq!(result, Some("users".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_update_table_schema_qualified() {
+        let toks = tokens_upper("UPDATE public.orders SET");
+        let result = extract_update_table(&toks);
+        assert_eq!(result, Some("orders".to_owned()));
+    }
+
+    #[test]
+    fn test_extract_update_table_none_when_absent() {
+        let toks = tokens_upper("SELECT * FROM users");
+        let result = extract_update_table(&toks);
+        assert_eq!(result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // preceded_by_update tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_preceded_by_update_true() {
+        let toks = tokens_upper("UPDATE users SET");
+        // SET is index 2; check toks[..2]
+        assert!(preceded_by_update(&toks, 2));
+    }
+
+    #[test]
+    fn test_preceded_by_update_false_bare_set() {
+        let toks = tokens_upper("SET work_mem");
+        assert!(!preceded_by_update(&toks, 0));
+    }
+
+    #[test]
+    fn test_preceded_by_update_false_select_intervenes() {
+        // "SELECT ... SET" (hypothetical) — SELECT should reset scope.
+        let toks = tokens_upper("SELECT 1 FROM t SET");
+        let set_idx = toks.iter().position(|t| t == "SET").unwrap();
+        assert!(!preceded_by_update(&toks, set_idx));
+    }
+
+    // -----------------------------------------------------------------------
+    // SamoHelper::complete — new scenario smoke tests
+    // -----------------------------------------------------------------------
+
+    fn make_cache_with_table_and_columns() -> SchemaCache {
+        let mut cache = SchemaCache::default();
+        cache.tables.push(TableInfo {
+            schema: "public".to_owned(),
+            name: "users".to_owned(),
+            kind: 'r',
+        });
+        for col in ["id", "email", "created_at"] {
+            cache.columns.push(ColumnInfo {
+                schema: "public".to_owned(),
+                table: "users".to_owned(),
+                name: col.to_owned(),
+                type_name: "text".to_owned(),
+                position: 1,
+            });
+        }
+        cache
+    }
+
+    #[test]
+    fn test_complete_columns_after_select() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "SELECT ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        // With no FROM, all columns should be offered.
+        assert!(names.contains(&"id"), "expected 'id' in {names:?}");
+        assert!(names.contains(&"email"), "expected 'email' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_columns_after_where() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "SELECT * FROM users WHERE ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"id"), "expected 'id' in {names:?}");
+        assert!(names.contains(&"email"), "expected 'email' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_columns_after_update_set() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "UPDATE users SET ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"email"), "expected 'email' in {names:?}");
+        assert!(names.contains(&"id"), "expected 'id' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_tables_after_insert_into() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "INSERT INTO ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"users"), "expected 'users' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_tables_after_drop_table() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "DROP TABLE ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"users"), "expected 'users' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_tables_after_alter_table() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "ALTER TABLE ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"users"), "expected 'users' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_tables_after_create_index_on() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "CREATE INDEX ON ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"users"), "expected 'users' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_columns_order_by() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "SELECT id FROM users ORDER BY ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"id"), "expected 'id' in {names:?}");
+        assert!(names.contains(&"email"), "expected 'email' in {names:?}");
+    }
+
+    #[test]
+    fn test_complete_columns_group_by() {
+        use rustyline::history::DefaultHistory;
+
+        let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
+        let helper = SamoHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "SELECT status FROM users GROUP BY ";
+        let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"id"), "expected 'id' in {names:?}");
     }
 }
