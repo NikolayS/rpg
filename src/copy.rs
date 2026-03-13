@@ -145,25 +145,91 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
     // -----------------------------------------------------------------------
     // Step 4 — options (CSV, TEXT, DELIMITER 'x', HEADER, NULL 'str')
     // -----------------------------------------------------------------------
+    let (format, delimiter, header, null_string) = parse_copy_options(&mut tokens)?;
+
+    Ok(CopySpec {
+        direction,
+        target,
+        source,
+        format,
+        delimiter,
+        header,
+        null_string,
+    })
+}
+
+/// Parse the options portion of a `\copy` command (everything after the
+/// file/stdin/stdout token).
+///
+/// Accepts both the flat form (`CSV HEADER`) and the `WITH (FORMAT csv,
+/// HEADER)` parenthesised form used by psql.
+fn parse_copy_options(
+    tokens: &mut Tokenizer<'_>,
+) -> Result<(CopyFormat, Option<char>, bool, Option<String>), String> {
     let mut format = CopyFormat::default();
     let mut delimiter: Option<char> = None;
     let mut header = false;
     let mut null_string: Option<String> = None;
 
-    while let Some(opt) = tokens.next() {
+    // psql supports both `CSV HEADER` (flat) and `WITH (FORMAT csv, HEADER)`
+    // (parenthesised) option syntax.  Collect the remaining option tokens
+    // into a Vec so we can handle both forms uniformly.
+    let option_list: Vec<String> = if tokens
+        .peek()
+        .is_some_and(|t| t.eq_ignore_ascii_case("WITH"))
+    {
+        tokens.next(); // consume "WITH"
+        let paren_tok = tokens
+            .next()
+            .ok_or_else(|| "\\copy: WITH requires a parenthesised option list".to_owned())?;
+        // paren_tok should be "(FORMAT csv, HEADER, …)"; strip the outer parens
+        // and re-tokenise the contents.  Replace only *unquoted* commas with
+        // spaces so that quoted values like DELIMITER ',' are preserved.
+        let inner_raw = paren_tok
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .ok_or_else(|| "\\copy: WITH requires a parenthesised option list".to_owned())?
+            .trim()
+            .to_owned();
+        let inner = replace_unquoted_commas(&inner_raw);
+        Tokenizer::new(&inner).collect_tokens()
+    } else {
+        let mut list = Vec::new();
+        while let Some(tok) = tokens.next() {
+            list.push(tok);
+        }
+        list
+    };
+
+    let mut opt_iter = option_list.into_iter();
+    while let Some(opt) = opt_iter.next() {
         match opt.to_uppercase().as_str() {
             "TEXT" => format = CopyFormat::Text,
             "CSV" => format = CopyFormat::Csv,
+            // `FORMAT csv` / `FORMAT text` — the keyword form used inside
+            // the WITH (…) parenthesised block.
+            "FORMAT" => {
+                let fmt_val = opt_iter
+                    .next()
+                    .ok_or_else(|| "\\copy: FORMAT requires a value".to_owned())?;
+                match fmt_val.to_uppercase().as_str() {
+                    "CSV" => format = CopyFormat::Csv,
+                    "TEXT" => format = CopyFormat::Text,
+                    other => {
+                        return Err(format!("\\copy: unknown FORMAT value '{other}'"));
+                    }
+                }
+            }
             "HEADER" => header = true,
             "DELIMITER" => {
-                let val = tokens
+                let val = opt_iter
                     .next()
                     .ok_or_else(|| "\\copy: DELIMITER requires a value".to_owned())?;
                 let ch = unquote_char(&val)?;
                 delimiter = Some(ch);
             }
             "NULL" => {
-                let val = tokens
+                let val = opt_iter
                     .next()
                     .ok_or_else(|| "\\copy: NULL requires a value".to_owned())?;
                 let s = val
@@ -179,15 +245,7 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
         }
     }
 
-    Ok(CopySpec {
-        direction,
-        target,
-        source,
-        format,
-        delimiter,
-        header,
-        null_string,
-    })
+    Ok((format, delimiter, header, null_string))
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +498,39 @@ fn parse_target(tokens: &mut Tokenizer) -> Result<CopyTarget, String> {
     Ok(CopyTarget::Table { name, columns })
 }
 
+/// Replace unquoted commas with spaces so the contents of a `WITH (…)` block
+/// can be fed to the flat tokenizer.  Quoted values like `DELIMITER ','` are
+/// left intact.
+fn replace_unquoted_commas(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_quote = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if in_quote => {
+                out.push('\'');
+                // Handle SQL escaped quote `''`.
+                if chars.peek() == Some(&'\'') {
+                    out.push(chars.next().unwrap());
+                } else {
+                    in_quote = false;
+                }
+            }
+            '\'' => {
+                in_quote = true;
+                out.push('\'');
+            }
+            ',' if !in_quote => {
+                out.push(' ');
+            }
+            _ => {
+                out.push(ch);
+            }
+        }
+    }
+    out
+}
+
 /// Strip single quotes around a one-character value like `','`.
 fn unquote_char(s: &str) -> Result<char, String> {
     let inner = s
@@ -492,6 +583,15 @@ impl<'a> Tokenizer<'a> {
             return Some(tok);
         }
         self.advance()
+    }
+
+    /// Drain all remaining tokens into a `Vec`.
+    fn collect_tokens(mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(tok) = self.next() {
+            out.push(tok);
+        }
+        out
     }
 
     fn advance(&mut self) -> Option<String> {
@@ -564,8 +664,14 @@ impl<'a> Tokenizer<'a> {
                 }
             }
         } else {
-            // Regular token: read until whitespace.
-            while self.pos < bytes.len() && !bytes[self.pos].is_ascii_whitespace() {
+            // Regular token: read until whitespace or an opening parenthesis.
+            // Stopping at '(' ensures that table names written without a space
+            // before the column list — e.g. `users(id, email)` — are split
+            // into two separate tokens: `users` and `(id, email)`.
+            while self.pos < bytes.len()
+                && !bytes[self.pos].is_ascii_whitespace()
+                && bytes[self.pos] != b'('
+            {
                 self.pos += 1;
             }
         }
@@ -769,6 +875,72 @@ mod tests {
             build_copy_to_sql(&spec),
             "copy t to stdout with (format csv, delimiter ';', header, null '\\N')"
         );
+    }
+
+    // --- Regression tests for bug #127 -------------------------------------
+
+    /// Column list without a space before `(` — the exact form from bug #127.
+    #[test]
+    fn test_parse_columns_no_space_before_paren() {
+        let spec = parse_copy_args(
+            "users(id, email, name, created_at) FROM '/tmp/test.csv' WITH (FORMAT csv)",
+        )
+        .unwrap();
+        assert_eq!(spec.direction, CopyDirection::From);
+        assert_eq!(
+            spec.target,
+            CopyTarget::Table {
+                name: "users".to_owned(),
+                columns: vec![
+                    "id".to_owned(),
+                    "email".to_owned(),
+                    "name".to_owned(),
+                    "created_at".to_owned(),
+                ],
+            }
+        );
+        assert_eq!(spec.source, CopySource::File("/tmp/test.csv".to_owned()));
+        assert_eq!(spec.format, CopyFormat::Csv);
+    }
+
+    /// Column list with a space before `(` should still work.
+    #[test]
+    fn test_parse_columns_with_space_before_paren() {
+        let spec = parse_copy_args(
+            "users (id, email, name, created_at) FROM '/tmp/test.csv' WITH (FORMAT csv)",
+        )
+        .unwrap();
+        assert_eq!(
+            spec.target,
+            CopyTarget::Table {
+                name: "users".to_owned(),
+                columns: vec![
+                    "id".to_owned(),
+                    "email".to_owned(),
+                    "name".to_owned(),
+                    "created_at".to_owned(),
+                ],
+            }
+        );
+        assert_eq!(spec.format, CopyFormat::Csv);
+    }
+
+    /// `WITH (FORMAT csv, HEADER)` parenthesised options block.
+    #[test]
+    fn test_parse_with_options_block() {
+        let spec =
+            parse_copy_args("t FROM '/f' WITH (FORMAT csv, HEADER)").unwrap();
+        assert_eq!(spec.format, CopyFormat::Csv);
+        assert!(spec.header);
+    }
+
+    /// `WITH (FORMAT text, DELIMITER ',')` options block.
+    #[test]
+    fn test_parse_with_options_block_delimiter() {
+        let spec =
+            parse_copy_args("t FROM '/f' WITH (FORMAT text, DELIMITER ',')").unwrap();
+        assert_eq!(spec.format, CopyFormat::Text);
+        assert_eq!(spec.delimiter, Some(','));
     }
 
     #[test]
