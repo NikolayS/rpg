@@ -987,6 +987,15 @@ pub struct ReplSettings {
     /// of the current script rather than the process working directory,
     /// matching psql behaviour.
     pub current_file: Option<String>,
+    /// Unique identifier for the current session (used by session persistence).
+    ///
+    /// Assigned once at REPL startup from [`crate::session_store::new_session_id`].
+    pub session_id: String,
+    /// Number of queries executed in this session.
+    ///
+    /// Incremented after each successful query execution.  Persisted by
+    /// `\session save` and `\session touch`.
+    pub query_count: u32,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1050,6 +1059,8 @@ impl std::fmt::Debug for ReplSettings {
             .field("i_know_what_im_doing", &self.i_know_what_im_doing)
             .field("verbose_errors", &self.verbose_errors)
             .field("current_file", &self.current_file)
+            .field("session_id", &self.session_id)
+            .field("query_count", &self.query_count)
             .finish()
     }
 }
@@ -1096,6 +1107,8 @@ impl Default for ReplSettings {
             i_know_what_im_doing: false,
             verbose_errors: false,
             current_file: None,
+            session_id: crate::session_store::new_session_id(),
+            query_count: 0,
         }
     }
 }
@@ -1451,6 +1464,8 @@ pub async fn execute_query(
         settings.last_query = Some(sql.to_owned());
         // Clear last_error on success so /fix isn't stale.
         settings.last_error = None;
+        // Increment session query counter.
+        settings.query_count = settings.query_count.saturating_add(1);
     }
 
     success
@@ -1634,6 +1649,8 @@ pub async fn execute_query_extended(
         settings.last_query = Some(sql.to_owned());
         // Clear last_error on success so /fix isn't stale.
         settings.last_error = None;
+        // Increment session query counter.
+        settings.query_count = settings.query_count.saturating_add(1);
     }
 
     success
@@ -2893,6 +2910,16 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         return;
     }
     settings.vars.set(name, value);
+    // Mirror DEBUG on/off into the debug flag and the global log level.
+    if name == "DEBUG" {
+        let on = matches!(value, "on" | "true" | "1");
+        settings.debug = on;
+        if on {
+            crate::logging::set_level(crate::logging::Level::Debug);
+        } else {
+            crate::logging::set_level(crate::logging::Level::Warn);
+        }
+    }
     // Mirror ECHO_HIDDEN into the settings flag.
     if name == "ECHO_HIDDEN" {
         settings.echo_hidden = value == "on";
@@ -4273,12 +4300,192 @@ async fn dispatch_meta(
             crate::describe::execute(client, &parsed, settings.db_capabilities.pg_major_version())
                 .await;
         }
+        // Session persistence meta-commands (#247).
+        MetaCmd::SessionList => {
+            dispatch_session_list();
+        }
+        MetaCmd::SessionSave(ref name) => {
+            dispatch_session_save(
+                params,
+                &settings.session_id,
+                name.as_deref(),
+                settings.query_count,
+            );
+        }
+        MetaCmd::SessionDelete(ref id) => {
+            dispatch_session_delete(id);
+        }
+        MetaCmd::SessionResume(ref id) => {
+            if let Some(result) = dispatch_session_resume(id).await {
+                return result;
+            }
+        }
         ref stub => {
             eprintln!("{}: not yet implemented (see #27)", stub.label());
         }
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence helpers
+// ---------------------------------------------------------------------------
+
+/// Auto-save the current session on connect (best-effort; errors are silenced).
+fn session_store_auto_save(params: &crate::connection::ConnParams, session_id: &str) {
+    let Ok(store) = crate::session_store::SessionStore::open() else {
+        return;
+    };
+    let now = crate::session_store::now_iso8601();
+    let rec = crate::session_store::SessionRecord {
+        id: session_id.to_owned(),
+        host: Some(params.host.clone()),
+        port: Some(params.port),
+        username: Some(params.user.clone()),
+        dbname: Some(params.dbname.clone()),
+        created_at: now.clone(),
+        last_used: now,
+        query_count: 0,
+        name: None,
+    };
+    let _ = store.upsert(&rec);
+}
+
+/// Print a table of recent sessions (used by `\session list`).
+fn dispatch_session_list() {
+    let store = match crate::session_store::SessionStore::open() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("\\session list: {e}");
+            return;
+        }
+    };
+    let sessions = match store.list() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("\\session list: {e}");
+            return;
+        }
+    };
+    if sessions.is_empty() {
+        println!("No saved sessions.");
+        return;
+    }
+    println!(
+        "{:<16}  {:<20}  {:<5}  {:<16}  {:<24}  name",
+        "id", "host", "port", "dbname", "last_used"
+    );
+    println!("{}", "-".repeat(100));
+    for s in &sessions {
+        let host = s.host.as_deref().unwrap_or("-");
+        let port = s.port.map_or_else(|| "-".to_owned(), |p| p.to_string());
+        let dbname = s.dbname.as_deref().unwrap_or("-");
+        let name = s.name.as_deref().unwrap_or("");
+        println!(
+            "{:<16}  {:<20}  {:<5}  {:<16}  {:<24}  {}",
+            s.id, host, port, dbname, s.last_used, name
+        );
+    }
+}
+
+/// Save the current session with an optional friendly name.
+fn dispatch_session_save(
+    params: &crate::connection::ConnParams,
+    session_id: &str,
+    name: Option<&str>,
+    query_count: u32,
+) {
+    let store = match crate::session_store::SessionStore::open() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("\\session save: {e}");
+            return;
+        }
+    };
+    let now = crate::session_store::now_iso8601();
+    let rec = crate::session_store::SessionRecord {
+        id: session_id.to_owned(),
+        host: Some(params.host.clone()),
+        port: Some(params.port),
+        username: Some(params.user.clone()),
+        dbname: Some(params.dbname.clone()),
+        created_at: now.clone(),
+        last_used: now,
+        query_count,
+        name: name.map(str::to_owned),
+    };
+    if let Err(e) = store.upsert(&rec) {
+        eprintln!("\\session save: {e}");
+        return;
+    }
+    if let Some(n) = name {
+        println!("Session saved as \"{n}\" (id: {sid}).", sid = rec.id);
+    } else {
+        println!("Session saved (id: {sid}).", sid = rec.id);
+    }
+}
+
+/// Delete a saved session by id.
+fn dispatch_session_delete(id: &str) {
+    let store = match crate::session_store::SessionStore::open() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("\\session delete: {e}");
+            return;
+        }
+    };
+    match store.delete(id) {
+        Ok(true) => println!("Session {id} deleted."),
+        Ok(false) => eprintln!("\\session delete: no session with id \"{id}\""),
+        Err(e) => eprintln!("\\session delete: {e}"),
+    }
+}
+
+/// Look up a session by id and reconnect using its saved parameters.
+///
+/// Returns `Some(MetaResult::Reconnected(...))` on success, or `None` (error
+/// already printed) on failure.
+async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
+    let store = match crate::session_store::SessionStore::open() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("\\session resume: {e}");
+            return None;
+        }
+    };
+    let rec = match store.get(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            eprintln!("\\session resume: no session with id \"{id}\"");
+            return None;
+        }
+        Err(e) => {
+            eprintln!("\\session resume: {e}");
+            return None;
+        }
+    };
+
+    let pattern = format!(
+        "{db} {user} {host} {port}",
+        db = rec.dbname.as_deref().unwrap_or("-"),
+        user = rec.username.as_deref().unwrap_or("-"),
+        host = rec.host.as_deref().unwrap_or("-"),
+        port = rec.port.map_or_else(|| "-".to_owned(), |p| p.to_string()),
+    );
+
+    // Borrow a dummy current_params for reconnect (port 5432 default).
+    let dummy = crate::connection::ConnParams::default();
+    match crate::session::reconnect(Some(&pattern), &dummy).await {
+        Ok((new_client, new_params)) => {
+            println!("{}", crate::connection::connection_info(&new_params));
+            Some(MetaResult::Reconnected(Box::new(new_client), new_params))
+        }
+        Err(e) => {
+            eprintln!("\\session resume: {e}");
+            None
+        }
+    }
 }
 
 /// Run the interactive REPL loop.
@@ -4300,6 +4507,9 @@ pub async fn run_repl(
     let mut tx = TxState::default();
     let mut client = client;
     let mut params = params;
+
+    // Auto-save current connection to session store (best-effort; non-fatal).
+    session_store_auto_save(&params, &settings.session_id);
 
     // Execute startup file unless suppressed by -X.
     if !no_psqlrc {

@@ -78,6 +78,18 @@ pub fn init(level: Level, log_file: Option<Box<dyn Write + Send>>) {
     let _ = LOGGER.set(Arc::new(Mutex::new(logger)));
 }
 
+/// Change the log level at runtime.
+///
+/// Does nothing if the logger has not been initialised.
+pub fn set_level(level: Level) {
+    let Some(logger_arc) = LOGGER.get() else {
+        return;
+    };
+    if let Ok(mut logger) = logger_arc.lock() {
+        logger.level = level;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core log function
 // ---------------------------------------------------------------------------

@@ -295,6 +295,18 @@ pub enum MetaCmd {
     /// `\profiles` — list all configured connection profiles.
     ListProfiles,
 
+    // -- Session persistence (#247) ----------------------------------------
+    /// `\session list` — show recent sessions.
+    SessionList,
+    /// `\session save [name]` — save the current session with an optional name.
+    ///
+    /// `name` is `None` when omitted.
+    SessionSave(Option<String>),
+    /// `\session delete <id>` — delete a session by id.
+    SessionDelete(String),
+    /// `\session resume <id>` — reconnect using a saved session.
+    SessionResume(String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -481,12 +493,18 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     }
 }
 
-/// Dispatch `s`-family commands: `\set`, `\sf`, `\sv`.
+/// Dispatch `s`-family commands: `\set`, `\sf`, `\sv`, `\session`.
 fn parse_s_family(input: &str) -> ParsedMeta {
-    // \sql — switch to SQL mode
+    // \sql — switch to SQL mode (check before \set)
     if let Some(rest) = input.strip_prefix("sql") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::SqlMode);
+        }
+    }
+    // \session … — session persistence commands (check before \set)
+    if let Some(rest) = input.strip_prefix("session") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return parse_session(rest.trim());
         }
     }
     if let Some(after) = input.strip_prefix("set") {
@@ -495,6 +513,42 @@ fn parse_s_family(input: &str) -> ParsedMeta {
         }
     }
     parse_sf_sv(input)
+}
+
+/// Parse `\session [subcommand [args]]`.
+fn parse_session(rest: &str) -> ParsedMeta {
+    // Bare `\session` — same as `\session list`.
+    if rest.is_empty() {
+        return ParsedMeta::simple(MetaCmd::SessionList);
+    }
+
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("");
+    let arg = parts.next().map_or("", str::trim).to_owned();
+
+    match sub {
+        "list" => ParsedMeta::simple(MetaCmd::SessionList),
+        "save" => ParsedMeta::simple(MetaCmd::SessionSave(if arg.is_empty() {
+            None
+        } else {
+            Some(arg)
+        })),
+        "delete" | "del" => {
+            if arg.is_empty() {
+                ParsedMeta::simple(MetaCmd::Unknown("session delete".to_owned()))
+            } else {
+                ParsedMeta::simple(MetaCmd::SessionDelete(arg))
+            }
+        }
+        "resume" | "connect" => {
+            if arg.is_empty() {
+                ParsedMeta::simple(MetaCmd::Unknown("session resume".to_owned()))
+            } else {
+                ParsedMeta::simple(MetaCmd::SessionResume(arg))
+            }
+        }
+        _ => ParsedMeta::simple(MetaCmd::Unknown(format!("session {sub}"))),
+    }
 }
 
 /// Parse `\set [name [value]]`.

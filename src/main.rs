@@ -41,6 +41,7 @@ mod rca_actions;
 mod repl;
 mod safety;
 mod session;
+mod session_store;
 mod setup;
 mod vars;
 #[allow(dead_code)]
