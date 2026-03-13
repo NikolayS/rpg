@@ -838,11 +838,18 @@ pub async fn execute_query(
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            let error_message = e.to_string();
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
-                error_message: e.to_string(),
+                error_message: error_message.clone(),
                 sqlstate,
             });
+
+            // Inline error suggestion: if AI is configured and
+            // auto_explain_errors is on, show a brief hint.
+            if settings.config.ai.auto_explain_errors {
+                suggest_error_fix_inline(sql_to_send, &error_message, settings).await;
+            }
 
             false
         }
@@ -4335,6 +4342,63 @@ async fn handle_line(
 ///
 /// Falls back to printing the full response at once if the provider does
 /// not implement true streaming.
+/// Show a brief inline AI suggestion after a SQL error.
+///
+/// Called automatically when `[ai] auto_explain_errors = true`.  The
+/// suggestion is dimmed to visually distinguish it from the error itself.
+/// Uses a small `max_tokens` budget to keep latency low.
+async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &ReplSettings) {
+    let provider_name = match settings.config.ai.provider.as_deref() {
+        Some(p) if !p.is_empty() => p,
+        _ => return, // AI not configured — silently skip.
+    };
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let Ok(provider) = crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) else {
+        return;
+    };
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: "You are a PostgreSQL expert. \
+                      The user just got a SQL error. \
+                      Give a ONE-LINE fix suggestion. \
+                      Be extremely concise — just the fix, nothing else."
+                .to_owned(),
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: format!("Query: {sql}\nError: {error_message}"),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: 150,
+        temperature: 0.0,
+    };
+
+    // Use non-streaming for lower latency on a short response.
+    if let Ok(result) = provider.complete(&messages, &options).await {
+        let suggestion = result.content.trim();
+        if !suggestion.is_empty() {
+            // Print dimmed (ANSI escape: dim = \x1b[2m, reset = \x1b[0m).
+            eprintln!("\x1b[2mHint: {suggestion}\x1b[0m");
+        }
+    }
+}
+
 async fn stream_completion(
     provider: &dyn crate::ai::LlmProvider,
     messages: &[crate::ai::Message],
