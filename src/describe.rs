@@ -683,8 +683,98 @@ async fn describe_object(client: &Client, meta: &ParsedMeta) -> bool {
             list_all_relations(client, meta).await
         }
         Some(pattern) => {
-            // `\d tablename`: describe a specific object.
-            describe_table(client, meta, pattern).await
+            // `\d pattern`: look up all matching objects, then describe each.
+            //
+            // Psql first resolves the pattern to a list of OIDs/names, then
+            // calls describeOneTableDetails() for each.  We replicate that
+            // two-step approach so that wildcards (e.g. `\d t*`) describe ALL
+            // matching objects rather than treating the pattern as a literal
+            // object name.
+            let (schema_part, _name_part) = pattern::split_schema(pattern);
+            let name_filter =
+                pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
+
+            // Add pg_table_is_visible when no schema is specified so that
+            // unqualified patterns follow the search_path.
+            let visibility_filter = if schema_part.is_none() {
+                "pg_catalog.pg_table_is_visible(c.oid)"
+            } else {
+                ""
+            };
+
+            let where_cond = {
+                let parts: Vec<&str> = [
+                    if name_filter.is_empty() {
+                        None
+                    } else {
+                        Some(name_filter.as_str())
+                    },
+                    if visibility_filter.is_empty() {
+                        None
+                    } else {
+                        Some(visibility_filter)
+                    },
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                parts.join("\n    and ")
+            };
+
+            let lookup_sql = format!(
+                "select c.oid, n.nspname, c.relname
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+where {where_cond}
+order by 2, 3"
+            );
+
+            if meta.echo_hidden {
+                eprintln!("/******** QUERY *********/\n{lookup_sql}\n/************************/");
+            }
+
+            let matches: Vec<(String, String)> =
+                match client.simple_query(&lookup_sql).await {
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        return false;
+                    }
+                    Ok(msgs) => {
+                        use tokio_postgres::SimpleQueryMessage;
+                        msgs.into_iter()
+                            .filter_map(|m| {
+                                if let SimpleQueryMessage::Row(row) = m {
+                                    let schema =
+                                        row.get(1).unwrap_or("").to_owned();
+                                    let name = row.get(2).unwrap_or("").to_owned();
+                                    Some((schema, name))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
+                };
+
+            if matches.is_empty() {
+                eprintln!("Did not find any relation named \"{pattern}\".");
+                return false;
+            }
+
+            for (i, (schema, name)) in matches.into_iter().enumerate() {
+                // Separate consecutive describes with a blank line (psql does this).
+                if i > 0 {
+                    println!();
+                }
+                // Use the exact schema-qualified name so describe_table resolves
+                // to exactly one object.
+                let qualified = format!("{schema}.{name}");
+                describe_table(client, meta, &qualified).await;
+            }
+
+            // Return false unconditionally (only \q should exit the REPL).
+            false
         }
     }
 }
@@ -1222,6 +1312,106 @@ mod tests {
     fn pattern_filter_none_is_empty() {
         let f = pattern::where_clause(None, "c.relname", Some("n.nspname"));
         assert!(f.is_empty(), "no pattern should produce empty filter");
+    }
+
+    // -----------------------------------------------------------------------
+    // describe_object lookup SQL
+    // -----------------------------------------------------------------------
+
+    /// Verify that the lookup query used by describe_object includes the
+    /// pattern filter when a wildcard pattern is supplied (e.g. `\d t*`).
+    #[test]
+    fn describe_object_lookup_sql_includes_pattern_filter() {
+        let pattern = "t*";
+        let name_filter =
+            pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
+        // No schema specified — add visibility filter.
+        let visibility_filter = "pg_catalog.pg_table_is_visible(c.oid)";
+
+        let where_cond = format!("{name_filter}\n    and {visibility_filter}");
+
+        let lookup_sql = format!(
+            "select c.oid, n.nspname, c.relname
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+where {where_cond}
+order by 2, 3"
+        );
+
+        assert!(
+            lookup_sql.contains("LIKE 't%'"),
+            "lookup SQL should use LIKE with wildcard expanded: {lookup_sql}"
+        );
+        assert!(
+            lookup_sql.contains("pg_table_is_visible"),
+            "lookup SQL should include visibility filter: {lookup_sql}"
+        );
+        assert!(
+            lookup_sql.contains("c.relname"),
+            "lookup SQL should filter on relname: {lookup_sql}"
+        );
+        assert!(
+            lookup_sql.contains("order by 2, 3"),
+            "lookup SQL should order by schema, name: {lookup_sql}"
+        );
+    }
+
+    /// Verify that when a schema-qualified wildcard pattern is used (e.g.
+    /// `\d public.t*`), the lookup SQL filters on both schema and name and
+    /// does NOT include the visibility filter.
+    #[test]
+    fn describe_object_lookup_sql_schema_qualified_no_visibility() {
+        let pattern = "public.t*";
+        let (schema_part, _name_part) = pattern::split_schema(pattern);
+        let name_filter =
+            pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
+
+        // Schema was specified — no visibility filter.
+        let visibility_filter = if schema_part.is_none() {
+            "pg_catalog.pg_table_is_visible(c.oid)"
+        } else {
+            ""
+        };
+
+        let parts: Vec<&str> = [
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+            if visibility_filter.is_empty() {
+                None
+            } else {
+                Some(visibility_filter)
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let where_cond = parts.join("\n    and ");
+
+        let lookup_sql = format!(
+            "select c.oid, n.nspname, c.relname
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+where {where_cond}
+order by 2, 3"
+        );
+
+        assert!(
+            lookup_sql.contains("n.nspname = 'public'"),
+            "lookup SQL should filter on schema: {lookup_sql}"
+        );
+        assert!(
+            lookup_sql.contains("LIKE 't%'"),
+            "lookup SQL should use LIKE for name wildcard: {lookup_sql}"
+        );
+        assert!(
+            !lookup_sql.contains("pg_table_is_visible"),
+            "schema-qualified lookup should NOT include visibility filter: {lookup_sql}"
+        );
     }
 
     // -----------------------------------------------------------------------
