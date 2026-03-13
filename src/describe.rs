@@ -910,6 +910,11 @@ order by 1"
 // \dT — list types
 // ---------------------------------------------------------------------------
 
+/// List data types matching psql's `\dT [pattern]` output.
+///
+/// Basic columns: Schema, Name, Description.
+/// Verbose (`\dT+`) adds: Internal name, Size, Elements, Owner,
+/// Access privileges.
 async fn list_types(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "t.typname", Some("n.nspname"));
@@ -944,8 +949,42 @@ async fn list_types(client: &Client, meta: &ParsedMeta) -> bool {
 
     let where_clause = format!("where {}", where_parts.join("\n    and "));
 
-    let sql = format!(
-        "select
+    let sql = if meta.plus {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    pg_catalog.format_type(t.oid, null) as \"Name\",
+    t.typname as \"Internal name\",
+    case when t.typrelid != 0
+            then cast('tuple' as pg_catalog.text)
+        when t.typlen < 0
+            then cast('var' as pg_catalog.text)
+        else cast(t.typlen as pg_catalog.text)
+    end as \"Size\",
+    pg_catalog.array_to_string(
+        array(
+            select e.enumlabel
+            from pg_catalog.pg_enum as e
+            where e.enumtypid = t.oid
+            order by e.enumsortorder
+        ),
+        E'\\n'
+    ) as \"Elements\",
+    pg_catalog.pg_get_userbyid(t.typowner) as \"Owner\",
+    case when pg_catalog.array_length(t.typacl, 1) = 0
+         then '(none)'
+         else pg_catalog.array_to_string(t.typacl, E'\\n')
+    end as \"Access privileges\",
+    coalesce(pg_catalog.obj_description(t.oid, 'pg_type'), '') as \"Description\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+{where_clause}
+order by 1, 2"
+        )
+    } else {
+        format!(
+            "select
     n.nspname as \"Schema\",
     pg_catalog.format_type(t.oid, null) as \"Name\",
     coalesce(pg_catalog.obj_description(t.oid, 'pg_type'), '') as \"Description\"
@@ -954,7 +993,8 @@ left join pg_catalog.pg_namespace as n
     on n.oid = t.typnamespace
 {where_clause}
 order by 1, 2"
-    );
+        )
+    };
 
     run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of data types")).await
 }
@@ -3160,6 +3200,188 @@ order by 1, 2";
         assert!(
             sql.contains("typacl"),
             "verbose SQL must reference typacl for Access privileges: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_types SQL generation — \dT+ verbose columns (#177)
+    // -----------------------------------------------------------------------
+
+    /// Verify that the non-verbose SQL for `\dT` contains only Schema, Name,
+    /// and Description columns.
+    #[test]
+    fn list_types_basic_sql_has_three_columns() {
+        let base_filter = "t.typtype in ('c', 'd', 'e', 'r') and t.typname !~ '^_'\
+            \n    and (t.typrelid = 0 or (select c.relkind = 'c' from pg_catalog.pg_class as c where c.oid = t.typrelid))";
+        let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')";
+        let where_clause = format!("where {base_filter}\n    and {sys_filter}");
+
+        let sql = format!(
+            "select
+    n.nspname as \"Schema\",
+    pg_catalog.format_type(t.oid, null) as \"Name\",
+    coalesce(pg_catalog.obj_description(t.oid, 'pg_type'), '') as \"Description\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+{where_clause}
+order by 1, 2"
+        );
+
+        assert!(
+            sql.contains("\"Schema\""),
+            "basic SQL must have Schema: {sql}"
+        );
+        assert!(sql.contains("\"Name\""), "basic SQL must have Name: {sql}");
+        assert!(
+            sql.contains("\"Description\""),
+            "basic SQL must have Description: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Internal name\""),
+            "basic SQL must not have Internal name: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Owner\""),
+            "basic SQL must not have Owner: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Access privileges\""),
+            "basic SQL must not have Access privileges: {sql}"
+        );
+    }
+
+    /// Build the verbose `\dT+` SQL fragment used by the two tests below.
+    fn dt_plus_sql() -> String {
+        let base_filter = "t.typtype in ('c', 'd', 'e', 'r') and t.typname !~ '^_'\
+            \n    and (t.typrelid = 0 or (select c.relkind = 'c' from pg_catalog.pg_class as c where c.oid = t.typrelid))";
+        let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')";
+        let where_clause = format!("where {base_filter}\n    and {sys_filter}");
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    pg_catalog.format_type(t.oid, null) as \"Name\",
+    t.typname as \"Internal name\",
+    case when t.typrelid != 0
+            then cast('tuple' as pg_catalog.text)
+        when t.typlen < 0
+            then cast('var' as pg_catalog.text)
+        else cast(t.typlen as pg_catalog.text)
+    end as \"Size\",
+    pg_catalog.array_to_string(
+        array(
+            select e.enumlabel
+            from pg_catalog.pg_enum as e
+            where e.enumtypid = t.oid
+            order by e.enumsortorder
+        ),
+        E'\\n'
+    ) as \"Elements\",
+    pg_catalog.pg_get_userbyid(t.typowner) as \"Owner\",
+    case when pg_catalog.array_length(t.typacl, 1) = 0
+         then '(none)'
+         else pg_catalog.array_to_string(t.typacl, E'\\n')
+    end as \"Access privileges\",
+    coalesce(pg_catalog.obj_description(t.oid, 'pg_type'), '') as \"Description\"
+from pg_catalog.pg_type as t
+left join pg_catalog.pg_namespace as n
+    on n.oid = t.typnamespace
+{where_clause}
+order by 1, 2"
+        )
+    }
+
+    /// Verify that verbose `\dT+` SQL contains the expected columns and
+    /// references the correct catalog objects.
+    /// Regression test for bug #177.
+    #[test]
+    fn list_types_plus_sql_has_verbose_columns() {
+        let sql = dt_plus_sql();
+
+        assert!(
+            sql.contains("\"Internal name\""),
+            "verbose SQL must have Internal name: {sql}"
+        );
+        assert!(
+            sql.contains("t.typname as \"Internal name\""),
+            "Internal name must use t.typname: {sql}"
+        );
+        assert!(
+            sql.contains("\"Size\""),
+            "verbose SQL must have Size: {sql}"
+        );
+        assert!(
+            sql.contains("t.typlen"),
+            "Size must reference t.typlen: {sql}"
+        );
+        assert!(
+            sql.contains("\"Elements\""),
+            "verbose SQL must have Elements: {sql}"
+        );
+        assert!(
+            sql.contains("pg_enum"),
+            "Elements must query pg_enum: {sql}"
+        );
+        assert!(
+            sql.contains("enumsortorder"),
+            "Elements must order by enumsortorder: {sql}"
+        );
+        assert!(
+            sql.contains("\"Owner\""),
+            "verbose SQL must have Owner: {sql}"
+        );
+        assert!(
+            sql.contains("pg_get_userbyid(t.typowner)"),
+            "Owner must use pg_get_userbyid: {sql}"
+        );
+        assert!(
+            sql.contains("\"Access privileges\""),
+            "verbose SQL must have Access privileges: {sql}"
+        );
+        assert!(
+            sql.contains("t.typacl"),
+            "Access privileges must reference t.typacl: {sql}"
+        );
+        assert!(
+            sql.contains("\"Description\""),
+            "verbose SQL must have Description: {sql}"
+        );
+    }
+
+    /// Verify that verbose `\dT+` columns appear in the order psql uses:
+    /// Schema, Name, Internal name, Size, Elements, Owner, Access privileges,
+    /// Description.
+    /// Regression test for bug #177.
+    #[test]
+    fn list_types_plus_sql_column_order() {
+        let sql = dt_plus_sql();
+
+        let internal_pos = sql.find("\"Internal name\"").unwrap();
+        let size_pos = sql.find("\"Size\"").unwrap();
+        let elements_pos = sql.find("\"Elements\"").unwrap();
+        let owner_pos = sql.find("\"Owner\"").unwrap();
+        let acl_pos = sql.find("\"Access privileges\"").unwrap();
+        let desc_pos = sql.find("\"Description\"").unwrap();
+
+        assert!(
+            internal_pos < size_pos,
+            "Internal name must appear before Size: {sql}"
+        );
+        assert!(
+            size_pos < elements_pos,
+            "Size must appear before Elements: {sql}"
+        );
+        assert!(
+            elements_pos < owner_pos,
+            "Elements must appear before Owner: {sql}"
+        );
+        assert!(
+            owner_pos < acl_pos,
+            "Owner must appear before Access privileges: {sql}"
+        );
+        assert!(
+            acl_pos < desc_pos,
+            "Access privileges must appear before Description: {sql}"
         );
     }
 }
