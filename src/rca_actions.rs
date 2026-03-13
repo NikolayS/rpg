@@ -374,18 +374,29 @@ async fn present_and_execute(
     // Execute.
     let outcome = actor.execute(client, &action_request).await;
     let success = matches!(outcome, ActionOutcome::Success { .. });
-    match &outcome {
-        ActionOutcome::Success { detail } => {
-            eprintln!("      Done: {detail}");
 
-            // Post-action verification.
-            let vr = crate::verification::verify_action(client, &action_request.action_type).await;
-            eprintln!("      Verify: {vr}\n");
+    // Post-action verification (on success only).
+    let verified_note = if success {
+        if let ActionOutcome::Success { detail } = &outcome {
+            eprintln!("      Done: {detail}");
         }
-        ActionOutcome::Failure { error } => eprintln!("      Failed: {error}\n"),
-        other => eprintln!("      {other:?}\n"),
-    }
-    log_action(audit_log, proposal, outcome, note);
+        let vr = crate::verification::verify_action(client, &action_request.action_type).await;
+        eprintln!("      Verify: {vr}\n");
+
+        // Append verification result to auditor note.
+        let vr_str = format!(" | Verification: {vr}");
+        Some(match note {
+            Some(n) => format!("{n}{vr_str}"),
+            None => vr_str,
+        })
+    } else {
+        match &outcome {
+            ActionOutcome::Failure { error } => eprintln!("      Failed: {error}\n"),
+            other => eprintln!("      {other:?}\n"),
+        }
+        note
+    };
+    log_action(audit_log, proposal, outcome, verified_note);
     success
 }
 
