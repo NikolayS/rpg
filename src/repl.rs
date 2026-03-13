@@ -377,6 +377,158 @@ pub struct LastError {
 }
 
 // ---------------------------------------------------------------------------
+// Session conversation context (used by /ask for follow-up queries)
+// ---------------------------------------------------------------------------
+
+/// A single entry in the AI conversation history.
+#[derive(Debug, Clone)]
+pub struct ConversationEntry {
+    /// Role: "user" or "assistant".
+    pub role: &'static str,
+    /// The text content.
+    pub content: String,
+}
+
+/// Sliding-window conversation context for AI commands.
+///
+/// Stores recent user prompts and assistant responses so that follow-up
+/// queries (e.g. "now group that by month") can reference prior context.
+/// Also tracks SQL queries and their results for richer context.
+#[derive(Debug, Clone, Default)]
+pub struct ConversationContext {
+    /// Conversation history entries (user + assistant turns).
+    entries: Vec<ConversationEntry>,
+    /// Maximum number of entries before oldest are dropped.
+    max_entries: usize,
+    /// Approximate token count (rough: 1 token ≈ 4 chars).
+    approx_tokens: usize,
+}
+
+impl ConversationContext {
+    /// Create a new context with a default capacity.
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries: 50,
+            approx_tokens: 0,
+        }
+    }
+
+    /// Add a user turn to the conversation.
+    fn push_user(&mut self, content: String) {
+        self.approx_tokens += content.len() / 4;
+        self.entries.push(ConversationEntry {
+            role: "user",
+            content,
+        });
+        self.trim();
+    }
+
+    /// Add an assistant turn to the conversation.
+    fn push_assistant(&mut self, content: String) {
+        self.approx_tokens += content.len() / 4;
+        self.entries.push(ConversationEntry {
+            role: "assistant",
+            content,
+        });
+        self.trim();
+    }
+
+    /// Record a SQL query and its result summary for context.
+    fn push_query_result(&mut self, sql: &str, result_summary: &str) {
+        let content = format!("Executed SQL:\n```sql\n{sql}\n```\nResult: {result_summary}");
+        self.approx_tokens += content.len() / 4;
+        self.entries.push(ConversationEntry {
+            role: "user",
+            content,
+        });
+        self.trim();
+    }
+
+    /// Build the conversation history as `Message` objects for the LLM.
+    fn to_messages(&self) -> Vec<crate::ai::Message> {
+        self.entries
+            .iter()
+            .map(|e| crate::ai::Message {
+                role: if e.role == "user" {
+                    crate::ai::Role::User
+                } else {
+                    crate::ai::Role::Assistant
+                },
+                content: e.content.clone(),
+            })
+            .collect()
+    }
+
+    /// Compact the context: summarize older entries into a single summary,
+    /// keeping the most recent `keep` entries intact.
+    fn compact(&mut self, focus: Option<&str>) {
+        use std::fmt::Write as _;
+
+        if self.entries.len() <= 4 {
+            return; // Nothing meaningful to compact.
+        }
+
+        // Keep the last 4 entries, summarize the rest.
+        let keep = 4;
+        let split = self.entries.len().saturating_sub(keep);
+        let old_entries: Vec<ConversationEntry> = self.entries.drain(..split).collect();
+
+        let mut summary = String::from("Previous conversation summary:");
+        if let Some(f) = focus {
+            let _ = write!(summary, " (focus: {f})");
+        }
+        summary.push('\n');
+
+        for entry in &old_entries {
+            let preview: String = entry.content.chars().take(200).collect();
+            let suffix = if entry.content.len() > 200 { "..." } else { "" };
+            let _ = writeln!(summary, "- [{role}] {preview}{suffix}", role = entry.role);
+        }
+
+        // Recalculate token count.
+        self.approx_tokens = summary.len() / 4;
+        for e in &self.entries {
+            self.approx_tokens += e.content.len() / 4;
+        }
+
+        self.entries.insert(
+            0,
+            ConversationEntry {
+                role: "user",
+                content: summary,
+            },
+        );
+    }
+
+    /// Clear all conversation history.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.approx_tokens = 0;
+    }
+
+    /// Return `true` if the context has any entries.
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Approximate token count.
+    fn token_estimate(&self) -> usize {
+        self.approx_tokens
+    }
+
+    /// Drop oldest entries until we're within `max_entries`.
+    fn trim(&mut self) {
+        while self.entries.len() > self.max_entries {
+            if let Some(removed) = self.entries.first() {
+                self.approx_tokens = self.approx_tokens.saturating_sub(removed.content.len() / 4);
+            }
+            self.entries.remove(0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // REPL settings (mutable at runtime via backslash commands)
 // ---------------------------------------------------------------------------
 
@@ -457,6 +609,11 @@ pub struct ReplSettings {
     /// successful execution.  Used by `/fix` to provide the LLM with the
     /// query and error details.
     pub last_error: Option<LastError>,
+    /// Session conversation context for multi-turn AI interactions.
+    ///
+    /// Stores recent user prompts, assistant responses, and query results
+    /// so follow-up `/ask` commands can reference prior context.
+    pub conversation: ConversationContext,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -503,6 +660,14 @@ impl std::fmt::Debug for ReplSettings {
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
             )
+            .field(
+                "conversation",
+                &format!(
+                    "{} entries, ~{} tokens",
+                    self.conversation.entries.len(),
+                    self.conversation.token_estimate()
+                ),
+            )
             .finish()
     }
 }
@@ -538,6 +703,7 @@ impl Default for ReplSettings {
             exec_mode: ExecMode::default(),
             auto_explain: AutoExplain::default(),
             last_error: None,
+            conversation: ConversationContext::new(),
         }
     }
 }
@@ -2085,6 +2251,8 @@ AI commands:
   /fix              diagnose and fix the last error
   /optimize <query> suggest query optimizations
   /describe <table> AI-generated table description
+  /clear            clear AI conversation context
+  /compact [focus]  compact conversation context (optional focus topic)
 
 Input/execution modes:
   \sql              switch to SQL input mode (default)
@@ -4455,10 +4623,26 @@ async fn dispatch_ai_command(
             return;
         }
         handle_ai_describe(client, table_arg, settings, params).await;
+    } else if input == "/clear" {
+        settings.conversation.clear();
+        eprintln!("AI conversation context cleared.");
+    } else if let Some(focus) = input.strip_prefix("/compact").map(str::trim) {
+        if settings.conversation.is_empty() {
+            eprintln!("Nothing to compact — conversation context is empty.");
+        } else {
+            let focus = if focus.is_empty() { None } else { Some(focus) };
+            let before = settings.conversation.entries.len();
+            settings.conversation.compact(focus);
+            eprintln!(
+                "Compacted {before} entries → {} entries (~{} tokens)",
+                settings.conversation.entries.len(),
+                settings.conversation.token_estimate(),
+            );
+        }
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize, /describe"
+             Available: /ask, /fix, /explain, /optimize, /describe, /clear, /compact"
         );
     }
 }
@@ -4576,16 +4760,19 @@ async fn handle_ai_ask(
         schema = schema_ctx,
     );
 
-    let messages = vec![
-        crate::ai::Message {
-            role: crate::ai::Role::System,
-            content: system_content,
-        },
-        crate::ai::Message {
-            role: crate::ai::Role::User,
-            content: prompt.to_owned(),
-        },
-    ];
+    // Build messages: system + conversation history + current prompt.
+    let mut messages = vec![crate::ai::Message {
+        role: crate::ai::Role::System,
+        content: system_content,
+    }];
+
+    // Include conversation history for follow-up context.
+    messages.extend(settings.conversation.to_messages());
+
+    messages.push(crate::ai::Message {
+        role: crate::ai::Role::User,
+        content: prompt.to_owned(),
+    });
 
     let options = crate::ai::CompletionOptions {
         model: settings.config.ai.model.clone().unwrap_or_default(),
@@ -4603,6 +4790,12 @@ async fn handle_ai_ask(
 
     // Strip markdown fences if present (LLMs sometimes wrap in ```sql ... ```).
     let sql = strip_sql_fences(&generated_sql);
+
+    // Record the exchange in conversation context for follow-ups.
+    settings.conversation.push_user(prompt.to_owned());
+    settings
+        .conversation
+        .push_assistant(format!("Generated SQL:\n```sql\n{sql}\n```"));
 
     // Display with syntax highlighting when available.
     if settings.no_highlight {
@@ -4633,7 +4826,12 @@ async fn handle_ai_ask(
     };
 
     if should_execute {
-        execute_query(client, sql, settings, tx).await;
+        let ok = execute_query(client, sql, settings, tx).await;
+        if ok {
+            settings
+                .conversation
+                .push_query_result(sql, "(executed successfully)");
+        }
     }
 }
 
@@ -6124,6 +6322,27 @@ mod tests {
         assert_eq!(prompt, Some(""));
     }
 
+    #[test]
+    fn ai_clear_prefix_detected() {
+        let line = "/clear";
+        assert!(line.trim().starts_with('/'));
+        assert_eq!(line, "/clear");
+    }
+
+    #[test]
+    fn ai_compact_prefix_detected() {
+        let input = "/compact performance";
+        let focus = input.strip_prefix("/compact").map(str::trim);
+        assert_eq!(focus, Some("performance"));
+    }
+
+    #[test]
+    fn ai_compact_no_focus() {
+        let input = "/compact";
+        let focus = input.strip_prefix("/compact").map(str::trim);
+        assert_eq!(focus, Some(""));
+    }
+
     // -- /explain helpers ------------------------------------------------------
 
     #[test]
@@ -6366,5 +6585,127 @@ mod tests {
     fn strip_fences_no_closing_fence() {
         // Gracefully handles missing closing fence.
         assert_eq!(strip_sql_fences("```sql\nSELECT 1;"), "SELECT 1;");
+    }
+
+    // -- ConversationContext ---------------------------------------------------
+
+    #[test]
+    fn conversation_context_new_is_empty() {
+        let ctx = ConversationContext::new();
+        assert!(ctx.is_empty());
+        assert_eq!(ctx.token_estimate(), 0);
+        assert!(ctx.to_messages().is_empty());
+    }
+
+    #[test]
+    fn conversation_context_push_user() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_user("show me all users".to_owned());
+        assert!(!ctx.is_empty());
+        assert_eq!(ctx.entries.len(), 1);
+        assert_eq!(ctx.entries[0].role, "user");
+        assert_eq!(ctx.entries[0].content, "show me all users");
+    }
+
+    #[test]
+    fn conversation_context_push_assistant() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_assistant("SELECT * FROM users;".to_owned());
+        assert_eq!(ctx.entries.len(), 1);
+        assert_eq!(ctx.entries[0].role, "assistant");
+    }
+
+    #[test]
+    fn conversation_context_push_query_result() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_query_result("SELECT 1", "1 row");
+        assert_eq!(ctx.entries.len(), 1);
+        assert!(ctx.entries[0].content.contains("SELECT 1"));
+        assert!(ctx.entries[0].content.contains("1 row"));
+    }
+
+    #[test]
+    fn conversation_context_to_messages() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_user("hello".to_owned());
+        ctx.push_assistant("world".to_owned());
+        let msgs = ctx.to_messages();
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[0].role, crate::ai::Role::User));
+        assert!(matches!(msgs[1].role, crate::ai::Role::Assistant));
+        assert_eq!(msgs[0].content, "hello");
+        assert_eq!(msgs[1].content, "world");
+    }
+
+    #[test]
+    fn conversation_context_clear() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_user("a".to_owned());
+        ctx.push_assistant("b".to_owned());
+        assert!(!ctx.is_empty());
+        ctx.clear();
+        assert!(ctx.is_empty());
+        assert_eq!(ctx.token_estimate(), 0);
+    }
+
+    #[test]
+    fn conversation_context_trim_at_max() {
+        let mut ctx = ConversationContext::new();
+        ctx.max_entries = 3;
+        ctx.push_user("1".to_owned());
+        ctx.push_user("2".to_owned());
+        ctx.push_user("3".to_owned());
+        ctx.push_user("4".to_owned());
+        assert_eq!(ctx.entries.len(), 3);
+        // Oldest entry ("1") should have been trimmed.
+        assert_eq!(ctx.entries[0].content, "2");
+    }
+
+    #[test]
+    fn conversation_context_compact_small_noop() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_user("a".to_owned());
+        ctx.push_assistant("b".to_owned());
+        // <= 4 entries, compact should be a no-op.
+        ctx.compact(None);
+        assert_eq!(ctx.entries.len(), 2);
+    }
+
+    #[test]
+    fn conversation_context_compact_reduces_entries() {
+        let mut ctx = ConversationContext::new();
+        for i in 0..10 {
+            ctx.push_user(format!("q{i}"));
+            ctx.push_assistant(format!("a{i}"));
+        }
+        assert_eq!(ctx.entries.len(), 20);
+        ctx.compact(None);
+        // Should have: 1 summary + 4 recent = 5 entries.
+        assert_eq!(ctx.entries.len(), 5);
+        assert!(ctx.entries[0].content.contains("Previous conversation summary"));
+    }
+
+    #[test]
+    fn conversation_context_compact_with_focus() {
+        let mut ctx = ConversationContext::new();
+        for i in 0..8 {
+            ctx.push_user(format!("q{i}"));
+        }
+        ctx.compact(Some("performance"));
+        assert!(ctx.entries[0].content.contains("(focus: performance)"));
+    }
+
+    #[test]
+    fn conversation_context_token_estimate_grows() {
+        let mut ctx = ConversationContext::new();
+        assert_eq!(ctx.token_estimate(), 0);
+        ctx.push_user("a long message with many words".to_owned());
+        assert!(ctx.token_estimate() > 0);
+    }
+
+    #[test]
+    fn repl_settings_conversation_default_is_empty() {
+        let s = ReplSettings::default();
+        assert!(s.conversation.is_empty());
     }
 }
