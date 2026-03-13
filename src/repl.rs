@@ -4622,7 +4622,14 @@ async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
     let dummy = crate::connection::ConnParams::default();
     match crate::session::reconnect(Some(&pattern), &dummy).await {
         Ok((new_client, new_params)) => {
-            println!("{}", crate::connection::connection_info(&new_params));
+            let server_ver = crate::capabilities::detect_server_version_pub(&new_client).await;
+            let msg = crate::connection::reconnect_info(
+                crate::version_string(),
+                server_ver.as_deref(),
+                &dummy,
+                &new_params,
+            );
+            println!("{msg}");
             Some(MetaResult::Reconnected(Box::new(new_client), new_params))
         }
         Err(e) => {
