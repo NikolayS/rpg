@@ -436,14 +436,48 @@ fn split_schema_name(name: &str) -> (Option<String>, String) {
     }
 }
 
-/// Print `text` to stdout, optionally prepending 1-based line numbers.
-fn print_with_optional_line_numbers(text: &str, plus: bool) {
-    if plus {
-        for (i, line) in text.lines().enumerate() {
-            println!("{:>4}\t{line}", i + 1);
+/// Compute the line-numbered version of `text` that matches psql `\sf+`.
+///
+/// Lines before the `AS $` dollar-quote marker are returned with blank
+/// padding instead of a line number.  Lines from the `AS $` marker onward
+/// are numbered starting at 1.  Width is determined by the total body count.
+/// If there is no `AS $` line (e.g. for views) every line is numbered.
+fn numbered_lines(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+
+    let body_start = lines
+        .iter()
+        .position(|l| l.starts_with("AS $"))
+        .unwrap_or(0);
+
+    let body_line_count = lines.len().saturating_sub(body_start);
+    let width = body_line_count.to_string().len();
+    let blank = " ".repeat(width + 1);
+
+    let mut out = Vec::with_capacity(lines.len());
+    let mut body_lineno: usize = 0;
+    for (idx, line) in lines.iter().enumerate() {
+        if idx < body_start {
+            out.push(format!("{blank}{line}"));
+        } else {
+            body_lineno += 1;
+            out.push(format!("{body_lineno:<width$} {line}"));
         }
-    } else {
+    }
+    out
+}
+
+/// Print function/view source, optionally with psql-compatible line numbers.
+///
+/// When `plus` is true, delegates to [`numbered_lines`] so that only the
+/// dollar-quoted body receives line numbers, matching `psql \sf+` exactly.
+fn print_with_optional_line_numbers(text: &str, plus: bool) {
+    if !plus {
         println!("{text}");
+        return;
+    }
+    for line in numbered_lines(text) {
+        println!("{line}");
     }
 }
 
@@ -626,6 +660,102 @@ mod tests {
     fn build_view_def_sql_qualified() {
         let sql = build_view_def_sql(Some("myschema"), "my_view");
         assert!(sql.contains("n.nspname = 'myschema'"));
+    }
+
+    // -- numbered_lines (\sf+ body-only numbering) ---------------------------
+
+    #[test]
+    fn sf_plus_numbers_only_body_lines() {
+        // Simulate a typical pg_get_functiondef output.
+        let src = "\
+CREATE OR REPLACE FUNCTION public.user_order_count(p_user_id bigint)
+ RETURNS bigint
+ LANGUAGE sql
+ STABLE
+AS $function$
+    select count(*) from orders where user_id = p_user_id;
+$function$";
+
+        let lines = numbered_lines(src);
+        // Header lines (before AS $) must start with blank space, not a digit.
+        assert!(
+            lines[0].starts_with(' '),
+            "header line 0 must start with blank: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[3].starts_with(' '),
+            "header line 3 must start with blank: {:?}",
+            lines[3]
+        );
+        // The AS $ line is body line 1.
+        assert!(
+            lines[4].starts_with('1'),
+            "AS $ line must start with '1': {:?}",
+            lines[4]
+        );
+        // Body lines are numbered consecutively.
+        assert!(
+            lines[5].starts_with('2'),
+            "first body content line must start with '2': {:?}",
+            lines[5]
+        );
+        assert!(
+            lines[6].starts_with('3'),
+            "closing dollar-quote line must start with '3': {:?}",
+            lines[6]
+        );
+    }
+
+    #[test]
+    fn sf_plus_no_tab_separator() {
+        let src = "AS $f$\nselect 1;\n$f$";
+        let lines = numbered_lines(src);
+        // psql uses a space, not a tab.
+        for line in &lines {
+            assert!(!line.contains('\t'), "line must not contain tab: {line:?}");
+        }
+    }
+
+    #[test]
+    fn sf_plus_numbered_lines_width_matches_body_count() {
+        // 10 body lines + AS $f$ + $f$ = 12 body lines → width 2.
+        // Header blank prefix should be width+1 = 3 spaces.
+        let header = "CREATE FUNCTION f()";
+        let body_lines: Vec<&str> = (0..10).map(|_| "select 1;").collect();
+        let src = format!("{header}\nAS $f$\n{}\n$f$", body_lines.join("\n"));
+        let lines = numbered_lines(&src);
+        // Header line starts with 3 spaces (width=2 plus 1 separator space).
+        assert!(
+            lines[0].starts_with("   "),
+            "header must have 3-char blank prefix: {:?}",
+            lines[0]
+        );
+        // Body line 1 (the AS $f$ line) starts with "1 " (left-align in width=2).
+        assert!(lines[1].starts_with("1 "), "body line 1: {:?}", lines[1]);
+        // Body line 10 starts with "10 ".
+        assert!(
+            lines[10].starts_with("10 "),
+            "body line 10: {:?}",
+            lines[10]
+        );
+    }
+
+    #[test]
+    fn sf_plus_no_as_dollar_numbers_all() {
+        // Views (no AS $) → all lines are numbered from 1.
+        let src = " SELECT id\n   FROM t";
+        let lines = numbered_lines(src);
+        assert!(
+            lines[0].starts_with('1'),
+            "first line must be numbered: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with('2'),
+            "second line must be numbered: {:?}",
+            lines[1]
+        );
     }
 
     // -- reconnect port validation -------------------------------------------
