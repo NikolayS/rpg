@@ -9,7 +9,7 @@
 use std::sync::{Arc, RwLock};
 
 use rustyline::completion::{Completer, Pair};
-use rustyline::highlight::Highlighter;
+use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
@@ -720,12 +720,27 @@ pub fn fuzzy_match(input: &str, candidate: &str) -> Option<i32> {
 /// the async REPL without blocking readline.
 pub struct SamoHelper {
     cache: Arc<RwLock<SchemaCache>>,
+    /// Whether syntax highlighting is active.
+    highlight: bool,
 }
 
 impl SamoHelper {
     /// Create a new helper backed by the given cache.
-    pub fn new(cache: Arc<RwLock<SchemaCache>>) -> Self {
-        Self { cache }
+    ///
+    /// `highlight` enables ANSI syntax highlighting.  Pass `false` when
+    /// stdout is not a terminal or `$TERM` is `dumb`.
+    pub fn new(cache: Arc<RwLock<SchemaCache>>, highlight: bool) -> Self {
+        Self { cache, highlight }
+    }
+
+    /// Return `true` when syntax highlighting is enabled.
+    fn highlight_enabled(&self) -> bool {
+        self.highlight
+    }
+
+    /// Enable or disable syntax highlighting at runtime.
+    pub fn set_highlight(&mut self, enabled: bool) {
+        self.highlight = enabled;
     }
 }
 
@@ -843,7 +858,30 @@ impl Hinter for SamoHelper {
 }
 
 impl Validator for SamoHelper {}
-impl Highlighter for SamoHelper {}
+
+impl Highlighter for SamoHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
+        if self.highlight_enabled() {
+            crate::highlight::highlight_sql(line)
+        } else {
+            std::borrow::Cow::Borrowed(line)
+        }
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
+        // Return true to trigger re-highlighting on every keystroke.
+        self.highlight_enabled()
+    }
+
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> std::borrow::Cow<'b, str> {
+        std::borrow::Cow::Borrowed(prompt)
+    }
+}
+
 impl Helper for SamoHelper {}
 
 // ---------------------------------------------------------------------------
@@ -1081,7 +1119,7 @@ mod tests {
         // Compile-time check: SamoHelper must implement Helper.
         fn assert_helper<T: Helper>(_: &T) {}
         let cache = Arc::new(RwLock::new(SchemaCache::default()));
-        let helper = SamoHelper::new(cache);
+        let helper = SamoHelper::new(cache, false);
         assert_helper(&helper);
     }
 
@@ -1118,7 +1156,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(SchemaCache::default()));
-        let helper = SamoHelper::new(cache);
+        let helper = SamoHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1146,7 +1184,7 @@ mod tests {
         });
 
         let cache = Arc::new(RwLock::new(cache));
-        let helper = SamoHelper::new(cache);
+        let helper = SamoHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1170,7 +1208,7 @@ mod tests {
         });
 
         let cache = Arc::new(RwLock::new(cache));
-        let helper = SamoHelper::new(cache);
+        let helper = SamoHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 

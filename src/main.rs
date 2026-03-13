@@ -11,6 +11,7 @@ mod connection;
 mod copy;
 mod crosstab;
 mod describe;
+mod highlight;
 mod io;
 mod metacmd;
 #[allow(dead_code)]
@@ -223,6 +224,10 @@ struct Cli {
     debug: bool,
 
     // -- Samo-specific flags ------------------------------------------------
+    /// Disable syntax highlighting in the interactive REPL.
+    #[arg(long)]
+    no_highlight: bool,
+
     /// Enable text-to-SQL mode: translate natural language to SQL.
     #[arg(long)]
     text2sql: bool,
@@ -412,6 +417,7 @@ fn build_settings(cli: &Cli) -> repl::ReplSettings {
         single_transaction: cli.single_transaction,
         quiet: cli.quiet,
         debug: cli.debug,
+        no_highlight: cli.no_highlight,
         ..Default::default()
     }
 }
