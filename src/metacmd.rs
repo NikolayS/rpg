@@ -2212,6 +2212,9 @@ mod tests {
         assert_eq!(
             m.cmd,
             MetaCmd::Copy("my_table FROM '/tmp/data.txt'".to_owned())
+        );
+    }
+
     // -- \bind (#57) ---------------------------------------------------------
 
     #[test]
@@ -2261,7 +2264,6 @@ mod tests {
                 "my_stmt".to_owned(),
                 vec!["1".to_owned(), "2".to_owned(), "3".to_owned()],
             )
-
         );
     }
 
@@ -2283,6 +2285,9 @@ mod tests {
         assert!(matches!(parse("\\copy t FROM stdin").cmd, MetaCmd::Copy(_)));
         assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
         assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
+    }
+
+    #[test]
     fn parse_bind_named_missing_name() {
         // No name: should parse as Unknown.
         let m = parse("\\bind_named");
@@ -2363,7 +2368,6 @@ mod tests {
     #[test]
     fn split_params_mixed() {
         assert_eq!(split_params("42 'foo bar' baz"), vec!["42", "foo bar", "baz"]);
-
     }
 
     // -- \crosstabview -------------------------------------------------------
