@@ -310,6 +310,58 @@ pub enum ExecMode {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-EXPLAIN mode
+// ---------------------------------------------------------------------------
+
+/// Auto-EXPLAIN level — controls whether queries automatically show
+/// execution plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoExplain {
+    /// No automatic EXPLAIN (default).
+    #[default]
+    Off,
+    /// Prepend `EXPLAIN` to every query.
+    On,
+    /// Prepend `EXPLAIN ANALYZE` to every query.
+    Analyze,
+    /// Prepend `EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)`.
+    Verbose,
+}
+
+impl AutoExplain {
+    /// Cycle to the next mode: Off → On → Analyze → Verbose → Off.
+    #[allow(dead_code)]
+    fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::On,
+            Self::On => Self::Analyze,
+            Self::Analyze => Self::Verbose,
+            Self::Verbose => Self::Off,
+        }
+    }
+
+    /// Return the EXPLAIN prefix string (empty for Off).
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Off => "",
+            Self::On => "EXPLAIN ",
+            Self::Analyze => "EXPLAIN ANALYZE ",
+            Self::Verbose => "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING) ",
+        }
+    }
+
+    /// Human-readable label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Analyze => "analyze",
+            Self::Verbose => "verbose",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Last-error context (used by /fix)
 // ---------------------------------------------------------------------------
 
@@ -397,6 +449,8 @@ pub struct ReplSettings {
     pub input_mode: InputMode,
     /// Current execution mode (how much the AI can do without asking).
     pub exec_mode: ExecMode,
+    /// Auto-EXPLAIN level — prepend EXPLAIN to queries when not Off.
+    pub auto_explain: AutoExplain,
     /// Context from the most-recently failed query.
     ///
     /// Populated whenever a query returns an error; cleared on the next
@@ -444,6 +498,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("config_profiles", &self.config.connections.len())
             .field("input_mode", &self.input_mode)
             .field("exec_mode", &self.exec_mode)
+            .field("auto_explain", &self.auto_explain)
             .field(
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
@@ -481,6 +536,7 @@ impl Default for ReplSettings {
             config: crate::config::Config::default(),
             input_mode: InputMode::default(),
             exec_mode: ExecMode::default(),
+            auto_explain: AutoExplain::default(),
             last_error: None,
         }
     }
@@ -648,7 +704,27 @@ pub async fn execute_query(
 ) -> bool {
     // Interpolate variables before sending.
     let interpolated = settings.vars.interpolate(sql);
-    let sql_to_send = interpolated.as_str();
+
+    // Auto-EXPLAIN: prepend EXPLAIN prefix when enabled.
+    // Skip for statements that are already EXPLAIN, or for
+    // non-query statements (SET, BEGIN, COMMIT, etc.).
+    let auto_explained;
+    let sql_to_send = if settings.auto_explain == AutoExplain::Off {
+        interpolated.as_str()
+    } else {
+        let trimmed_upper = interpolated.trim_start().to_uppercase();
+        let is_query = trimmed_upper.starts_with("SELECT")
+            || trimmed_upper.starts_with("WITH")
+            || trimmed_upper.starts_with("TABLE")
+            || trimmed_upper.starts_with("VALUES");
+        let already_explain = trimmed_upper.starts_with("EXPLAIN");
+        if is_query && !already_explain {
+            auto_explained = format!("{}{}", settings.auto_explain.prefix(), interpolated);
+            auto_explained.as_str()
+        } else {
+            interpolated.as_str()
+        }
+    };
 
     // -s / --single-step: prompt before executing.
     if settings.single_step && !confirm_single_step(sql_to_send) {
@@ -2010,7 +2086,13 @@ Input/execution modes:
   \yolo             enter YOLO execution mode
   \observe          enter observe execution mode
   \interactive      return to interactive mode (default)
-  \mode             show current input and execution mode"
+  \mode             show current input and execution mode
+
+Auto-EXPLAIN:
+  \\set EXPLAIN on       show EXPLAIN for every query
+  \\set EXPLAIN analyze  show EXPLAIN ANALYZE for every query
+  \\set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
+  \\set EXPLAIN off      disable auto-EXPLAIN"
     );
 }
 
@@ -2118,6 +2200,23 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror DESTRUCTIVE_WARNING on/off into the destructive_warning flag.
     if name == "DESTRUCTIVE_WARNING" {
         settings.destructive_warning = matches!(value, "on" | "true" | "1");
+    }
+    // Mirror EXPLAIN into auto_explain.
+    if name == "EXPLAIN" {
+        settings.auto_explain = match value {
+            "on" | "true" | "1" => AutoExplain::On,
+            "analyze" => AutoExplain::Analyze,
+            "verbose" => AutoExplain::Verbose,
+            "off" | "false" | "0" | "" => AutoExplain::Off,
+            other => {
+                eprintln!(
+                    "\\set EXPLAIN: unknown value \"{other}\"\n\
+                     Valid: on, analyze, verbose, off"
+                );
+                return;
+            }
+        };
+        println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
     }
 }
 
@@ -5764,6 +5863,47 @@ mod tests {
             ),
             "mydb plan=> "
         );
+    }
+
+    // -- AutoExplain -----------------------------------------------------------
+
+    #[test]
+    fn auto_explain_off_prefix() {
+        assert_eq!(AutoExplain::Off.prefix(), "");
+    }
+
+    #[test]
+    fn auto_explain_on_prefix() {
+        assert_eq!(AutoExplain::On.prefix(), "EXPLAIN ");
+    }
+
+    #[test]
+    fn auto_explain_analyze_prefix() {
+        assert_eq!(AutoExplain::Analyze.prefix(), "EXPLAIN ANALYZE ");
+    }
+
+    #[test]
+    fn auto_explain_verbose_prefix() {
+        assert_eq!(
+            AutoExplain::Verbose.prefix(),
+            "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING) "
+        );
+    }
+
+    #[test]
+    fn auto_explain_cycle() {
+        assert_eq!(AutoExplain::Off.cycle(), AutoExplain::On);
+        assert_eq!(AutoExplain::On.cycle(), AutoExplain::Analyze);
+        assert_eq!(AutoExplain::Analyze.cycle(), AutoExplain::Verbose);
+        assert_eq!(AutoExplain::Verbose.cycle(), AutoExplain::Off);
+    }
+
+    #[test]
+    fn auto_explain_labels() {
+        assert_eq!(AutoExplain::Off.label(), "off");
+        assert_eq!(AutoExplain::On.label(), "on");
+        assert_eq!(AutoExplain::Analyze.label(), "analyze");
+        assert_eq!(AutoExplain::Verbose.label(), "verbose");
     }
 
     // -- \gexec parser ---------------------------------------------------------
