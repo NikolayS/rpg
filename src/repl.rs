@@ -6207,9 +6207,7 @@ async fn handle_ai_ask(
 
     // Record the exchange in conversation context for follow-ups.
     settings.conversation.push_user(prompt.to_owned());
-    settings
-        .conversation
-        .push_assistant(ai_response.clone());
+    settings.conversation.push_assistant(ai_response.clone());
 
     // Auto-compact when approaching the context window limit.
     if settings
@@ -6220,8 +6218,7 @@ async fn handle_ai_ask(
     }
 
     // Parse the response into text and SQL segments, then process each.
-    let show_sql =
-        settings.config.ai.show_sql || settings.echo_hidden;
+    let show_sql = settings.config.ai.show_sql || settings.echo_hidden;
     let yolo = settings.exec_mode == ExecMode::Yolo;
 
     let segments = parse_ai_response_segments(&ai_response);
@@ -6262,15 +6259,11 @@ async fn handle_ai_ask(
                             .governance
                             .autonomy_for(crate::governance::FeatureArea::Rca);
                         match autonomy {
-                            crate::governance::AutonomyLevel::Observe => {
-                                YoloWriteAction::Block
-                            }
+                            crate::governance::AutonomyLevel::Observe => YoloWriteAction::Block,
                             crate::governance::AutonomyLevel::Supervised => {
                                 YoloWriteAction::WarnThenExecute
                             }
-                            crate::governance::AutonomyLevel::Auto => {
-                                YoloWriteAction::Execute
-                            }
+                            crate::governance::AutonomyLevel::Auto => YoloWriteAction::Execute,
                         }
                     }
                 } else {
@@ -6289,8 +6282,7 @@ async fn handle_ai_ask(
 
                 // Read-only queries auto-execute; write queries prompt for
                 // confirmation unless YOLO mode overrides.
-                let auto_exec = read_only
-                    || (yolo && yolo_write_action != YoloWriteAction::Block);
+                let auto_exec = read_only || (yolo && yolo_write_action != YoloWriteAction::Block);
 
                 let choice = if auto_exec {
                     if yolo && !read_only {
@@ -6303,9 +6295,7 @@ async fn handle_ai_ask(
                                 );
                             }
                             YoloWriteAction::Execute => {
-                                eprintln!(
-                                    "-- YOLO: auto-executing write query"
-                                );
+                                eprintln!("-- YOLO: auto-executing write query");
                             }
                             YoloWriteAction::Block => {
                                 unreachable!("Block handled above")
@@ -6319,36 +6309,27 @@ async fn handle_ai_ask(
 
                 match choice {
                     AskChoice::Yes => {
-                        let ok =
-                            execute_query(client, sql, settings, tx).await;
+                        let ok = execute_query(client, sql, settings, tx).await;
                         if ok {
-                            settings
-                                .conversation
-                                .push_query_result(sql, "(executed)");
+                            settings.conversation.push_query_result(sql, "(executed)");
                         }
                     }
-                    AskChoice::Edit => {
-                        match crate::io::edit(sql, None, None) {
-                            Ok(edited) => {
-                                let edited = edited.trim();
-                                if edited.is_empty() {
-                                    eprintln!("(empty — skipped)");
-                                } else {
-                                    let ok = execute_query(
-                                        client, edited, settings, tx,
-                                    )
-                                    .await;
-                                    if ok {
-                                        settings.conversation.push_query_result(
-                                            edited,
-                                            "(executed after edit)",
-                                        );
-                                    }
+                    AskChoice::Edit => match crate::io::edit(sql, None, None) {
+                        Ok(edited) => {
+                            let edited = edited.trim();
+                            if edited.is_empty() {
+                                eprintln!("(empty — skipped)");
+                            } else {
+                                let ok = execute_query(client, edited, settings, tx).await;
+                                if ok {
+                                    settings
+                                        .conversation
+                                        .push_query_result(edited, "(executed after edit)");
                                 }
                             }
-                            Err(e) => eprintln!("{e}"),
                         }
-                    }
+                        Err(e) => eprintln!("{e}"),
+                    },
                     AskChoice::No => {}
                 }
             }
@@ -9095,7 +9076,7 @@ mod tests {
         let segs = collect_segments(response);
         assert_eq!(segs.len(), 2);
         assert!(!segs[0].0); // Text
-        assert!(segs[1].0);  // Sql
+        assert!(segs[1].0); // Sql
         assert_eq!(segs[1].1, "SELECT count(*) FROM users;");
     }
 
@@ -9104,19 +9085,18 @@ mod tests {
         let response = "```sql\nSELECT now();\n```\nThe current time is above.";
         let segs = collect_segments(response);
         assert_eq!(segs.len(), 2);
-        assert!(segs[0].0);  // Sql
+        assert!(segs[0].0); // Sql
         assert!(!segs[1].0); // Text
         assert_eq!(segs[0].1, "SELECT now();");
     }
 
     #[test]
     fn parse_segments_text_sql_text() {
-        let response =
-            "Count of users:\n```sql\nSELECT count(*) FROM users;\n```\nThat's all.";
+        let response = "Count of users:\n```sql\nSELECT count(*) FROM users;\n```\nThat's all.";
         let segs = collect_segments(response);
         assert_eq!(segs.len(), 3);
         assert!(!segs[0].0); // Text
-        assert!(segs[1].0);  // Sql
+        assert!(segs[1].0); // Sql
         assert!(!segs[2].0); // Text
         assert_eq!(segs[1].1, "SELECT count(*) FROM users;");
     }
