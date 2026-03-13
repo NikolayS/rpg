@@ -63,6 +63,14 @@ impl NamedQueries {
         &self.queries
     }
 
+    /// Return `true` if `name` is a valid named-query identifier.
+    ///
+    /// Valid names consist only of ASCII alphanumeric characters and
+    /// underscores, and must be non-empty.
+    pub fn is_valid_name(name: &str) -> bool {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
     /// Substitute positional parameters (`$1`, `$2`, …) in a query.
     ///
     /// Parameters are replaced in order: `$1` → `args[0]`, `$2` → `args[1]`,
@@ -154,5 +162,72 @@ mod tests {
         // $3 left as-is when only 2 args provided
         let result = NamedQueries::substitute("$1 $2 $3", &["a", "b"]);
         assert_eq!(result, "a b $3");
+    }
+
+    // -- is_valid_name -------------------------------------------------------
+
+    #[test]
+    fn test_valid_name_alphanumeric() {
+        assert!(NamedQueries::is_valid_name("top_tables"));
+        assert!(NamedQueries::is_valid_name("query1"));
+        assert!(NamedQueries::is_valid_name("a"));
+    }
+
+    #[test]
+    fn test_valid_name_empty_rejected() {
+        assert!(!NamedQueries::is_valid_name(""));
+    }
+
+    #[test]
+    fn test_valid_name_hyphen_rejected() {
+        assert!(!NamedQueries::is_valid_name("my-query"));
+    }
+
+    #[test]
+    fn test_valid_name_space_rejected() {
+        assert!(!NamedQueries::is_valid_name("my query"));
+    }
+
+    #[test]
+    fn test_valid_name_dot_rejected() {
+        assert!(!NamedQueries::is_valid_name("my.query"));
+    }
+
+    // -- TOML round-trip -----------------------------------------------------
+
+    #[test]
+    fn test_toml_round_trip() {
+        let mut nq = NamedQueries::default();
+        nq.set(
+            "active",
+            "select * from pg_stat_activity where state = 'active'",
+        );
+        nq.set(
+            "top_tables",
+            "select * from pg_stat_user_tables order by $1 desc limit $2",
+        );
+
+        let serialized = toml::to_string_pretty(&nq).expect("serialization failed");
+        let deserialized: NamedQueries =
+            toml::from_str(&serialized).expect("deserialization failed");
+
+        assert_eq!(
+            deserialized.get("active"),
+            Some("select * from pg_stat_activity where state = 'active'")
+        );
+        assert_eq!(
+            deserialized.get("top_tables"),
+            Some("select * from pg_stat_user_tables order by $1 desc limit $2")
+        );
+        assert_eq!(deserialized.list().len(), 2);
+    }
+
+    #[test]
+    fn test_toml_empty_round_trip() {
+        let nq = NamedQueries::default();
+        let serialized = toml::to_string_pretty(&nq).expect("serialization failed");
+        let deserialized: NamedQueries =
+            toml::from_str(&serialized).expect("deserialization failed");
+        assert!(deserialized.list().is_empty());
     }
 }

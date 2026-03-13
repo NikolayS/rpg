@@ -270,6 +270,8 @@ pub enum MetaCmd {
     NamedList,
     /// `\nd name` — delete a named query.
     NamedDelete(String),
+    /// `\np name` — print (show) a named query without executing.
+    NamedPrint(String),
 
     // -- Input mode --------------------------------------------------------
     /// `\sql` — switch to SQL input mode.
@@ -1281,11 +1283,12 @@ fn parse_b_family(input: &str) -> ParsedMeta {
 // \n family parser — named queries (#69)
 // ---------------------------------------------------------------------------
 
-/// Parse `\ns name query`, `\nd name`, `\n+`, and `\n name [args...]`.
+/// Parse `\ns name query`, `\nd name`, `\np name`, `\n+`, and `\n name [args...]`.
 ///
 /// Disambiguation order (longest match first):
 ///   `ns` → [`MetaCmd::NamedSave`]
 ///   `nd` → [`MetaCmd::NamedDelete`]
+///   `np` → [`MetaCmd::NamedPrint`]
 ///   `n+` → [`MetaCmd::NamedList`]
 ///   `n`  → [`MetaCmd::NamedExec`]
 fn parse_n_family(input: &str) -> ParsedMeta {
@@ -1311,6 +1314,17 @@ fn parse_n_family(input: &str) -> ParsedMeta {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
             }
             return ParsedMeta::simple(MetaCmd::NamedDelete(name));
+        }
+    }
+
+    // `\np name` — print a named query without executing.  Must come before bare `\n`.
+    if let Some(rest) = input.strip_prefix("np") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let name = rest.trim().to_owned();
+            if name.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::NamedPrint(name));
         }
     }
 
@@ -2993,6 +3007,25 @@ mod tests {
     fn parse_named_delete_missing_name_is_unknown() {
         let m = parse("\\nd");
         assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_named_print() {
+        let m = parse("\\np top_tables");
+        assert_eq!(m.cmd, MetaCmd::NamedPrint("top_tables".to_owned()));
+    }
+
+    #[test]
+    fn parse_named_print_missing_name_is_unknown() {
+        let m = parse("\\np");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_named_print_np_not_confused_with_n() {
+        // `\np` must not be mistaken for `\n` with arg `p`.
+        let m = parse("\\np my_q");
+        assert!(matches!(m.cmd, MetaCmd::NamedPrint(_)));
     }
 
     // -- Input mode commands ---------------------------------------------------
