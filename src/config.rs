@@ -110,6 +110,17 @@ pub struct AiConfig {
     /// is configured.
     #[serde(default = "default_true")]
     pub auto_explain_errors: bool,
+    /// Approximate context window size (in tokens) for the configured model.
+    ///
+    /// Used by auto-compact: when the conversation context exceeds 70% of
+    /// this value, older entries are automatically summarized.
+    /// Defaults to 128000 (128k).
+    #[serde(default = "default_context_window")]
+    pub context_window: u32,
+}
+
+fn default_context_window() -> u32 {
+    128_000
 }
 
 fn default_true() -> bool {
@@ -126,6 +137,7 @@ impl Default for AiConfig {
             max_tokens: 4096,
             auto_execute_readonly: false,
             auto_explain_errors: true,
+            context_window: default_context_window(),
         }
     }
 }
@@ -224,6 +236,11 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             auto_execute_readonly: overlay.ai.auto_execute_readonly
                 || base.ai.auto_execute_readonly,
             auto_explain_errors: overlay.ai.auto_explain_errors && base.ai.auto_explain_errors,
+            context_window: if overlay.ai.context_window == default_context_window() {
+                base.ai.context_window
+            } else {
+                overlay.ai.context_window
+            },
         },
         connections: {
             let mut merged = base.connections;
@@ -571,6 +588,7 @@ provider = "ollama"
                 max_tokens: 2048,
                 auto_execute_readonly: false,
                 auto_explain_errors: true,
+                context_window: 128_000,
             },
             ..Default::default()
         };
@@ -583,6 +601,7 @@ provider = "ollama"
                 max_tokens: 4096,
                 auto_execute_readonly: false,
                 auto_explain_errors: true,
+                context_window: 128_000,
             },
             ..Default::default()
         };
@@ -603,6 +622,7 @@ provider = "ollama"
                 max_tokens: 4096,
                 auto_execute_readonly: false,
                 auto_explain_errors: true,
+                context_window: 128_000,
             },
             ..Default::default()
         };
