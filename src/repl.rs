@@ -326,6 +326,76 @@ pub fn history_file() -> Option<PathBuf> {
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
 
+/// Print a single result set (column-aligned table with header and row count).
+///
+/// `col_names` and `rows` describe the result set. `had_rows` indicates
+/// whether any `Row` messages were received (distinguishes an empty SELECT
+/// from a DML command). `rows_affected` carries the `CommandComplete` count.
+/// `is_first` is `false` when this is a subsequent result set in a
+/// multi-statement query, in which case a blank separator line is printed
+/// before the table (matching psql behaviour).
+fn print_result_set(
+    col_names: &[String],
+    rows: &[Vec<String>],
+    had_rows: bool,
+    rows_affected: u64,
+    is_first: bool,
+) {
+    if had_rows {
+        if !col_names.is_empty() {
+            if !is_first {
+                println!();
+            }
+
+            // Compute column widths.
+            let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
+            for row in rows {
+                for (i, val) in row.iter().enumerate() {
+                    if i < widths.len() {
+                        widths[i] = widths[i].max(val.len());
+                    }
+                }
+            }
+
+            // Header row
+            let header: Vec<String> = col_names
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+                .collect();
+            println!(" {} ", header.join(" | "));
+
+            // Separator
+            let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
+            println!("-{}-", sep.join("-+-"));
+
+            // Data rows
+            for row in rows {
+                let cells: Vec<String> = row
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        format!("{:<width$}", v, width = *widths.get(i).unwrap_or(&v.len()))
+                    })
+                    .collect();
+                println!(" {} ", cells.join(" | "));
+            }
+
+            let nrows = rows.len();
+            let row_word = if nrows == 1 { "row" } else { "rows" };
+            println!("({nrows} {row_word})");
+        }
+    } else {
+        // Non-SELECT statement: show rows affected if > 0.
+        if rows_affected > 0 {
+            if !is_first {
+                println!();
+            }
+            println!("{rows_affected}");
+        }
+    }
+}
+
 /// Execute a SQL string using `simple_query` and print a basic result.
 ///
 /// This is a stub implementation. Issue #19 will replace this with proper
@@ -349,8 +419,8 @@ pub async fn execute_query(
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
             let mut rows: Vec<Vec<String>> = Vec::new();
-            let mut rows_affected: Option<u64> = None;
             let mut had_rows = false;
+            let mut result_set_index: usize = 0;
 
             for msg in messages {
                 match msg {
@@ -371,7 +441,19 @@ pub async fn execute_query(
                         rows.push(vals);
                     }
                     SimpleQueryMessage::CommandComplete(n) => {
-                        rows_affected = Some(n);
+                        // Flush the current result set, then reset for next
+                        // statement in a multi-statement query.
+                        print_result_set(
+                            &col_names,
+                            &rows,
+                            had_rows,
+                            n,
+                            result_set_index == 0,
+                        );
+                        result_set_index += 1;
+                        col_names.clear();
+                        rows.clear();
+                        had_rows = false;
                     }
                     _ => {}
                 }
@@ -380,53 +462,6 @@ pub async fn execute_query(
             // Update transaction state based on what SQL was sent.
             tx.update_from_sql(sql);
 
-            // Print result table.
-            if had_rows {
-                if !col_names.is_empty() {
-                    // Compute column widths.
-                    let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
-                    for row in &rows {
-                        for (i, val) in row.iter().enumerate() {
-                            if i < widths.len() {
-                                widths[i] = widths[i].max(val.len());
-                            }
-                        }
-                    }
-
-                    // Header row
-                    let header: Vec<String> = col_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
-                        .collect();
-                    println!(" {} ", header.join(" | "));
-
-                    // Separator
-                    let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
-                    println!("-{}-", sep.join("-+-"));
-
-                    // Data rows
-                    for row in &rows {
-                        let cells: Vec<String> = row
-                            .iter()
-                            .enumerate()
-                            .map(|(i, v)| {
-                                format!("{:<width$}", v, width = *widths.get(i).unwrap_or(&v.len()))
-                            })
-                            .collect();
-                        println!(" {} ", cells.join(" | "));
-                    }
-
-                    let nrows = rows.len();
-                    let row_word = if nrows == 1 { "row" } else { "rows" };
-                    println!("({nrows} {row_word})");
-                }
-            } else if let Some(n) = rows_affected {
-                // Non-SELECT statement: show rows affected if > 0.
-                if n > 0 {
-                    println!("{n}");
-                }
-            }
             true
         }
         Err(e) => {
