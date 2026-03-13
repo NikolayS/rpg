@@ -253,6 +253,8 @@ pub enum MetaCmd {
     // -- Info commands ------------------------------------------------------
     /// `\copyright` — show `PostgreSQL` copyright and distribution terms.
     Copyright,
+    /// `\version` — show samo version and build information.
+    Version,
 
     // -- Diagnostic commands (#66) -----------------------------------------
     /// `\dba [subcommand]` — run a database diagnostic sub-command.
@@ -462,6 +464,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('s') => parse_s_family(input),
         Some('t') => parse_t_family(input),
         Some('u') => parse_unset(input),
+        Some('v') => parse_v_family(input),
         Some('w') => parse_w(input),
         Some('x') => parse_x(input),
         Some('b') => parse_b_family(input),
@@ -768,6 +771,16 @@ fn parse_x(input: &str) -> ParsedMeta {
         _ => ExpandedMode::Toggle,
     };
     ParsedMeta::simple(MetaCmd::Expanded(mode))
+}
+
+/// Parse `\version` or unknown `\v…`.
+fn parse_v_family(input: &str) -> ParsedMeta {
+    if let Some(rest) = input.strip_prefix("version") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Version);
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
 /// Parse `\conninfo`, `\crosstabview`, `\copy`, `\close_prepared`, `\copyright`, `\cd`, `\c`, or unknown `\c…`.
@@ -2860,6 +2873,20 @@ mod tests {
         assert_eq!(parse("\\copyright").cmd, MetaCmd::Copyright);
         assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
         assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
+    }
+
+    // -- \version ------------------------------------------------------------
+
+    #[test]
+    fn parse_version() {
+        assert_eq!(parse("\\version").cmd, MetaCmd::Version);
+    }
+
+    #[test]
+    fn parse_version_not_confused_with_other_v_prefixes() {
+        // \version must parse cleanly; a partial match like \v alone is Unknown.
+        assert_eq!(parse("\\version").cmd, MetaCmd::Version);
+        assert!(matches!(parse("\\v").cmd, MetaCmd::Unknown(_)));
     }
 
     // -- \dba (#66) ----------------------------------------------------------

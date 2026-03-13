@@ -47,6 +47,27 @@ mod verification;
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
 
+/// Build-time date (UTC, `YYYY-MM-DD`) injected by `build.rs`.
+const BUILD_DATE: &str = env!("SAMO_BUILD_DATE");
+
+/// One-line version string: `samo 0.1.0 (abc1234, built 2026-03-13)`.
+///
+/// Exposed as `pub` so that meta-command handlers can print it without
+/// duplicating the formatting logic.
+pub fn version_string() -> &'static str {
+    // Leak is fine: called at most a handful of times, lives for the
+    // process lifetime.
+    Box::leak(
+        format!(
+            "samo {} ({}, built {})",
+            env!("CARGO_PKG_VERSION"),
+            GIT_HASH,
+            BUILD_DATE,
+        )
+        .into_boxed_str(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Autonomy levels (samo-specific)
 // ---------------------------------------------------------------------------
@@ -70,10 +91,9 @@ enum Autonomy {
 // CLI definition
 // ---------------------------------------------------------------------------
 
-/// Assemble a long version string like `0.1.0-dev (abc1234)`.
+/// Assemble the clap version string: delegates to [`version_string`].
 fn long_version() -> &'static str {
-    // Leak is fine: called once at startup, lives for the process lifetime.
-    Box::leak(format!("{} ({})", env!("CARGO_PKG_VERSION"), GIT_HASH).into_boxed_str())
+    version_string()
 }
 
 /// Samo — self-driving Postgres agent and psql-compatible terminal.
@@ -642,7 +662,12 @@ async fn main() {
             );
             let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
             let is_scripting = !cli.command.is_empty() || cli.file.is_some();
-            if !cli.quiet && !is_scripting && !is_piped {
+            let is_interactive = !is_scripting && !is_piped;
+            if !cli.quiet && is_interactive {
+                // Version banner — matches psql's style of showing version on
+                // connect. Only shown for interactive sessions, not -c/-f/pipe.
+                println!("{}", version_string());
+                println!("Type \\? for help, \\q to quit.");
                 println!("{}", connection::connection_info(&resolved));
             }
 
@@ -653,7 +678,7 @@ async fn main() {
             if let capabilities::PgAshStatus::Available { ref version } =
                 settings.db_capabilities.pg_ash
             {
-                if !cli.quiet && !is_scripting && !is_piped {
+                if !cli.quiet && is_interactive {
                     let ver = version.as_deref().unwrap_or("unknown version");
                     logging::info("capabilities", &format!("pg_ash detected: {ver}"));
                 }

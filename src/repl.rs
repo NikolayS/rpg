@@ -2720,8 +2720,10 @@ pub(crate) async fn exec_lines(
 
 /// Print the backslash command help text.
 fn print_help() {
+    println!("{}", crate::version_string());
     println!(
-        r"Backslash commands:
+        r"
+Backslash commands:
   \q              quit samo
   quit            quit samo (interactive mode only)
   exit            quit samo (interactive mode only)
@@ -2729,6 +2731,7 @@ fn print_help() {
   \x [on|off|auto]      toggle/set expanded display
   \conninfo       show connection information
   \copyright      show PostgreSQL usage and distribution terms
+  \version        show samo version and build information
   \?              show this help
 
 Session commands:
@@ -4131,6 +4134,9 @@ async fn dispatch_meta(
         }
         MetaCmd::Copyright => {
             print_copyright();
+        }
+        MetaCmd::Version => {
+            println!("{}", crate::version_string());
         }
         MetaCmd::SqlMode => {
             return MetaResult::SetInputMode(InputMode::Sql);
