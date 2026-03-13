@@ -451,10 +451,8 @@ pub async fn exec_command(
             echo_hidden: settings.echo_hidden,
             ..Default::default()
         };
-        match dispatch_meta(parsed, client, params, &mut dummy_settings).await {
-            MetaResult::Quit => return 0,
-            MetaResult::Continue | MetaResult::Reconnected(..) => return 0,
-        }
+        dispatch_meta(parsed, client, params, &mut dummy_settings).await;
+        return 0;
     }
     let mut tx = TxState::default();
     i32::from(!execute_query(client, sql, settings, &mut tx).await)
@@ -858,10 +856,6 @@ async fn run_dumb_loop(
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 if line.trim_start().starts_with('\\') {
-<<<<<<< HEAD
-                    if handle_backslash_dumb(line.trim(), client, params, settings).await {
-                        break;
-=======
                     match handle_backslash_dumb(line.trim(), client, params, settings).await {
                         HandleLineResult::Quit => break,
                         HandleLineResult::Reconnected(new_client, new_params) => {
@@ -871,7 +865,6 @@ async fn run_dumb_loop(
                             buf.clear();
                         }
                         HandleLineResult::Continue => {}
->>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
                     }
                 } else {
                     if !buf.is_empty() {
@@ -910,22 +903,11 @@ enum HandleLineResult {
 }
 
 /// Handle a single input line in the dumb loop (backslash commands).
-<<<<<<< HEAD
-///
-/// Returns `true` if the loop should exit (i.e. `\q` was issued).
-=======
->>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
 async fn handle_backslash_dumb(
     input: &str,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
-<<<<<<< HEAD
-) -> bool {
-    let mut parsed = crate::metacmd::parse(input);
-    parsed.echo_hidden = settings.echo_hidden;
-    dispatch_meta(parsed, client, params, settings).await
-=======
 ) -> HandleLineResult {
     let mut parsed = crate::metacmd::parse(input);
     parsed.echo_hidden = settings.echo_hidden;
@@ -934,7 +916,6 @@ async fn handle_backslash_dumb(
         MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
         MetaResult::Continue => HandleLineResult::Continue,
     }
->>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
 }
 
 /// Process one line of input in the readline loop.
@@ -955,16 +936,11 @@ async fn handle_line(
         // Backslash command — execute immediately.
         let mut parsed = crate::metacmd::parse(line.trim());
         parsed.echo_hidden = settings.echo_hidden;
-<<<<<<< HEAD
-        let should_exit = dispatch_meta(parsed, client, params, settings).await;
-        return should_exit;
-=======
         return match dispatch_meta(parsed, client, params, settings).await {
             MetaResult::Quit => HandleLineResult::Quit,
             MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::Continue => HandleLineResult::Continue,
         };
->>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
     }
 
     // SQL input: accumulate lines until we have a complete statement.
