@@ -237,6 +237,21 @@ compare "\\dm" \
 compare "\\di+" \
   "\\di+"
 
+compare "\\dn+" \
+  "\\dn+"
+
+compare "\\du+" \
+  "\\du+"
+
+compare "\\dv+" \
+  "\\dv+"
+
+compare "\\dm+" \
+  "\\dm+"
+
+compare "\\ds+" \
+  "\\ds+"
+
 # \d products and \d+ products disabled — partial index WHERE clause missing (#144)
 
 # ---------------------------------------------------------------------------
