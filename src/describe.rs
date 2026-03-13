@@ -674,11 +674,7 @@ order by 1"
 // \l — list databases
 // ---------------------------------------------------------------------------
 
-async fn list_databases(
-    client: &Client,
-    meta: &ParsedMeta,
-    pg_major_version: Option<u32>,
-) -> bool {
+async fn list_databases(client: &Client, meta: &ParsedMeta, pg_major_version: Option<u32>) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "d.datname", None);
 
     let where_clause = if name_filter.is_empty() {

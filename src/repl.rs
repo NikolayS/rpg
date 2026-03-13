@@ -3658,12 +3658,8 @@ async fn dispatch_meta(
                     | MetaCmd::ListUserMappings
             ) =>
         {
-            crate::describe::execute(
-                client,
-                &parsed,
-                settings.db_capabilities.pg_major_version(),
-            )
-            .await;
+            crate::describe::execute(client, &parsed, settings.db_capabilities.pg_major_version())
+                .await;
         }
         ref stub => {
             eprintln!("{}: not yet implemented (see #27)", stub.label());
