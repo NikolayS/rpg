@@ -99,6 +99,19 @@ insert into products (name, price, active) values
 on conflict do nothing;
 
 -- ---------------------------------------------------------------------------
+-- Sequences (used by \ds integration tests)
+-- ---------------------------------------------------------------------------
+
+create sequence if not exists order_ref_seq
+    start 1000
+    increment 1
+    no minvalue
+    no maxvalue
+    cache 1;
+
+comment on sequence order_ref_seq is 'Human-readable order reference number';
+
+-- ---------------------------------------------------------------------------
 -- Views (used by \sv integration tests)
 -- ---------------------------------------------------------------------------
 
@@ -111,6 +124,27 @@ create or replace view active_products as
     where active = true;
 
 comment on view active_products is 'Products currently listed for sale';
+
+-- ---------------------------------------------------------------------------
+-- Materialized views (used by \dm integration tests)
+-- ---------------------------------------------------------------------------
+
+create materialized view if not exists user_order_summary as
+    select
+        u.id          as user_id,
+        u.name        as user_name,
+        count(o.id)   as order_count,
+        sum(o.amount) as total_amount
+    from users as u
+    left join orders as o
+        on o.user_id = u.id
+    group by
+        u.id,
+        u.name
+    with no data;
+
+comment on materialized view user_order_summary
+    is 'Aggregated order totals per user (refresh manually)';
 
 -- ---------------------------------------------------------------------------
 -- Functions (used by \sf integration tests)

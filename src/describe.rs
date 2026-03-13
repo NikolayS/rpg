@@ -254,6 +254,11 @@ fn print_table_inner(
 
         for line_idx in 0..max_lines {
             let mut line = String::new();
+            // Track whether the previous column had a continuation marker, so
+            // we can suppress the leading space in the following ` | ` separator
+            // (psql prints `+|` with no gap between the marker and `|`).
+            let mut prev_had_continuation = false;
+
             for (col_idx, &w) in widths.iter().enumerate() {
                 let text = cell_lines
                     .get(col_idx)
@@ -267,18 +272,26 @@ fn print_table_inner(
                 // Column separator.
                 if col_idx == 0 {
                     line.push(' ');
+                } else if prev_had_continuation {
+                    // Previous column ended with `+`; omit the leading space so
+                    // the separator renders as `+|` (matching psql).
+                    line.push_str("| ");
                 } else {
                     line.push_str(" | ");
                 }
+                prev_had_continuation = false;
 
                 if has_more && col_idx < ncols - 1 {
-                    // Middle column with continuation: `+` within cell width.
-                    let text_pad = w.saturating_sub(1).saturating_sub(text.len());
+                    // Middle column with continuation: pad to full width, then
+                    // append `+` which will replace the leading space of the
+                    // next separator.
+                    let text_pad = w.saturating_sub(text.len());
                     line.push_str(text);
                     for _ in 0..text_pad {
                         line.push(' ');
                     }
                     line.push('+');
+                    prev_had_continuation = true;
                 } else if col_idx == ncols - 1 && !has_more {
                     // Last column without continuation — no trailing padding (matches psql).
                     line.push_str(text);
@@ -393,6 +406,13 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     {type_expr} as \"Type\",
     pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
     ct.relname as \"Table\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
+    coalesce(am.amname, '') as \"Access method\",
     pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
     coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
 from pg_catalog.pg_class as c
@@ -402,6 +422,8 @@ join pg_catalog.pg_index as idx_i
     on idx_i.indexrelid = c.oid
 join pg_catalog.pg_class as ct
     on ct.oid = idx_i.indrelid
+left join pg_catalog.pg_am as am
+    on am.oid = c.relam
 where c.relkind in ({kind_in})
     {where_clause}
 order by 1, 2"
@@ -792,7 +814,13 @@ left join pg_catalog.pg_namespace as n
 order by 1"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of installed extensions"),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,7 +1205,14 @@ async fn describe_table(client: &Client, meta: &ParsedMeta, obj_pattern: &str) -
     ) as \"Collation\",
     case when a.attnotnull then 'not null' else '' end as \"Nullable\",
     {default_expr} as \"Default\",
-    a.attstorage::text as \"Storage\",
+    case a.attstorage
+        when 'p' then 'plain'
+        when 'e' then 'external'
+        when 'x' then 'extended'
+        when 'm' then 'main'
+        else a.attstorage::text
+    end as \"Storage\",
+    coalesce(a.attcompression, '') as \"Compression\",
     case when a.attstattarget = -1 then '' else a.attstattarget::text end as \"Stats target\",
     coalesce(pg_catalog.col_description(a.attrelid, a.attnum), '') as \"Description\"
 from pg_catalog.pg_attribute as a
@@ -1516,6 +1551,36 @@ order by 1, 2"
             println!("Referenced by:");
             for (from_table, name, def) in &lines {
                 println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
+            }
+        }
+    }
+
+    // Access method — shown by psql \d+ for tables and materialized views.
+    if meta.plus {
+        let am_sql = format!(
+            "select am.amname
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_am as am
+    on am.oid = c.relam
+where c.relkind in ('r','p','m')
+    and {name_cond}
+limit 1"
+        );
+        if meta.echo_hidden {
+            eprintln!("/******** QUERY *********/\n{am_sql}\n/************************/");
+        }
+        if let Ok(msgs) = client.simple_query(&am_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let amname = row.get(0).unwrap_or("");
+                    if !amname.is_empty() {
+                        println!("Access method: {amname}");
+                    }
+                    break;
+                }
             }
         }
     }

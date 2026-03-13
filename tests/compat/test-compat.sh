@@ -216,8 +216,26 @@ compare "\\df" \
 compare "\\d users" \
   "\\d users"
 
+compare "\\d+ users" \
+  "\\d+ users"
+
 compare "\\l" \
   "\\l"
+
+compare "\\l+" \
+  "\\l+"
+
+compare "\\dx" \
+  "\\dx"
+
+compare "\\ds" \
+  "\\ds"
+
+compare "\\dm" \
+  "\\dm"
+
+compare "\\di+" \
+  "\\di+"
 
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
