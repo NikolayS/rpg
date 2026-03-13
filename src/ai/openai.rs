@@ -4,6 +4,7 @@
 //! Azure `OpenAI`, local `vLLM`, `LM Studio`, etc.).
 
 use super::{CompletionOptions, CompletionResult, LlmProvider, Message};
+use futures::StreamExt;
 
 // ---------------------------------------------------------------------------
 // OpenAiProvider
@@ -110,6 +111,92 @@ impl LlmProvider for OpenAiProvider {
                 content,
                 input_tokens,
                 output_tokens,
+            })
+        })
+    }
+
+    fn complete_streaming(
+        &self,
+        messages: &[Message],
+        options: &CompletionOptions,
+        on_token: Box<dyn Fn(&str) + Send>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>,
+    > {
+        let messages = messages.to_vec();
+        let options = options.clone();
+        Box::pin(async move {
+            let model = if options.model.is_empty() {
+                self.default_model().to_owned()
+            } else {
+                options.model.clone()
+            };
+
+            let conv_messages: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": m.content,
+                    })
+                })
+                .collect();
+
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": options.max_tokens,
+                "temperature": options.temperature,
+                "messages": conv_messages,
+                "stream": true,
+            });
+
+            let resp = self
+                .client
+                .post(format!("{}/v1/chat/completions", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("OpenAI API error: {e}"))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(format!("OpenAI API {status}: {body_text}"));
+            }
+
+            let mut full_content = String::new();
+            let mut stream = resp.bytes_stream();
+            let mut buf = String::new();
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(newline_pos) = buf.find('\n') {
+                    let line = buf[..newline_pos].trim_end().to_owned();
+                    buf = buf[newline_pos + 1..].to_owned();
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(text) = json["choices"][0]["delta"]["content"].as_str() {
+                                on_token(text);
+                                full_content.push_str(text);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // OpenAI streaming doesn't include usage in each chunk.
+            Ok(CompletionResult {
+                content: full_content,
+                input_tokens: 0,
+                output_tokens: 0,
             })
         })
     }

@@ -3806,6 +3806,31 @@ async fn handle_line(
 // AI command helpers
 // ---------------------------------------------------------------------------
 
+/// Stream an LLM completion to stdout, printing tokens as they arrive.
+///
+/// Falls back to printing the full response at once if the provider does
+/// not implement true streaming.
+async fn stream_completion(
+    provider: &dyn crate::ai::LlmProvider,
+    messages: &[crate::ai::Message],
+    options: &crate::ai::CompletionOptions,
+) -> Result<crate::ai::CompletionResult, String> {
+    use std::io::Write;
+
+    let result = provider
+        .complete_streaming(
+            messages,
+            options,
+            Box::new(|token| {
+                print!("{token}");
+                let _ = io::stdout().flush();
+            }),
+        )
+        .await?;
+    println!();
+    Ok(result)
+}
+
 /// Dispatch a `/`-prefixed AI command.
 ///
 /// Recognised commands:
@@ -4115,10 +4140,8 @@ async fn handle_ai_fix(client: &Client, settings: &ReplSettings, params: &ConnPa
         temperature: 0.0,
     };
 
-    match provider.complete(&messages, &options).await {
-        Ok(result) => {
-            println!("{}", result.content);
-        }
+    match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(_result) => {}
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -4274,9 +4297,8 @@ async fn handle_ai_explain(
     };
 
     println!();
-    match provider.complete(&ai_messages, &options).await {
-        Ok(result) => println!("{}", result.content),
-        Err(e) => eprintln!("AI error: {e}"),
+    if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        eprintln!("AI error: {e}");
     }
 }
 
@@ -4496,9 +4518,8 @@ async fn handle_ai_optimize(
     };
 
     println!();
-    match provider.complete(&ai_messages, &options).await {
-        Ok(result) => println!("{}", result.content),
-        Err(e) => eprintln!("AI error: {e}"),
+    if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        eprintln!("AI error: {e}");
     }
 }
 

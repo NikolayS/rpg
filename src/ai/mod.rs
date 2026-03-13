@@ -95,6 +95,28 @@ pub trait LlmProvider: Send + Sync + std::fmt::Debug {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>,
     >;
+
+    /// Send a streaming completion request, invoking `on_token` for each
+    /// text chunk as it arrives.
+    ///
+    /// The default implementation falls back to [`Self::complete`] and calls
+    /// `on_token` once with the full response.
+    fn complete_streaming(
+        &self,
+        messages: &[Message],
+        options: &CompletionOptions,
+        on_token: Box<dyn Fn(&str) + Send>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>,
+    > {
+        let messages = messages.to_vec();
+        let options = options.clone();
+        Box::pin(async move {
+            let result = self.complete(&messages, &options).await?;
+            on_token(&result.content);
+            Ok(result)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
