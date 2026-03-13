@@ -397,6 +397,10 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     // For \di (indexes), we need an extra Table column and index-specific joins.
     let is_index_only = relkinds == ["i"];
 
+    // Views, materialized views, and sequences use pg_relation_size in verbose
+    // mode and omit the Persistence / Access method columns (matches psql).
+    let is_view_or_seq = matches!(relkinds, ["v" | "m" | "S"]);
+
     let sql = if meta.plus {
         if is_index_only {
             format!(
@@ -424,6 +428,22 @@ join pg_catalog.pg_class as ct
     on ct.oid = idx_i.indrelid
 left join pg_catalog.pg_am as am
     on am.oid = c.relam
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+            )
+        } else if is_view_or_seq {
+            format!(
+                "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    {type_expr} as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_relation_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
 where c.relkind in ({kind_in})
     {where_clause}
 order by 1, 2"
@@ -615,6 +635,7 @@ async fn list_schemas(client: &Client, meta: &ParsedMeta) -> bool {
             "select
     n.nspname as \"Name\",
     pg_catalog.pg_get_userbyid(n.nspowner) as \"Owner\",
+    pg_catalog.array_to_string(n.nspacl, E'\\n') as \"Access privileges\",
     coalesce(pg_catalog.obj_description(n.oid, 'pg_namespace'), '') as \"Description\"
 from pg_catalog.pg_namespace as n
 {where_clause}
@@ -672,21 +693,36 @@ async fn list_roles(client: &Client, meta: &ParsedMeta) -> bool {
 
     // psql (PG16) shows "Role name" and "Attributes" only (no "Member of" column).
     // Attributes are expressed as a comma-separated list of capability words.
-    let sql = format!(
-        "select
-    r.rolname as \"Role name\",
-    case when r.rolsuper then 'Superuser' else '' end
+    // The `+` variant additionally shows a Description column.
+    let attrs_expr = "case when r.rolsuper then 'Superuser' else '' end
     || case when not r.rolinherit then case when r.rolsuper then ', No inherit' else 'No inherit' end else '' end
     || case when r.rolcreaterole then case when r.rolsuper or not r.rolinherit then ', Create role' else 'Create role' end else '' end
     || case when r.rolcreatedb then case when r.rolsuper or not r.rolinherit or r.rolcreaterole then ', Create DB' else 'Create DB' end else '' end
     || case when not r.rolcanlogin then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb then ', Cannot login' else 'Cannot login' end else '' end
     || case when r.rolreplication then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin then ', Replication' else 'Replication' end else '' end
     || case when r.rolbypassrls then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin or r.rolreplication then ', Bypass RLS' else 'Bypass RLS' end else '' end
-    as \"Attributes\"
+    as \"Attributes\"";
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    r.rolname as \"Role name\",
+    {attrs_expr},
+    pg_catalog.shobj_description(r.oid, 'pg_authid') as \"Description\"
 from pg_catalog.pg_roles as r
 {where_clause}
 order by 1"
-    );
+        )
+    } else {
+        format!(
+            "select
+    r.rolname as \"Role name\",
+    {attrs_expr}
+from pg_catalog.pg_roles as r
+{where_clause}
+order by 1"
+        )
+    };
 
     // psql suppresses the row count footer for \du.
     run_and_print_no_count(client, &sql, meta.echo_hidden, Some("List of roles")).await
