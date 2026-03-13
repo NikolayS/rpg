@@ -3,9 +3,13 @@
 //! This is the CLI entry point. It parses psql-compatible flags and
 //! samo-specific options, then dispatches to the appropriate subsystem.
 
+use std::io::Read;
+
 use clap::Parser;
 
 mod connection;
+mod output;
+mod query;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
@@ -263,6 +267,32 @@ impl Cli {
             sslmode: self.sslmode.clone(),
         }
     }
+
+    /// Build output configuration from CLI flags.
+    fn output_config() -> output::OutputConfig {
+        output::OutputConfig::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detect whether stdin is a TTY
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when stdin is connected to a terminal (interactive session).
+fn stdin_is_tty() -> bool {
+    // Use `isatty` on the raw fd 0.
+    // Safety: fd 0 is always open for the lifetime of the process.
+    #[cfg(unix)]
+    {
+        // SAFETY: libc::isatty takes an fd and is always safe to call.
+        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix (Windows) we conservatively say stdin is a TTY so
+        // we don't accidentally hang trying to read piped input.
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -292,23 +322,88 @@ async fn main() {
                 println!("{}", connection::connection_info(&resolved));
             }
 
-            // If -c or -f given, we would execute here (issue #19).
-            // For now, just disconnect cleanly.
-            if cli.command.is_some() || cli.file.is_some() {
-                // Future: execute command/file, then exit.
-                drop(client);
-            } else {
-                // Future: start REPL (issue #20).
-                // For now, print a note and exit.
-                if !cli.quiet {
-                    println!("(interactive mode not yet implemented — disconnecting)");
-                }
-                drop(client);
+            let cfg = Cli::output_config();
+
+            // Dispatch: -c → execute command and exit.
+            if let Some(ref sql) = cli.command {
+                run_sql_and_exit(&client, sql, &cfg).await;
             }
+
+            // Dispatch: -f → execute file and exit.
+            if let Some(ref path) = cli.file {
+                run_file_and_exit(&client, path, &cfg).await;
+            }
+
+            // Dispatch: piped stdin (non-TTY, non-interactive).
+            if !cli.interactive && !stdin_is_tty() {
+                let mut sql = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut sql)
+                    .unwrap_or_else(|e| {
+                        eprintln!("samo: could not read stdin: {e}");
+                        std::process::exit(1);
+                    });
+                run_sql_and_exit(&client, &sql, &cfg).await;
+            }
+
+            // Interactive mode: REPL (issue #20 — not yet implemented).
+            if !cli.quiet {
+                println!("(interactive mode not yet implemented — disconnecting)");
+            }
+            drop(client);
         }
         Err(e) => {
             eprintln!("samo: {e}");
             std::process::exit(2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Execution helpers
+// ---------------------------------------------------------------------------
+
+/// Execute SQL string, print output, exit with appropriate code.
+async fn run_sql_and_exit(client: &tokio_postgres::Client, sql: &str, cfg: &output::OutputConfig) {
+    match query::execute_sql(client, sql).await {
+        Ok(outcome) => {
+            let formatted = output::format_outcome(&outcome, cfg);
+            print!("{formatted}");
+            std::process::exit(0);
+        }
+        Err(query::QueryError::Postgres(ref pg_err)) => {
+            let msg = output::format_pg_error(pg_err, Some(sql));
+            eprint!("{msg}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("samo: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Read SQL from a file, execute it, print output, exit.
+async fn run_file_and_exit(
+    client: &tokio_postgres::Client,
+    path: &str,
+    cfg: &output::OutputConfig,
+) {
+    match query::execute_file(client, path).await {
+        Ok(outcome) => {
+            let formatted = output::format_outcome(&outcome, cfg);
+            print!("{formatted}");
+            std::process::exit(0);
+        }
+        Err(query::QueryError::Postgres(ref pg_err)) => {
+            let sql = std::fs::read_to_string(path).unwrap_or_default();
+            let msg = output::format_pg_error(pg_err, Some(&sql));
+            eprint!("{msg}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("samo: {e}");
+            std::process::exit(1);
         }
     }
 }

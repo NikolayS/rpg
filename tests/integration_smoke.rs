@@ -43,8 +43,34 @@ macro_rules! connect_or_skip {
     };
 }
 
+/// Run the `samo` binary with the given arguments, targeting the test DB.
+///
+/// Returns `(stdout, stderr, exit_code)`.
+fn run_samo(extra_args: &[&str]) -> (String, String, i32) {
+    let host = std::env::var("TEST_PGHOST").unwrap_or_else(|_| "localhost".to_owned());
+    let port = std::env::var("TEST_PGPORT").unwrap_or_else(|_| "15432".to_owned());
+    let user = std::env::var("TEST_PGUSER").unwrap_or_else(|_| "testuser".to_owned());
+    let password = std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
+    let dbname = std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
+
+    let bin = env!("CARGO_BIN_EXE_samo");
+
+    let output = std::process::Command::new(bin)
+        .args(["-h", &host, "-p", &port, "-U", &user, "-d", &dbname])
+        .args(extra_args)
+        .env("PGPASSWORD", &password)
+        .output()
+        .expect("failed to spawn samo binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let code = output.status.code().unwrap_or(-1);
+
+    (stdout, stderr, code)
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// Existing connectivity tests
 // ---------------------------------------------------------------------------
 
 /// Verify basic connectivity: `SELECT 1` must return the integer 1.
@@ -142,4 +168,110 @@ async fn smoke_schema_and_data() {
 
     // Teardown to leave DB clean for subsequent runs.
     db.teardown_schema().await.expect("teardown failed");
+}
+
+// ---------------------------------------------------------------------------
+// Query execution + output formatting tests (issue #19)
+// ---------------------------------------------------------------------------
+
+/// `samo -c "select 1"` prints an aligned table with `(1 row)` footer
+/// and exits 0.
+#[test]
+fn query_select_one_aligned_output() {
+    let (stdout, _stderr, code) = run_samo(&["-c", "select 1 as n"]);
+    assert_eq!(code, 0, "expected exit 0, got {code}\nstdout: {stdout}");
+    assert!(
+        stdout.contains("(1 row)"),
+        "expected '(1 row)' footer in output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" n ") || stdout.contains("| n"),
+        "expected column header 'n':\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" 1") || stdout.contains("| 1"),
+        "expected value '1':\n{stdout}"
+    );
+}
+
+/// A syntax error exits 1 and prints an error message to stderr.
+#[test]
+fn query_syntax_error_exits_1() {
+    let (stdout, stderr, code) = run_samo(&["-c", "SELEC 1"]);
+    assert_eq!(code, 1, "expected exit 1 for syntax error, got {code}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.to_uppercase().contains("ERROR"),
+        "expected ERROR in output:\n{combined}"
+    );
+}
+
+/// Multi-statement: `select 1; select 2` prints two result sets.
+#[test]
+fn query_multi_statement() {
+    let (stdout, _stderr, code) = run_samo(&["-c", "select 1 as a; select 2 as b"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 for multi-statement:\nstdout={stdout}"
+    );
+    // Should contain both column headers.
+    assert!(
+        stdout.contains(" a ") || stdout.contains("| a"),
+        "missing 'a':\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" b ") || stdout.contains("| b"),
+        "missing 'b':\n{stdout}"
+    );
+}
+
+/// NULL values display as the configured null string (default: empty).
+#[test]
+fn query_null_display() {
+    let (stdout, _stderr, code) = run_samo(&["-c", "select null::text as val"]);
+    assert_eq!(code, 0, "expected exit 0:\nstdout={stdout}");
+    assert!(stdout.contains("(1 row)"), "expected '(1 row)':\n{stdout}");
+}
+
+/// `samo -c "select true, false"` renders booleans as `t` / `f`.
+#[test]
+fn query_boolean_format() {
+    let (stdout, _stderr, code) = run_samo(&["-c", "select true as yes, false as no"]);
+    assert_eq!(code, 0, "expected exit 0:\nstdout={stdout}");
+    // psql renders booleans as 't' / 'f'
+    assert!(
+        stdout.contains(" t ") || stdout.contains("| t") || stdout.contains(" t\n"),
+        "expected 't' for true:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" f ") || stdout.contains("| f") || stdout.contains(" f\n"),
+        "expected 'f' for false:\n{stdout}"
+    );
+}
+
+/// A connection failure (bad host) exits with code 2.
+#[test]
+fn query_connection_failure_exits_2() {
+    let bin = env!("CARGO_BIN_EXE_samo");
+    let output = std::process::Command::new(bin)
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            "19999", // port nobody is listening on
+            "-U",
+            "nobody",
+            "-d",
+            "nobody",
+            "-c",
+            "select 1",
+            "-w", // never prompt for password
+        ])
+        .output()
+        .expect("failed to spawn samo");
+    let code = output.status.code().unwrap_or(-1);
+    assert_eq!(
+        code, 2,
+        "expected exit 2 for connection failure, got {code}"
+    );
 }

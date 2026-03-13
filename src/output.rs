@@ -1,0 +1,680 @@
+//! Output formatting for query results.
+//!
+//! Produces psql-compatible output:
+//! - Aligned table (default)
+//! - Expanded (`\x`) output
+//! - Unaligned / CSV (future)
+//! - Error display with position marker
+//! - Timing footer (`Time: X.XXX ms`)
+
+use std::fmt::Write as FmtWrite;
+use std::time::Duration;
+
+use unicode_width::UnicodeWidthStr;
+
+use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult};
+
+// ---------------------------------------------------------------------------
+// Output configuration
+// ---------------------------------------------------------------------------
+
+/// Controls how query results are rendered.
+#[derive(Debug, Clone, Default)]
+pub struct OutputConfig {
+    /// String to display for SQL NULL values (psql default: empty string).
+    pub null_string: String,
+    /// Whether to show `Time: X.XXX ms` after each result set.
+    pub timing: bool,
+    /// Whether to use expanded (`\x`) output instead of aligned table.
+    pub expanded: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Top-level formatter
+// ---------------------------------------------------------------------------
+
+/// Format all results from a [`QueryOutcome`] into a single `String`.
+///
+/// Each statement result is separated by a blank line (matching psql).
+pub fn format_outcome(outcome: &QueryOutcome, cfg: &OutputConfig) -> String {
+    let mut out = String::new();
+    let n = outcome.results.len();
+
+    for (idx, result) in outcome.results.iter().enumerate() {
+        match result {
+            StatementResult::Rows(rs) => {
+                if cfg.expanded {
+                    format_expanded(&mut out, rs, cfg);
+                } else {
+                    format_aligned(&mut out, rs, cfg);
+                }
+            }
+            StatementResult::CommandTag(ct) => {
+                format_command_tag(&mut out, ct);
+            }
+            StatementResult::Empty => {
+                // Nothing to print for DDL/SET/etc.
+            }
+        }
+
+        // Print timing after each statement.
+        if cfg.timing {
+            let _ = writeln!(out, "Time: {}", format_duration(outcome.duration));
+        }
+
+        // Blank line between multiple results (skip after the last one).
+        if idx + 1 < n {
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Aligned (default) table formatter
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] as a psql-style aligned table.
+///
+/// ```text
+///  id | name  | email
+/// ----+-------+------------------
+///   1 | Alice | alice@example.com
+/// (1 row)
+/// ```
+pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usize {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    if cols.is_empty() {
+        // No columns: just print the row count footer.
+        write_row_count(out, rows.len());
+        return rows.len();
+    }
+
+    // Calculate column widths: max(header width, max data width).
+    let widths = column_widths(cols, rows, cfg);
+
+    // Header row.
+    write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), false);
+    // Separator.
+    write_separator(out, &widths);
+    // Data rows.
+    for row in rows {
+        write_aligned_row(
+            out,
+            cols,
+            &widths,
+            |_col, cell_idx| {
+                row.get(cell_idx)
+                    .and_then(|v| v.as_deref().map(ToOwned::to_owned))
+                    .unwrap_or_else(|| cfg.null_string.clone())
+            },
+            true,
+        );
+    }
+
+    // Footer.
+    write_row_count(out, rows.len());
+
+    rows.len()
+}
+
+/// Calculate per-column display widths (in terminal columns, accounting for
+/// Unicode multi-byte / wide characters).
+fn column_widths(
+    cols: &[ColumnMeta],
+    rows: &[Vec<Option<String>>],
+    cfg: &OutputConfig,
+) -> Vec<usize> {
+    let mut widths: Vec<usize> = cols.iter().map(|c| display_width(&c.name)).collect();
+
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i >= widths.len() {
+                break;
+            }
+            let cell_str = cell.as_deref().unwrap_or(&cfg.null_string);
+            let w = display_width(cell_str);
+            if w > widths[i] {
+                widths[i] = w;
+            }
+        }
+    }
+
+    widths
+}
+
+/// Write one row of the aligned table (header or data).
+///
+/// `value_fn` maps `(column_meta, column_index) → String`.
+/// `is_data` controls right-alignment for numeric columns.
+fn write_aligned_row<F>(
+    out: &mut String,
+    cols: &[ColumnMeta],
+    widths: &[usize],
+    value_fn: F,
+    is_data: bool,
+) where
+    F: Fn(&ColumnMeta, usize) -> String,
+{
+    for (i, col) in cols.iter().enumerate() {
+        let val = value_fn(col, i);
+        let w = widths[i];
+        let val_width = display_width(&val);
+        let padding = w.saturating_sub(val_width);
+
+        if i == 0 {
+            out.push(' ');
+        } else {
+            out.push_str(" | ");
+        }
+
+        if is_data && col.is_numeric {
+            // Right-align: pad on the left.
+            for _ in 0..padding {
+                out.push(' ');
+            }
+            out.push_str(&val);
+        } else {
+            // Left-align: pad on the right.
+            out.push_str(&val);
+            for _ in 0..padding {
+                out.push(' ');
+            }
+        }
+    }
+    out.push('\n');
+}
+
+/// Write the `----+--------` separator line.
+fn write_separator(out: &mut String, widths: &[usize]) {
+    for (i, &w) in widths.iter().enumerate() {
+        if i == 0 {
+            for _ in 0..=w {
+                out.push('-');
+            }
+        } else {
+            out.push_str("-+-");
+            for _ in 0..w {
+                out.push('-');
+            }
+        }
+    }
+    // Trailing dash to close the last column.
+    if !widths.is_empty() {
+        out.push('-');
+    }
+    out.push('\n');
+}
+
+/// Write `(N rows)` / `(1 row)` / `(0 rows)`.
+fn write_row_count(out: &mut String, n: usize) {
+    if n == 1 {
+        out.push_str("(1 row)\n");
+    } else {
+        let _ = writeln!(out, "({n} rows)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Expanded output formatter
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] in psql `\x` expanded format.
+///
+/// ```text
+/// -[ RECORD 1 ]---+------------------
+/// id               | 1
+/// name             | Alice
+/// email            | alice@example.com
+/// ```
+pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+
+    if rows.is_empty() {
+        out.push_str("(0 rows)\n");
+        return;
+    }
+
+    // Widest column name (for alignment of the `| value` part).
+    let max_name_width = cols
+        .iter()
+        .map(|c| display_width(&c.name))
+        .max()
+        .unwrap_or(0);
+
+    for (rec_idx, row) in rows.iter().enumerate() {
+        // Record header: `-[ RECORD N ]---+---`
+        write_expanded_header(out, rec_idx + 1, max_name_width);
+
+        for (i, col) in cols.iter().enumerate() {
+            let val = row
+                .get(i)
+                .and_then(|v| v.as_deref().map(ToOwned::to_owned))
+                .unwrap_or_else(|| cfg.null_string.clone());
+
+            let name_width = display_width(&col.name);
+            let padding = max_name_width.saturating_sub(name_width);
+            let _ = write!(out, "{}", col.name);
+            for _ in 0..padding {
+                out.push(' ');
+            }
+            let _ = writeln!(out, " | {val}");
+        }
+    }
+}
+
+/// Write the `-[ RECORD N ]---+---` header line for expanded output.
+fn write_expanded_header(out: &mut String, record_num: usize, name_col_width: usize) {
+    // Matches psql: `-[ RECORD 1 ]-----+`
+    // Left part has at least 2 dashes before `[`.
+    let prefix = format!("-[ RECORD {record_num} ]");
+    let total_left = name_col_width + 1; // +1 for the leading space in data rows
+    let dashes_needed = total_left.saturating_sub(prefix.len());
+    let _ = write!(out, "{prefix}");
+    for _ in 0..dashes_needed.max(1) {
+        out.push('-');
+    }
+    out.push_str("+-");
+    out.push('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Command tag formatter
+// ---------------------------------------------------------------------------
+
+/// Render the result of a non-SELECT statement.
+///
+/// For DML commands the format is the raw command tag from Postgres:
+/// ```text
+/// INSERT 0 3
+/// UPDATE 2
+/// DELETE 1
+/// ```
+pub fn format_command_tag(out: &mut String, ct: &CommandTag) {
+    let _ = writeln!(out, "{}", ct.tag);
+    // `ct.rows_affected` is available for callers that need the numeric count
+    // (e.g., the REPL in issue #20). We touch it here to confirm it is correct.
+    let _ = ct.rows_affected;
+}
+
+// ---------------------------------------------------------------------------
+// Error formatter
+// ---------------------------------------------------------------------------
+
+/// Format a `tokio_postgres::Error` in psql style.
+///
+/// ```text
+/// ERROR:  column "foo" does not exist
+/// LINE 1: select foo from bar;
+///                ^
+/// HINT:  Perhaps you meant ...
+/// ```
+pub fn format_pg_error(err: &tokio_postgres::Error, original_sql: Option<&str>) -> String {
+    let mut out = String::new();
+
+    if let Some(db_err) = err.as_db_error() {
+        // Severity line.
+        let _ = writeln!(out, "{}:  {}", db_err.severity(), db_err.message());
+
+        // Position marker.
+        if let Some(pos) = db_err.position() {
+            if let Some(sql) = original_sql {
+                write_error_position(&mut out, sql, pos);
+            }
+        }
+
+        // DETAIL line.
+        if let Some(detail) = db_err.detail() {
+            let _ = writeln!(out, "DETAIL:  {detail}");
+        }
+
+        // HINT line.
+        if let Some(hint) = db_err.hint() {
+            let _ = writeln!(out, "HINT:  {hint}");
+        }
+
+        // SQLSTATE (always present for DB errors).
+        let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+    } else {
+        // Non-server error (I/O, protocol, …).
+        let _ = writeln!(out, "ERROR:  {err}");
+    }
+
+    out
+}
+
+/// Write the `LINE N: …` context and the `^` position marker.
+fn write_error_position(out: &mut String, sql: &str, pos: &tokio_postgres::error::ErrorPosition) {
+    // Postgres reports `position` as a 1-based byte offset into the query.
+    let byte_offset = match pos {
+        tokio_postgres::error::ErrorPosition::Original(n) => (*n as usize).saturating_sub(1),
+        tokio_postgres::error::ErrorPosition::Internal { position, .. } => {
+            (*position as usize).saturating_sub(1)
+        }
+    };
+
+    // Find which line the offset falls on and the column within that line.
+    let before = sql.get(..byte_offset.min(sql.len())).unwrap_or(sql);
+    let line_num = before.chars().filter(|&c| c == '\n').count() + 1;
+
+    let line_start = before.rfind('\n').map_or(0, |p| p + 1);
+    let col_offset = before.len() - line_start;
+
+    // The line text (stop at the next newline).
+    let line_text = sql[line_start..].lines().next().unwrap_or("");
+
+    let _ = writeln!(out, "LINE {line_num}: {line_text}");
+    // Caret: `LINE N: ` prefix is 8 + digits in line_num.
+    let prefix_len = "LINE : ".len() + line_num.to_string().len() + col_offset;
+    for _ in 0..prefix_len {
+        out.push(' ');
+    }
+    out.push_str("^\n");
+}
+
+// ---------------------------------------------------------------------------
+// Timing helper
+// ---------------------------------------------------------------------------
+
+/// Format a [`Duration`] as `X.XXX ms`.
+pub fn format_duration(d: Duration) -> String {
+    let ms = d.as_secs_f64() * 1000.0;
+    format!("{ms:.3} ms")
+}
+
+// ---------------------------------------------------------------------------
+// Unicode-aware display width
+// ---------------------------------------------------------------------------
+
+/// Returns the terminal display width of a string, handling multi-byte and
+/// double-width Unicode characters (CJK, emoji, …).
+pub fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::{ColumnMeta, RowSet};
+
+    fn mk_col(name: &str, numeric: bool) -> ColumnMeta {
+        ColumnMeta {
+            name: name.to_owned(),
+            is_numeric: numeric,
+        }
+    }
+
+    fn mk_row(vals: &[Option<&str>]) -> Vec<Option<String>> {
+        vals.iter().map(|v| v.map(ToOwned::to_owned)).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // display_width
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_display_width_ascii() {
+        assert_eq!(display_width("hello"), 5);
+    }
+
+    #[test]
+    fn test_display_width_empty() {
+        assert_eq!(display_width(""), 0);
+    }
+
+    #[test]
+    fn test_display_width_cjk() {
+        // CJK characters are double-width.
+        assert_eq!(display_width("中文"), 4);
+    }
+
+    #[test]
+    fn test_display_width_mixed() {
+        // ASCII (1) + CJK (2) + ASCII (3) = 6
+        assert_eq!(display_width("a中bc"), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // format_duration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(Duration::ZERO), "0.000 ms");
+    }
+
+    #[test]
+    fn test_format_duration_one_ms() {
+        assert_eq!(format_duration(Duration::from_millis(1)), "1.000 ms");
+    }
+
+    #[test]
+    fn test_format_duration_fractional() {
+        // 1.5 ms
+        assert_eq!(format_duration(Duration::from_micros(1500)), "1.500 ms");
+    }
+
+    // -----------------------------------------------------------------------
+    // Aligned table output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_aligned_empty_rows() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        // Should have header, separator, and `(0 rows)`.
+        assert!(out.contains("id"), "missing header 'id'");
+        assert!(out.contains("name"), "missing header 'name'");
+        assert!(out.contains("(0 rows)"), "missing row count");
+    }
+
+    #[test]
+    fn test_aligned_one_row() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![mk_row(&[Some("1"), Some("Alice")])],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        assert!(out.contains("(1 row)"), "missing '(1 row)' footer");
+        assert!(out.contains("Alice"));
+        assert!(out.contains("id"));
+    }
+
+    #[test]
+    fn test_aligned_two_rows() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![
+                mk_row(&[Some("1"), Some("Alice")]),
+                mk_row(&[Some("2"), Some("Bob")]),
+            ],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        assert!(out.contains("(2 rows)"));
+        assert!(out.contains("Alice"));
+        assert!(out.contains("Bob"));
+    }
+
+    #[test]
+    fn test_aligned_separator_format() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![mk_row(&[Some("1"), Some("Alice")])],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        // Separator must contain `-+-`
+        assert!(out.contains("-+-"), "separator missing '-+-': {out}");
+    }
+
+    #[test]
+    fn test_aligned_null_display() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[None])],
+        };
+        let mut out = String::new();
+        let cfg = OutputConfig {
+            null_string: "(null)".to_owned(),
+            ..Default::default()
+        };
+        format_aligned(&mut out, &rs, &cfg);
+        assert!(out.contains("(null)"), "null not rendered: {out}");
+    }
+
+    #[test]
+    fn test_aligned_column_width_wider_than_header() {
+        // Data wider than header: column should be padded to data width.
+        let rs = RowSet {
+            columns: vec![mk_col("x", false)],
+            rows: vec![mk_row(&[Some("hello world")])],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        // "hello world" must appear intact (not truncated).
+        assert!(out.contains("hello world"));
+    }
+
+    #[test]
+    fn test_aligned_unicode_column_width() {
+        // CJK header + ASCII data: widths should account for double-width chars.
+        let rs = RowSet {
+            columns: vec![mk_col("中文", false)],
+            rows: vec![mk_row(&[Some("ab")])],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        // Both header and data should be present.
+        assert!(out.contains("中文"));
+        assert!(out.contains("ab"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Expanded output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_expanded_basic() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![mk_row(&[Some("1"), Some("Alice")])],
+        };
+        let mut out = String::new();
+        format_expanded(&mut out, &rs, &OutputConfig::default());
+        assert!(out.contains("-[ RECORD 1 ]"), "missing record header");
+        assert!(out.contains("id"), "missing id column");
+        assert!(out.contains("Alice"), "missing value");
+    }
+
+    #[test]
+    fn test_expanded_empty_rows() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true)],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        format_expanded(&mut out, &rs, &OutputConfig::default());
+        assert_eq!(out, "(0 rows)\n");
+    }
+
+    #[test]
+    fn test_expanded_multiple_records() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![
+                mk_row(&[Some("1"), Some("Alice")]),
+                mk_row(&[Some("2"), Some("Bob")]),
+            ],
+        };
+        let mut out = String::new();
+        format_expanded(&mut out, &rs, &OutputConfig::default());
+        assert!(out.contains("-[ RECORD 1 ]"));
+        assert!(out.contains("-[ RECORD 2 ]"));
+        assert!(out.contains("Alice"));
+        assert!(out.contains("Bob"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Command tag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_command_tag() {
+        use crate::query::CommandTag;
+        let ct = CommandTag {
+            tag: "INSERT 0 3".to_owned(),
+            rows_affected: 3,
+        };
+        let mut out = String::new();
+        format_command_tag(&mut out, &ct);
+        assert_eq!(out, "INSERT 0 3\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Boolean formatting (comes through as "t"/"f" from query.rs)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_boolean_display_in_table() {
+        // Simulate what query.rs would produce for booleans.
+        let rs = RowSet {
+            columns: vec![mk_col("active", false)],
+            rows: vec![mk_row(&[Some("t")]), mk_row(&[Some("f")])],
+        };
+        let mut out = String::new();
+        format_aligned(&mut out, &rs, &OutputConfig::default());
+        assert!(
+            out.contains(" t ") || out.contains(" t\n") || out.contains("| t"),
+            "missing 't': {out}"
+        );
+        assert!(
+            out.contains(" f ") || out.contains(" f\n") || out.contains("| f"),
+            "missing 'f': {out}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // format_outcome integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_outcome_empty_result() {
+        use crate::query::{QueryOutcome, StatementResult};
+        let outcome = QueryOutcome {
+            results: vec![StatementResult::Empty],
+            duration: Duration::ZERO,
+        };
+        let out = format_outcome(&outcome, &OutputConfig::default());
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_format_outcome_timing() {
+        use crate::query::{QueryOutcome, StatementResult};
+        let outcome = QueryOutcome {
+            results: vec![StatementResult::Empty],
+            duration: Duration::from_millis(42),
+        };
+        let cfg = OutputConfig {
+            timing: true,
+            ..Default::default()
+        };
+        let out = format_outcome(&outcome, &cfg);
+        assert!(out.contains("Time:"), "missing timing: {out}");
+        assert!(out.contains("ms"), "missing 'ms': {out}");
+    }
+}

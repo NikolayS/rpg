@@ -22,12 +22,14 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+libc = "0.2"
 rpassword = "7"
 rustls = "0.23"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.12"
+unicode-width = "0.2"
 webpki-roots = "0.26"
 
 [dev-dependencies]
