@@ -240,17 +240,6 @@ pub fn is_complete(buf: &str) -> bool {
 // Backslash command types
 // ---------------------------------------------------------------------------
 
-/// Parsed backslash command.
-#[derive(Debug, PartialEq, Eq)]
-pub enum BackslashCmd {
-    Quit,
-    Timing(Option<bool>),
-    Expanded(ExpandedMode),
-    ConnInfo,
-    Help,
-    Unknown(String),
-}
-
 /// Expanded display mode argument.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExpandedMode {
@@ -259,38 +248,6 @@ pub enum ExpandedMode {
     Off,
     Auto,
     Toggle,
-}
-
-/// Parse a backslash command string (without leading `\`).
-pub fn parse_backslash(input: &str) -> BackslashCmd {
-    let input = input.trim_start_matches('\\');
-    let mut parts = input.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("").trim();
-    let arg = parts.next().map_or("", str::trim).trim();
-
-    match cmd {
-        "q" | "quit" => BackslashCmd::Quit,
-        "?" => BackslashCmd::Help,
-        "conninfo" => BackslashCmd::ConnInfo,
-        "timing" => {
-            let mode = match arg.to_lowercase().as_str() {
-                "on" => Some(true),
-                "off" => Some(false),
-                _ => None, // empty or unknown → toggle
-            };
-            BackslashCmd::Timing(mode)
-        }
-        "x" => {
-            let mode = match arg.to_lowercase().as_str() {
-                "on" => ExpandedMode::On,
-                "off" => ExpandedMode::Off,
-                "auto" => ExpandedMode::Auto,
-                _ => ExpandedMode::Toggle, // empty or unknown → toggle
-            };
-            BackslashCmd::Expanded(mode)
-        }
-        other => BackslashCmd::Unknown(format!("\\{other}")),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +261,8 @@ pub struct ReplSettings {
     pub timing: bool,
     /// Expanded display mode.
     pub expanded: ExpandedMode,
+    /// Whether to echo internally-generated SQL to stdout (`-E` / `--echo-hidden`).
+    pub echo_hidden: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +539,32 @@ fn print_help() {
   \timing [on|off]  toggle/set query timing display
   \x [on|off|auto]  toggle/set expanded display
   \conninfo   show connection information
-  \?          show this help"
+  \?          show this help
+
+Describe commands (stubs; see #27 for full implementation):
+  \d  [pattern]     describe objects
+  \dt [pattern]     list tables
+  \di [pattern]     list indexes
+  \ds [pattern]     list sequences
+  \dv [pattern]     list views
+  \dm [pattern]     list materialised views
+  \df [pattern]     list functions
+  \dn [pattern]     list schemas
+  \du [pattern]     list roles
+  \dp [pattern]     list access privileges
+  \db [pattern]     list tablespaces
+  \dT [pattern]     list data types
+  \dx [pattern]     list extensions
+  \l  [pattern]     list databases
+  \dE [pattern]     list foreign tables
+  \dD [pattern]     list domains
+  \dc [pattern]     list conversions
+  \dC [pattern]     list casts
+  \dd [pattern]     list object comments
+  \des [pattern]    list foreign servers
+  \dew [pattern]    list foreign-data wrappers
+  \det [pattern]    list foreign tables via FDW
+  \deu [pattern]    list user mappings"
     );
 }
 
@@ -616,6 +600,36 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
         "Expanded display is {}.",
         expanded_mode_str(settings.expanded)
     );
+}
+
+/// Dispatch a parsed meta-command, applying any side-effects to `settings`.
+///
+/// Returns `true` if the REPL loop should exit.
+fn dispatch_meta(
+    parsed: crate::metacmd::ParsedMeta,
+    params: &ConnParams,
+    settings: &mut ReplSettings,
+) -> bool {
+    use crate::metacmd::MetaCmd;
+
+    match parsed.cmd {
+        MetaCmd::Quit => return true,
+        MetaCmd::Help => print_help(),
+        MetaCmd::Timing(mode) => apply_timing(settings, mode),
+        MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
+        MetaCmd::ConnInfo => {
+            println!("{}", crate::connection::connection_info(params));
+        }
+        MetaCmd::Unknown(name) => {
+            eprintln!("Invalid command \\{name}. Try \\? for help.");
+        }
+        // Describe-family stubs — #27 will add actual query handlers.
+        ref stub => {
+            eprintln!("{}: not yet implemented (see #27)", stub.label());
+        }
+    }
+
+    false
 }
 
 /// Run the interactive REPL loop.
@@ -775,24 +789,9 @@ async fn run_dumb_loop(
 ///
 /// Returns `true` if the loop should exit (i.e. `\q` was issued).
 fn handle_backslash_dumb(input: &str, params: &ConnParams, settings: &mut ReplSettings) -> bool {
-    let cmd = parse_backslash(input);
-    match cmd {
-        BackslashCmd::Quit => {
-            return true;
-        }
-        BackslashCmd::Help => {
-            print_help();
-        }
-        BackslashCmd::Timing(mode) => apply_timing(settings, mode),
-        BackslashCmd::Expanded(mode) => apply_expanded(settings, mode),
-        BackslashCmd::ConnInfo => {
-            println!("{}", crate::connection::connection_info(params));
-        }
-        BackslashCmd::Unknown(name) => {
-            eprintln!("Invalid command {name}. Try \\? for help.");
-        }
-    }
-    false
+    let mut parsed = crate::metacmd::parse(input);
+    parsed.echo_hidden = settings.echo_hidden;
+    dispatch_meta(parsed, params, settings)
 }
 
 /// Process one line of input in the readline loop.
@@ -811,25 +810,10 @@ async fn handle_line(
 ) -> bool {
     if line.trim_start().starts_with('\\') {
         // Backslash command — execute immediately.
-        let cmd = parse_backslash(line.trim());
-        match cmd {
-            BackslashCmd::Quit => {
-                // Signal the caller to break the loop so history is saved.
-                return true;
-            }
-            BackslashCmd::Help => {
-                print_help();
-            }
-            BackslashCmd::Timing(mode) => apply_timing(settings, mode),
-            BackslashCmd::Expanded(mode) => apply_expanded(settings, mode),
-            BackslashCmd::ConnInfo => {
-                println!("{}", crate::connection::connection_info(params));
-            }
-            BackslashCmd::Unknown(name) => {
-                eprintln!("Invalid command {name}. Try \\? for help.");
-            }
-        }
-        return false;
+        let mut parsed = crate::metacmd::parse(line.trim());
+        parsed.echo_hidden = settings.echo_hidden;
+        let should_exit = dispatch_meta(parsed, params, settings);
+        return should_exit;
     }
 
     // SQL input: accumulate lines until we have a complete statement.
@@ -905,73 +889,86 @@ mod tests {
         assert!(is_complete("do $$ begin end $$;"));
     }
 
-    // -- parse_backslash -------------------------------------------------------
+    // -- metacmd::parse (backslash command parser) ----------------------------
 
     #[test]
     fn parse_quit() {
-        assert_eq!(parse_backslash("\\q"), BackslashCmd::Quit);
+        assert_eq!(
+            crate::metacmd::parse("\\q").cmd,
+            crate::metacmd::MetaCmd::Quit
+        );
     }
 
     #[test]
     fn parse_help() {
-        assert_eq!(parse_backslash("\\?"), BackslashCmd::Help);
+        assert_eq!(
+            crate::metacmd::parse("\\?").cmd,
+            crate::metacmd::MetaCmd::Help
+        );
     }
 
     #[test]
     fn parse_conninfo() {
-        assert_eq!(parse_backslash("\\conninfo"), BackslashCmd::ConnInfo);
+        assert_eq!(
+            crate::metacmd::parse("\\conninfo").cmd,
+            crate::metacmd::MetaCmd::ConnInfo
+        );
     }
 
     #[test]
     fn parse_timing_on() {
         assert_eq!(
-            parse_backslash("\\timing on"),
-            BackslashCmd::Timing(Some(true))
+            crate::metacmd::parse("\\timing on").cmd,
+            crate::metacmd::MetaCmd::Timing(Some(true))
         );
     }
 
     #[test]
     fn parse_timing_off() {
         assert_eq!(
-            parse_backslash("\\timing off"),
-            BackslashCmd::Timing(Some(false))
+            crate::metacmd::parse("\\timing off").cmd,
+            crate::metacmd::MetaCmd::Timing(Some(false))
         );
     }
 
     #[test]
     fn parse_timing_toggle() {
-        assert_eq!(parse_backslash("\\timing"), BackslashCmd::Timing(None));
+        assert_eq!(
+            crate::metacmd::parse("\\timing").cmd,
+            crate::metacmd::MetaCmd::Timing(None)
+        );
     }
 
     #[test]
     fn parse_expanded_on() {
         assert_eq!(
-            parse_backslash("\\x on"),
-            BackslashCmd::Expanded(ExpandedMode::On)
+            crate::metacmd::parse("\\x on").cmd,
+            crate::metacmd::MetaCmd::Expanded(ExpandedMode::On)
         );
     }
 
     #[test]
     fn parse_expanded_auto() {
         assert_eq!(
-            parse_backslash("\\x auto"),
-            BackslashCmd::Expanded(ExpandedMode::Auto)
+            crate::metacmd::parse("\\x auto").cmd,
+            crate::metacmd::MetaCmd::Expanded(ExpandedMode::Auto)
         );
     }
 
     #[test]
     fn parse_expanded_toggle() {
         assert_eq!(
-            parse_backslash("\\x"),
-            BackslashCmd::Expanded(ExpandedMode::Toggle)
+            crate::metacmd::parse("\\x").cmd,
+            crate::metacmd::MetaCmd::Expanded(ExpandedMode::Toggle)
         );
     }
 
     #[test]
     fn parse_unknown_command() {
+        // Unknown commands store the name WITHOUT a leading backslash.
         assert_eq!(
-            parse_backslash("\\foo"),
-            BackslashCmd::Unknown("\\foo".to_owned())
+            crate::metacmd::parse("\\foo").cmd,
+            crate::metacmd::MetaCmd::Unknown("foo".to_owned())
         );
     }
 
