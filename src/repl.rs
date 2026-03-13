@@ -683,9 +683,9 @@ async fn execute_piped(
 /// statement (`\gexec`).
 ///
 /// The initial query is run via `simple_query`.  For each row, for each
-/// column, if the cell value is non-empty (the simple-query protocol maps
-/// NULL to an empty string, which we skip together with genuinely empty
-/// strings), that value is executed as a SQL statement.
+/// column, if the cell value is `Some` and non-empty, that value is executed
+/// as a SQL statement.  `tokio_postgres` returns `None` for NULL cells via
+/// `SimpleQueryRow::get()`; both `None` and empty-string cells are skipped.
 ///
 /// On success the command tag (e.g. `"CREATE TABLE"`) is printed.  On error
 /// the error message is printed and processing continues with the next cell.
@@ -2098,6 +2098,7 @@ enum HandleLineResult {
 ///
 /// Buffer-mutating commands (`\r`, `\p`, `\w`, `\e`) are handled inline
 /// here because the dumb loop owns the buffer directly.
+#[allow(clippy::too_many_lines)]
 async fn handle_backslash_dumb(
     input: &str,
     buf: &mut String,
