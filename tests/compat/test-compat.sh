@@ -30,6 +30,7 @@ FAIL=0
 # Column alignment and row counts are left intact — they are exactly what we
 # are testing.
 normalize() {
+  expand | \
   sed -e 's/[[:space:]]*$//' | \
   awk '
     /^$/ { blank++; next }
