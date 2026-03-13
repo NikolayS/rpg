@@ -1120,11 +1120,28 @@ async fn list_privileges(client: &Client, meta: &ParsedMeta) -> bool {
 
     let sys_filter = system_schema_filter(meta.system);
 
+    // relkind guard: only relation types that can have privileges
+    let relkind_filter = "c.relkind in ('r','v','m','S','f','p')";
+
+    // visibility: use pg_table_is_visible when no schema pattern is given,
+    // matching psql's behaviour for the non-schema-qualified case
+    let visibility_filter = if name_filter.is_empty() || !name_filter.contains("n.nspname") {
+        "pg_catalog.pg_table_is_visible(c.oid)"
+    } else {
+        ""
+    };
+
     let where_parts: Vec<&str> = [
+        Some(relkind_filter),
         if sys_filter.is_empty() {
             None
         } else {
             Some(sys_filter)
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter)
         },
         if name_filter.is_empty() {
             None
@@ -1136,11 +1153,7 @@ async fn list_privileges(client: &Client, meta: &ParsedMeta) -> bool {
     .flatten()
     .collect();
 
-    let where_clause = if where_parts.is_empty() {
-        String::new()
-    } else {
-        format!("where {}", where_parts.join("\n    and "))
-    };
+    let where_clause = format!("where {}", where_parts.join("\n    and "));
 
     let sql = format!(
         "select
@@ -1148,35 +1161,54 @@ async fn list_privileges(client: &Client, meta: &ParsedMeta) -> bool {
     c.relname as \"Name\",
     case c.relkind
         when 'r' then 'table'
-        when 'p' then 'partitioned table'
         when 'v' then 'view'
         when 'm' then 'materialized view'
         when 'S' then 'sequence'
         when 'f' then 'foreign table'
-        else c.relkind::text
+        when 'p' then 'partitioned table'
     end as \"Type\",
-    coalesce(pg_catalog.array_to_string(c.relacl, E'\\n'), '') as \"Access privileges\",
-    coalesce(
-        (select pg_catalog.array_to_string(
-            pg_catalog.array_agg(
-                a.attname || ': ' || pg_catalog.array_to_string(a.attacl, E'\\n')
-            ), E'\\n')
-         from pg_catalog.pg_attribute as a
-         where a.attrelid = c.oid
-           and a.attacl is not null
-           and a.attnum > 0
-           and not a.attisdropped),
-        ''
-    ) as \"Column privileges\",
-    coalesce(
-        (select pg_catalog.array_to_string(
-            pg_catalog.array_agg(pol.polname || case pol.polpermissive
-                when true then '' else ' (RESTRICTIVE)' end),
-            E'\\n')
-         from pg_catalog.pg_policy as pol
-         where pol.polrelid = c.oid),
-        ''
-    ) as \"Policies\"
+    case when pg_catalog.array_length(c.relacl, 1) = 0
+        then '(none)'
+        else pg_catalog.array_to_string(c.relacl, E'\\n')
+    end as \"Access privileges\",
+    pg_catalog.array_to_string(array(
+        select
+            a.attname || E':\\n  '
+            || pg_catalog.array_to_string(a.attacl, E'\\n  ')
+        from pg_catalog.pg_attribute as a
+        where a.attrelid = c.oid
+          and not a.attisdropped
+          and a.attacl is not null
+    ), E'\\n') as \"Column privileges\",
+    pg_catalog.array_to_string(array(
+        select
+            pol.polname
+            || case when not pol.polpermissive
+               then E' (RESTRICTIVE)'
+               else '' end
+            || case when pol.polcmd <> '*'
+               then E' (' || pol.polcmd::pg_catalog.text || E'):'
+               else E':'
+               end
+            || case when pol.polqual is not null
+               then E'\\n  (u): '
+                    || pg_catalog.pg_get_expr(pol.polqual, pol.polrelid)
+               else '' end
+            || case when pol.polwithcheck is not null
+               then E'\\n  (c): '
+                    || pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid)
+               else '' end
+            || case when pol.polroles <> '{{0}}'
+               then E'\\n  to: ' || pg_catalog.array_to_string(array(
+                   select rolname
+                   from pg_catalog.pg_roles
+                   where oid = any(pol.polroles)
+                   order by 1
+               ), E', ')
+               else '' end
+        from pg_catalog.pg_policy as pol
+        where pol.polrelid = c.oid
+    ), E'\\n') as \"Policies\"
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
