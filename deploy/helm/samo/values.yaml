@@ -1,0 +1,106 @@
+# Samo Helm chart default values.
+
+image:
+  repository: ghcr.io/nikolays/samo
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Deployment mode: "sidecar" or "standalone"
+# - sidecar: deploy as a sidecar container alongside your application
+# - standalone: deploy as a standalone Deployment
+mode: standalone
+
+replicaCount: 1
+
+# Postgres connection settings.
+# Either provide a connectionString or individual fields.
+postgres:
+  # Full connection string (takes precedence).
+  # connectionString: "host=mydb port=5432 dbname=mydb user=samo"
+  host: ""
+  port: 5432
+  database: "postgres"
+  user: "samo"
+  # Reference to an existing Secret for the password.
+  existingSecret: ""
+  existingSecretKey: "password"
+
+# Samo daemon configuration.
+daemon:
+  # Monitoring interval in seconds.
+  interval: 10
+  # Health check HTTP port (0 to disable).
+  healthPort: 8080
+
+# Governance / autonomy configuration.
+governance:
+  # Default autonomy level: observe, supervised, auto
+  defaultAutonomy: observe
+  # Per-feature overrides (uncomment to customize).
+  # features:
+  #   rca: supervised
+  #   index_health: observe
+  #   config_tuning: observe
+
+# Notification channels.
+notifications:
+  slack:
+    enabled: false
+    webhookUrl: ""
+    # Or reference an existing Secret.
+    existingSecret: ""
+    existingSecretKey: "webhook-url"
+  stderr:
+    enabled: true
+
+# GitHub integration (issue creation on anomalies).
+github:
+  enabled: false
+  repo: ""  # e.g. "org/repo"
+
+# Health check service.
+service:
+  type: ClusterIP
+  port: 8080
+
+# Pod resources.
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Security context for the Samo container.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Pod-level security context.
+podSecurityContext:
+  fsGroup: 65534
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra environment variables.
+extraEnv: []
+# - name: PGPASSWORD
+#   valueFrom:
+#     secretKeyRef:
+#       name: my-secret
+#       key: password

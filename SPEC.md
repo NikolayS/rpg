@@ -2781,7 +2781,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Jira connector
 - [ ] GitLab Issues connector
 - [ ] Plugin system for custom connectors
-- [ ] Helm chart for Kubernetes sidecar deployment
+- [x] Helm chart for Kubernetes sidecar deployment
 - [ ] Protocol marketplace (shareable health check definitions)
 - [ ] Auto level for remaining features (requires extended Supervised validation + Auditor approval)
 - [ ] `pg_stat_io` integration (PG 16+) for I/O attribution in RCA

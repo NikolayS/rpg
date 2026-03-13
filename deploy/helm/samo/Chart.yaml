@@ -1,0 +1,17 @@
+apiVersion: v2
+name: samo
+description: Samo — self-driving Postgres agent and diagnostic terminal
+type: application
+version: 0.1.0
+appVersion: "0.1.0-dev"
+keywords:
+  - postgres
+  - postgresql
+  - monitoring
+  - dba
+  - database
+home: https://github.com/NikolayS/project-alpha
+sources:
+  - https://github.com/NikolayS/project-alpha
+maintainers:
+  - name: Nikolay Samokhvalov
