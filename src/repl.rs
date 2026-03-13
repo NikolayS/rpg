@@ -3822,6 +3822,37 @@ async fn dispatch_meta(
         MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
         MetaCmd::ConnInfo => {
             println!("{}", crate::connection::connection_info(params));
+            let caps = &settings.db_capabilities;
+            match &caps.pooler {
+                crate::capabilities::PoolerType::None => {}
+                crate::capabilities::PoolerType::PgBouncer { pool_mode } => {
+                    println!("Pooler: PgBouncer (pool_mode={pool_mode})");
+                }
+                crate::capabilities::PoolerType::Supavisor => {
+                    println!("Pooler: Supavisor");
+                }
+                crate::capabilities::PoolerType::PgCat => {
+                    println!("Pooler: PgCat");
+                }
+            }
+            match caps.managed_provider {
+                crate::capabilities::ManagedProvider::None => {}
+                crate::capabilities::ManagedProvider::Rds => {
+                    println!("Provider: Amazon RDS");
+                }
+                crate::capabilities::ManagedProvider::CloudSql => {
+                    println!("Provider: Google Cloud SQL");
+                }
+                crate::capabilities::ManagedProvider::Supabase => {
+                    println!("Provider: Supabase");
+                }
+                crate::capabilities::ManagedProvider::Neon => {
+                    println!("Provider: Neon");
+                }
+            }
+            if let Some(warning) = caps.pooler_warning() {
+                eprintln!("WARNING: {warning}");
+            }
         }
         MetaCmd::Copyright => {
             print_copyright();
