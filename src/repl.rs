@@ -3439,12 +3439,11 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
                         None
                     }
                 });
-                match name {
-                    Some(n) => n,
-                    None => {
-                        eprintln!("\\password: could not determine current user");
-                        return;
-                    }
+                if let Some(n) = name {
+                    n
+                } else {
+                    eprintln!("\\password: could not determine current user");
+                    return;
                 }
             }
             Err(e) => {
