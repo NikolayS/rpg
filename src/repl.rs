@@ -3038,6 +3038,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         };
         println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
     }
+    // Mirror AI_SHOW_SQL into config.ai.show_sql.
+    if name == "AI_SHOW_SQL" {
+        settings.config.ai.show_sql = matches!(value, "on" | "true" | "1");
+    }
 }
 
 /// Apply an `\unset` command.
@@ -3046,6 +3050,10 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
         // Mirror ECHO_HIDDEN.
         if name == "ECHO_HIDDEN" {
             settings.echo_hidden = false;
+        }
+        // Mirror AI_SHOW_SQL.
+        if name == "AI_SHOW_SQL" {
+            settings.config.ai.show_sql = false;
         }
     } else {
         eprintln!("\\unset: variable {name} was not set");
@@ -5967,6 +5975,7 @@ async fn dispatch_ai_command(
 /// LLMs sometimes wrap SQL in `` ```sql ... ``` `` blocks.  This function
 /// removes the fences and returns the inner content, trimmed.  If no fences
 /// are found, the original string is returned as-is.
+#[cfg(test)]
 fn strip_sql_fences(s: &str) -> &str {
     let trimmed = s.trim();
     if let Some(rest) = trimmed.strip_prefix("```") {
@@ -6074,10 +6083,18 @@ fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
 
 /// Handle a `/ask <prompt>` command end-to-end.
 ///
-/// Checks AI configuration, builds schema context, sends the prompt to the
-/// configured LLM, prints the generated SQL with syntax highlighting, and
-/// prompts `[Y/n]` to execute.  Read-only queries auto-execute when
-/// `ai.auto_execute_readonly` is set.
+/// Acts as a general-purpose `PostgreSQL` expert assistant.  The AI answers
+/// questions directly and, when a database query is needed, includes it in
+/// a triple-backtick `sql` code fence.  Any SQL blocks found in the response
+/// are automatically executed; results are shown interleaved with the AI's
+/// explanatory text.
+///
+/// SQL visibility is controlled by `ai.show_sql = true` (config) or
+/// `\set ECHO_HIDDEN on` (runtime): when either is set the generated SQL is
+/// printed (with syntax highlighting) before its result set.
+///
+/// Write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) always prompt for
+/// confirmation unless running in YOLO mode.
 #[allow(clippy::too_many_lines)]
 async fn handle_ai_ask(
     client: &Client,
@@ -6139,14 +6156,19 @@ async fn handle_ai_ask(
     };
 
     let system_content = format!(
-        "You are a PostgreSQL expert. \
-         Generate SQL queries based on the user's request.\n\
+        "You are a helpful PostgreSQL expert assistant connected to a \
+         live database.\n\
          Database: {dbname}\n\n\
          Schema:\n{schema}{wait}\n\n\
-         Rules:\n\
-         - Output ONLY the SQL query, nothing else\n\
-         - Use standard PostgreSQL syntax\n\
-         - If the request is ambiguous, make reasonable assumptions",
+         Guidelines:\n\
+         - Answer the user's question directly and concisely.\n\
+         - If you need to query the database to answer, include the SQL \
+           wrapped in a ```sql code fence.\n\
+         - You may include explanatory text before or after the SQL.\n\
+         - If the question does not require a database query, just answer \
+           it directly — do not generate SQL.\n\
+         - Use standard PostgreSQL syntax.\n\
+         - If the request is ambiguous, make reasonable assumptions.",
         dbname = params.dbname,
         schema = schema_ctx,
         wait = wait_section,
@@ -6172,7 +6194,7 @@ async fn handle_ai_ask(
         temperature: 0.0,
     };
 
-    let generated_sql = match provider.complete(&messages, &options).await {
+    let ai_response = match provider.complete(&messages, &options).await {
         Ok(result) => {
             record_token_usage(settings, &result);
             result.content
@@ -6183,14 +6205,11 @@ async fn handle_ai_ask(
         }
     };
 
-    // Strip markdown fences if present (LLMs sometimes wrap in ```sql ... ```).
-    let sql = strip_sql_fences(&generated_sql);
-
     // Record the exchange in conversation context for follow-ups.
     settings.conversation.push_user(prompt.to_owned());
     settings
         .conversation
-        .push_assistant(format!("Generated SQL:\n```sql\n{sql}\n```"));
+        .push_assistant(ai_response.clone());
 
     // Auto-compact when approaching the context window limit.
     if settings
@@ -6200,109 +6219,197 @@ async fn handle_ai_ask(
         eprintln!("-- AI context auto-compacted to save tokens");
     }
 
-    // Display with syntax highlighting when available.
-    if settings.no_highlight {
-        println!("{sql}");
-    } else {
-        println!("{}", crate::highlight::highlight_sql(sql, None));
-    }
-
-    // Decide whether to execute.
-    let read_only = !is_write_query(sql);
+    // Parse the response into text and SQL segments, then process each.
+    let show_sql =
+        settings.config.ai.show_sql || settings.echo_hidden;
     let yolo = settings.exec_mode == ExecMode::Yolo;
 
-    // In YOLO mode, check autonomy level for write queries.
-    //
-    // L1 Observe  — block all writes (read-only fence).
-    // L2 Supervised — allow writes but warn the user first.
-    // L3 Auto     — allow writes silently.
-    //
-    // --i-know-what-im-doing bypasses all level checks entirely.
-    let yolo_write_action = if yolo && !read_only {
-        if settings.i_know_what_im_doing {
-            // Danger mode: bypass autonomy checks entirely.
-            YoloWriteAction::Execute
-        } else {
-            let autonomy = settings
-                .config
-                .governance
-                .autonomy_for(crate::governance::FeatureArea::Rca);
-            match autonomy {
-                crate::governance::AutonomyLevel::Observe => YoloWriteAction::Block,
-                crate::governance::AutonomyLevel::Supervised => YoloWriteAction::WarnThenExecute,
-                crate::governance::AutonomyLevel::Auto => YoloWriteAction::Execute,
-            }
-        }
-    } else {
-        YoloWriteAction::Execute
-    };
+    let segments = parse_ai_response_segments(&ai_response);
 
-    if yolo_write_action == YoloWriteAction::Block {
-        eprintln!(
-            "-- YOLO: write query blocked (autonomy level is Observe). \
-             Use \\set governance.default_autonomy supervised \
-             or pass --i-know-what-im-doing to bypass"
-        );
-        return;
-    }
-
-    let auto_exec = (yolo && yolo_write_action != YoloWriteAction::Block)
-        || (read_only && settings.config.ai.auto_execute_readonly);
-
-    let choice = if auto_exec {
-        if yolo && !read_only {
-            match yolo_write_action {
-                YoloWriteAction::WarnThenExecute => {
-                    eprintln!(
-                        "-- YOLO: write query executing \
-                         (autonomy level is Supervised — proceed with care)"
-                    );
+    for segment in &segments {
+        match segment {
+            AiResponseSegment::Text(text) => {
+                let text = text.trim();
+                if !text.is_empty() {
+                    println!("{text}");
                 }
-                YoloWriteAction::Execute => {
-                    eprintln!("-- YOLO: auto-executing write query");
-                }
-                YoloWriteAction::Block => unreachable!("Block handled above"),
             }
-        }
-        AskChoice::Yes
-    } else {
-        ask_yne_prompt(
-            if read_only {
-                "Execute? [Y/n/e] "
-            } else {
-                "Execute (write query)? [y/N/e] "
-            },
-            read_only,
-        )
-    };
-
-    match choice {
-        AskChoice::Yes => {
-            let ok = execute_query(client, sql, settings, tx).await;
-            if ok {
-                settings
-                    .conversation
-                    .push_query_result(sql, "(executed successfully)");
-            }
-        }
-        AskChoice::Edit => match crate::io::edit(sql, None, None) {
-            Ok(edited) => {
-                let edited = edited.trim();
-                if edited.is_empty() {
-                    eprintln!("(empty — skipped)");
-                } else {
-                    let ok = execute_query(client, edited, settings, tx).await;
-                    if ok {
-                        settings
-                            .conversation
-                            .push_query_result(edited, "(executed after edit)");
+            AiResponseSegment::Sql(sql) => {
+                // Optionally reveal the generated SQL.
+                if show_sql {
+                    if settings.no_highlight {
+                        eprintln!("{sql}");
+                    } else {
+                        eprintln!("{}", crate::highlight::highlight_sql(sql, None));
                     }
                 }
+
+                let read_only = !is_write_query(sql);
+
+                // In YOLO mode, check autonomy level for write queries.
+                //
+                // L1 Observe     — block all writes (read-only fence).
+                // L2 Supervised  — warn then execute.
+                // L3 Auto        — execute silently.
+                //
+                // --i-know-what-im-doing bypasses all level checks.
+                let yolo_write_action = if yolo && !read_only {
+                    if settings.i_know_what_im_doing {
+                        YoloWriteAction::Execute
+                    } else {
+                        let autonomy = settings
+                            .config
+                            .governance
+                            .autonomy_for(crate::governance::FeatureArea::Rca);
+                        match autonomy {
+                            crate::governance::AutonomyLevel::Observe => {
+                                YoloWriteAction::Block
+                            }
+                            crate::governance::AutonomyLevel::Supervised => {
+                                YoloWriteAction::WarnThenExecute
+                            }
+                            crate::governance::AutonomyLevel::Auto => {
+                                YoloWriteAction::Execute
+                            }
+                        }
+                    }
+                } else {
+                    YoloWriteAction::Execute
+                };
+
+                if yolo_write_action == YoloWriteAction::Block {
+                    eprintln!(
+                        "-- YOLO: write query blocked \
+                         (autonomy level is Observe). \
+                         Use \\set governance.default_autonomy supervised \
+                         or pass --i-know-what-im-doing to bypass"
+                    );
+                    continue;
+                }
+
+                // Read-only queries auto-execute; write queries prompt for
+                // confirmation unless YOLO mode overrides.
+                let auto_exec = read_only
+                    || (yolo && yolo_write_action != YoloWriteAction::Block);
+
+                let choice = if auto_exec {
+                    if yolo && !read_only {
+                        match yolo_write_action {
+                            YoloWriteAction::WarnThenExecute => {
+                                eprintln!(
+                                    "-- YOLO: write query executing \
+                                     (autonomy level is Supervised \
+                                     — proceed with care)"
+                                );
+                            }
+                            YoloWriteAction::Execute => {
+                                eprintln!(
+                                    "-- YOLO: auto-executing write query"
+                                );
+                            }
+                            YoloWriteAction::Block => {
+                                unreachable!("Block handled above")
+                            }
+                        }
+                    }
+                    AskChoice::Yes
+                } else {
+                    ask_yne_prompt("Execute (write query)? [y/N/e] ", false)
+                };
+
+                match choice {
+                    AskChoice::Yes => {
+                        let ok =
+                            execute_query(client, sql, settings, tx).await;
+                        if ok {
+                            settings
+                                .conversation
+                                .push_query_result(sql, "(executed)");
+                        }
+                    }
+                    AskChoice::Edit => {
+                        match crate::io::edit(sql, None, None) {
+                            Ok(edited) => {
+                                let edited = edited.trim();
+                                if edited.is_empty() {
+                                    eprintln!("(empty — skipped)");
+                                } else {
+                                    let ok = execute_query(
+                                        client, edited, settings, tx,
+                                    )
+                                    .await;
+                                    if ok {
+                                        settings.conversation.push_query_result(
+                                            edited,
+                                            "(executed after edit)",
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("{e}"),
+                        }
+                    }
+                    AskChoice::No => {}
+                }
             }
-            Err(e) => eprintln!("{e}"),
-        },
-        AskChoice::No => {}
+        }
     }
+}
+
+/// A segment of an AI response: plain text or a SQL block.
+enum AiResponseSegment {
+    Text(String),
+    Sql(String),
+}
+
+/// Split an AI response into alternating text and SQL segments.
+///
+/// SQL blocks are delimited by ` ```sql ` … ` ``` ` (case-insensitive
+/// language tag).  Plain ` ``` ` fences without a language tag are treated
+/// as text, not SQL.  The function never allocates an empty segment.
+fn parse_ai_response_segments(response: &str) -> Vec<AiResponseSegment> {
+    let mut segments: Vec<AiResponseSegment> = Vec::new();
+    let mut remaining = response;
+
+    while !remaining.is_empty() {
+        // Look for the start of a ```sql fence.
+        if let Some(fence_start) = remaining.find("```sql") {
+            // Any text before the fence becomes a Text segment.
+            let before = &remaining[..fence_start];
+            if !before.trim().is_empty() {
+                segments.push(AiResponseSegment::Text(before.to_owned()));
+            }
+            // Advance past the opening fence + language tag.
+            let after_open = &remaining[fence_start + 6..];
+            // Skip the newline immediately after the tag.
+            let body_start = after_open
+                .find('\n')
+                .map_or(after_open, |i| &after_open[i + 1..]);
+            // Find the closing fence.
+            if let Some(close_pos) = body_start.find("```") {
+                let sql_body = body_start[..close_pos].trim();
+                if !sql_body.is_empty() {
+                    segments.push(AiResponseSegment::Sql(sql_body.to_owned()));
+                }
+                remaining = &body_start[close_pos + 3..];
+            } else {
+                // Unclosed fence: treat everything as SQL.
+                let sql_body = body_start.trim();
+                if !sql_body.is_empty() {
+                    segments.push(AiResponseSegment::Sql(sql_body.to_owned()));
+                }
+                break;
+            }
+        } else {
+            // No more SQL fences — rest is plain text.
+            if !remaining.trim().is_empty() {
+                segments.push(AiResponseSegment::Text(remaining.to_owned()));
+            }
+            break;
+        }
+    }
+
+    segments
 }
 
 /// Handle a plan-mode prompt.
@@ -8952,5 +9059,91 @@ mod tests {
     #[test]
     fn regular_sql_does_not_trigger_quit() {
         assert!(!bare_word_quits("select 1", true));
+    }
+
+    // -- parse_ai_response_segments -------------------------------------------
+
+    fn collect_segments(response: &str) -> Vec<(bool, String)> {
+        parse_ai_response_segments(response)
+            .into_iter()
+            .map(|s| match s {
+                AiResponseSegment::Text(t) => (false, t),
+                AiResponseSegment::Sql(q) => (true, q),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parse_segments_plain_text_only() {
+        let segs = collect_segments("Hello, world!");
+        assert_eq!(segs.len(), 1);
+        assert!(!segs[0].0); // Text
+        assert_eq!(segs[0].1.trim(), "Hello, world!");
+    }
+
+    #[test]
+    fn parse_segments_sql_only() {
+        let segs = collect_segments("```sql\nSELECT 1;\n```");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].0); // Sql
+        assert_eq!(segs[0].1, "SELECT 1;");
+    }
+
+    #[test]
+    fn parse_segments_text_then_sql() {
+        let response = "Here is the count:\n```sql\nSELECT count(*) FROM users;\n```";
+        let segs = collect_segments(response);
+        assert_eq!(segs.len(), 2);
+        assert!(!segs[0].0); // Text
+        assert!(segs[1].0);  // Sql
+        assert_eq!(segs[1].1, "SELECT count(*) FROM users;");
+    }
+
+    #[test]
+    fn parse_segments_sql_then_text() {
+        let response = "```sql\nSELECT now();\n```\nThe current time is above.";
+        let segs = collect_segments(response);
+        assert_eq!(segs.len(), 2);
+        assert!(segs[0].0);  // Sql
+        assert!(!segs[1].0); // Text
+        assert_eq!(segs[0].1, "SELECT now();");
+    }
+
+    #[test]
+    fn parse_segments_text_sql_text() {
+        let response =
+            "Count of users:\n```sql\nSELECT count(*) FROM users;\n```\nThat's all.";
+        let segs = collect_segments(response);
+        assert_eq!(segs.len(), 3);
+        assert!(!segs[0].0); // Text
+        assert!(segs[1].0);  // Sql
+        assert!(!segs[2].0); // Text
+        assert_eq!(segs[1].1, "SELECT count(*) FROM users;");
+    }
+
+    #[test]
+    fn parse_segments_no_sql_fence_no_segments() {
+        // A plain code fence (no "sql" tag) is not treated as SQL.
+        let response = "Some text\n```\nnot sql\n```\nmore text";
+        let segs = collect_segments(response);
+        // No SQL segments — everything is text.
+        assert!(segs.iter().all(|(is_sql, _)| !is_sql));
+    }
+
+    #[test]
+    fn parse_segments_empty_response() {
+        let segs = collect_segments("");
+        assert!(segs.is_empty());
+    }
+
+    #[test]
+    fn parse_segments_unclosed_fence() {
+        let response = "Intro:\n```sql\nSELECT 1;";
+        let segs = collect_segments(response);
+        // Should still find the SQL even without a closing fence.
+        assert_eq!(segs.len(), 2);
+        assert!(!segs[0].0);
+        assert!(segs[1].0);
+        assert_eq!(segs[1].1, "SELECT 1;");
     }
 }
