@@ -219,12 +219,14 @@ const TOP_WAIT_SQL: &str = "\
 ///
 /// Continuously monitors the database, detects anomalies, and sends
 /// notifications. Exits on SIGTERM or SIGINT.
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     client: &Client,
     config: &Config,
     dbname: &str,
     channels: &[NotificationChannel],
     health_port: Option<u16>,
+    github_repo: Option<&str>,
 ) {
     use std::sync::Arc;
     use std::time::Duration;
@@ -305,6 +307,24 @@ pub async fn run(
             );
             for ch in channels {
                 notify(ch, &msg).await;
+            }
+
+            // Create GitHub issue if configured.
+            if let Some(repo) = github_repo {
+                let template = crate::issues::issue_from_anomaly(
+                    dbname,
+                    anomaly.kind.label(),
+                    &anomaly.description,
+                );
+                let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                match creator.create_issue(&template).await {
+                    Ok(url) => {
+                        crate::logging::info("daemon", &format!("Created issue: {url}"));
+                    }
+                    Err(e) => {
+                        crate::logging::warn("daemon", &format!("Issue creation failed: {e}"));
+                    }
+                }
             }
         }
 
