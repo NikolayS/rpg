@@ -386,14 +386,6 @@ fn print_result_set_pset(
                 let _ = writeln!(writer);
             }
 
-            // Build a RowSet from the raw string data.
-            let columns: Vec<ColumnMeta> = col_names
-                .iter()
-                .map(|n| ColumnMeta {
-                    name: n.clone(),
-                    is_numeric: false,
-                })
-                .collect();
             // simple_query returns NULL as empty string; we wrap every cell
             // in Some to distinguish "empty string" from "NULL" at the pset
             // formatting layer (which uses null_display).  The distinction
@@ -402,6 +394,33 @@ fn print_result_set_pset(
             let row_data: Vec<Vec<Option<String>>> = rows
                 .iter()
                 .map(|r| r.iter().map(|v| Some(v.clone())).collect())
+                .collect();
+
+            // Heuristic: psql right-aligns numeric columns using type OIDs from
+            // the wire protocol.  The simple query protocol does not expose OIDs,
+            // so we infer numeric columns by inspecting cell values.  A column is
+            // treated as numeric if every non-NULL, non-empty cell in that column
+            // parses as an f64 (covers integers, decimals, and scientific notation).
+            // Columns that are entirely NULL/empty are NOT marked numeric.
+            let columns: Vec<ColumnMeta> = col_names
+                .iter()
+                .enumerate()
+                .map(|(col_idx, n)| {
+                    let mut has_value = false;
+                    let is_numeric = row_data.iter().all(|row| {
+                        match row.get(col_idx).and_then(|v| v.as_deref()) {
+                            None | Some("") => true, // NULL or empty: skip, don't disqualify
+                            Some(val) => {
+                                has_value = true;
+                                val.parse::<f64>().is_ok()
+                            }
+                        }
+                    }) && has_value;
+                    ColumnMeta {
+                        name: n.clone(),
+                        is_numeric,
+                    }
+                })
                 .collect();
 
             let rs = RowSet {

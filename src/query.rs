@@ -62,9 +62,9 @@ pub struct ColumnMeta {
     pub name: String,
     /// Whether the column type is numeric (right-align hint for the formatter).
     ///
-    /// The simple query protocol does not expose column OIDs, so this is
-    /// always `false` for now.  The extended query path (issue #21) will
-    /// populate this from `pg_type`.
+    /// The simple query protocol does not expose column OIDs.  The REPL path
+    /// infers this heuristically by inspecting cell values (see `repl.rs`).
+    /// The extended query path (issue #21) will populate this from `pg_type`.
     pub is_numeric: bool,
 }
 
