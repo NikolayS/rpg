@@ -2001,6 +2001,7 @@ AI commands:
   /explain          explain the last query plan
   /fix              diagnose and fix the last error
   /optimize <query> suggest query optimizations
+  /describe <table> AI-generated table description
 
 Input/execution modes:
   \sql              switch to SQL input mode (default)
@@ -4285,10 +4286,16 @@ async fn dispatch_ai_command(
         handle_ai_explain(client, query_arg, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
         handle_ai_optimize(client, query_arg, settings, params).await;
+    } else if let Some(table_arg) = input.strip_prefix("/describe").map(str::trim) {
+        if table_arg.is_empty() {
+            eprintln!("Usage: /describe <table_name>");
+            return;
+        }
+        handle_ai_describe(client, table_arg, settings, params).await;
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize"
+             Available: /ask, /fix, /explain, /optimize, /describe"
         );
     }
 }
@@ -5073,6 +5080,178 @@ async fn handle_ai_optimize(
 
     println!();
     if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        eprintln!("AI error: {e}");
+    }
+}
+
+/// Handle a `/describe <table>` command.
+///
+/// Queries the table's columns, constraints, indexes, and row estimate,
+/// then sends everything to the LLM for a human-readable description of
+/// the table's purpose, relationships, and notable patterns.
+#[allow(clippy::too_many_lines)]
+async fn handle_ai_describe(
+    client: &Client,
+    table_name: &str,
+    settings: &ReplSettings,
+    params: &ConnParams,
+) {
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+    if provider_name.is_empty() {
+        eprintln!(
+            "AI not configured. \
+             Add an [ai] section to ~/.config/samo/config.toml"
+        );
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Gather table metadata.
+    let mut table_info = String::new();
+
+    // Columns.
+    let col_query = format!(
+        "SELECT column_name, data_type, is_nullable, column_default \
+         FROM information_schema.columns \
+         WHERE table_name = '{table_name}' \
+         ORDER BY ordinal_position"
+    );
+    if let Ok(rows) = client.simple_query(&col_query).await {
+        use std::fmt::Write as _;
+        let _ = writeln!(table_info, "Columns:");
+        for msg in &rows {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or("?");
+                let dtype = row.get(1).unwrap_or("?");
+                let nullable = row.get(2).unwrap_or("?");
+                let default = row.get(3).unwrap_or("");
+                let _ = writeln!(
+                    table_info,
+                    "  {name} {dtype} nullable={nullable} default={default}"
+                );
+            }
+        }
+    }
+
+    // Constraints (PK, FK, unique, check).
+    let constraint_query = format!(
+        "SELECT conname, contype, pg_get_constraintdef(oid) \
+         FROM pg_constraint \
+         WHERE conrelid = '{table_name}'::regclass"
+    );
+    if let Ok(rows) = client.simple_query(&constraint_query).await {
+        use std::fmt::Write as _;
+        let _ = writeln!(table_info, "\nConstraints:");
+        for msg in &rows {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or("?");
+                let ctype = row.get(1).unwrap_or("?");
+                let def = row.get(2).unwrap_or("?");
+                let type_label = match ctype {
+                    "p" => "PRIMARY KEY",
+                    "f" => "FOREIGN KEY",
+                    "u" => "UNIQUE",
+                    "c" => "CHECK",
+                    "x" => "EXCLUSION",
+                    other => other,
+                };
+                let _ = writeln!(table_info, "  {name} ({type_label}): {def}");
+            }
+        }
+    }
+
+    // Indexes.
+    let idx_query = format!(
+        "SELECT indexname, indexdef \
+         FROM pg_indexes \
+         WHERE tablename = '{table_name}'"
+    );
+    if let Ok(rows) = client.simple_query(&idx_query).await {
+        use std::fmt::Write as _;
+        let _ = writeln!(table_info, "\nIndexes:");
+        for msg in &rows {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or("?");
+                let def = row.get(1).unwrap_or("?");
+                let _ = writeln!(table_info, "  {name}: {def}");
+            }
+        }
+    }
+
+    // Row estimate + size.
+    let stats_query = format!(
+        "SELECT reltuples::bigint AS row_estimate, \
+         pg_size_pretty(pg_total_relation_size('{table_name}'::regclass)) AS size \
+         FROM pg_class WHERE relname = '{table_name}'"
+    );
+    if let Ok(rows) = client.simple_query(&stats_query).await {
+        use std::fmt::Write as _;
+        for msg in &rows {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                let rows_est = row.get(0).unwrap_or("?");
+                let size = row.get(1).unwrap_or("?");
+                let _ = writeln!(
+                    table_info,
+                    "\nEstimated rows: {rows_est}, Total size: {size}"
+                );
+            }
+        }
+    }
+
+    if table_info.trim().is_empty() {
+        eprintln!("No metadata found for table '{table_name}'.");
+        return;
+    }
+
+    let system_content = format!(
+        "You are a PostgreSQL expert. \
+         Describe the purpose and design of this database table.\n\
+         Database: {dbname}\n\n\
+         Rules:\n\
+         - Infer the table's purpose from its name, columns, and constraints\n\
+         - Describe relationships (foreign keys) to other tables\n\
+         - Note any design patterns (audit columns, soft deletes, etc.)\n\
+         - Mention notable indexes and their likely purpose\n\
+         - Be concise — this is for quick understanding",
+        dbname = params.dbname,
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: format!("Describe table '{table_name}':\n\n{table_info}"),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    if let Err(e) = stream_completion(provider.as_ref(), &messages, &options).await {
         eprintln!("AI error: {e}");
     }
 }
