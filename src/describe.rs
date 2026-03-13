@@ -155,7 +155,8 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
 
     // Total table width: 1 (leading space) + sum(widths) + 3*(ncols-1) (` | `) + 1 (trailing space).
     let ncols = widths.len();
-    let table_width = 1 + widths.iter().sum::<usize>() + if ncols > 1 { 3 * (ncols - 1) } else { 0 } + 1;
+    let table_width =
+        1 + widths.iter().sum::<usize>() + if ncols > 1 { 3 * (ncols - 1) } else { 0 } + 1;
 
     // Optional title centered to table width.
     if let Some(t) = title {
