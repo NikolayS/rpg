@@ -3894,9 +3894,8 @@ async fn dispatch_meta(
                     } else {
                         eprintln!("\\c: unknown profile \"@{name}\"");
                         eprintln!(
-                            "Configure profiles in \
-                             ~/.config/samo/config.toml \
-                             under [connections.{name}]"
+                            "Configure profiles in {} under [connections.{name}]",
+                            crate::config::user_config_path_display()
                         );
                         return MetaResult::Continue;
                     }
@@ -5522,8 +5521,8 @@ async fn handle_ai_ask(
 
     if provider_name.is_empty() {
         eprintln!(
-            "AI not configured. \
-             Add an [ai] section to ~/.config/samo/config.toml"
+            "AI not configured. Add an [ai] section to {}",
+            crate::config::user_config_path_display()
         );
         eprintln!("Supported providers: anthropic, openai, ollama");
         eprintln!("Example:");
@@ -5753,8 +5752,8 @@ async fn handle_ai_plan(
 
     if provider_name.is_empty() {
         eprintln!(
-            "AI not configured. \
-             Add an [ai] section to ~/.config/samo/config.toml"
+            "AI not configured. Add an [ai] section to {}",
+            crate::config::user_config_path_display()
         );
         return;
     }
@@ -5885,8 +5884,8 @@ async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &Co
 
     if provider_name.is_empty() {
         eprintln!(
-            "AI not configured. \
-             Add an [ai] section to ~/.config/samo/config.toml"
+            "AI not configured. Add an [ai] section to {}",
+            crate::config::user_config_path_display()
         );
         eprintln!("Supported providers: anthropic, openai, ollama");
         eprintln!("Example:");
@@ -6286,7 +6285,8 @@ async fn handle_ai_optimize(
     if provider_name.is_empty() {
         eprintln!(
             "\nAI not configured — showing raw plan only. \
-             Add an [ai] section to ~/.config/samo/config.toml for optimization suggestions."
+             Add an [ai] section to {} for optimization suggestions.",
+            crate::config::user_config_path_display()
         );
         return;
     }
@@ -6374,8 +6374,8 @@ async fn handle_ai_describe(
     let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
     if provider_name.is_empty() {
         eprintln!(
-            "AI not configured. \
-             Add an [ai] section to ~/.config/samo/config.toml"
+            "AI not configured. Add an [ai] section to {}",
+            crate::config::user_config_path_display()
         );
         return;
     }

@@ -327,7 +327,28 @@ pub fn load_config() -> (Config, Vec<String>) {
 /// Return the path to the user config file, or `None` if the config
 /// directory cannot be determined.
 fn user_config_path() -> Option<PathBuf> {
+    // Check XDG-style path first (~/.config/samo/config.toml) since that's
+    // what our docs and error messages reference.  On macOS `dirs::config_dir`
+    // returns ~/Library/Application Support/ which is unexpected for CLI
+    // tools, so we prefer the XDG path when it exists.
+    if let Some(home) = dirs::home_dir() {
+        let xdg_path = home.join(".config").join("samo").join("config.toml");
+        if xdg_path.exists() {
+            return Some(xdg_path);
+        }
+    }
+    // Fall back to the platform-native config dir.
     dirs::config_dir().map(|d| d.join("samo").join("config.toml"))
+}
+
+/// Return a human-readable path string for the user config file (for error
+/// messages).  Prefers `~/.config/samo/config.toml` since that's cross-platform.
+pub fn user_config_path_display() -> String {
+    if let Some(home) = dirs::home_dir() {
+        format!("{}/.config/samo/config.toml", home.display())
+    } else {
+        "~/.config/samo/config.toml".to_owned()
+    }
 }
 
 /// Read and parse a single TOML config file.

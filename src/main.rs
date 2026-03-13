@@ -605,8 +605,8 @@ async fn main() {
         } else {
             eprintln!("samo: unknown profile \"@{name}\"");
             eprintln!(
-                "Configure profiles in ~/.config/samo/config.toml \
-                 under [connections.{name}]"
+                "Configure profiles in {} under [connections.{name}]",
+                config::user_config_path_display()
             );
             std::process::exit(2);
         }
