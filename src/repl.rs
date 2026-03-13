@@ -310,6 +310,21 @@ pub enum ExecMode {
 }
 
 // ---------------------------------------------------------------------------
+// YOLO write-action decision
+// ---------------------------------------------------------------------------
+
+/// Outcome of the YOLO-mode autonomy boundary check for write queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum YoloWriteAction {
+    /// Block the write — autonomy level is Observe (L1).
+    Block,
+    /// Execute but emit a caution warning — autonomy level is Supervised (L2).
+    WarnThenExecute,
+    /// Execute silently — autonomy level is Auto (L3) or bypass flag set.
+    Execute,
+}
+
+// ---------------------------------------------------------------------------
 // Auto-EXPLAIN mode
 // ---------------------------------------------------------------------------
 
@@ -672,6 +687,12 @@ pub struct ReplSettings {
     ///
     /// Populated at connect time by [`crate::capabilities::detect`].
     pub db_capabilities: crate::capabilities::DbCapabilities,
+    /// Bypass autonomy level checks in YOLO mode.
+    ///
+    /// Set by `--i-know-what-im-doing` CLI flag. When `true` and
+    /// `exec_mode == Yolo`, all write queries are auto-executed regardless
+    /// of the configured autonomy level. Use with extreme care.
+    pub i_know_what_im_doing: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -729,6 +750,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("tokens_used", &self.tokens_used)
             .field("audit_log", &format!("{} entries", self.audit_log.len()))
             .field("db_capabilities", &self.db_capabilities)
+            .field("i_know_what_im_doing", &self.i_know_what_im_doing)
             .finish()
     }
 }
@@ -768,6 +790,7 @@ impl Default for ReplSettings {
             tokens_used: 0,
             audit_log: crate::governance::AuditLog::new(),
             db_capabilities: crate::capabilities::DbCapabilities::default(),
+            i_know_what_im_doing: false,
         }
     }
 }
@@ -5262,30 +5285,57 @@ async fn handle_ai_ask(
     let yolo = settings.exec_mode == ExecMode::Yolo;
 
     // In YOLO mode, check autonomy level for write queries.
-    let yolo_permitted = if yolo && !read_only {
-        let default_autonomy = settings
-            .config
-            .governance
-            .autonomy_for(crate::governance::FeatureArea::Rca);
-        if default_autonomy == crate::governance::AutonomyLevel::Observe {
-            eprintln!(
-                "-- YOLO: write query blocked (autonomy level is Observe). \
-                 Use \\set governance.default_autonomy supervised"
-            );
-            false
+    //
+    // L1 Observe  — block all writes (read-only fence).
+    // L2 Supervised — allow writes but warn the user first.
+    // L3 Auto     — allow writes silently.
+    //
+    // --i-know-what-im-doing bypasses all level checks entirely.
+    let yolo_write_action = if yolo && !read_only {
+        if settings.i_know_what_im_doing {
+            // Danger mode: bypass autonomy checks entirely.
+            YoloWriteAction::Execute
         } else {
-            true
+            let autonomy = settings
+                .config
+                .governance
+                .autonomy_for(crate::governance::FeatureArea::Rca);
+            match autonomy {
+                crate::governance::AutonomyLevel::Observe => YoloWriteAction::Block,
+                crate::governance::AutonomyLevel::Supervised => YoloWriteAction::WarnThenExecute,
+                crate::governance::AutonomyLevel::Auto => YoloWriteAction::Execute,
+            }
         }
     } else {
-        true
+        YoloWriteAction::Execute
     };
 
-    let auto_exec =
-        (yolo && yolo_permitted) || (read_only && settings.config.ai.auto_execute_readonly);
+    if yolo_write_action == YoloWriteAction::Block {
+        eprintln!(
+            "-- YOLO: write query blocked (autonomy level is Observe). \
+             Use \\set governance.default_autonomy supervised \
+             or pass --i-know-what-im-doing to bypass"
+        );
+        return;
+    }
+
+    let auto_exec = (yolo && yolo_write_action != YoloWriteAction::Block)
+        || (read_only && settings.config.ai.auto_execute_readonly);
 
     let choice = if auto_exec {
         if yolo && !read_only {
-            eprintln!("-- YOLO: auto-executing write query");
+            match yolo_write_action {
+                YoloWriteAction::WarnThenExecute => {
+                    eprintln!(
+                        "-- YOLO: write query executing \
+                         (autonomy level is Supervised — proceed with care)"
+                    );
+                }
+                YoloWriteAction::Execute => {
+                    eprintln!("-- YOLO: auto-executing write query");
+                }
+                YoloWriteAction::Block => unreachable!("Block handled above"),
+            }
         }
         AskChoice::Yes
     } else {
