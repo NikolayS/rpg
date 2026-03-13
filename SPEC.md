@@ -2798,6 +2798,14 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [x] Golden file compat tests for describe commands (PR #133, #139, #147)
 - [x] YOLO autonomy boundary checks L1/L2/L3 (PR #134)
 - [x] `\dba bloat` query fix (PR #135)
+- [x] `\dy` event triggers describe command (PR #158)
+- [x] `\do` operators describe command (PR #166)
+- [x] `\db` title "List of tablespaces" (PR #163)
+- [x] `\dT` type filter — exclude table row types (PR #163)
+- [x] `\dD` and other commands: show title/headers for empty results (PR #165)
+- [x] `\dm+` Access method column and `pg_table_size` (PR #167)
+- [x] Verbose compat tests: `\dn+`, `\du+`, `\dv+`, `\dm+`, `\ds+`, `\db`, `\dT`, `\dD` (PR #156)
+- [x] Stub describe commands: `\dp`, `\dd`, `\dC`, `\dc`, `\des`, `\dew`, `\det`, `\deu` (PR #152)
 
 ---
 
