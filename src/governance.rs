@@ -465,6 +465,221 @@ fn autonomy_permits(current: AutonomyLevel, max_allowed: AutonomyLevel) -> bool 
 }
 
 // ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+
+/// Circuit breaker configuration.
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerConfig {
+    /// Window of recent outcomes to consider.
+    pub window_size: usize,
+    /// Failure rate threshold (0.0–1.0) to trip the breaker.
+    pub failure_threshold: f64,
+    /// Minimum actions before the breaker can trip.
+    pub min_actions: usize,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            window_size: 20,
+            failure_threshold: 0.15, // >15% failure rate trips
+            min_actions: 5,
+        }
+    }
+}
+
+/// Per-feature circuit breaker that tracks success/failure and downgrades
+/// from Auto to Supervised when the failure rate exceeds the threshold.
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    /// Configuration.
+    config: CircuitBreakerConfig,
+    /// Per-feature outcome windows (true = success, false = failure).
+    windows: std::collections::HashMap<FeatureArea, Vec<bool>>,
+    /// Features that have been tripped (downgraded to Supervised).
+    tripped: std::collections::HashSet<FeatureArea>,
+}
+
+impl CircuitBreaker {
+    /// Create a new circuit breaker with default config.
+    pub fn new() -> Self {
+        Self::with_config(CircuitBreakerConfig::default())
+    }
+
+    /// Create a circuit breaker with custom config.
+    pub fn with_config(config: CircuitBreakerConfig) -> Self {
+        Self {
+            config,
+            windows: std::collections::HashMap::new(),
+            tripped: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Record an action outcome for a feature area.
+    ///
+    /// Returns `true` if the breaker just tripped (transition to tripped state).
+    pub fn record(&mut self, feature: FeatureArea, success: bool) -> bool {
+        let window = self.windows.entry(feature).or_default();
+        window.push(success);
+
+        // Trim to window size.
+        if window.len() > self.config.window_size {
+            let excess = window.len() - self.config.window_size;
+            window.drain(..excess);
+        }
+
+        // Check if breaker should trip.
+        if window.len() >= self.config.min_actions && !self.tripped.contains(&feature) {
+            let failures = window.iter().filter(|&&s| !s).count();
+            #[allow(clippy::cast_precision_loss)]
+            let failure_rate = failures as f64 / window.len() as f64;
+            if failure_rate > self.config.failure_threshold {
+                self.tripped.insert(feature);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a feature area has been tripped (downgraded).
+    pub fn is_tripped(&self, feature: FeatureArea) -> bool {
+        self.tripped.contains(&feature)
+    }
+
+    /// Get the effective autonomy level for a feature, respecting the breaker.
+    ///
+    /// If the feature's breaker has tripped, Auto is downgraded to Supervised.
+    pub fn effective_autonomy(
+        &self,
+        feature: FeatureArea,
+        configured: AutonomyLevel,
+    ) -> AutonomyLevel {
+        if configured == AutonomyLevel::Auto && self.is_tripped(feature) {
+            AutonomyLevel::Supervised
+        } else {
+            configured
+        }
+    }
+
+    /// Reset a tripped breaker (manual recovery).
+    pub fn reset(&mut self, feature: FeatureArea) {
+        self.tripped.remove(&feature);
+        self.windows.remove(&feature);
+    }
+
+    /// Get the current failure rate for a feature (0.0–1.0).
+    #[allow(clippy::cast_precision_loss)]
+    pub fn failure_rate(&self, feature: FeatureArea) -> f64 {
+        self.windows.get(&feature).map_or(0.0, |w| {
+            if w.is_empty() {
+                0.0
+            } else {
+                let failures = w.iter().filter(|&&s| !s).count();
+                failures as f64 / w.len() as f64
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto promotion tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks Supervised action history to determine Auto promotion eligibility.
+///
+/// A feature can be promoted to Auto only after a minimum number of
+/// successful Supervised actions with a high Auditor approval rate.
+#[derive(Debug)]
+pub struct AutoPromotionTracker {
+    /// Minimum successful Supervised actions required.
+    pub min_actions: usize,
+    /// Minimum approval rate (0.0–1.0).
+    pub min_approval_rate: f64,
+    /// Per-feature counters: (total, approved, successful).
+    counters: std::collections::HashMap<FeatureArea, (usize, usize, usize)>,
+}
+
+impl Default for AutoPromotionTracker {
+    fn default() -> Self {
+        Self {
+            min_actions: 30,
+            min_approval_rate: 0.85,
+            counters: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl AutoPromotionTracker {
+    /// Create a new tracker with default thresholds.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a Supervised action outcome.
+    pub fn record(&mut self, feature: FeatureArea, approved: bool, success: bool) {
+        let (total, approved_count, success_count) = self.counters.entry(feature).or_default();
+        *total += 1;
+        if approved {
+            *approved_count += 1;
+        }
+        if success {
+            *success_count += 1;
+        }
+    }
+
+    /// Check if a feature is eligible for Auto promotion.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn is_eligible(&self, feature: FeatureArea) -> bool {
+        let Some(&(total, approved, successful)) = self.counters.get(&feature) else {
+            return false;
+        };
+        if successful < self.min_actions {
+            return false;
+        }
+        if total == 0 {
+            return false;
+        }
+        let approval_rate = approved as f64 / total as f64;
+        approval_rate >= self.min_approval_rate
+    }
+
+    /// Get promotion stats for a feature: (total, approved, successful).
+    pub fn stats(&self, feature: FeatureArea) -> (usize, usize, usize) {
+        self.counters.get(&feature).copied().unwrap_or((0, 0, 0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-mode action constraints
+// ---------------------------------------------------------------------------
+
+/// Defines which action types are permitted in Auto mode per feature area.
+///
+/// Auto mode is deliberately narrow — only safe, well-validated actions
+/// that are reversible or have low blast radius.
+pub fn auto_permitted_actions(feature: FeatureArea) -> &'static [&'static str] {
+    match feature {
+        // RCA Auto: only cancel/terminate (no GUC changes).
+        FeatureArea::Rca => &["pg_cancel_backend", "pg_terminate_backend"],
+        // Index health Auto: only REINDEX CONCURRENTLY (no DROP, no CREATE).
+        FeatureArea::IndexHealth => &["REINDEX CONCURRENTLY"],
+        // All other features: no Auto actions permitted yet.
+        _ => &[],
+    }
+}
+
+/// Check if a proposed action is permitted in Auto mode for its feature area.
+pub fn is_auto_permitted(feature: FeatureArea, proposed_action: &str) -> bool {
+    let permitted = auto_permitted_actions(feature);
+    let action_lower = proposed_action.to_lowercase();
+    permitted
+        .iter()
+        .any(|p| action_lower.contains(&p.to_lowercase()))
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -790,5 +1005,228 @@ mod tests {
             &proposal,
             AutonomyLevel::Supervised
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Circuit breaker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn circuit_breaker_does_not_trip_on_success() {
+        let mut cb = CircuitBreaker::new();
+        for _ in 0..20 {
+            assert!(!cb.record(FeatureArea::Rca, true));
+        }
+        assert!(!cb.is_tripped(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn circuit_breaker_trips_on_high_failure_rate() {
+        let config = CircuitBreakerConfig {
+            window_size: 10,
+            failure_threshold: 0.15,
+            min_actions: 5,
+        };
+        let mut cb = CircuitBreaker::with_config(config);
+        // 3 successes + 2 failures = 40% failure rate > 15%
+        cb.record(FeatureArea::Rca, true);
+        cb.record(FeatureArea::Rca, true);
+        cb.record(FeatureArea::Rca, true);
+        cb.record(FeatureArea::Rca, false);
+        let tripped = cb.record(FeatureArea::Rca, false);
+        assert!(tripped);
+        assert!(cb.is_tripped(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn circuit_breaker_does_not_trip_below_min_actions() {
+        let config = CircuitBreakerConfig {
+            window_size: 10,
+            failure_threshold: 0.15,
+            min_actions: 5,
+        };
+        let mut cb = CircuitBreaker::with_config(config);
+        // 3 failures but only 3 actions (below min_actions=5)
+        cb.record(FeatureArea::Rca, false);
+        cb.record(FeatureArea::Rca, false);
+        assert!(!cb.record(FeatureArea::Rca, false));
+        assert!(!cb.is_tripped(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn circuit_breaker_effective_autonomy_downgrades_auto() {
+        let mut cb = CircuitBreaker::new();
+        // Before trip: Auto stays Auto.
+        assert_eq!(
+            cb.effective_autonomy(FeatureArea::Rca, AutonomyLevel::Auto),
+            AutonomyLevel::Auto
+        );
+
+        // Trip the breaker with all failures.
+        for _ in 0..5 {
+            cb.record(FeatureArea::Rca, false);
+        }
+        assert!(cb.is_tripped(FeatureArea::Rca));
+
+        // After trip: Auto → Supervised.
+        assert_eq!(
+            cb.effective_autonomy(FeatureArea::Rca, AutonomyLevel::Auto),
+            AutonomyLevel::Supervised
+        );
+
+        // Supervised and Observe unchanged.
+        assert_eq!(
+            cb.effective_autonomy(FeatureArea::Rca, AutonomyLevel::Supervised),
+            AutonomyLevel::Supervised
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_reset_clears_state() {
+        let mut cb = CircuitBreaker::new();
+        for _ in 0..5 {
+            cb.record(FeatureArea::Rca, false);
+        }
+        assert!(cb.is_tripped(FeatureArea::Rca));
+
+        cb.reset(FeatureArea::Rca);
+        assert!(!cb.is_tripped(FeatureArea::Rca));
+        assert!((cb.failure_rate(FeatureArea::Rca) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn circuit_breaker_per_feature_isolation() {
+        let mut cb = CircuitBreaker::new();
+        for _ in 0..5 {
+            cb.record(FeatureArea::Rca, false);
+        }
+        assert!(cb.is_tripped(FeatureArea::Rca));
+        assert!(!cb.is_tripped(FeatureArea::IndexHealth));
+    }
+
+    #[test]
+    fn circuit_breaker_failure_rate() {
+        let mut cb = CircuitBreaker::new();
+        cb.record(FeatureArea::Rca, true);
+        cb.record(FeatureArea::Rca, true);
+        cb.record(FeatureArea::Rca, false);
+        cb.record(FeatureArea::Rca, false);
+        assert!((cb.failure_rate(FeatureArea::Rca) - 0.5).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto promotion tracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn promotion_tracker_not_eligible_initially() {
+        let tracker = AutoPromotionTracker::new();
+        assert!(!tracker.is_eligible(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn promotion_tracker_eligible_after_threshold() {
+        let mut tracker = AutoPromotionTracker {
+            min_actions: 5,
+            min_approval_rate: 0.80,
+            ..Default::default()
+        };
+        // 5 approved+successful actions.
+        for _ in 0..5 {
+            tracker.record(FeatureArea::Rca, true, true);
+        }
+        assert!(tracker.is_eligible(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn promotion_tracker_not_eligible_low_approval() {
+        let mut tracker = AutoPromotionTracker {
+            min_actions: 5,
+            min_approval_rate: 0.80,
+            ..Default::default()
+        };
+        // 5 successful but only 3 approved (60% < 80%).
+        for _ in 0..3 {
+            tracker.record(FeatureArea::Rca, true, true);
+        }
+        for _ in 0..2 {
+            tracker.record(FeatureArea::Rca, false, true);
+        }
+        assert!(!tracker.is_eligible(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn promotion_tracker_not_eligible_insufficient_successes() {
+        let mut tracker = AutoPromotionTracker {
+            min_actions: 10,
+            min_approval_rate: 0.80,
+            ..Default::default()
+        };
+        // 5 successful (below min_actions=10).
+        for _ in 0..5 {
+            tracker.record(FeatureArea::Rca, true, true);
+        }
+        assert!(!tracker.is_eligible(FeatureArea::Rca));
+    }
+
+    #[test]
+    fn promotion_tracker_stats() {
+        let mut tracker = AutoPromotionTracker::new();
+        tracker.record(FeatureArea::IndexHealth, true, true);
+        tracker.record(FeatureArea::IndexHealth, true, false);
+        tracker.record(FeatureArea::IndexHealth, false, true);
+        let (total, approved, successful) = tracker.stats(FeatureArea::IndexHealth);
+        assert_eq!(total, 3);
+        assert_eq!(approved, 2);
+        assert_eq!(successful, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-mode action constraints tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_permitted_rca_cancel() {
+        assert!(is_auto_permitted(
+            FeatureArea::Rca,
+            "SELECT pg_cancel_backend(1234)"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_rca_terminate() {
+        assert!(is_auto_permitted(
+            FeatureArea::Rca,
+            "SELECT pg_terminate_backend(5678)"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_rca_guc_change() {
+        assert!(!is_auto_permitted(
+            FeatureArea::Rca,
+            "ALTER SYSTEM SET statement_timeout = '30s'"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_index_reindex() {
+        assert!(is_auto_permitted(
+            FeatureArea::IndexHealth,
+            "REINDEX CONCURRENTLY idx_foo"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_index_drop() {
+        assert!(!is_auto_permitted(
+            FeatureArea::IndexHealth,
+            "DROP INDEX CONCURRENTLY idx_foo"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_vacuum() {
+        assert!(!is_auto_permitted(FeatureArea::Vacuum, "VACUUM orders"));
     }
 }
