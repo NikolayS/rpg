@@ -34,8 +34,9 @@ jobs:
             use_cross: true
             artifact: samo-linux-aarch64
           # macOS (native runners)
+          # x86_64 cross-compiled on aarch64 runner (macos-13 deprecated)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             use_cross: false
             artifact: samo-darwin-x86_64
           - target: aarch64-apple-darwin
