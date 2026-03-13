@@ -462,8 +462,8 @@ mod tests {
     #[test]
     fn parse_quit() {
         assert_eq!(parse("\\q").cmd, MetaCmd::Quit);
-        assert_eq!(parse("\\q").plus, false);
-        assert_eq!(parse("\\q").system, false);
+        assert!(!parse("\\q").plus);
+        assert!(!parse("\\q").system);
         assert_eq!(parse("\\q").pattern, None);
     }
 
