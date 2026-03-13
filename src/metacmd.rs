@@ -194,7 +194,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         }
         Some('?') => parse_simple_or_unknown(input, "?", MetaCmd::Help),
         Some('c') => parse_c_family(input),
-        Some('h') => parse_simple_or_unknown(input, "h", MetaCmd::SqlHelp),
+        Some('h') => parse_h(input),
         Some('x') => parse_x(input),
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
@@ -278,39 +278,52 @@ fn parse_c_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
+/// Parse `\h [topic]` — SQL syntax help.
+///
+/// The entire remainder of the line (after `h` and leading whitespace) is
+/// treated as the topic argument, so `\h SELECT` passes `"SELECT"` and plain
+/// `\h` passes `None`.
+fn parse_h(input: &str) -> ParsedMeta {
+    let Some(rest) = input.strip_prefix('h') else {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    };
+    let pattern_str = rest.trim();
+    ParsedMeta {
+        cmd: MetaCmd::SqlHelp,
+        plus: false,
+        system: false,
+        pattern: if pattern_str.is_empty() {
+            None
+        } else {
+            Some(pattern_str.to_owned())
+        },
+        echo_hidden: false,
+    }
+}
+
 /// Parse `\sf` and `\sv`.
 fn parse_sf_sv(input: &str) -> ParsedMeta {
+    // `\sv` must be checked before `\sf` to avoid a prefix match on `sv`.
     if let Some(rest) = input.strip_prefix("sv") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let pattern = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::ShowViewDef,
-                plus: false,
-                system: false,
-                pattern: if pattern.is_empty() {
-                    None
-                } else {
-                    Some(pattern.to_owned())
-                },
-                echo_hidden: false,
-            };
-        }
+        // Accept `+` modifier followed by optional pattern.
+        let (plus, _system, pattern) = parse_modifiers_and_pattern(rest);
+        return ParsedMeta {
+            cmd: MetaCmd::ShowViewDef,
+            plus,
+            system: false,
+            pattern,
+            echo_hidden: false,
+        };
     }
     if let Some(rest) = input.strip_prefix("sf") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let pattern = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::ShowFunctionSource,
-                plus: false,
-                system: false,
-                pattern: if pattern.is_empty() {
-                    None
-                } else {
-                    Some(pattern.to_owned())
-                },
-                echo_hidden: false,
-            };
-        }
+        let (plus, _system, pattern) = parse_modifiers_and_pattern(rest);
+        return ParsedMeta {
+            cmd: MetaCmd::ShowFunctionSource,
+            plus,
+            system: false,
+            pattern,
+            echo_hidden: false,
+        };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
@@ -759,10 +772,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_show_function_source_plus() {
+        // `\sf+ my_func` — plus modifier must be recognised.
+        let m = parse("\\sf+ my_func");
+        assert_eq!(m.cmd, MetaCmd::ShowFunctionSource);
+        assert!(m.plus, "expected plus=true for \\sf+");
+        assert_eq!(m.pattern, Some("my_func".to_owned()));
+    }
+
+    #[test]
+    fn parse_show_function_source_plus_no_pattern() {
+        // `\sf+` with no pattern is valid (returns None pattern).
+        let m = parse("\\sf+");
+        assert_eq!(m.cmd, MetaCmd::ShowFunctionSource);
+        assert!(m.plus);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
     fn parse_show_view_def() {
         let m = parse("\\sv my_view");
         assert_eq!(m.cmd, MetaCmd::ShowViewDef);
         assert_eq!(m.pattern, Some("my_view".to_owned()));
+    }
+
+    #[test]
+    fn parse_show_view_def_plus() {
+        // `\sv+ my_view` — plus modifier must be recognised.
+        let m = parse("\\sv+ my_view");
+        assert_eq!(m.cmd, MetaCmd::ShowViewDef);
+        assert!(m.plus, "expected plus=true for \\sv+");
+        assert_eq!(m.pattern, Some("my_view".to_owned()));
+    }
+
+    #[test]
+    fn parse_show_view_def_plus_no_pattern() {
+        let m = parse("\\sv+");
+        assert_eq!(m.cmd, MetaCmd::ShowViewDef);
+        assert!(m.plus);
+        assert_eq!(m.pattern, None);
     }
 
     // -- \c ------------------------------------------------------------------
@@ -783,7 +831,25 @@ mod tests {
 
     #[test]
     fn parse_sql_help() {
-        assert_eq!(parse("\\h").cmd, MetaCmd::SqlHelp);
+        let m = parse("\\h");
+        assert_eq!(m.cmd, MetaCmd::SqlHelp);
+        assert_eq!(m.pattern, None);
+    }
+
+    #[test]
+    fn parse_sql_help_with_topic() {
+        // `\h SELECT` must capture "SELECT" as the pattern so the right
+        // synopsis is shown instead of the full topic list.
+        let m = parse("\\h SELECT");
+        assert_eq!(m.cmd, MetaCmd::SqlHelp);
+        assert_eq!(m.pattern, Some("SELECT".to_owned()));
+    }
+
+    #[test]
+    fn parse_sql_help_multi_word_topic() {
+        let m = parse("\\h CREATE TABLE");
+        assert_eq!(m.cmd, MetaCmd::SqlHelp);
+        assert_eq!(m.pattern, Some("CREATE TABLE".to_owned()));
     }
 
     // -- echo_hidden default -------------------------------------------------

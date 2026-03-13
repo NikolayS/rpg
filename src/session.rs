@@ -76,14 +76,17 @@ pub async fn reconnect(
     // Build a CliConnOpts that, when passed to resolve_params, will produce
     // the desired parameters.  We seed the positional/named fields from the
     // current params so that absent \c tokens retain their current values.
+    let port = match args.port.as_deref() {
+        None => current_params.port,
+        Some(p) => match p.parse::<u16>() {
+            Ok(n) => n,
+            Err(_) => return Err(format!("invalid port number: \"{p}\"")),
+        },
+    };
+
     let opts = CliConnOpts {
         host: Some(args.host.unwrap_or_else(|| current_params.host.clone())),
-        port: Some(
-            args.port
-                .as_deref()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(current_params.port),
-        ),
+        port: Some(port),
         username: Some(args.user.unwrap_or_else(|| current_params.user.clone())),
         dbname: Some(args.dbname.unwrap_or_else(|| current_params.dbname.clone())),
         // All positional fields are None — we feed through the named fields.
@@ -623,5 +626,41 @@ mod tests {
     fn build_view_def_sql_qualified() {
         let sql = build_view_def_sql(Some("myschema"), "my_view");
         assert!(sql.contains("n.nspname = 'myschema'"));
+    }
+
+    // -- reconnect port validation -------------------------------------------
+
+    #[tokio::test]
+    async fn reconnect_invalid_port_returns_error() {
+        // A non-numeric port must return an error immediately, without
+        // attempting a network connection.
+        use crate::connection::ConnParams;
+        let params = ConnParams::default();
+        // Pattern: "mydb alice myhost notaport"
+        let err = reconnect(Some("mydb alice myhost notaport"), &params)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("invalid port number"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            err.contains("notaport"),
+            "error should include the bad value: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_port_out_of_range_returns_error() {
+        // u16 max is 65535; 99999 is out of range.
+        use crate::connection::ConnParams;
+        let params = ConnParams::default();
+        let err = reconnect(Some("mydb alice myhost 99999"), &params)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("invalid port number"),
+            "unexpected error message: {err}"
+        );
     }
 }
