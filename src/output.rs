@@ -132,9 +132,12 @@ impl Default for PsetConfig {
 
 /// Format a single [`RowSet`] using the active [`PsetConfig`].
 pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
-    // Title line (if set).
-    if let Some(ref title) = cfg.title {
-        let _ = writeln!(out, "{title}");
+    // Title line: printed as plain text for non-HTML formats.
+    // HTML format emits the title itself as <caption> inside the table element.
+    if cfg.format != OutputFormat::Html {
+        if let Some(ref title) = cfg.title {
+            let _ = writeln!(out, "{title}");
+        }
     }
 
     match &cfg.format {
@@ -671,6 +674,10 @@ fn csv_field(val: &str) -> String {
 /// Each row becomes `{"col1": "val1", "col2": "val2"}`.
 /// NULL values are rendered as JSON `null`.
 /// String values are JSON-escaped.
+///
+/// `tuples_only` is intentionally ignored: JSON output always includes column
+/// keys because removing them would produce invalid/ambiguous data (an array of
+/// bare values with no key context).  This matches psql behaviour.
 pub fn format_json(out: &mut String, rs: &RowSet, _cfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;

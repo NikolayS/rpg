@@ -668,7 +668,7 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
 /// Apply a `\pset` command.
 #[allow(clippy::too_many_lines)]
 fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
-    use crate::output::{OutputFormat, PsetConfig};
+    use crate::output::OutputFormat;
 
     if option.is_empty() {
         // Display all pset options.
@@ -678,6 +678,11 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
 
     match option {
         "format" => {
+            if value.is_none_or(str::is_empty) {
+                // \pset format (no value) — show current setting.
+                println!("Output format is {}.", format_name(&settings.pset.format));
+                return;
+            }
             let fmt = match value.unwrap_or("") {
                 "aligned" => OutputFormat::Aligned,
                 "unaligned" => OutputFormat::Unaligned,
@@ -764,7 +769,6 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
 
     // Keep ReplSettings.expanded in sync.
     settings.expanded = settings.pset.expanded;
-    let _ = PsetConfig::default; // suppress unused-import lint
 }
 
 /// Parse a boolean value for pset options: `on`/`true`/`1` → true, else toggle.

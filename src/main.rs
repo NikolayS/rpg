@@ -141,9 +141,9 @@ struct Cli {
     #[arg(short = 't', long = "tuples-only")]
     tuples_only: bool,
 
-    /// Set printing option (like `\pset`).
+    /// Set printing option (like `\pset`). Can be specified multiple times.
     #[arg(short = 'P', long, value_name = "VAR[=ARG]")]
-    pset: Option<String>,
+    pset: Vec<String>,
 
     /// Send query results to file (or pipe).
     #[arg(short = 'o', long)]
@@ -290,12 +290,16 @@ fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
     match option {
         "format" => {
             pset.format = match value.unwrap_or("") {
+                "aligned" => output::OutputFormat::Aligned,
                 "unaligned" => output::OutputFormat::Unaligned,
                 "csv" => output::OutputFormat::Csv,
                 "json" => output::OutputFormat::Json,
                 "html" => output::OutputFormat::Html,
                 "wrapped" => output::OutputFormat::Wrapped,
-                _ => output::OutputFormat::Aligned,
+                other => {
+                    eprintln!("samo: invalid value for -P format: \"{other}\"");
+                    std::process::exit(2);
+                }
             };
         }
         "border" => {
@@ -373,8 +377,8 @@ async fn main() {
                 sep.clone_into(&mut pset.record_sep);
             }
 
-            // Handle `\pset` from -P flag.
-            if let Some(ref pset_arg) = cli.pset {
+            // Handle `\pset` from -P flags (may be specified multiple times).
+            for pset_arg in &cli.pset {
                 apply_cli_pset(&mut pset, pset_arg);
             }
 
