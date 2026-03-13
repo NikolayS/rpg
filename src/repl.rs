@@ -2365,6 +2365,10 @@ pub async fn exec_command(
     settings: &mut ReplSettings,
     params: &crate::connection::ConnParams,
 ) -> i32 {
+    // `quit` / `exit` passed via -c should exit cleanly (psql behaviour).
+    if is_quit_exit(sql.trim(), true) {
+        return 0;
+    }
     if sql.trim_start().starts_with('\\') {
         // Backslash meta-command in -c mode.
         //
@@ -2537,6 +2541,10 @@ pub(crate) async fn exec_lines(
     let mut exit_code = 0i32;
 
     'lines: for line in lines {
+        // `quit` / `exit` bare words work in all modes (psql behaviour).
+        if is_quit_exit(line.trim(), buf.is_empty()) {
+            break 'lines;
+        }
         if line.trim_start().starts_with('\\') {
             // Interpolate variables in the meta-command line (psql behaviour:
             // `:varname` is expanded before the backslash parser sees it).
@@ -2732,8 +2740,8 @@ fn print_help() {
         r"
 Backslash commands:
   \q              quit samo
-  quit            quit samo (interactive mode only)
-  exit            quit samo (interactive mode only)
+  quit            quit samo
+  exit            quit samo
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
   \conninfo       show connection information
@@ -2930,6 +2938,10 @@ fn apply_timing(settings: &mut ReplSettings, mode: Option<bool>) {
 }
 
 /// Apply an expanded-display mode change and print the new state.
+///
+/// Both `settings.expanded` and `settings.pset.expanded` are kept in sync
+/// so that subsequent queries rendered via `settings.pset` (e.g. in `-c`
+/// mode) use the updated expanded flag.
 fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     settings.expanded = match mode {
         ExpandedMode::Toggle => {
@@ -2941,6 +2953,8 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
         }
         m => m,
     };
+    // Keep pset in sync so -c and -f paths see the updated setting.
+    settings.pset.expanded = settings.expanded;
     println!(
         "Expanded display is {}.",
         expanded_mode_str(settings.expanded)
@@ -4818,6 +4832,10 @@ async fn run_dumb_loop(
             Ok(0) => break, // EOF / Ctrl-D
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
+                // `quit` / `exit` bare words exit in all modes.
+                if is_quit_exit(line.trim(), buf.is_empty()) {
+                    break;
+                }
                 if line.trim_start().starts_with('\\') {
                     match handle_backslash_dumb(line.trim(), &mut buf, client, params, settings, tx)
                         .await
@@ -5227,6 +5245,21 @@ async fn handle_backslash_dumb(
     }
 }
 
+/// Return `true` when `trimmed` is a bare `quit` or `exit` and the query
+/// buffer is empty (primary prompt, not mid-statement).
+///
+/// This matches `PostgreSQL` 11+ behaviour: both keywords are recognised as
+/// exit commands in **all** input modes — interactive readline, dumb-terminal
+/// loop, piped stdin, and `-c` / `-f` single-command mode.
+#[inline]
+fn is_quit_exit(trimmed: &str, buf_empty: bool) -> bool {
+    if !buf_empty {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "quit" || lower == "exit"
+}
+
 /// Process one line of input in the readline loop.
 ///
 /// `stmt_buf` accumulates the full multi-line statement for history recording.
@@ -5245,14 +5278,9 @@ async fn handle_line(
     // AI commands use a `/` prefix and are handled before backslash commands.
     let trimmed = line.trim();
 
-    // `quit` and `exit` as bare words at the primary prompt exit interactively
-    // (PostgreSQL 11+ behaviour).  Only applies when the query buffer is empty
-    // (i.e. we are at the primary prompt, not mid-statement).
-    if buf.is_empty() {
-        let lower = trimmed.to_ascii_lowercase();
-        if lower == "quit" || lower == "exit" {
-            return HandleLineResult::Quit;
-        }
+    // `quit` / `exit` bare words: handled in all modes via `is_quit_exit`.
+    if is_quit_exit(trimmed, buf.is_empty()) {
+        return HandleLineResult::Quit;
     }
     if trimmed.starts_with('/') {
         stmt_buf.clear();
@@ -9044,70 +9072,163 @@ mod tests {
     }
 
     // -- quit/exit bare-word detection ----------------------------------------
-
-    /// Helper that mirrors the bare-word quit/exit logic from `handle_line`
-    /// without requiring a live DB connection.
-    fn bare_word_quits(line: &str, buf_empty: bool) -> bool {
-        let trimmed = line.trim();
-        if buf_empty {
-            let lower = trimmed.to_ascii_lowercase();
-            if lower == "quit" || lower == "exit" {
-                return true;
-            }
-        }
-        false
-    }
+    //
+    // These tests exercise `is_quit_exit` directly, which is the shared helper
+    // used by handle_line (readline), run_dumb_loop (dumb/piped), exec_lines
+    // (stdin pipe / -f), and exec_command (-c).
 
     #[test]
     fn quit_bare_word_empty_buf_quits() {
-        assert!(bare_word_quits("quit", true));
+        assert!(is_quit_exit("quit", true));
     }
 
     #[test]
     fn exit_bare_word_empty_buf_quits() {
-        assert!(bare_word_quits("exit", true));
+        assert!(is_quit_exit("exit", true));
     }
 
     #[test]
     fn quit_uppercase_empty_buf_quits() {
-        assert!(bare_word_quits("QUIT", true));
+        assert!(is_quit_exit("QUIT", true));
     }
 
     #[test]
     fn exit_mixed_case_empty_buf_quits() {
-        assert!(bare_word_quits("Exit", true));
+        assert!(is_quit_exit("Exit", true));
     }
 
     #[test]
-    fn quit_with_whitespace_empty_buf_quits() {
-        // Leading/trailing whitespace is stripped by `line.trim()`.
-        assert!(bare_word_quits("  quit  ", true));
+    fn quit_with_whitespace_stripped_quits() {
+        // Callers pass `line.trim()` — verify trimmed variants are recognised.
+        assert!(is_quit_exit("quit", true));
+        assert!(is_quit_exit("exit", true));
     }
 
     #[test]
     fn quit_mid_statement_does_not_quit() {
         // Buffer is non-empty — we are in continuation mode.
-        assert!(!bare_word_quits("quit", false));
+        assert!(!is_quit_exit("quit", false));
     }
 
     #[test]
     fn exit_mid_statement_does_not_quit() {
-        assert!(!bare_word_quits("exit", false));
+        assert!(!is_quit_exit("exit", false));
     }
 
     #[test]
     fn quit_with_args_does_not_quit() {
         // "quit foo" is not a bare word.
-        assert!(!bare_word_quits("quit foo", true));
+        assert!(!is_quit_exit("quit foo", true));
     }
 
     #[test]
     fn exit_with_args_does_not_quit() {
-        assert!(!bare_word_quits("exit now", true));
+        assert!(!is_quit_exit("exit now", true));
     }
 
     #[test]
     fn regular_sql_does_not_trigger_quit() {
-        assert!(!bare_word_quits("select 1", true));
+        assert!(!is_quit_exit("select 1", true));
+    }
+
+    // -- quit/exit in non-interactive (exec_lines / piped) path ---------------
+
+    /// Simulate exec_lines processing a single "quit" line with an empty
+    /// buffer.  The loop must break immediately — no SQL dispatched.
+    #[test]
+    fn exec_lines_quit_exits_immediately() {
+        let lines: Vec<String> = vec!["quit".to_owned()];
+        let mut buf = String::new();
+        let mut saw_sql = false;
+        for line in lines {
+            if is_quit_exit(line.trim(), buf.is_empty()) {
+                break;
+            }
+            // Anything past the guard would be SQL execution.
+            saw_sql = true;
+            buf.push_str(&line);
+        }
+        assert!(
+            !saw_sql,
+            "quit should prevent any SQL from being dispatched"
+        );
+    }
+
+    #[test]
+    fn exec_lines_exit_exits_immediately() {
+        let lines: Vec<String> = vec!["exit".to_owned()];
+        let mut buf = String::new();
+        let mut saw_sql = false;
+        for line in lines {
+            if is_quit_exit(line.trim(), buf.is_empty()) {
+                break;
+            }
+            saw_sql = true;
+            buf.push_str(&line);
+        }
+        assert!(
+            !saw_sql,
+            "exit should prevent any SQL from being dispatched"
+        );
+    }
+
+    /// quit mid-statement (non-empty buffer) must NOT exit — it falls through
+    /// to be accumulated as SQL, matching psql behaviour.
+    #[test]
+    fn exec_lines_quit_mid_statement_is_sql() {
+        let lines: Vec<String> = vec!["select".to_owned(), "quit".to_owned()];
+        let mut buf = String::new();
+        let mut lines_processed = 0usize;
+        for line in lines {
+            if is_quit_exit(line.trim(), buf.is_empty()) {
+                break;
+            }
+            buf.push_str(&line);
+            lines_processed += 1;
+        }
+        // Both lines were processed — quit did not fire because buf was
+        // non-empty when the second line arrived.
+        assert_eq!(lines_processed, 2);
+    }
+
+    // -- apply_expanded pset sync (bug fix: \x must persist across -c) --------
+
+    /// `apply_expanded` must update both `settings.expanded` and
+    /// `settings.pset.expanded` so that subsequent queries rendered via
+    /// `settings.pset` (the path taken in `-c` mode) use the new setting.
+    #[test]
+    fn apply_expanded_syncs_pset_expanded() {
+        let mut s = ReplSettings::default();
+        assert_eq!(s.expanded, ExpandedMode::Off);
+        assert_eq!(s.pset.expanded, ExpandedMode::Off);
+
+        apply_expanded(&mut s, ExpandedMode::On);
+
+        assert_eq!(s.expanded, ExpandedMode::On, "settings.expanded must be On");
+        assert_eq!(
+            s.pset.expanded,
+            ExpandedMode::On,
+            "settings.pset.expanded must be synced to On"
+        );
+    }
+
+    /// Toggle from Off to On updates both fields.
+    #[test]
+    fn apply_expanded_toggle_off_to_on_syncs_pset() {
+        let mut s = ReplSettings::default();
+        apply_expanded(&mut s, ExpandedMode::Toggle);
+        assert_eq!(s.expanded, ExpandedMode::On);
+        assert_eq!(s.pset.expanded, ExpandedMode::On);
+    }
+
+    /// Toggle from On to Off updates both fields.
+    #[test]
+    fn apply_expanded_toggle_on_to_off_syncs_pset() {
+        let mut s = ReplSettings::default();
+        s.expanded = ExpandedMode::On;
+        s.pset.expanded = ExpandedMode::On;
+        apply_expanded(&mut s, ExpandedMode::Toggle);
+        assert_eq!(s.expanded, ExpandedMode::Off);
+        assert_eq!(s.pset.expanded, ExpandedMode::Off);
     }
 }
