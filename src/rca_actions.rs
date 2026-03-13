@@ -375,7 +375,13 @@ async fn present_and_execute(
     let outcome = actor.execute(client, &action_request).await;
     let success = matches!(outcome, ActionOutcome::Success { .. });
     match &outcome {
-        ActionOutcome::Success { detail } => eprintln!("      Done: {detail}\n"),
+        ActionOutcome::Success { detail } => {
+            eprintln!("      Done: {detail}");
+
+            // Post-action verification.
+            let vr = crate::verification::verify_action(client, &action_request.action_type).await;
+            eprintln!("      Verify: {vr}\n");
+        }
         ActionOutcome::Failure { error } => eprintln!("      Failed: {error}\n"),
         other => eprintln!("      {other:?}\n"),
     }

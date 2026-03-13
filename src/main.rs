@@ -40,6 +40,8 @@ mod repl;
 mod safety;
 mod session;
 mod setup;
+#[allow(dead_code)]
+mod verification;
 mod vars;
 
 /// Build-time git commit hash injected by `build.rs`.
