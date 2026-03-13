@@ -9133,7 +9133,7 @@ mod tests {
 
     // -- quit/exit in non-interactive (exec_lines / piped) path ---------------
 
-    /// Simulate exec_lines processing a single "quit" line with an empty
+    /// Simulate `exec_lines` processing a single "quit" line with an empty
     /// buffer.  The loop must break immediately — no SQL dispatched.
     #[test]
     fn exec_lines_quit_exits_immediately() {
@@ -9224,8 +9224,10 @@ mod tests {
     /// Toggle from On to Off updates both fields.
     #[test]
     fn apply_expanded_toggle_on_to_off_syncs_pset() {
-        let mut s = ReplSettings::default();
-        s.expanded = ExpandedMode::On;
+        let mut s = ReplSettings {
+            expanded: ExpandedMode::On,
+            ..Default::default()
+        };
         s.pset.expanded = ExpandedMode::On;
         apply_expanded(&mut s, ExpandedMode::Toggle);
         assert_eq!(s.expanded, ExpandedMode::Off);
