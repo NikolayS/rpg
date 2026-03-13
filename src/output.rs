@@ -513,11 +513,7 @@ pub fn format_pg_error(
 /// not need the string representation.  `sql` is the original query text
 /// (used to render the position marker); pass `None` when unavailable.
 /// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
-pub fn eprint_db_error(
-    err: &tokio_postgres::Error,
-    sql: Option<&str>,
-    verbose: bool,
-) {
+pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool) {
     let cfg = OutputConfig {
         verbose_errors: verbose,
         ..OutputConfig::default()
@@ -1333,6 +1329,9 @@ mod tests {
         let e = make_io_pg_error();
         let cfg = OutputConfig::default();
         let out = format_pg_error(&e, None, &cfg);
-        assert!(out.ends_with('\n'), "output should end with newline: {out:?}");
+        assert!(
+            out.ends_with('\n'),
+            "output should end with newline: {out:?}"
+        );
     }
 }
