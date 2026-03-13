@@ -1122,21 +1122,59 @@ pub(crate) async fn exec_lines(
                 _ => {}
             }
         } else if settings.cond.is_active() {
-            if !buf.is_empty() {
-                buf.push('\n');
-            }
-            buf.push_str(&line);
-
-            if is_complete(&buf) {
-                if !execute_query(client, buf.trim(), settings, tx).await {
-                    exit_code = 1;
-                    // In single-transaction mode, stop on first error so the
-                    // caller can roll back and skip the rest.
-                    if settings.single_transaction {
-                        break 'lines;
+            // Check for inline backslash command (e.g. `select 1 \gset`).
+            if let Some(pos) = find_inline_backslash(&line) {
+                let sql_part = &line[..pos];
+                let meta_part = line[pos..].trim();
+                if !sql_part.trim().is_empty() {
+                    if !buf.is_empty() {
+                        buf.push('\n');
                     }
+                    buf.push_str(sql_part.trim_end());
                 }
-                buf.clear();
+                let mut parsed = crate::metacmd::parse(meta_part);
+                parsed.echo_hidden = settings.echo_hidden;
+                let result = dispatch_meta(parsed, client, params, settings, tx).await;
+                match result {
+                    MetaResult::ExecuteBuffer => {
+                        let sql = buf.trim().to_owned();
+                        buf.clear();
+                        if !sql.is_empty() && !execute_query(client, &sql, settings, tx).await {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
+                        }
+                    }
+                    MetaResult::GSet(prefix) => {
+                        let sql = buf.trim().to_owned();
+                        buf.clear();
+                        if !sql.is_empty() {
+                            execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
+                        }
+                    }
+                    MetaResult::DescribeBuffer => {
+                        describe_buffer(client, buf.trim()).await;
+                    }
+                    _ => {}
+                }
+            } else {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(&line);
+
+                if is_complete(&buf) {
+                    if !execute_query(client, buf.trim(), settings, tx).await {
+                        exit_code = 1;
+                        // In single-transaction mode, stop on first error so the
+                        // caller can roll back and skip the rest.
+                        if settings.single_transaction {
+                            break 'lines;
+                        }
+                    }
+                    buf.clear();
+                }
             }
         }
     }
