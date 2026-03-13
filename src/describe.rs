@@ -206,11 +206,21 @@ fn print_table_inner(
         }
     }
 
-    // Header.
+    // Header — psql center-aligns column headers within the column width.
     let header: Vec<String> = col_names
         .iter()
         .enumerate()
-        .map(|(i, c)| format!("{:<width$}", c, width = widths[i]))
+        .map(|(i, c)| {
+            let w = widths[i];
+            let clen = c.len();
+            if clen >= w {
+                c.clone()
+            } else {
+                let left_pad = (w - clen) / 2;
+                let right_pad = w - clen - left_pad;
+                format!("{}{c}{}", " ".repeat(left_pad), " ".repeat(right_pad))
+            }
+        })
         .collect();
     println!(" {} ", header.join(" | "));
 
@@ -253,9 +263,11 @@ fn print_table_inner(
                         .get(col)
                         .is_some_and(|ls| line_idx + 1 < ls.len());
                     if has_more {
-                        // text + '+' right-padded to width
-                        let visible = format!("{text}+");
-                        format!("{visible:<w$}")
+                        // psql pads text to column width, then places `+` at
+                        // the end (so `+` is at position `w`).  The overall
+                        // field is `w` chars wide; the last char is `+`.
+                        let text_pad = w.saturating_sub(1).saturating_sub(text.len());
+                        format!("{text}{}+", " ".repeat(text_pad))
                     } else {
                         format!("{text:<w$}")
                     }
@@ -629,7 +641,8 @@ from pg_catalog.pg_roles as r
 order by 1"
     );
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of roles")).await
+    // psql suppresses the row count footer for \du.
+    run_and_print_no_count(client, &sql, meta.echo_hidden, Some("List of roles")).await
 }
 
 // ---------------------------------------------------------------------------
