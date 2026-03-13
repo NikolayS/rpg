@@ -37,6 +37,7 @@ pub enum QueryError {
 
 /// A single result set from one SQL statement.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum StatementResult {
     /// A query that returned rows (SELECT, TABLE, VALUES, RETURNING, …).
     Rows(RowSet),
@@ -70,6 +71,7 @@ pub struct ColumnMeta {
 
 /// The result of a non-SELECT statement.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CommandTag {
     /// The command tag as returned by Postgres (e.g. `INSERT 0 3`).
     pub tag: String,
@@ -82,6 +84,7 @@ pub struct CommandTag {
 
 /// The outcome of executing one or more SQL statements.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct QueryOutcome {
     /// One entry per statement that was executed.
     pub results: Vec<StatementResult>,

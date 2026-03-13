@@ -820,7 +820,7 @@ async fn connect_plain(
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {e}");
+            eprintln!("samo: connection error: {e}");
         }
     });
 
@@ -842,7 +842,7 @@ async fn connect_tls(
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {e}");
+            eprintln!("samo: connection error: {e}");
         }
     });
 

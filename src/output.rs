@@ -37,8 +37,12 @@ pub enum ExpandedMode {
 // ---------------------------------------------------------------------------
 
 /// Controls how query results are rendered.
+///
+/// Not yet wired to the REPL output path (issue #21); used by the
+/// `format_outcome` / `format_aligned` pipeline that is in progress.
 #[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
+#[allow(dead_code)]
 pub struct OutputConfig {
     /// String to display for SQL NULL values (psql default: empty string).
     pub null_string: String,
@@ -173,6 +177,8 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 /// Format all results from a [`QueryOutcome`] into a single `String`.
 ///
 /// Each statement result is separated by a blank line (matching psql).
+/// Not yet called from the REPL dispatch path (issue #21).
+#[allow(dead_code)]
 pub fn format_outcome(outcome: &QueryOutcome, cfg: &OutputConfig) -> String {
     let mut out = String::new();
     let n = outcome.results.len();
@@ -220,6 +226,7 @@ pub fn format_outcome(outcome: &QueryOutcome, cfg: &OutputConfig) -> String {
 ///   1 | Alice | alice@example.com
 /// (1 row)
 /// ```
+#[allow(dead_code)]
 pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usize {
     let cols = &rs.columns;
     let rows = &rs.rows;
@@ -461,6 +468,7 @@ fn write_expanded_header(out: &mut String, record_num: usize, max_data_width: us
 /// UPDATE 2
 /// DELETE 1
 /// ```
+#[allow(dead_code)]
 pub fn format_command_tag(out: &mut String, ct: &CommandTag) {
     let _ = writeln!(out, "{}", ct.tag);
     // `ct.rows_affected` is available for callers that need the numeric count
@@ -573,6 +581,7 @@ fn write_error_position(out: &mut String, sql: &str, pos: &tokio_postgres::error
 // ---------------------------------------------------------------------------
 
 /// Format a [`Duration`] as `X.XXX ms`.
+#[allow(dead_code)]
 pub fn format_duration(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
     format!("{ms:.3} ms")
