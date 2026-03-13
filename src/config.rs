@@ -24,6 +24,8 @@ pub struct Config {
     pub display: DisplayConfig,
     /// Safety and destructive-operation settings.
     pub safety: SafetyConfig,
+    /// AI/LLM provider settings.
+    pub ai: AiConfig,
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
@@ -75,6 +77,41 @@ impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
             destructive_warning: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AI / LLM settings
+// ---------------------------------------------------------------------------
+
+/// AI / LLM provider settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiConfig {
+    /// Provider name: `"anthropic"`, `"openai"`, or `"ollama"`.
+    pub provider: Option<String>,
+    /// Model identifier override (uses provider default when absent).
+    pub model: Option<String>,
+    /// Name of the environment variable holding the API key.
+    ///
+    /// Example: `"ANTHROPIC_API_KEY"`.
+    pub api_key_env: Option<String>,
+    /// Custom base URL for the provider API (useful for proxies / local
+    /// deployments).
+    pub base_url: Option<String>,
+    /// Maximum number of tokens to generate per request.
+    pub max_tokens: u32,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            model: None,
+            api_key_env: None,
+            base_url: None,
+            max_tokens: 4096,
         }
     }
 }
@@ -163,6 +200,13 @@ fn merge_config(base: Config, overlay: Config) -> Config {
         },
         safety: SafetyConfig {
             destructive_warning: overlay.safety.destructive_warning,
+        },
+        ai: AiConfig {
+            provider: overlay.ai.provider.or(base.ai.provider),
+            model: overlay.ai.model.or(base.ai.model),
+            api_key_env: overlay.ai.api_key_env.or(base.ai.api_key_env),
+            base_url: overlay.ai.base_url.or(base.ai.base_url),
+            max_tokens: overlay.ai.max_tokens,
         },
         connections: {
             let mut merged = base.connections;
@@ -329,6 +373,7 @@ dbname = "testdb"
             safety: SafetyConfig {
                 destructive_warning: true,
             },
+            ai: AiConfig::default(),
             connections: HashMap::new(),
         };
         let overlay = Config {
@@ -341,6 +386,7 @@ dbname = "testdb"
             safety: SafetyConfig {
                 destructive_warning: false,
             },
+            ai: AiConfig::default(),
             connections: HashMap::new(),
         };
         let merged = merge_config(base, overlay);
@@ -448,5 +494,100 @@ dbname = "testdb"
         assert!(p.username.is_none());
         assert!(p.sslmode.is_none());
         assert!(p.password.is_none());
+    }
+
+    // -- AiConfig TOML parsing ----------------------------------------------
+
+    #[test]
+    fn parse_ai_section_full() {
+        let toml_str = r#"
+[ai]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+max_tokens = 8192
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ai.provider.as_deref(), Some("anthropic"));
+        assert_eq!(cfg.ai.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(cfg.ai.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            cfg.ai.base_url.as_deref(),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(cfg.ai.max_tokens, 8192);
+    }
+
+    #[test]
+    fn parse_ai_section_minimal() {
+        let toml_str = r#"
+[ai]
+provider = "ollama"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ai.provider.as_deref(), Some("ollama"));
+        assert!(cfg.ai.model.is_none());
+        assert!(cfg.ai.api_key_env.is_none());
+        assert!(cfg.ai.base_url.is_none());
+        assert_eq!(cfg.ai.max_tokens, 4096); // default
+    }
+
+    #[test]
+    fn ai_config_defaults_all_none() {
+        let cfg: Config = toml::from_str("").expect("empty TOML should parse");
+        assert!(cfg.ai.provider.is_none());
+        assert!(cfg.ai.model.is_none());
+        assert!(cfg.ai.api_key_env.is_none());
+        assert!(cfg.ai.base_url.is_none());
+        assert_eq!(cfg.ai.max_tokens, 4096);
+    }
+
+    #[test]
+    fn merge_ai_overlay_wins() {
+        let base = Config {
+            ai: AiConfig {
+                provider: Some("ollama".to_owned()),
+                model: None,
+                api_key_env: None,
+                base_url: None,
+                max_tokens: 2048,
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            ai: AiConfig {
+                provider: Some("anthropic".to_owned()),
+                model: Some("claude-sonnet-4-6".to_owned()),
+                api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
+                base_url: None,
+                max_tokens: 4096,
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.ai.provider.as_deref(), Some("anthropic"));
+        assert_eq!(merged.ai.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(merged.ai.max_tokens, 4096);
+    }
+
+    #[test]
+    fn merge_ai_base_preserved_when_overlay_absent() {
+        let base = Config {
+            ai: AiConfig {
+                provider: Some("openai".to_owned()),
+                model: Some("gpt-4o".to_owned()),
+                api_key_env: Some("OPENAI_API_KEY".to_owned()),
+                base_url: None,
+                max_tokens: 4096,
+            },
+            ..Default::default()
+        };
+        // Overlay has no ai section (all None).
+        let overlay = Config::default();
+        let merged = merge_config(base, overlay);
+        // provider from base is preserved because overlay is None.
+        assert_eq!(merged.ai.provider.as_deref(), Some("openai"));
+        assert_eq!(merged.ai.model.as_deref(), Some("gpt-4o"));
     }
 }
