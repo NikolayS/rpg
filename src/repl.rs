@@ -2420,12 +2420,12 @@ mod tests {
 
     #[test]
     fn watch_interval_invalid_uses_default() {
-        assert_eq!(parse_watch_interval("abc"), WATCH_DEFAULT_INTERVAL);
+        assert!((parse_watch_interval("abc") - WATCH_DEFAULT_INTERVAL).abs() < f64::EPSILON);
     }
 
     #[test]
     fn watch_interval_negative_uses_default() {
-        assert_eq!(parse_watch_interval("-1"), WATCH_DEFAULT_INTERVAL);
+        assert!((parse_watch_interval("-1") - WATCH_DEFAULT_INTERVAL).abs() < f64::EPSILON);
     }
 
     #[test]
