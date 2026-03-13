@@ -5189,7 +5189,28 @@ async fn handle_ai_ask(
     // Decide whether to execute.
     let read_only = !is_write_query(sql);
     let yolo = settings.exec_mode == ExecMode::Yolo;
-    let auto_exec = yolo || (read_only && settings.config.ai.auto_execute_readonly);
+
+    // In YOLO mode, check autonomy level for write queries.
+    let yolo_permitted = if yolo && !read_only {
+        let default_autonomy = settings
+            .config
+            .governance
+            .autonomy_for(crate::governance::FeatureArea::Rca);
+        if default_autonomy == crate::governance::AutonomyLevel::Observe {
+            eprintln!(
+                "-- YOLO: write query blocked (autonomy level is Observe). \
+                 Use \\set governance.default_autonomy supervised"
+            );
+            false
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+
+    let auto_exec =
+        (yolo && yolo_permitted) || (read_only && settings.config.ai.auto_execute_readonly);
 
     let choice = if auto_exec {
         if yolo && !read_only {
@@ -5241,6 +5262,7 @@ async fn handle_ai_ask(
 /// Gathers schema context, sends the user's natural-language prompt to the
 /// LLM with a plan-generation system prompt, and streams the resulting plan.
 /// Offers to save the plan to `~/.local/share/samo/plans/`.
+#[allow(clippy::too_many_lines)]
 async fn handle_ai_plan(
     client: &Client,
     prompt: &str,
@@ -5284,21 +5306,32 @@ async fn handle_ai_plan(
         }
     };
 
+    // Collect live diagnostic data (read-only queries) for richer context.
+    eprintln!("-- Plan mode: collecting diagnostics...");
+    let pg_ash = settings.db_capabilities.pg_ash.is_available();
+    let diagnostics = crate::rca::collect_snapshot(client, pg_ash).await;
+    let diag_steps = diagnostics.steps.iter().filter(|s| s.has_data).count();
+    let diag_context = diagnostics.to_prompt();
+    eprintln!("-- Collected {diag_steps} diagnostic steps");
+
     let system_content = format!(
         "You are a PostgreSQL expert. \
          The user has asked you to investigate and produce an action plan.\n\
          Database: {dbname}\n\n\
          Schema:\n{schema}\n\n\
+         Live diagnostics (read-only queries just collected):\n{diagnostics}\n\n\
          Rules:\n\
          - Produce a structured plan in markdown format\n\
          - Each action should include the SQL command and a safety assessment\n\
          - Mark actions as [safe], [caution], or [dangerous]\n\
          - Order actions from safest to most impactful\n\
          - Include estimated duration where possible\n\
-         - Start with a brief root-cause analysis\n\
+         - Start with a brief root-cause analysis based on the live diagnostics above\n\
+         - Reference specific data from the diagnostics to support your analysis\n\
          - Do NOT execute anything — only plan",
         dbname = params.dbname,
         schema = schema_ctx,
+        diagnostics = diag_context,
     );
 
     let messages = vec![
