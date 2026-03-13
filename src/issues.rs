@@ -8,6 +8,9 @@
 //!
 //! Template-based issue content ensures consistent formatting.
 
+// Phase 3 infrastructure — consumers arrive in subsequent PRs.
+#![allow(dead_code)]
+
 use std::fmt::Write as _;
 
 use crate::governance::{ActionProposal, Severity};

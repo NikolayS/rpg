@@ -64,16 +64,10 @@ pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Optio
 // Internal execution helper
 // ---------------------------------------------------------------------------
 
-/// Execute `sql` via `simple_query`, print an aligned table (with an optional
-/// centered title), and return `false` (never exits the REPL).
+/// Execute `sql` via `simple_query`, print an aligned table with an optional
+/// centered title, and return `false` (never exits the REPL).
 ///
 /// When `echo_hidden` is `true` the SQL is echoed to stderr first.
-#[allow(dead_code)]
-async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
-    run_and_print_titled(client, sql, echo_hidden, None).await
-}
-
-/// Like `run_and_print` but also prints a centered title above the table.
 async fn run_and_print_titled(
     client: &Client,
     sql: &str,

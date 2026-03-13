@@ -14,6 +14,9 @@
 //! | Missing index | Heuristic | High seq_scan count on large tables |
 //! | Redundant index | Heuristic | Column prefix match |
 
+// Phase 3 infrastructure — consumers arrive in subsequent PRs.
+#![allow(dead_code)]
+
 use crate::governance::{EvidenceClass, Severity};
 
 use std::fmt::Write as _;

@@ -5,10 +5,9 @@
 
 use clap::Parser;
 
+// Core modules.
 mod actor;
 mod ai;
-#[allow(dead_code)]
-mod anomaly;
 mod capabilities;
 mod complete;
 mod conditional;
@@ -21,30 +20,28 @@ mod dba;
 mod describe;
 mod governance;
 mod highlight;
-#[allow(dead_code)]
-mod index_health;
 mod io;
-#[allow(dead_code)]
-mod issues;
 mod logging;
 mod metacmd;
 mod named;
-#[allow(dead_code)]
 mod output;
 mod pager;
 mod pattern;
-#[allow(dead_code)]
 mod query;
 mod rca;
-#[allow(dead_code)]
-mod rca_actions;
 mod repl;
 mod safety;
 mod session;
 mod session_store;
 mod setup;
 mod vars;
-#[allow(dead_code)]
+
+// Phase 2/3 infrastructure — compiled but not yet wired into the main
+// dispatch loop. Each module suppresses dead_code at the item level.
+mod anomaly;
+mod index_health;
+mod issues;
+mod rca_actions;
 mod verification;
 
 /// Build-time git commit hash injected by `build.rs`.

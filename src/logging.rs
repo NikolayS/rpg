@@ -136,7 +136,6 @@ pub fn error(component: &str, msg: &str) {
 }
 
 /// Log at `Warn` level.
-#[allow(dead_code)]
 pub fn warn(component: &str, msg: &str) {
     log(Level::Warn, component, msg);
 }
