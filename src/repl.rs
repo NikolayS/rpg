@@ -3575,6 +3575,7 @@ async fn dispatch_meta(
                 subcommand,
                 parsed.plus,
                 Some(&settings.config.governance),
+                Some(&settings.db_capabilities),
             )
             .await;
         }

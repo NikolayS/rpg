@@ -43,8 +43,26 @@ pub struct DbCapabilities {
     /// `pg_ash` extension status.
     pub pg_ash: PgAshStatus,
     /// `PostgreSQL` server version string (e.g. `"16.2"`).
-    #[allow(dead_code)]
     pub server_version: Option<String>,
+}
+
+impl DbCapabilities {
+    /// Parse the major version number from the server version string.
+    ///
+    /// Returns `None` if the version string is absent or unparseable.
+    pub fn pg_major_version(&self) -> Option<u32> {
+        parse_pg_major_version(self.server_version.as_deref()?)
+    }
+
+    /// Whether `pg_stat_io` is available (PG 16+).
+    pub fn has_pg_stat_io(&self) -> bool {
+        self.pg_major_version().is_some_and(|v| v >= 16)
+    }
+}
+
+/// Parse the major version from a PG version string like `"16.2"` or `"14.11 (Ubuntu)"`.
+fn parse_pg_major_version(version_str: &str) -> Option<u32> {
+    version_str.split('.').next()?.trim().parse().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -172,5 +190,50 @@ mod tests {
     fn pg_ash_available_without_version() {
         let status = PgAshStatus::Available { version: None };
         assert!(status.is_available());
+    }
+
+    #[test]
+    fn parse_pg_major_version_simple() {
+        assert_eq!(parse_pg_major_version("16.2"), Some(16));
+        assert_eq!(parse_pg_major_version("14.11"), Some(14));
+        assert_eq!(parse_pg_major_version("18.0"), Some(18));
+    }
+
+    #[test]
+    fn parse_pg_major_version_with_suffix() {
+        assert_eq!(
+            parse_pg_major_version("14.11 (Ubuntu 14.11-1.pgdg22.04+1)"),
+            Some(14)
+        );
+    }
+
+    #[test]
+    fn parse_pg_major_version_invalid() {
+        assert_eq!(parse_pg_major_version(""), None);
+        assert_eq!(parse_pg_major_version("abc"), None);
+    }
+
+    #[test]
+    fn has_pg_stat_io_pg16() {
+        let caps = DbCapabilities {
+            server_version: Some("16.2".to_owned()),
+            ..Default::default()
+        };
+        assert!(caps.has_pg_stat_io());
+    }
+
+    #[test]
+    fn has_pg_stat_io_pg14() {
+        let caps = DbCapabilities {
+            server_version: Some("14.11".to_owned()),
+            ..Default::default()
+        };
+        assert!(!caps.has_pg_stat_io());
+    }
+
+    #[test]
+    fn has_pg_stat_io_no_version() {
+        let caps = DbCapabilities::default();
+        assert!(!caps.has_pg_stat_io());
     }
 }
