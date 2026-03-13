@@ -1163,18 +1163,18 @@ pub fn startup_file() -> Option<PathBuf> {
 
 /// Print a single result set using the active [`PsetConfig`].
 ///
-/// `col_names` and `rows` describe the result set. `had_rows` indicates
-/// whether any `Row` messages were received (distinguishes an empty SELECT
-/// from a DML command). `rows_affected` carries the `CommandComplete` count.
-/// `is_first` is `false` when this is a subsequent result set in a
-/// multi-statement query, in which case a blank separator line is printed
-/// before the table (matching psql behaviour).
+/// `col_names` and `rows` describe the result set. `is_select` indicates
+/// whether this was a SELECT-like statement (i.e. we received a
+/// `RowDescription` message, even if zero rows followed). `rows_affected`
+/// carries the `CommandComplete` count. `is_first` is `false` when this is
+/// a subsequent result set in a multi-statement query, in which case a blank
+/// separator line is printed before the table (matching psql behaviour).
 /// `writer` is the output destination (stdout or a redirected file).
 fn print_result_set_pset(
     writer: &mut dyn io::Write,
     col_names: &[String],
     rows: &[Vec<String>],
-    had_rows: bool,
+    is_select: bool,
     rows_affected: u64,
     is_first: bool,
     pset: &crate::output::PsetConfig,
@@ -1182,59 +1182,57 @@ fn print_result_set_pset(
     use crate::output::format_rowset_pset;
     use crate::query::{ColumnMeta, RowSet};
 
-    if had_rows {
-        if !col_names.is_empty() {
-            if !is_first {
-                let _ = writeln!(writer);
-            }
-
-            // simple_query returns NULL as empty string; we wrap every cell
-            // in Some to distinguish "empty string" from "NULL" at the pset
-            // formatting layer (which uses null_display).  The distinction
-            // is lost at this protocol level; a future migration to the
-            // extended query protocol (issue #21) will fix this.
-            let row_data: Vec<Vec<Option<String>>> = rows
-                .iter()
-                .map(|r| r.iter().map(|v| Some(v.clone())).collect())
-                .collect();
-
-            // Heuristic: psql right-aligns numeric columns using type OIDs from
-            // the wire protocol.  The simple query protocol does not expose OIDs,
-            // so we infer numeric columns by inspecting cell values.  A column is
-            // treated as numeric if every non-NULL, non-empty cell in that column
-            // parses as an f64 (covers integers, decimals, and scientific notation).
-            // Columns that are entirely NULL/empty are NOT marked numeric.
-            let columns: Vec<ColumnMeta> = col_names
-                .iter()
-                .enumerate()
-                .map(|(col_idx, n)| {
-                    let mut has_value = false;
-                    let is_numeric = row_data.iter().all(|row| {
-                        match row.get(col_idx).and_then(|v| v.as_deref()) {
-                            None | Some("") => true, // NULL or empty: skip, don't disqualify
-                            Some(val) => {
-                                has_value = true;
-                                val.parse::<f64>().is_ok()
-                            }
-                        }
-                    }) && has_value;
-                    ColumnMeta {
-                        name: n.clone(),
-                        is_numeric,
-                    }
-                })
-                .collect();
-
-            let rs = RowSet {
-                columns,
-                rows: row_data,
-            };
-
-            let mut out = String::new();
-            format_rowset_pset(&mut out, &rs, pset);
-            let _ = writer.write_all(out.as_bytes());
+    if is_select && !col_names.is_empty() {
+        if !is_first {
+            let _ = writeln!(writer);
         }
-    } else {
+
+        // simple_query returns NULL as empty string; we wrap every cell
+        // in Some to distinguish "empty string" from "NULL" at the pset
+        // formatting layer (which uses null_display).  The distinction
+        // is lost at this protocol level; a future migration to the
+        // extended query protocol (issue #21) will fix this.
+        let row_data: Vec<Vec<Option<String>>> = rows
+            .iter()
+            .map(|r| r.iter().map(|v| Some(v.clone())).collect())
+            .collect();
+
+        // Heuristic: psql right-aligns numeric columns using type OIDs from
+        // the wire protocol.  The simple query protocol does not expose OIDs,
+        // so we infer numeric columns by inspecting cell values.  A column is
+        // treated as numeric if every non-NULL, non-empty cell in that column
+        // parses as an f64 (covers integers, decimals, and scientific notation).
+        // Columns that are entirely NULL/empty are NOT marked numeric.
+        let columns: Vec<ColumnMeta> = col_names
+            .iter()
+            .enumerate()
+            .map(|(col_idx, n)| {
+                let mut has_value = false;
+                let is_numeric = row_data.iter().all(|row| {
+                    match row.get(col_idx).and_then(|v| v.as_deref()) {
+                        None | Some("") => true, // NULL or empty: skip, don't disqualify
+                        Some(val) => {
+                            has_value = true;
+                            val.parse::<f64>().is_ok()
+                        }
+                    }
+                }) && has_value;
+                ColumnMeta {
+                    name: n.clone(),
+                    is_numeric,
+                }
+            })
+            .collect();
+
+        let rs = RowSet {
+            columns,
+            rows: row_data,
+        };
+
+        let mut out = String::new();
+        format_rowset_pset(&mut out, &rs, pset);
+        let _ = writer.write_all(out.as_bytes());
+    } else if !is_select {
         // Non-SELECT statement: show rows affected if > 0.
         if rows_affected > 0 {
             if !is_first {
@@ -1342,13 +1340,25 @@ pub async fn execute_query(
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
             let mut rows: Vec<Vec<String>> = Vec::new();
-            let mut had_rows = false;
+            // `is_select` is set to true when we receive a RowDescription
+            // message (or any Row message).  This distinguishes an empty
+            // SELECT (zero rows but column headers) from a DML command.
+            let mut is_select = false;
             let mut result_set_index: usize = 0;
 
             for msg in messages {
                 match msg {
+                    SimpleQueryMessage::RowDescription(cols) => {
+                        // Emitted before data rows (or before CommandComplete
+                        // when zero rows matched).  Capture column names here
+                        // so that empty result sets still show their headers.
+                        is_select = true;
+                        if col_names.is_empty() {
+                            col_names = cols.iter().map(|c| c.name().to_owned()).collect();
+                        }
+                    }
                     SimpleQueryMessage::Row(row) => {
-                        had_rows = true;
+                        is_select = true;
                         if col_names.is_empty() {
                             col_names = (0..row.len())
                                 .map(|i| {
@@ -1386,7 +1396,7 @@ pub async fn execute_query(
                             &mut out_buf,
                             &col_names,
                             &rows,
-                            had_rows,
+                            is_select,
                             n,
                             result_set_index == 0,
                             &settings.pset,
@@ -1407,7 +1417,7 @@ pub async fn execute_query(
                         result_set_index += 1;
                         col_names.clear();
                         rows.clear();
-                        had_rows = false;
+                        is_select = false;
                     }
                     _ => {}
                 }
@@ -2338,6 +2348,10 @@ async fn describe_buffer(client: &Client, buf: &str, verbose_errors: bool) {
 // ---------------------------------------------------------------------------
 
 /// Execute a single SQL command string (from `-c`) and exit.
+///
+/// Mirrors psql behaviour: if the string starts with a backslash it is
+/// dispatched as a meta-command (using only the first line as the command,
+/// matching psql's `-c` meta-command handling).  Otherwise it is sent as SQL.
 pub async fn exec_command(
     client: &Client,
     sql: &str,
@@ -2345,8 +2359,16 @@ pub async fn exec_command(
     params: &crate::connection::ConnParams,
 ) -> i32 {
     if sql.trim_start().starts_with('\\') {
-        // Backslash meta-command in -c mode: interpolate variables, then parse.
-        let interpolated = settings.vars.interpolate(sql.trim());
+        // Backslash meta-command in -c mode.
+        //
+        // psql processes only the first line as the meta-command when `-c`
+        // receives a multi-line string starting with `\`.  Anything after
+        // the first newline is treated as extra arguments (and warned about).
+        // We replicate this by extracting only the first line for parsing,
+        // and dispatching against the real settings so that pset changes are
+        // visible (stdout messages printed, border/format/etc. updated).
+        let first_line = sql.trim().lines().next().unwrap_or(sql.trim());
+        let interpolated = settings.vars.interpolate(first_line);
         let mut parsed = crate::metacmd::parse(&interpolated);
         parsed.echo_hidden = settings.echo_hidden;
         let mut tx = TxState::default();
@@ -3103,18 +3125,12 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             println!("Record separator is set.");
         }
         "tuples_only" | "t" => {
+            // psql does not print a confirmation message for tuples_only.
             settings.pset.tuples_only = bool_value(value, settings.pset.tuples_only);
-            let state = if settings.pset.tuples_only {
-                "on"
-            } else {
-                "off"
-            };
-            println!("Tuples only is {state}.");
         }
         "footer" => {
+            // psql does not print a confirmation message for footer.
             settings.pset.footer = bool_value(value, settings.pset.footer);
-            let state = if settings.pset.footer { "on" } else { "off" };
-            println!("Default footer is {state}.");
         }
         "title" => {
             settings.pset.title = value.filter(|s| !s.is_empty()).map(ToOwned::to_owned);

@@ -581,6 +581,9 @@ fn parse_unset(input: &str) -> ParsedMeta {
 }
 
 /// Parse `\pset [option [value]]`.
+///
+/// The value may be single-quoted (matching psql: `\pset null '(null)'`
+/// sets the null display string to `(null)` without the quotes).
 fn parse_pset(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix("pset") else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
@@ -591,7 +594,15 @@ fn parse_pset(input: &str) -> ParsedMeta {
     }
     let mut parts = rest.splitn(2, char::is_whitespace);
     let option = parts.next().unwrap_or("").to_owned();
-    let value = parts.next().map(|s| s.trim().to_owned());
+    let value = parts.next().map(|s| {
+        let v = s.trim();
+        // Strip surrounding single quotes (matching psql behaviour).
+        if v.len() >= 2 && v.starts_with('\'') && v.ends_with('\'') {
+            v[1..v.len() - 1].to_owned()
+        } else {
+            v.to_owned()
+        }
+    });
     ParsedMeta::simple(MetaCmd::Pset(option, value))
 }
 
