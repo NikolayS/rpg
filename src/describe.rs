@@ -3198,10 +3198,8 @@ order by 1, 2";
     fn list_types_basic_sql_has_three_columns() {
         let base_filter = "t.typtype in ('c', 'd', 'e', 'r') and t.typname !~ '^_'\
             \n    and (t.typrelid = 0 or (select c.relkind = 'c' from pg_catalog.pg_class as c where c.oid = t.typrelid))";
-        let sys_filter =
-            "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')";
-        let where_clause =
-            format!("where {base_filter}\n    and {sys_filter}");
+        let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')";
+        let where_clause = format!("where {base_filter}\n    and {sys_filter}");
 
         let sql = format!(
             "select
@@ -3215,7 +3213,10 @@ left join pg_catalog.pg_namespace as n
 order by 1, 2"
         );
 
-        assert!(sql.contains("\"Schema\""), "basic SQL must have Schema: {sql}");
+        assert!(
+            sql.contains("\"Schema\""),
+            "basic SQL must have Schema: {sql}"
+        );
         assert!(sql.contains("\"Name\""), "basic SQL must have Name: {sql}");
         assert!(
             sql.contains("\"Description\""),
@@ -3239,8 +3240,7 @@ order by 1, 2"
     fn dt_plus_sql() -> String {
         let base_filter = "t.typtype in ('c', 'd', 'e', 'r') and t.typname !~ '^_'\
             \n    and (t.typrelid = 0 or (select c.relkind = 'c' from pg_catalog.pg_class as c where c.oid = t.typrelid))";
-        let sys_filter =
-            "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')";
+        let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')";
         let where_clause = format!("where {base_filter}\n    and {sys_filter}");
         format!(
             "select
@@ -3291,18 +3291,30 @@ order by 1, 2"
             sql.contains("t.typname as \"Internal name\""),
             "Internal name must use t.typname: {sql}"
         );
-        assert!(sql.contains("\"Size\""), "verbose SQL must have Size: {sql}");
-        assert!(sql.contains("t.typlen"), "Size must reference t.typlen: {sql}");
+        assert!(
+            sql.contains("\"Size\""),
+            "verbose SQL must have Size: {sql}"
+        );
+        assert!(
+            sql.contains("t.typlen"),
+            "Size must reference t.typlen: {sql}"
+        );
         assert!(
             sql.contains("\"Elements\""),
             "verbose SQL must have Elements: {sql}"
         );
-        assert!(sql.contains("pg_enum"), "Elements must query pg_enum: {sql}");
+        assert!(
+            sql.contains("pg_enum"),
+            "Elements must query pg_enum: {sql}"
+        );
         assert!(
             sql.contains("enumsortorder"),
             "Elements must order by enumsortorder: {sql}"
         );
-        assert!(sql.contains("\"Owner\""), "verbose SQL must have Owner: {sql}");
+        assert!(
+            sql.contains("\"Owner\""),
+            "verbose SQL must have Owner: {sql}"
+        );
         assert!(
             sql.contains("pg_get_userbyid(t.typowner)"),
             "Owner must use pg_get_userbyid: {sql}"
