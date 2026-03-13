@@ -334,11 +334,12 @@ async fn dba_locks(client: &Client, _verbose: bool) {
 }
 
 async fn dba_bloat(client: &Client, _verbose: bool) {
+    // pg_stat_user_tables uses `relname`, not `tablename`.
     let sql = "select \
         schemaname, \
-        tablename, \
+        relname as tablename, \
         pg_size_pretty(pg_total_relation_size( \
-            schemaname || '.' || tablename)) as total_size, \
+            schemaname || '.' || relname)) as total_size, \
         case when n_live_tup > 0 \
              then round(100.0 * n_dead_tup \
                       / (n_live_tup + n_dead_tup), 1) \
