@@ -331,9 +331,8 @@ compare_flags "expanded with null" \
 compare "\\sf user_order_count" \
   "\\sf user_order_count"
 
-## \sf+ — line numbering format mismatch (#208)
-# compare "\\sf+ user_order_count" \
-#   "\\sf+ user_order_count"
+compare "\\sf+ user_order_count" \
+  "\\sf+ user_order_count"
 
 compare "\\sv active_products" \
   "\\sv active_products"
