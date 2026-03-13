@@ -3756,7 +3756,7 @@ async fn handle_line(
 /// Recognised commands:
 /// - `/ask <prompt>` — generate SQL from natural language
 /// - `/fix` — explain and fix the last error (stub)
-/// - `/explain [query]` — explain query plan with AI interpretation (stub)
+/// - `/explain [query]` — explain query plan with AI interpretation
 /// - `/optimize [query]` — suggest query optimizations (stub)
 async fn dispatch_ai_command(
     input: &str,
@@ -3772,8 +3772,8 @@ async fn dispatch_ai_command(
         handle_ai_ask(client, prompt, settings, params).await;
     } else if input == "/fix" || input.starts_with("/fix ") {
         eprintln!("/fix: not yet implemented");
-    } else if input == "/explain" || input.starts_with("/explain ") {
-        eprintln!("/explain: not yet implemented");
+    } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
+        handle_ai_explain(client, query_arg, settings, params).await;
     } else if input == "/optimize" || input.starts_with("/optimize ") {
         eprintln!("/optimize: not yet implemented");
     } else {
@@ -3874,6 +3874,167 @@ async fn handle_ai_ask(
             println!("{}", result.content);
             // TODO: prompt user to execute, track token usage (#75)
         }
+        Err(e) => eprintln!("AI error: {e}"),
+    }
+}
+
+/// Detect whether a query is a data-modifying statement that must be
+/// wrapped in a rolled-back transaction before `EXPLAIN ANALYZE`.
+///
+/// Returns `true` for `INSERT`, `UPDATE`, `DELETE`, and `MERGE`.
+fn is_write_query(sql: &str) -> bool {
+    let first = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_uppercase();
+    matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+}
+
+/// Build the `EXPLAIN` SQL for a given target query.
+///
+/// Write queries are wrapped in `BEGIN` / `ROLLBACK` so that
+/// `EXPLAIN ANALYZE` can run them without persisting any changes.
+fn build_explain_sql(target_query: &str) -> String {
+    let explain = format!("explain (analyze, costs, verbose, buffers, format text) {target_query}");
+    if is_write_query(target_query) {
+        format!("begin;\n{explain};\nrollback;")
+    } else {
+        explain
+    }
+}
+
+/// Handle a `/explain [query]` command end-to-end.
+///
+/// 1. Resolves the target query: inline arg or `last_query`.
+/// 2. Runs `EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT TEXT)`.
+///    Write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) are wrapped in
+///    a `BEGIN` … `ROLLBACK` to prevent side-effects.
+/// 3. Prints the raw plan.
+/// 4. If AI is configured, sends plan + schema context to the LLM and
+///    prints its interpretation.
+#[allow(clippy::too_many_lines)]
+async fn handle_ai_explain(
+    client: &Client,
+    query_arg: &str,
+    settings: &ReplSettings,
+    params: &ConnParams,
+) {
+    // Resolve target query.
+    let target_query = if query_arg.is_empty() {
+        if let Some(q) = settings.last_query.as_deref() {
+            q.to_owned()
+        } else {
+            eprintln!(
+                "/explain: no query to explain. \
+                 Run a query first or provide one: /explain SELECT ..."
+            );
+            return;
+        }
+    } else {
+        query_arg.to_owned()
+    };
+
+    // Run EXPLAIN ANALYZE (wrapped in BEGIN/ROLLBACK for write queries).
+    let explain_sql = build_explain_sql(&target_query);
+
+    let messages_result = client.simple_query(&explain_sql).await;
+    let raw_messages = match messages_result {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            return;
+        }
+    };
+
+    // Collect plan lines from the result.
+    let mut plan_lines: Vec<String> = Vec::new();
+    for msg in &raw_messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            if let Some(line) = row.get(0) {
+                plan_lines.push(line.to_owned());
+            }
+        }
+    }
+
+    if plan_lines.is_empty() {
+        eprintln!("/explain: EXPLAIN returned no output");
+        return;
+    }
+
+    let plan_text = plan_lines.join("\n");
+    println!("{plan_text}");
+
+    // AI interpretation — skip gracefully when AI is not configured.
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+    if provider_name.is_empty() {
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Build schema context for richer analysis.
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    let system_content = format!(
+        "You are a PostgreSQL performance expert. \
+         Analyse the EXPLAIN ANALYZE plan provided by the user and give \
+         a concise, actionable interpretation:\n\
+         - Identify the most expensive nodes\n\
+         - Flag sequential scans on large tables\n\
+         - Note any high row-estimate errors\n\
+         - Suggest specific indexes or query rewrites when applicable\n\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let user_content = format!("Query:\n{target_query}\n\nEXPLAIN ANALYZE output:\n{plan_text}");
+
+    let ai_messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: user_content,
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    println!();
+    match provider.complete(&ai_messages, &options).await {
+        Ok(result) => println!("{}", result.content),
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -4414,5 +4575,103 @@ mod tests {
         let input = "/ask";
         let prompt = input.strip_prefix("/ask").map(str::trim);
         assert_eq!(prompt, Some(""));
+    }
+
+    // -- /explain helpers ------------------------------------------------------
+
+    #[test]
+    fn explain_strip_prefix_with_inline_query() {
+        // "/explain SELECT ..." → inline query is extracted.
+        let input = "/explain select 1";
+        let arg = input.strip_prefix("/explain").map(str::trim).unwrap();
+        assert_eq!(arg, "select 1");
+    }
+
+    #[test]
+    fn explain_strip_prefix_bare_uses_last_query() {
+        // "/explain" with no args → arg is empty → must fall back to
+        // last_query.
+        let input = "/explain";
+        let arg = input.strip_prefix("/explain").map(str::trim).unwrap();
+        assert!(arg.is_empty());
+        // When arg is empty and last_query is None, we should surface an error.
+        let s = ReplSettings::default();
+        assert!(s.last_query.is_none());
+    }
+
+    #[test]
+    fn explain_no_prior_query_and_no_args_signals_error() {
+        // Verify the decision logic: empty arg + no last_query → error path.
+        let query_arg = "";
+        let last_query: Option<String> = None;
+        let resolved = if query_arg.is_empty() {
+            last_query.as_deref().map(str::to_owned)
+        } else {
+            Some(query_arg.to_owned())
+        };
+        assert!(resolved.is_none(), "should have no query to explain");
+    }
+
+    // -- is_write_query --------------------------------------------------------
+
+    #[test]
+    fn write_query_insert() {
+        assert!(is_write_query("INSERT INTO t VALUES (1)"));
+    }
+
+    #[test]
+    fn write_query_update() {
+        assert!(is_write_query("UPDATE t SET x = 1"));
+    }
+
+    #[test]
+    fn write_query_delete() {
+        assert!(is_write_query("DELETE FROM t WHERE id = 1"));
+    }
+
+    #[test]
+    fn write_query_merge() {
+        assert!(is_write_query("MERGE INTO t USING src ON (t.id = src.id)"));
+    }
+
+    #[test]
+    fn write_query_select_is_false() {
+        assert!(!is_write_query("select * from users"));
+    }
+
+    #[test]
+    fn write_query_with_cte_select_is_false() {
+        assert!(!is_write_query("with cte as (select 1) select * from cte"));
+    }
+
+    #[test]
+    fn write_query_case_insensitive() {
+        assert!(is_write_query("insert into t values (1)"));
+        assert!(is_write_query("Insert Into t values (1)"));
+    }
+
+    // -- build_explain_sql -----------------------------------------------------
+
+    #[test]
+    fn build_explain_sql_select_no_wrap() {
+        let sql = build_explain_sql("select * from users");
+        assert!(sql.starts_with("explain (analyze, costs, verbose, buffers, format text)"));
+        assert!(!sql.contains("begin"));
+        assert!(!sql.contains("rollback"));
+    }
+
+    #[test]
+    fn build_explain_sql_write_wraps_in_transaction() {
+        let sql = build_explain_sql("INSERT INTO t VALUES (1)");
+        assert!(sql.starts_with("begin;"));
+        assert!(sql.contains("explain (analyze, costs, verbose, buffers, format text)"));
+        assert!(sql.ends_with("rollback;"));
+    }
+
+    #[test]
+    fn build_explain_sql_delete_wraps_in_transaction() {
+        let sql = build_explain_sql("DELETE FROM t WHERE id = 1");
+        assert!(sql.starts_with("begin;"));
+        assert!(sql.ends_with("rollback;"));
     }
 }
