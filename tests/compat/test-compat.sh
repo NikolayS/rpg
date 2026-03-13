@@ -237,6 +237,30 @@ compare "\\dm" \
 compare "\\di+" \
   "\\di+"
 
+compare "\\db" \
+  "\\db"
+
+compare "\\dn+" \
+  "\\dn+"
+
+compare "\\du+" \
+  "\\du+"
+
+compare "\\dv+" \
+  "\\dv+"
+
+compare "\\dm+" \
+  "\\dm+"
+
+compare "\\ds+" \
+  "\\ds+"
+
+compare "\\d products" \
+  "\\d products"
+
+compare "\\d+ products" \
+  "\\d+ products"
+
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
 # ---------------------------------------------------------------------------
