@@ -1780,6 +1780,18 @@ async fn dispatch_io(
         MetaCmd::GDesc => Some(MetaResult::DescribeBuffer),
         MetaCmd::GExec => Some(MetaResult::GExecBuffer),
         MetaCmd::GSet(ref prefix) => Some(MetaResult::GSet(prefix.clone())),
+        MetaCmd::Copy(ref args) => {
+            let args = args.clone();
+            match crate::copy::parse_copy_args(&args) {
+                Ok(spec) => {
+                    if let Err(e) = crate::copy::execute_copy(client, &spec).await {
+                        eprintln!("{e}");
+                    }
+                }
+                Err(e) => eprintln!("{e}"),
+            }
+            Some(MetaResult::Continue)
+        }
         _ => None,
     }
 }

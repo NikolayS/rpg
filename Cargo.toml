@@ -20,8 +20,10 @@ name = "samo"
 path = "src/main.rs"
 
 [dependencies]
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+futures = "0.3"
 libc = "0.2"
 rpassword = "7"
 rustyline = "15"

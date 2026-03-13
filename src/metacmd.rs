@@ -200,6 +200,13 @@ pub enum MetaCmd {
     /// and no side-effects occur on the server.
     GDesc,
 
+    // -- Copy (#copy) ------------------------------------------------------
+    /// `\copy args` — client-side COPY between local file and table.
+    ///
+    /// The raw argument string (everything after `\copy `) is captured here
+    /// and passed to [`crate::copy::parse_copy_args`] at dispatch time.
+    Copy(String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -252,6 +259,7 @@ impl MetaCmd {
             Self::Warn => "\\warn",
             Self::Encoding => "\\encoding",
             Self::Password => "\\password",
+            Self::Copy(_) => "\\copy",
             // Non-stub commands should never reach this.
             _ => "\\?",
         }
@@ -513,11 +521,17 @@ fn parse_x(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Expanded(mode))
 }
 
-/// Parse `\conninfo`, `\cd`, `\c`, or unknown `\c…`.
+/// Parse `\conninfo`, `\copy`, `\cd`, `\c`, or unknown `\c…`.
 fn parse_c_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("conninfo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::ConnInfo);
+        }
+    }
+    // `\copy args` — client-side COPY.  Must be checked before bare `\c`.
+    if let Some(rest) = input.strip_prefix("copy") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Copy(rest.trim().to_owned()));
         }
     }
     // `\cd [dir]` — must be checked before bare `\c`.
@@ -2034,5 +2048,36 @@ mod tests {
         assert_eq!(parse("\\watch").cmd, MetaCmd::Watch);
         assert_eq!(parse("\\warn text").cmd, MetaCmd::Warn);
         assert_eq!(parse("\\w file.sql").cmd, MetaCmd::WriteBuffer);
+    }
+
+    // -- \copy ---------------------------------------------------------------
+
+    #[test]
+    fn parse_copy_from_file() {
+        let m = parse("\\copy my_table FROM '/tmp/data.txt'");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::Copy("my_table FROM '/tmp/data.txt'".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_copy_to_stdout() {
+        let m = parse("\\copy t TO stdout CSV");
+        assert_eq!(m.cmd, MetaCmd::Copy("t TO stdout CSV".to_owned()));
+    }
+
+    #[test]
+    fn parse_copy_bare_is_copy_with_empty_args() {
+        let m = parse("\\copy");
+        assert_eq!(m.cmd, MetaCmd::Copy(String::new()));
+    }
+
+    #[test]
+    fn parse_copy_not_confused_with_conninfo_or_chdir() {
+        // \copy must not silently become \c or \cd or \conninfo.
+        assert!(matches!(parse("\\copy t FROM stdin").cmd, MetaCmd::Copy(_)));
+        assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+        assert_eq!(parse("\\cd /tmp").cmd, MetaCmd::Chdir);
     }
 }
