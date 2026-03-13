@@ -4256,7 +4256,7 @@ async fn handle_backslash_dumb(
                         settings.named_statements.insert(name.clone(), stmt);
                     }
                     Err(e) => {
-                        crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors)
+                        crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors);
                     }
                 }
             }
@@ -4538,7 +4538,7 @@ async fn handle_line(
                             settings.named_statements.insert(name.clone(), stmt);
                         }
                         Err(e) => {
-                            crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors)
+                            crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors);
                         }
                     }
                 }
