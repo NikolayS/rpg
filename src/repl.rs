@@ -2925,10 +2925,12 @@ async fn observe_loop(
     let start = std::time::Instant::now();
     let mut snapshots: Vec<String> = Vec::new();
     let interval = Duration::from_secs(10);
+    let mut anomaly_detector = crate::anomaly::AnomalyDetector::new();
 
     loop {
         let ts = format_system_time(std::time::SystemTime::now());
         let mut report = format!("{ts} |");
+        let mut metric_snap = crate::anomaly::MetricSnapshot::default();
 
         // 1. Connection count.
         if let Ok(rows) = client
@@ -2944,6 +2946,8 @@ async fn observe_loop(
                     let active = row.get(0).unwrap_or("?");
                     let total = row.get(1).unwrap_or("?");
                     let _ = write!(report, " connections: {active} active / {total} total");
+                    metric_snap.active_sessions = active.parse().unwrap_or(0);
+                    metric_snap.total_sessions = total.parse().unwrap_or(0);
                 }
             }
         }
@@ -2963,6 +2967,7 @@ async fn observe_loop(
                     let we = row.get(0).unwrap_or("?");
                     let cnt = row.get(1).unwrap_or("?");
                     let _ = write!(report, " | top wait: {we} ({cnt})");
+                    metric_snap.top_wait_count = cnt.parse().unwrap_or(0);
                 }
             }
         }
@@ -2981,12 +2986,33 @@ async fn observe_loop(
             )
             .await
         {
+            let mut long_count = 0u32;
             for msg in &rows {
                 if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
                     let pid = row.get(0).unwrap_or("?");
                     let secs = row.get(1).unwrap_or("?");
                     let q = row.get(2).unwrap_or("?");
                     let _ = write!(report, "\n  long query (pid {pid}, {secs}s): {q}");
+                    long_count += 1;
+                }
+            }
+            metric_snap.long_queries = long_count;
+        }
+
+        // 3b. Blocked sessions (for anomaly detection).
+        if let Ok(rows) = client
+            .simple_query(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE pid != pg_backend_pid() \
+                 AND backend_type = 'client backend' \
+                 AND wait_event_type = 'Lock'",
+            )
+            .await
+        {
+            for msg in &rows {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                    metric_snap.blocked_sessions =
+                        row.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
                 }
             }
         }
@@ -3029,6 +3055,25 @@ async fn observe_loop(
 
         eprintln!("{report}");
         snapshots.push(report);
+
+        // Anomaly detection.
+        let anomalies = anomaly_detector.check(&metric_snap);
+        for anomaly in &anomalies {
+            eprintln!(
+                "  ** ANOMALY [{}]: {}",
+                anomaly.kind.label(),
+                anomaly.description
+            );
+        }
+        if crate::anomaly::AnomalyDetector::should_trigger_rca(&anomalies) {
+            eprintln!("  >> Auto-triggering RCA investigation...");
+            let pg_ash_available = settings.db_capabilities.pg_ash.is_available();
+            let snapshot = crate::rca::collect_snapshot(client, pg_ash_available).await;
+            let data_steps = snapshot.steps.iter().filter(|s| s.has_data).count();
+            eprintln!("  >> RCA: collected {data_steps} diagnostic steps.");
+            print!("{}", snapshot.to_prompt());
+            anomaly_detector.reset_rca_cooldown();
+        }
 
         // Check if duration has elapsed.
         if let Some(d) = total_duration {

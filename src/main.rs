@@ -7,6 +7,8 @@ use clap::Parser;
 
 mod actor;
 mod ai;
+#[allow(dead_code)]
+mod anomaly;
 mod capabilities;
 mod complete;
 mod conditional;
