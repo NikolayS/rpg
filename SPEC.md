@@ -2806,6 +2806,10 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [x] `\dm+` Access method column and `pg_table_size` (PR #167)
 - [x] Verbose compat tests: `\dn+`, `\du+`, `\dv+`, `\dm+`, `\ds+`, `\db`, `\dT`, `\dD` (PR #156)
 - [x] Stub describe commands: `\dp`, `\dd`, `\dC`, `\dc`, `\des`, `\dew`, `\det`, `\deu` (PR #152)
+- [x] `\dD` correct columns — Collation/Check instead of Description (PR #171)
+- [x] `\dy`/`\do` empty-result headers — show title/column headers for empty results (PR #179)
+- [x] `\df+` verbose columns — Language, Source code, Description columns (PR #180)
+- [x] `\dT+` verbose columns — Internal name, Size, Elements, Access privileges, Description (PR #181)
 
 ---
 
