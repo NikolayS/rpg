@@ -691,8 +691,7 @@ async fn describe_object(client: &Client, meta: &ParsedMeta) -> bool {
             // matching objects rather than treating the pattern as a literal
             // object name.
             let (schema_part, _name_part) = pattern::split_schema(pattern);
-            let name_filter =
-                pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
+            let name_filter = pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
 
             // Add pg_table_is_visible when no schema is specified so that
             // unqualified patterns follow the search_path.
@@ -734,28 +733,26 @@ order by 2, 3"
                 eprintln!("/******** QUERY *********/\n{lookup_sql}\n/************************/");
             }
 
-            let matches: Vec<(String, String)> =
-                match client.simple_query(&lookup_sql).await {
-                    Err(e) => {
-                        eprintln!("ERROR: {e}");
-                        return false;
-                    }
-                    Ok(msgs) => {
-                        use tokio_postgres::SimpleQueryMessage;
-                        msgs.into_iter()
-                            .filter_map(|m| {
-                                if let SimpleQueryMessage::Row(row) = m {
-                                    let schema =
-                                        row.get(1).unwrap_or("").to_owned();
-                                    let name = row.get(2).unwrap_or("").to_owned();
-                                    Some((schema, name))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    }
-                };
+            let matches: Vec<(String, String)> = match client.simple_query(&lookup_sql).await {
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    return false;
+                }
+                Ok(msgs) => {
+                    use tokio_postgres::SimpleQueryMessage;
+                    msgs.into_iter()
+                        .filter_map(|m| {
+                            if let SimpleQueryMessage::Row(row) = m {
+                                let schema = row.get(1).unwrap_or("").to_owned();
+                                let name = row.get(2).unwrap_or("").to_owned();
+                                Some((schema, name))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                }
+            };
 
             if matches.is_empty() {
                 eprintln!("Did not find any relation named \"{pattern}\".");
@@ -1323,8 +1320,7 @@ mod tests {
     #[test]
     fn describe_object_lookup_sql_includes_pattern_filter() {
         let pattern = "t*";
-        let name_filter =
-            pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
+        let name_filter = pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
         // No schema specified — add visibility filter.
         let visibility_filter = "pg_catalog.pg_table_is_visible(c.oid)";
 
@@ -1364,8 +1360,7 @@ order by 2, 3"
     fn describe_object_lookup_sql_schema_qualified_no_visibility() {
         let pattern = "public.t*";
         let (schema_part, _name_part) = pattern::split_schema(pattern);
-        let name_filter =
-            pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
+        let name_filter = pattern::where_clause(Some(pattern), "c.relname", Some("n.nspname"));
 
         // Schema was specified — no visibility filter.
         let visibility_filter = if schema_part.is_none() {
