@@ -275,3 +275,242 @@ fn query_connection_failure_exits_2() {
         "expected exit 2 for connection failure, got {code}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Describe-family command integration tests (issue #27)
+//
+// These tests require the test schema fixture to be loaded.
+// Each test loads the fixture, runs the command, and tears down.
+// ---------------------------------------------------------------------------
+
+/// `\dt` lists tables in the test schema.
+#[tokio::test]
+async fn describe_dt_lists_tables() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\dt"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\dt should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // Should list the users, products, orders tables.
+    assert!(
+        stdout.contains("users"),
+        "\\dt output should contain 'users':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("products"),
+        "\\dt output should contain 'products':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("orders"),
+        "\\dt output should contain 'orders':\n{stdout}"
+    );
+    // Should show Schema and Name columns.
+    assert!(
+        stdout.contains("Schema") || stdout.contains("Name"),
+        "\\dt output should have column headers:\n{stdout}"
+    );
+}
+
+/// `\dt users` filters to a single table by name.
+#[tokio::test]
+async fn describe_dt_with_pattern() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\dt users"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\dt users should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("users"),
+        "\\dt users should list 'users':\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("orders"),
+        "\\dt users should not list 'orders':\n{stdout}"
+    );
+}
+
+/// `\d users` describes the users table columns.
+#[tokio::test]
+async fn describe_d_table() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\d users"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\d users should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // Should show column names.
+    assert!(
+        stdout.contains("id") && stdout.contains("name") && stdout.contains("email"),
+        "\\d users should show column names:\n{stdout}"
+    );
+    // Should show column types.
+    assert!(
+        stdout.contains("text") || stdout.contains("bigint") || stdout.contains("integer"),
+        "\\d users should show column types:\n{stdout}"
+    );
+}
+
+/// `\d` (no args) lists all relations.
+#[tokio::test]
+async fn describe_d_no_args_lists_relations() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\d"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\d should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("users"),
+        "\\d should list 'users':\n{stdout}"
+    );
+}
+
+/// `\di` lists indexes.
+#[tokio::test]
+async fn describe_di_lists_indexes() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\di"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\di should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // The fixture creates orders_user_id_idx, orders_status_idx, etc.
+    assert!(
+        stdout.contains("orders_user_id_idx") || stdout.contains("index"),
+        "\\di should list indexes:\n{stdout}"
+    );
+}
+
+/// `\dn` lists schemas.
+#[tokio::test]
+async fn describe_dn_lists_schemas() {
+    let (stdout, stderr, code) = run_samo(&["-c", r"\dn"]);
+    assert_eq!(
+        code, 0,
+        "\\dn should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // At minimum, 'public' schema must be visible.
+    assert!(
+        stdout.contains("public"),
+        "\\dn should list 'public' schema:\n{stdout}"
+    );
+}
+
+/// `\du` lists roles.
+#[tokio::test]
+async fn describe_du_lists_roles() {
+    let (stdout, stderr, code) = run_samo(&["-c", r"\du"]);
+    assert_eq!(
+        code, 0,
+        "\\du should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // The test user (testuser) should appear.
+    assert!(
+        stdout.contains("testuser"),
+        "\\du should list test role:\n{stdout}"
+    );
+}
+
+/// `\l` lists databases.
+#[tokio::test]
+async fn describe_l_lists_databases() {
+    let (stdout, stderr, code) = run_samo(&["-c", r"\l"]);
+    assert_eq!(
+        code, 0,
+        "\\l should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // testdb must appear in the database list.
+    assert!(
+        stdout.contains("testdb"),
+        "\\l should list 'testdb':\n{stdout}"
+    );
+}
+
+/// `\dt+` shows the Size column in addition to the standard columns.
+#[tokio::test]
+async fn describe_dt_plus_shows_size() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\dt+"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\dt+ should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Size"),
+        "\\dt+ should show Size column:\n{stdout}"
+    );
+}
+
+/// `\dx` lists installed extensions.
+#[tokio::test]
+async fn describe_dx_lists_extensions() {
+    let (stdout, stderr, code) = run_samo(&["-c", r"\dx"]);
+    assert_eq!(
+        code, 0,
+        "\\dx should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // Output should at least have the header columns.
+    assert!(
+        stdout.contains("Name") || stdout.contains("Version"),
+        "\\dx should show extension columns:\n{stdout}"
+    );
+}
+
+/// `\df` lists functions (at minimum the output exits 0).
+#[tokio::test]
+async fn describe_df_lists_functions() {
+    let (stdout, stderr, code) = run_samo(&["-c", r"\df"]);
+    assert_eq!(
+        code, 0,
+        "\\df should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // Should have standard function columns.
+    assert!(
+        stdout.contains("Schema") || stdout.contains("Name") || stdout.contains("rows"),
+        "\\df should produce output:\n{stdout}"
+    );
+}

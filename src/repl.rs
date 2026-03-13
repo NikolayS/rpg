@@ -437,13 +437,24 @@ pub async fn execute_query(
 // ---------------------------------------------------------------------------
 
 /// Execute a single SQL command string (from `-c`) and exit.
-pub async fn exec_command(client: &Client, sql: &str, settings: &ReplSettings) -> i32 {
-    let mut tx = TxState::default();
+pub async fn exec_command(
+    client: &Client,
+    sql: &str,
+    settings: &ReplSettings,
+    params: &crate::connection::ConnParams,
+) -> i32 {
     if sql.trim_start().starts_with('\\') {
-        // Backslash command in -c mode: run and exit
-        eprintln!("samo: backslash commands not supported in -c mode");
-        return 1;
+        // Backslash meta-command in -c mode: parse and execute.
+        let mut parsed = crate::metacmd::parse(sql.trim());
+        parsed.echo_hidden = settings.echo_hidden;
+        let mut dummy_settings = ReplSettings {
+            echo_hidden: settings.echo_hidden,
+            ..Default::default()
+        };
+        let quit = dispatch_meta(parsed, client, params, &mut dummy_settings).await;
+        return i32::from(quit);
     }
+    let mut tx = TxState::default();
     i32::from(!execute_query(client, sql, settings, &mut tx).await)
 }
 
@@ -605,8 +616,9 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
 /// Dispatch a parsed meta-command, applying any side-effects to `settings`.
 ///
 /// Returns `true` if the REPL loop should exit.
-fn dispatch_meta(
+async fn dispatch_meta(
     parsed: crate::metacmd::ParsedMeta,
+    client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
 ) -> bool {
@@ -620,12 +632,43 @@ fn dispatch_meta(
         MetaCmd::ConnInfo => {
             println!("{}", crate::connection::connection_info(params));
         }
-        MetaCmd::Unknown(name) => {
+        MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
-        // Describe-family stubs — #27 will add actual query handlers.
+        // Describe-family commands — delegate to the describe module.
+        ref describe_cmd
+            if matches!(
+                describe_cmd,
+                MetaCmd::DescribeObject
+                    | MetaCmd::ListTables
+                    | MetaCmd::ListIndexes
+                    | MetaCmd::ListSequences
+                    | MetaCmd::ListViews
+                    | MetaCmd::ListMatViews
+                    | MetaCmd::ListForeignTables
+                    | MetaCmd::ListFunctions
+                    | MetaCmd::ListSchemas
+                    | MetaCmd::ListRoles
+                    | MetaCmd::ListDatabases
+                    | MetaCmd::ListExtensions
+                    | MetaCmd::ListTablespaces
+                    | MetaCmd::ListTypes
+                    | MetaCmd::ListDomains
+                    | MetaCmd::ListPrivileges
+                    | MetaCmd::ListConversions
+                    | MetaCmd::ListCasts
+                    | MetaCmd::ListComments
+                    | MetaCmd::ListForeignServers
+                    | MetaCmd::ListFdws
+                    | MetaCmd::ListForeignTablesViaFdw
+                    | MetaCmd::ListUserMappings
+            ) =>
+        {
+            crate::describe::execute(client, &parsed).await;
+        }
+        // Session commands not yet implemented.
         ref stub => {
-            eprintln!("{}: not yet implemented (see #27)", stub.label());
+            eprintln!("{}: not yet implemented", stub.label());
         }
     }
 
@@ -760,7 +803,7 @@ async fn run_dumb_loop(
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 if line.trim_start().starts_with('\\') {
-                    if handle_backslash_dumb(line.trim(), params, settings) {
+                    if handle_backslash_dumb(line.trim(), client, params, settings).await {
                         break;
                     }
                 } else {
@@ -788,10 +831,15 @@ async fn run_dumb_loop(
 /// Handle a single input line in the dumb loop (backslash commands).
 ///
 /// Returns `true` if the loop should exit (i.e. `\q` was issued).
-fn handle_backslash_dumb(input: &str, params: &ConnParams, settings: &mut ReplSettings) -> bool {
+async fn handle_backslash_dumb(
+    input: &str,
+    client: &Client,
+    params: &ConnParams,
+    settings: &mut ReplSettings,
+) -> bool {
     let mut parsed = crate::metacmd::parse(input);
     parsed.echo_hidden = settings.echo_hidden;
-    dispatch_meta(parsed, params, settings)
+    dispatch_meta(parsed, client, params, settings).await
 }
 
 /// Process one line of input in the readline loop.
@@ -812,7 +860,7 @@ async fn handle_line(
         // Backslash command — execute immediately.
         let mut parsed = crate::metacmd::parse(line.trim());
         parsed.echo_hidden = settings.echo_hidden;
-        let should_exit = dispatch_meta(parsed, params, settings);
+        let should_exit = dispatch_meta(parsed, client, params, settings).await;
         return should_exit;
     }
 

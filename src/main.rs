@@ -6,10 +6,10 @@
 use clap::Parser;
 
 mod connection;
+mod describe;
 mod metacmd;
 #[allow(dead_code)]
 mod output;
-#[allow(dead_code)]
 mod pattern;
 #[allow(dead_code)]
 mod query;
@@ -311,7 +311,7 @@ async fn main() {
 
             let exit_code = if let Some(ref cmd) = cli.command {
                 // -c "SQL": execute single command and exit.
-                repl::exec_command(&client, cmd, &settings).await
+                repl::exec_command(&client, cmd, &settings, &resolved).await
             } else if let Some(ref path) = cli.file {
                 // -f file: execute file and exit.
                 repl::exec_file(&client, path, &settings).await
