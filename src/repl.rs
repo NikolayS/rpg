@@ -3363,7 +3363,7 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::Password => {
-            dispatch_password(parsed.pattern.as_deref());
+            dispatch_password(parsed.pattern.as_deref(), client).await;
             Some(MetaResult::Continue)
         }
         MetaCmd::GoExecute(ref target) => {
@@ -3411,23 +3411,81 @@ async fn dispatch_io(
 }
 
 /// Handle `\password [user]`.
-fn dispatch_password(user: Option<&str>) {
-    let u = user.unwrap_or("");
-    let prompt = if u.is_empty() {
-        "Enter new password: ".to_owned()
-    } else {
-        format!("Enter new password for user \"{u}\": ")
-    };
-    match rpassword::prompt_password(&prompt) {
-        Ok(pw) => {
-            let confirm = rpassword::prompt_password("Confirm new password: ").unwrap_or_default();
-            if pw == confirm {
-                println!("\\password: password change is not yet wired to the server");
-            } else {
-                eprintln!("\\password: passwords do not match");
+///
+/// Matches psql behaviour:
+/// - Prompts `Enter new password for user "<user>": ` then `Enter it again: `
+/// - When no user is given, resolves the current role via `SELECT CURRENT_USER`
+/// - Error message on mismatch: `Passwords didn't match.`
+/// - Executes `ALTER USER <ident> PASSWORD '<escaped>'` on the live connection
+///
+/// Note: psql encrypts the password client-side via `PQencryptPasswordConn`
+/// before sending it, so the plaintext never appears in server logs.  We
+/// instead send the cleartext password and rely on the server's
+/// `password_encryption` setting to hash it at rest — a pragmatic trade-off
+/// until a Rust-native SCRAM / MD5 implementation is added.
+async fn dispatch_password(user: Option<&str>, client: &Client) {
+    use tokio_postgres::SimpleQueryMessage;
+
+    // Resolve effective username: argument takes priority, otherwise ask the
+    // server for the currently authenticated role.
+    let resolved_user: String = match user {
+        Some(u) if !u.is_empty() => u.to_owned(),
+        _ => match client.simple_query("select current_user").await {
+            Ok(msgs) => {
+                let name = msgs.into_iter().find_map(|m| {
+                    if let SimpleQueryMessage::Row(row) = m {
+                        row.get(0).map(str::to_owned)
+                    } else {
+                        None
+                    }
+                });
+                match name {
+                    Some(n) => n,
+                    None => {
+                        eprintln!("\\password: could not determine current user");
+                        return;
+                    }
+                }
             }
+            Err(e) => {
+                eprintln!("\\password: {e}");
+                return;
+            }
+        },
+    };
+
+    let prompt = format!("Enter new password for user \"{resolved_user}\": ");
+    let pw = match rpassword::prompt_password(&prompt) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\\password: {e}");
+            return;
         }
-        Err(e) => eprintln!("\\password: {e}"),
+    };
+
+    let confirm = match rpassword::prompt_password("Enter it again: ") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("\\password: {e}");
+            return;
+        }
+    };
+
+    if pw != confirm {
+        eprintln!("Passwords didn't match.");
+        return;
+    }
+
+    // Escape the username as a SQL identifier (double-quote and double any
+    // internal double-quotes) and the password as a SQL string literal
+    // (single-quote and double any internal single-quotes).
+    let ident_escaped = resolved_user.replace('"', "\"\"");
+    let pw_escaped = pw.replace('\'', "''");
+    let sql = format!("alter user \"{ident_escaped}\" password '{pw_escaped}'");
+
+    match client.simple_query(&sql).await {
+        Ok(_) => {}
+        Err(e) => eprintln!("{e}"),
     }
 }
 
