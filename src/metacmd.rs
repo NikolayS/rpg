@@ -171,6 +171,14 @@ pub enum MetaCmd {
     /// `pattern` holds the optional file path.
     GoExecuteExpanded(Option<String>),
 
+    // -- Watch (#47) -------------------------------------------------------
+    /// `\watch [interval]` — re-execute the last query every N seconds.
+    ///
+    /// `pattern` carries the raw interval string (e.g. `"5"`, `"0.5"`,
+    /// `"5s"`).  When `pattern` is `None` the default 2-second interval is
+    /// used.
+    Watch,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -784,9 +792,26 @@ fn parse_r_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\w file`.
+/// Parse `\w file`, `\warn [text]`, and `\watch [interval]`.
 fn parse_w(input: &str) -> ParsedMeta {
-    // Check `\warn` and `\w` (warn is longer, check first).
+    // `\watch [interval]` — must come before `\warn` and `\w` (longest first).
+    if let Some(rest) = input.strip_prefix("watch") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let arg = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Watch,
+                plus: false,
+                system: false,
+                pattern: if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+    // `\warn [text]` — must come before bare `\w` (longer prefix wins).
     if let Some(rest) = input.strip_prefix("warn") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let text = rest.trim();
@@ -1891,5 +1916,43 @@ mod tests {
         // \gx must not fall through to \g.
         assert!(matches!(parse("\\gx").cmd, MetaCmd::GoExecuteExpanded(_)));
         assert!(matches!(parse("\\g").cmd, MetaCmd::GoExecute(_)));
+    }
+
+    // -- \watch (#47) --------------------------------------------------------
+
+    #[test]
+    fn parse_watch_bare() {
+        let m = parse("\\watch");
+        assert_eq!(m.cmd, MetaCmd::Watch);
+        assert!(m.pattern.is_none());
+    }
+
+    #[test]
+    fn parse_watch_with_interval() {
+        let m = parse("\\watch 5");
+        assert_eq!(m.cmd, MetaCmd::Watch);
+        assert_eq!(m.pattern, Some("5".to_owned()));
+    }
+
+    #[test]
+    fn parse_watch_with_float_interval() {
+        let m = parse("\\watch 0.5");
+        assert_eq!(m.cmd, MetaCmd::Watch);
+        assert_eq!(m.pattern, Some("0.5".to_owned()));
+    }
+
+    #[test]
+    fn parse_watch_with_seconds_suffix() {
+        let m = parse("\\watch 3s");
+        assert_eq!(m.cmd, MetaCmd::Watch);
+        assert_eq!(m.pattern, Some("3s".to_owned()));
+    }
+
+    #[test]
+    fn parse_watch_not_confused_with_warn_or_write_buffer() {
+        // \watch must not match \warn or \w
+        assert_eq!(parse("\\watch").cmd, MetaCmd::Watch);
+        assert_eq!(parse("\\warn text").cmd, MetaCmd::Warn);
+        assert_eq!(parse("\\w file.sql").cmd, MetaCmd::WriteBuffer);
     }
 }

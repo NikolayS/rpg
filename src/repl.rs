@@ -284,6 +284,8 @@ pub struct ReplSettings {
     pub debug: bool,
     /// Conditional execution state (`\if` / `\elif` / `\else` / `\endif`).
     pub cond: crate::conditional::ConditionalState,
+    /// The last successfully-executed SQL string, used by `\watch`.
+    pub last_query: Option<String>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -307,6 +309,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("quiet", &self.quiet)
             .field("debug", &self.debug)
             .field("cond_depth", &self.cond.depth())
+            .field("last_query", &self.last_query.as_deref().map(|_| "<sql>"))
             .finish()
     }
 }
@@ -577,6 +580,11 @@ pub async fn execute_query(
         let elapsed = t.elapsed();
         // Timing always goes to stdout regardless of output redirection.
         println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+    }
+
+    // Store as the last successfully executed query (used by `\watch`).
+    if success {
+        settings.last_query = Some(sql.to_owned());
     }
 
     success
@@ -1208,6 +1216,112 @@ pub enum MetaResult {
     ExecuteBufferExpandedToFile(String),
 }
 
+/// Default `\watch` interval in seconds.
+const WATCH_DEFAULT_INTERVAL: f64 = 2.0;
+
+/// Parse an interval string from `\watch [interval]`.
+///
+/// Accepts:
+/// - bare number: `"5"`, `"0.5"` → seconds as f64
+/// - `s`-suffixed number: `"5s"`, `"0.5s"` → same
+///
+/// Returns the default interval (2.0 s) when the string is empty or
+/// cannot be parsed as a non-negative number.
+fn parse_watch_interval(s: &str) -> f64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return WATCH_DEFAULT_INTERVAL;
+    }
+    // Strip optional trailing `s`.
+    let digits = s.strip_suffix('s').unwrap_or(s);
+    digits
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(WATCH_DEFAULT_INTERVAL)
+}
+
+/// Format a [`std::time::SystemTime`] as `YYYY-MM-DD HH:MM:SS` (UTC).
+fn format_system_time(now: std::time::SystemTime) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let total_secs = duration.as_secs();
+
+    // Split into days + time-of-day.
+    let days_since_epoch = total_secs / 86400;
+    let time_of_day = total_secs % 86400;
+
+    let hour = time_of_day / 3600;
+    let min = (time_of_day % 3600) / 60;
+    let sec = time_of_day % 60;
+
+    // Convert days-since-Unix-epoch to Gregorian calendar date.
+    // Uses Julian Day Number arithmetic; Unix epoch = JDN 2 440 588.
+    // Reference: https://en.wikipedia.org/wiki/Julian_day#Converting_Julian_or_Gregorian_calendar_date_to_Julian_day_number
+    let jdn = days_since_epoch + 2_440_588;
+    let p1 = jdn + 32_044;
+    let p2 = (4 * p1 + 3) / 146_097;
+    let p3 = p1 - (146_097 * p2) / 4;
+    let p4 = (4 * p3 + 3) / 1_461;
+    let p5 = p3 - (1_461 * p4) / 4;
+    let p6 = (5 * p5 + 2) / 153;
+
+    let day = p5 - (153 * p6 + 2) / 5 + 1;
+    let month = p6 + 3 - 12 * (p6 / 10);
+    let year = 100 * p2 + p4 - 4_800 + p6 / 10;
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}")
+}
+
+/// Re-execute `sql` repeatedly, printing a timestamp header before each run.
+///
+/// The loop exits when Ctrl-C (SIGINT) is received while sleeping between
+/// iterations.  Each iteration:
+/// 1. Prints timestamp header.
+/// 2. Executes the query.
+/// 3. Sleeps `interval_secs`; if Ctrl-C arrives during the sleep, exits.
+///
+/// The screen is cleared (ANSI escape) at the start of each iteration
+/// after the first, matching psql `\watch` behaviour.
+async fn watch_query(
+    client: &Client,
+    sql: &str,
+    interval_secs: f64,
+    settings: &mut ReplSettings,
+) {
+    use std::time::Duration;
+    use tokio::signal;
+    use tokio::time::sleep;
+
+    let mut first = true;
+    loop {
+        if first {
+            first = false;
+        } else {
+            // Clear screen before each subsequent iteration.
+            print!("\x1b[2J\x1b[H");
+        }
+
+        // Print timestamp header.
+        let ts = format_system_time(std::time::SystemTime::now());
+        println!("{ts} (every {interval_secs}s)\n");
+
+        // Execute the stored query; use a dummy TxState (watch is read-only
+        // by convention; state changes inside the watch loop are not tracked).
+        let mut dummy_tx = TxState::default();
+        execute_query(client, sql, settings, &mut dummy_tx).await;
+
+        // Sleep for the interval, but exit cleanly on Ctrl-C.
+        tokio::select! {
+            () = sleep(Duration::from_secs_f64(interval_secs)) => {},
+            _ = signal::ctrl_c() => {
+                break;
+            },
+        }
+    }
+}
+
 /// Dispatch I/O and utility meta-commands (the `#33` family).
 ///
 /// Returns `Some(MetaResult)` if the command was handled, `None` if the
@@ -1481,6 +1595,22 @@ async fn dispatch_meta(
         }
         MetaCmd::SetTitle(ref title) => {
             apply_set_title(settings, title.as_deref());
+        }
+        MetaCmd::Watch => {
+            let interval = parse_watch_interval(
+                parsed.pattern.as_deref().unwrap_or(""),
+            );
+            // Capture the last query before the (potentially long) watch loop
+            // to avoid borrow issues with `settings`.
+            let sql = settings.last_query.clone();
+            match sql {
+                Some(ref q) => {
+                    watch_query(client, q, interval, settings).await;
+                }
+                None => {
+                    eprintln!("\\watch: no query to repeat");
+                }
+            }
         }
         // Describe-family commands — delegate to the describe module.
         ref describe_cmd
@@ -2266,6 +2396,64 @@ mod tests {
     fn repl_settings_log_file_default_is_none() {
         let s = ReplSettings::default();
         assert!(s.log_file.is_none());
+    }
+
+    // -- \watch helper functions (#47) ----------------------------------------
+
+    #[test]
+    fn watch_interval_default_when_empty() {
+        assert_eq!(parse_watch_interval(""), WATCH_DEFAULT_INTERVAL);
+    }
+
+    #[test]
+    fn watch_interval_bare_integer() {
+        assert!((parse_watch_interval("5") - 5.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn watch_interval_float() {
+        assert!((parse_watch_interval("0.5") - 0.5_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn watch_interval_seconds_suffix() {
+        assert!((parse_watch_interval("3s") - 3.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn watch_interval_float_seconds_suffix() {
+        assert!((parse_watch_interval("0.5s") - 0.5_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn watch_interval_invalid_uses_default() {
+        assert_eq!(parse_watch_interval("abc"), WATCH_DEFAULT_INTERVAL);
+    }
+
+    #[test]
+    fn watch_interval_negative_uses_default() {
+        assert_eq!(parse_watch_interval("-1"), WATCH_DEFAULT_INTERVAL);
+    }
+
+    #[test]
+    fn format_system_time_unix_epoch() {
+        // Unix epoch should format as 1970-01-01 00:00:00
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        assert_eq!(format_system_time(epoch), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn format_system_time_known_date() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // 2026-03-12 00:00:00 UTC = 1773273600 seconds since epoch
+        let ts = UNIX_EPOCH + Duration::from_secs(1_773_273_600);
+        assert_eq!(format_system_time(ts), "2026-03-12 00:00:00");
+    }
+
+    #[test]
+    fn repl_settings_last_query_default_is_none() {
+        let s = ReplSettings::default();
+        assert!(s.last_query.is_none());
     }
 
     // -- single-line mode (is_complete or single_line) -------------------------
