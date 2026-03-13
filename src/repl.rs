@@ -631,6 +631,11 @@ pub struct ReplSettings {
     /// Tracks total input + output tokens consumed.  When a `token_budget`
     /// is configured, AI calls are refused once this exceeds the budget.
     pub tokens_used: u64,
+    /// Action audit log for the governance framework.
+    ///
+    /// Records every action proposed, executed, vetoed, or skipped
+    /// during this session.  Never LLM-summarized (FIFO-evicted only).
+    pub audit_log: crate::governance::AuditLog,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -686,6 +691,7 @@ impl std::fmt::Debug for ReplSettings {
                 ),
             )
             .field("tokens_used", &self.tokens_used)
+            .field("audit_log", &format!("{} entries", self.audit_log.len()))
             .finish()
     }
 }
@@ -723,6 +729,7 @@ impl Default for ReplSettings {
             last_error: None,
             conversation: ConversationContext::new(),
             tokens_used: 0,
+            audit_log: crate::governance::AuditLog::new(),
         }
     }
 }

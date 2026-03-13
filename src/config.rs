@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::governance::{AutonomyLevel, FeatureArea};
+
 // ---------------------------------------------------------------------------
 // Top-level config
 // ---------------------------------------------------------------------------
@@ -26,6 +28,8 @@ pub struct Config {
     pub safety: SafetyConfig,
     /// AI/LLM provider settings.
     pub ai: AiConfig,
+    /// Per-feature autonomy levels for the governance framework.
+    pub governance: GovernanceConfig,
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
@@ -150,6 +154,120 @@ impl Default for AiConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Governance settings (per-feature autonomy)
+// ---------------------------------------------------------------------------
+
+/// Per-feature autonomy configuration.
+///
+/// Each feature area defaults to [`AutonomyLevel::Observe`] (read-only).
+/// Users can escalate individual features to `supervised` or `auto`
+/// in their `config.toml`:
+///
+/// ```toml
+/// [governance]
+/// rca = "observe"
+/// index_health = "supervised"
+/// vacuum = "supervised"
+/// ```
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct GovernanceConfig {
+    /// Vacuum management autonomy.
+    pub vacuum: AutonomyLevel,
+    /// Bloat management autonomy.
+    pub bloat: AutonomyLevel,
+    /// Index health management autonomy.
+    pub index_health: AutonomyLevel,
+    /// `PostgreSQL` parameter tuning autonomy.
+    pub config_tuning: AutonomyLevel,
+    /// Query optimization autonomy.
+    pub query_optimization: AutonomyLevel,
+    /// Connection management autonomy.
+    pub connection_management: AutonomyLevel,
+    /// Replication management autonomy.
+    pub replication: AutonomyLevel,
+    /// Root cause analysis autonomy.
+    pub rca: AutonomyLevel,
+    /// Backup monitoring autonomy.
+    pub backup_monitoring: AutonomyLevel,
+    /// Security audit autonomy.
+    pub security: AutonomyLevel,
+}
+
+impl Default for GovernanceConfig {
+    fn default() -> Self {
+        Self {
+            vacuum: AutonomyLevel::Observe,
+            bloat: AutonomyLevel::Observe,
+            index_health: AutonomyLevel::Observe,
+            config_tuning: AutonomyLevel::Observe,
+            query_optimization: AutonomyLevel::Observe,
+            connection_management: AutonomyLevel::Observe,
+            replication: AutonomyLevel::Observe,
+            rca: AutonomyLevel::Observe,
+            backup_monitoring: AutonomyLevel::Observe,
+            security: AutonomyLevel::Observe,
+        }
+    }
+}
+
+impl GovernanceConfig {
+    /// Look up the autonomy level for a given feature area.
+    #[allow(dead_code)]
+    pub fn autonomy_for(&self, feature: FeatureArea) -> AutonomyLevel {
+        match feature {
+            FeatureArea::Vacuum => self.vacuum,
+            FeatureArea::Bloat => self.bloat,
+            FeatureArea::IndexHealth => self.index_health,
+            FeatureArea::ConfigTuning => self.config_tuning,
+            FeatureArea::QueryOptimization => self.query_optimization,
+            FeatureArea::ConnectionManagement => self.connection_management,
+            FeatureArea::Replication => self.replication,
+            FeatureArea::Rca => self.rca,
+            FeatureArea::BackupMonitoring => self.backup_monitoring,
+            FeatureArea::Security => self.security,
+        }
+    }
+
+    /// Set the autonomy level for a given feature area.
+    #[allow(dead_code)]
+    pub fn set_autonomy(&mut self, feature: FeatureArea, level: AutonomyLevel) {
+        match feature {
+            FeatureArea::Vacuum => self.vacuum = level,
+            FeatureArea::Bloat => self.bloat = level,
+            FeatureArea::IndexHealth => self.index_health = level,
+            FeatureArea::ConfigTuning => self.config_tuning = level,
+            FeatureArea::QueryOptimization => self.query_optimization = level,
+            FeatureArea::ConnectionManagement => self.connection_management = level,
+            FeatureArea::Replication => self.replication = level,
+            FeatureArea::Rca => self.rca = level,
+            FeatureArea::BackupMonitoring => self.backup_monitoring = level,
+            FeatureArea::Security => self.security = level,
+        }
+    }
+
+    /// Return all feature areas with their current autonomy levels.
+    #[allow(dead_code)]
+    pub fn all_levels(&self) -> Vec<(FeatureArea, AutonomyLevel)> {
+        vec![
+            (FeatureArea::Vacuum, self.vacuum),
+            (FeatureArea::Bloat, self.bloat),
+            (FeatureArea::IndexHealth, self.index_health),
+            (FeatureArea::ConfigTuning, self.config_tuning),
+            (FeatureArea::QueryOptimization, self.query_optimization),
+            (
+                FeatureArea::ConnectionManagement,
+                self.connection_management,
+            ),
+            (FeatureArea::Replication, self.replication),
+            (FeatureArea::Rca, self.rca),
+            (FeatureArea::BackupMonitoring, self.backup_monitoring),
+            (FeatureArea::Security, self.security),
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Connection profile
 // ---------------------------------------------------------------------------
 
@@ -254,11 +372,35 @@ fn merge_config(base: Config, overlay: Config) -> Config {
                 overlay.ai.token_budget
             },
         },
+        governance: merge_governance(base.governance, overlay.governance),
         connections: {
             let mut merged = base.connections;
             merged.extend(overlay.connections);
             merged
         },
+    }
+}
+
+/// Merge governance config: overlay wins when not the default (Observe).
+fn merge_governance(base: GovernanceConfig, overlay: GovernanceConfig) -> GovernanceConfig {
+    let pick = |base_level, overlay_level| {
+        if overlay_level == AutonomyLevel::Observe {
+            base_level
+        } else {
+            overlay_level
+        }
+    };
+    GovernanceConfig {
+        vacuum: pick(base.vacuum, overlay.vacuum),
+        bloat: pick(base.bloat, overlay.bloat),
+        index_health: pick(base.index_health, overlay.index_health),
+        config_tuning: pick(base.config_tuning, overlay.config_tuning),
+        query_optimization: pick(base.query_optimization, overlay.query_optimization),
+        connection_management: pick(base.connection_management, overlay.connection_management),
+        replication: pick(base.replication, overlay.replication),
+        rca: pick(base.rca, overlay.rca),
+        backup_monitoring: pick(base.backup_monitoring, overlay.backup_monitoring),
+        security: pick(base.security, overlay.security),
     }
 }
 
@@ -420,6 +562,7 @@ dbname = "testdb"
                 destructive_warning: true,
             },
             ai: AiConfig::default(),
+            governance: GovernanceConfig::default(),
             connections: HashMap::new(),
         };
         let overlay = Config {
@@ -433,6 +576,7 @@ dbname = "testdb"
                 destructive_warning: false,
             },
             ai: AiConfig::default(),
+            governance: GovernanceConfig::default(),
             connections: HashMap::new(),
         };
         let merged = merge_config(base, overlay);
@@ -647,5 +791,100 @@ provider = "ollama"
         // provider from base is preserved because overlay is None.
         assert_eq!(merged.ai.provider.as_deref(), Some("openai"));
         assert_eq!(merged.ai.model.as_deref(), Some("gpt-4o"));
+    }
+
+    // -- GovernanceConfig -----------------------------------------------------
+
+    #[test]
+    fn governance_defaults_all_observe() {
+        let cfg: Config = toml::from_str("").expect("empty TOML");
+        let g = &cfg.governance;
+        assert_eq!(g.vacuum, AutonomyLevel::Observe);
+        assert_eq!(g.bloat, AutonomyLevel::Observe);
+        assert_eq!(g.index_health, AutonomyLevel::Observe);
+        assert_eq!(g.config_tuning, AutonomyLevel::Observe);
+        assert_eq!(g.query_optimization, AutonomyLevel::Observe);
+        assert_eq!(g.connection_management, AutonomyLevel::Observe);
+        assert_eq!(g.replication, AutonomyLevel::Observe);
+        assert_eq!(g.rca, AutonomyLevel::Observe);
+        assert_eq!(g.backup_monitoring, AutonomyLevel::Observe);
+        assert_eq!(g.security, AutonomyLevel::Observe);
+    }
+
+    #[test]
+    fn governance_parse_mixed_levels() {
+        let toml_str = r#"
+[governance]
+vacuum = "supervised"
+rca = "observe"
+index_health = "auto"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.governance.vacuum, AutonomyLevel::Supervised);
+        assert_eq!(cfg.governance.rca, AutonomyLevel::Observe);
+        assert_eq!(cfg.governance.index_health, AutonomyLevel::Auto);
+        // Unspecified fields remain Observe.
+        assert_eq!(cfg.governance.bloat, AutonomyLevel::Observe);
+        assert_eq!(cfg.governance.security, AutonomyLevel::Observe);
+    }
+
+    #[test]
+    fn governance_autonomy_for_lookup() {
+        let g = GovernanceConfig {
+            rca: AutonomyLevel::Supervised,
+            ..GovernanceConfig::default()
+        };
+        assert_eq!(g.autonomy_for(FeatureArea::Rca), AutonomyLevel::Supervised);
+        assert_eq!(g.autonomy_for(FeatureArea::Vacuum), AutonomyLevel::Observe);
+    }
+
+    #[test]
+    fn governance_set_autonomy() {
+        let mut g = GovernanceConfig::default();
+        g.set_autonomy(FeatureArea::IndexHealth, AutonomyLevel::Auto);
+        assert_eq!(g.index_health, AutonomyLevel::Auto);
+    }
+
+    #[test]
+    fn governance_all_levels_returns_10_entries() {
+        let g = GovernanceConfig::default();
+        assert_eq!(g.all_levels().len(), 10);
+    }
+
+    #[test]
+    fn merge_governance_overlay_wins() {
+        let base = Config {
+            governance: GovernanceConfig {
+                vacuum: AutonomyLevel::Supervised,
+                rca: AutonomyLevel::Supervised,
+                ..GovernanceConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            governance: GovernanceConfig {
+                vacuum: AutonomyLevel::Auto,
+                // rca left at Observe (default) → base should be preserved.
+                ..GovernanceConfig::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.governance.vacuum, AutonomyLevel::Auto);
+        assert_eq!(merged.governance.rca, AutonomyLevel::Supervised);
+    }
+
+    #[test]
+    fn merge_governance_base_preserved_when_overlay_default() {
+        let base = Config {
+            governance: GovernanceConfig {
+                index_health: AutonomyLevel::Auto,
+                ..GovernanceConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay = Config::default();
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.governance.index_health, AutonomyLevel::Auto);
     }
 }
