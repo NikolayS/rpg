@@ -147,7 +147,7 @@ async fn propose_idle_termination(client: &Client, proposals: &mut Vec<ActionPro
             proposals.push(ActionProposal {
                 feature: FeatureArea::Rca,
                 severity: Severity::Warning,
-                evidence_class: EvidenceClass::Heuristic,
+                evidence_class: EvidenceClass::Factual,
                 finding: format!(
                     "PID {pid} ({user}) idle in transaction for {duration}. \
                      Last query: {last_query}"
@@ -283,6 +283,7 @@ pub async fn run_supervised_flow(
 /// and the circuit breaker is consulted before execution.
 ///
 /// Returns the number of actions executed.
+#[allow(clippy::too_many_lines)]
 pub async fn run_auto_flow(
     client: &Client,
     proposals: &[ActionProposal],
@@ -319,7 +320,13 @@ pub async fn run_auto_flow(
                     proposal.proposed_action
                 ),
             );
-            log_action(audit_log, proposal, ActionOutcome::Skipped, None);
+            log_action(
+                audit_log,
+                proposal,
+                AutonomyLevel::Auto,
+                ActionOutcome::Skipped,
+                None,
+            );
             continue;
         }
 
@@ -332,6 +339,7 @@ pub async fn run_auto_flow(
             log_action(
                 audit_log,
                 proposal,
+                AutonomyLevel::Auto,
                 ActionOutcome::Vetoed {
                     reason: "Previously vetoed by Auditor".to_owned(),
                 },
@@ -345,16 +353,41 @@ pub async fn run_auto_flow(
         if let AuditDecision::Rejected { reason } = decision {
             crate::logging::info("auto", &format!("Auditor rejected: {reason}"));
             veto_tracker.record_veto(proposal.feature, &proposal.proposed_action);
-            log_action(audit_log, proposal, ActionOutcome::Vetoed { reason }, None);
+            log_action(
+                audit_log,
+                proposal,
+                AutonomyLevel::Auto,
+                ActionOutcome::Vetoed { reason },
+                None,
+            );
             continue;
         }
 
         // Parse and validate.
         let Some(action_request) = parse_proposal_to_request(proposal) else {
+            crate::logging::warn("auto", "Could not parse proposal into ActionRequest");
+            log_action(
+                audit_log,
+                proposal,
+                AutonomyLevel::Auto,
+                ActionOutcome::Failure {
+                    error: "Could not parse proposal into ActionRequest".to_owned(),
+                },
+                None,
+            );
             continue;
         };
         if let Err(e) = actor.validate(&action_request) {
             crate::logging::warn("auto", &format!("Validation failed: {e}"));
+            log_action(
+                audit_log,
+                proposal,
+                AutonomyLevel::Auto,
+                ActionOutcome::Failure {
+                    error: format!("Validation failed: {e}"),
+                },
+                None,
+            );
             continue;
         }
 
@@ -389,7 +422,7 @@ pub async fn run_auto_flow(
             circuit_breaker.record(proposal.feature, false);
         }
 
-        log_action(audit_log, proposal, outcome, None);
+        log_action(audit_log, proposal, AutonomyLevel::Auto, outcome, None);
         if success {
             executed += 1;
         }
@@ -406,12 +439,13 @@ pub async fn run_auto_flow(
 fn log_action(
     audit_log: &mut AuditLog,
     proposal: &ActionProposal,
+    autonomy: AutonomyLevel,
     outcome: ActionOutcome,
     note: Option<String>,
 ) {
     audit_log.record(
         proposal.feature,
-        AutonomyLevel::Supervised,
+        autonomy,
         proposal.proposed_action.clone(),
         proposal.finding.clone(),
         outcome,
@@ -422,6 +456,7 @@ fn log_action(
 /// Present a single proposal, prompt the user, and execute if approved.
 ///
 /// Returns `true` if the action was executed successfully.
+#[allow(clippy::too_many_lines)]
 async fn present_and_execute(
     client: &Client,
     proposal: &ActionProposal,
@@ -435,7 +470,13 @@ async fn present_and_execute(
     let note = match decision {
         AuditDecision::Rejected { reason } => {
             eprintln!("  [{num}] REJECTED by Auditor: {reason}");
-            log_action(audit_log, proposal, ActionOutcome::Vetoed { reason }, None);
+            log_action(
+                audit_log,
+                proposal,
+                AutonomyLevel::Supervised,
+                ActionOutcome::Vetoed { reason },
+                None,
+            );
             return false;
         }
         AuditDecision::Approved { note } => note,
@@ -460,12 +501,24 @@ async fn present_and_execute(
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_err() {
         eprintln!("      (could not read input, skipping)");
-        log_action(audit_log, proposal, ActionOutcome::Skipped, None);
+        log_action(
+            audit_log,
+            proposal,
+            AutonomyLevel::Supervised,
+            ActionOutcome::Skipped,
+            None,
+        );
         return false;
     }
     if !matches!(input.trim(), "y" | "Y" | "yes" | "Yes") {
         eprintln!("      Skipped.\n");
-        log_action(audit_log, proposal, ActionOutcome::Skipped, None);
+        log_action(
+            audit_log,
+            proposal,
+            AutonomyLevel::Supervised,
+            ActionOutcome::Skipped,
+            None,
+        );
         return false;
     }
 
@@ -475,6 +528,7 @@ async fn present_and_execute(
         log_action(
             audit_log,
             proposal,
+            AutonomyLevel::Supervised,
             ActionOutcome::Failure {
                 error: "Could not parse proposal into ActionRequest".to_owned(),
             },
@@ -489,6 +543,7 @@ async fn present_and_execute(
         log_action(
             audit_log,
             proposal,
+            AutonomyLevel::Supervised,
             ActionOutcome::Vetoed {
                 reason: e.to_string(),
             },
@@ -522,7 +577,13 @@ async fn present_and_execute(
         }
         note
     };
-    log_action(audit_log, proposal, outcome, verified_note);
+    log_action(
+        audit_log,
+        proposal,
+        AutonomyLevel::Supervised,
+        outcome,
+        verified_note,
+    );
     success
 }
 
