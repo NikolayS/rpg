@@ -2786,6 +2786,8 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Auto level for remaining features (requires extended Supervised validation + Auditor approval)
 - [x] `pg_stat_io` integration (PG 16+) for I/O attribution in RCA
 - [x] `pg_stat_progress_*` in `\dba` (VACUUM, CREATE INDEX, CLUSTER, ANALYZE progress monitoring)
+- [x] `\dba waits+` AI interpretation of wait event data (PR #131)
+- [x] `\l` PG version compatibility fix — correct column set for PG 14-18 (PR #123)
 
 ---
 
