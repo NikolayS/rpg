@@ -266,7 +266,8 @@ fn append_options(sql: &mut String, spec: &CopySpec) {
     }
 
     if let Some(ref ns) = spec.null_string {
-        opts.push(format!("null '{ns}'"));
+        let escaped = ns.replace('\'', "''");
+        opts.push(format!("null '{escaped}'"));
     }
 
     if !opts.is_empty() {
@@ -767,6 +768,26 @@ mod tests {
         assert_eq!(
             build_copy_to_sql(&spec),
             "copy t to stdout with (format csv, delimiter ';', header, null '\\N')"
+        );
+    }
+
+    #[test]
+    fn test_null_string_with_single_quote_is_escaped() {
+        let spec = CopySpec {
+            direction: CopyDirection::From,
+            target: CopyTarget::Table {
+                name: "t".to_owned(),
+                columns: vec![],
+            },
+            source: CopySource::Stdin,
+            format: CopyFormat::Text,
+            delimiter: None,
+            header: false,
+            null_string: Some("it's".to_owned()),
+        };
+        assert_eq!(
+            build_copy_from_sql(&spec),
+            "copy t from stdin with (null 'it''s')"
         );
     }
 }
