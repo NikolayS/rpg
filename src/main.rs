@@ -15,6 +15,7 @@ mod pattern;
 mod query;
 mod repl;
 mod session;
+mod vars;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
@@ -140,9 +141,9 @@ struct Cli {
     #[arg(short = 't', long = "tuples-only")]
     tuples_only: bool,
 
-    /// Set printing option (like `\pset`).
+    /// Set printing option (like `\pset`). Can be specified multiple times.
     #[arg(short = 'P', long, value_name = "VAR[=ARG]")]
-    pset: Option<String>,
+    pset: Vec<String>,
 
     /// Send query results to file (or pipe).
     #[arg(short = 'o', long)]
@@ -275,6 +276,54 @@ impl Cli {
 }
 
 // ---------------------------------------------------------------------------
+// CLI pset helper
+// ---------------------------------------------------------------------------
+
+/// Apply a single `-P VAR[=ARG]` option to the initial `PsetConfig`.
+fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
+    let (option, value) = if let Some((k, v)) = arg.split_once('=') {
+        (k, Some(v))
+    } else {
+        (arg, None)
+    };
+
+    match option {
+        "format" => {
+            pset.format = match value.unwrap_or("") {
+                "aligned" => output::OutputFormat::Aligned,
+                "unaligned" => output::OutputFormat::Unaligned,
+                "csv" => output::OutputFormat::Csv,
+                "json" => output::OutputFormat::Json,
+                "html" => output::OutputFormat::Html,
+                "wrapped" => output::OutputFormat::Wrapped,
+                other => {
+                    eprintln!("samo: invalid value for -P format: \"{other}\"");
+                    std::process::exit(2);
+                }
+            };
+        }
+        "border" => {
+            if let Some(v) = value.and_then(|s| s.parse::<u8>().ok()) {
+                pset.border = v.min(2);
+            }
+        }
+        "null" => {
+            value.unwrap_or("").clone_into(&mut pset.null_display);
+        }
+        "fieldsep" => {
+            value.unwrap_or("|").clone_into(&mut pset.field_sep);
+        }
+        "tuples_only" | "t" => {
+            pset.tuples_only = matches!(value, Some("on" | "true" | "1"));
+        }
+        "footer" => {
+            pset.footer = !matches!(value, Some("off" | "false" | "0"));
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -305,8 +354,46 @@ async fn main() {
                 println!("{}", connection::connection_info(&resolved));
             }
 
+            // Build PsetConfig from CLI flags.
+            let mut pset = output::PsetConfig::default();
+            if cli.csv {
+                pset.format = output::OutputFormat::Csv;
+            } else if cli.json {
+                pset.format = output::OutputFormat::Json;
+            } else if cli.no_align {
+                pset.format = output::OutputFormat::Unaligned;
+            }
+            if cli.tuples_only {
+                pset.tuples_only = true;
+            }
+            if cli.field_separator_zero {
+                "\0".clone_into(&mut pset.field_sep);
+            } else if let Some(ref sep) = cli.field_separator {
+                sep.clone_into(&mut pset.field_sep);
+            }
+            if cli.record_separator_zero {
+                "\0".clone_into(&mut pset.record_sep);
+            } else if let Some(ref sep) = cli.record_separator {
+                sep.clone_into(&mut pset.record_sep);
+            }
+
+            // Handle `\pset` from -P flags (may be specified multiple times).
+            for pset_arg in &cli.pset {
+                apply_cli_pset(&mut pset, pset_arg);
+            }
+
+            // Build initial variable store; apply -v NAME=VALUE assignments.
+            let mut vars = vars::Variables::new();
+            for assignment in &cli.variable {
+                if let Some((name, val)) = assignment.split_once('=') {
+                    vars.set(name, val);
+                }
+            }
+
             let settings = repl::ReplSettings {
                 echo_hidden: cli.echo_hidden,
+                pset,
+                vars,
                 ..Default::default()
             };
 
