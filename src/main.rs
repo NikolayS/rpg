@@ -171,6 +171,10 @@ struct Cli {
     #[arg(short = 't', long = "tuples-only")]
     tuples_only: bool,
 
+    /// Expanded table output mode (like `\x`).
+    #[arg(short = 'x', long = "expanded")]
+    expanded: bool,
+
     /// Set printing option (like `\pset`). Can be specified multiple times.
     #[arg(short = 'P', long, value_name = "VAR[=ARG]")]
     pset: Vec<String>,
@@ -422,6 +426,9 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     if cli.tuples_only {
         pset.tuples_only = true;
     }
+    if cli.expanded {
+        pset.expanded = output::ExpandedMode::On;
+    }
     if cli.field_separator_zero {
         "\0".clone_into(&mut pset.field_sep);
     } else if let Some(ref sep) = cli.field_separator {
@@ -471,8 +478,13 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     let pager_enabled = cfg.display.pager;
     let timing = cfg.display.timing;
 
+    // Keep ReplSettings.expanded in sync with pset.expanded so that both the
+    // REPL path and the -c path see a consistent expanded mode.
+    let expanded = pset.expanded;
+
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
+        expanded,
         pset,
         vars,
         output_target,
