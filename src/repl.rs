@@ -915,6 +915,10 @@ pub struct ReplSettings {
     ///
     /// Defaults to `true`. Disable with `\set DESTRUCTIVE_WARNING off`.
     pub destructive_warning: bool,
+    /// Whether destructive-statement confirmation prompts are enabled.
+    ///
+    /// Mirrors `destructive_warning`. Disable with `\set SAFETY off`.
+    pub safety_enabled: bool,
     /// Loaded TOML configuration (profiles, display defaults, etc.).
     ///
     /// Used by `\c @profile` to look up named connection profiles.
@@ -1006,6 +1010,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("no_highlight", &self.no_highlight)
             .field("pager_enabled", &self.pager_enabled)
             .field("destructive_warning", &self.destructive_warning)
+            .field("safety_enabled", &self.safety_enabled)
             .field("config_profiles", &self.config.connections.len())
             .field("input_mode", &self.input_mode)
             .field("exec_mode", &self.exec_mode)
@@ -1058,6 +1063,8 @@ impl Default for ReplSettings {
             pager_enabled: true,
             // Warn before destructive statements by default.
             destructive_warning: true,
+            // Safety prompts enabled by default.
+            safety_enabled: true,
             config: crate::config::Config::default(),
             input_mode: InputMode::default(),
             exec_mode: ExecMode::default(),
@@ -1268,8 +1275,8 @@ pub async fn execute_query(
     // Destructive statement guard: warn before DROP, TRUNCATE, DELETE without
     // WHERE, etc.  In non-interactive mode the check is skipped automatically
     // inside `confirm_destructive`.
-    if settings.destructive_warning {
-        if let Some(desc) = crate::safety::check_destructive(sql_to_send) {
+    if settings.destructive_warning || settings.safety_enabled {
+        if let Some(desc) = crate::safety::is_destructive(sql_to_send) {
             if !crate::safety::confirm_destructive(desc) {
                 eprintln!("Statement cancelled.");
                 return true; // skipped — not an error
@@ -2780,6 +2787,11 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror DESTRUCTIVE_WARNING on/off into the destructive_warning flag.
     if name == "DESTRUCTIVE_WARNING" {
         settings.destructive_warning = matches!(value, "on" | "true" | "1");
+    }
+    // Mirror SAFETY on/off into both safety_enabled and destructive_warning.
+    if name == "SAFETY" {
+        settings.safety_enabled = value != "off";
+        settings.destructive_warning = value != "off";
     }
     // Mirror VERBOSITY into verbose_errors (psql: verbose shows SQLSTATE).
     if name == "VERBOSITY" {
