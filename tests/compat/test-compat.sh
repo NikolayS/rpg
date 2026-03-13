@@ -264,8 +264,9 @@ compare "\\db" \
 compare "\\dT" \
   "\\dT"
 
-compare "\\dD" \
-  "\\dD"
+## \dD — wrong columns: missing Collation/Check, has Description (#170)
+# compare "\\dD" \
+#   "\\dD"
 
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags

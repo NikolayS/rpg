@@ -396,9 +396,10 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     // For \di (indexes), we need an extra Table column and index-specific joins.
     let is_index_only = relkinds == ["i"];
 
-    // Views, materialized views, and sequences use pg_relation_size in verbose
-    // mode and omit the Access method column (but do show Persistence).
-    let is_view_or_seq = matches!(relkinds, ["v" | "m" | "S"]);
+    // Views and sequences use pg_relation_size in verbose mode and omit the
+    // Access method column (but do show Persistence).  Materialized views are
+    // heap-stored like tables and need `pg_table_size` + Access method.
+    let is_view_or_seq = matches!(relkinds, ["v" | "S"]);
 
     let sql = if meta.plus {
         if is_index_only {
