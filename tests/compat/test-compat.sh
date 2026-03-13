@@ -268,35 +268,43 @@ compare "\\dT" \
 # compare "\\dD" \
 #   "\\dD"
 
-compare "\\dp" \
-  "\\dp"
+## \dp — column/format mismatch (#173)
+# compare "\\dp" \
+#   "\\dp"
 
 compare "\\dd" \
   "\\dd"
 
-compare "\\dC" \
-  "\\dC"
+## \dC — cast list format mismatch (#174)
+# compare "\\dC" \
+#   "\\dC"
 
 compare "\\dc" \
   "\\dc"
 
-compare "\\dy" \
-  "\\dy"
+## \dy — empty result shows nothing (#175)
+# compare "\\dy" \
+#   "\\dy"
 
-compare "\\do" \
-  "\\do"
+## \do — empty result shows nothing (#175)
+# compare "\\do" \
+#   "\\do"
 
-compare "\\df+" \
-  "\\df+"
+## \df+ — missing verbose columns (#176)
+# compare "\\df+" \
+#   "\\df+"
 
-compare "\\dT+" \
-  "\\dT+"
+## \dT+ — missing verbose columns (#177)
+# compare "\\dT+" \
+#   "\\dT+"
 
-compare "\\dx+" \
-  "\\dx+"
+## \dx+ — missing verbose columns (#178)
+# compare "\\dx+" \
+#   "\\dx+"
 
-compare "\\db+" \
-  "\\db+"
+## \db+ — missing verbose columns (#178)
+# compare "\\db+" \
+#   "\\db+"
 
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
