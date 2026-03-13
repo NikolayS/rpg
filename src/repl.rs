@@ -4743,8 +4743,7 @@ async fn run_readline_loop(
                         buf.clear();
                         stmt_buf.clear();
                         // Re-detect superuser status for the new connection.
-                        settings.is_superuser =
-                            crate::capabilities::detect_superuser(client).await;
+                        settings.is_superuser = crate::capabilities::detect_superuser(client).await;
                     }
                     HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                 }
