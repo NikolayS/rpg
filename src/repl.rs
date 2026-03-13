@@ -3616,8 +3616,18 @@ async fn handle_line(
                 execute_query(client, sql, settings, tx).await;
             }
         } else {
-            // Forward as /ask prompt.
-            handle_ai_ask(client, trimmed, settings, params, tx).await;
+            // Forward as AI prompt — behavior depends on execution mode.
+            match settings.exec_mode {
+                ExecMode::Plan => {
+                    handle_ai_plan(client, trimmed, settings, params).await;
+                }
+                ExecMode::Interactive | ExecMode::Yolo => {
+                    handle_ai_ask(client, trimmed, settings, params, tx).await;
+                }
+                ExecMode::Observe => {
+                    eprintln!("Observe mode is read-only. Use \\interactive to switch back.");
+                }
+            }
         }
         return HandleLineResult::Continue;
     }
@@ -4057,7 +4067,10 @@ async fn dispatch_ai_command(
             eprintln!("Usage: /ask <natural language description>");
             return;
         }
-        handle_ai_ask(client, prompt, settings, params, tx).await;
+        match settings.exec_mode {
+            ExecMode::Plan => handle_ai_plan(client, prompt, settings, params).await,
+            _ => handle_ai_ask(client, prompt, settings, params, tx).await,
+        }
     } else if input == "/fix" || input.starts_with("/fix ") {
         handle_ai_fix(client, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
@@ -4239,6 +4252,128 @@ async fn handle_ai_ask(
 
     if should_execute {
         execute_query(client, sql, settings, tx).await;
+    }
+}
+
+/// Handle a plan-mode prompt.
+///
+/// Gathers schema context, sends the user's natural-language prompt to the
+/// LLM with a plan-generation system prompt, and streams the resulting plan.
+/// Offers to save the plan to `~/.local/share/samo/plans/`.
+async fn handle_ai_plan(
+    client: &Client,
+    prompt: &str,
+    settings: &ReplSettings,
+    params: &ConnParams,
+) {
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+
+    if provider_name.is_empty() {
+        eprintln!(
+            "AI not configured. \
+             Add an [ai] section to ~/.config/samo/config.toml"
+        );
+        return;
+    }
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            return;
+        }
+    };
+
+    let system_content = format!(
+        "You are a PostgreSQL expert. \
+         The user has asked you to investigate and produce an action plan.\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n\n\
+         Rules:\n\
+         - Produce a structured plan in markdown format\n\
+         - Each action should include the SQL command and a safety assessment\n\
+         - Mark actions as [safe], [caution], or [dangerous]\n\
+         - Order actions from safest to most impactful\n\
+         - Include estimated duration where possible\n\
+         - Start with a brief root-cause analysis\n\
+         - Do NOT execute anything — only plan",
+        dbname = params.dbname,
+        schema = schema_ctx,
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: prompt.to_owned(),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    eprintln!("-- Plan mode: investigating...");
+    let result = match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Offer to save the plan.
+    if ask_yn_prompt("Save this plan? [y/N] ", false) {
+        let plans_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("samo")
+            .join("plans");
+        if let Err(e) = std::fs::create_dir_all(&plans_dir) {
+            eprintln!("Cannot create plans directory: {e}");
+            return;
+        }
+        let date = format_system_time(std::time::SystemTime::now())
+            .replace(' ', "-")
+            .replace(':', "");
+        // Build a slug from the first few words of the prompt.
+        let slug: String = prompt
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("-")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect();
+        let filename = format!("{date}-{slug}.md");
+        let path = plans_dir.join(&filename);
+        match std::fs::write(&path, &result.content) {
+            Ok(()) => eprintln!("Saved to: {}", path.display()),
+            Err(e) => eprintln!("Failed to save plan: {e}"),
+        }
     }
 }
 
