@@ -5,6 +5,7 @@
 
 use clap::Parser;
 
+mod complete;
 mod conditional;
 mod connection;
 mod copy;

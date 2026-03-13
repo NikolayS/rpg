@@ -9,10 +9,14 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use std::sync::{Arc, RwLock};
+
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Config, Editor};
 use tokio_postgres::Client;
+
+use crate::complete::{load_schema_cache, SamoHelper, SchemaCache};
 
 use crate::connection::ConnParams;
 
@@ -2574,13 +2578,29 @@ async fn run_readline_loop(
         .history_ignore_space(true)
         .build();
 
-    let mut rl: Editor<(), FileHistory> = match Editor::with_config(config) {
+    // Build schema cache (best-effort — completion degrades gracefully on
+    // failure).
+    let cache = Arc::new(RwLock::new(SchemaCache::default()));
+    match load_schema_cache(client).await {
+        Ok(loaded) => {
+            *cache.write().unwrap() = loaded;
+        }
+        Err(e) => {
+            if settings.debug {
+                eprintln!("samo: schema cache load failed: {e}");
+            }
+        }
+    }
+    let helper = SamoHelper::new(Arc::clone(&cache));
+
+    let mut rl: Editor<SamoHelper, FileHistory> = match Editor::with_config(config) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("samo: readline init failed: {e}");
             return 1;
         }
     };
+    rl.set_helper(Some(helper));
 
     let hist_path = history_file();
     if let Some(ref p) = hist_path {
