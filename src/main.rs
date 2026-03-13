@@ -150,9 +150,10 @@ struct Cli {
     variable: Vec<String>,
 
     // -- Common psql flags --------------------------------------------------
-    /// Run a single command (SQL or backslash) and exit.
-    #[arg(short = 'c', long)]
-    command: Option<String>,
+    /// Run a command (SQL or backslash) and exit. May be given multiple
+    /// times; commands are executed in order, like psql.
+    #[arg(short = 'c', long, action = clap::ArgAction::Append)]
+    command: Vec<String>,
 
     /// Execute commands from file, then exit.
     #[arg(short = 'f', long)]
@@ -622,7 +623,7 @@ async fn main() {
                 ),
             );
             let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
-            let is_scripting = cli.command.is_some() || cli.file.is_some();
+            let is_scripting = !cli.command.is_empty() || cli.file.is_some();
             if !cli.quiet && !is_scripting && !is_piped {
                 println!("{}", connection::connection_info(&resolved));
             }
@@ -675,9 +676,17 @@ async fn main() {
 
                 daemon::remove_pid_file(&pid_path);
                 0
-            } else if let Some(ref cmd) = cli.command {
-                // -c "SQL": execute single command and exit.
-                repl::exec_command(&client, cmd, &mut settings, &resolved).await
+            } else if !cli.command.is_empty() {
+                // -c CMD [--c CMD ...]: execute commands in order and exit.
+                // Mirror psql: stop on first non-zero exit and propagate it.
+                let mut exit_code = 0i32;
+                for cmd in &cli.command {
+                    exit_code = repl::exec_command(&client, cmd, &mut settings, &resolved).await;
+                    if exit_code != 0 {
+                        break;
+                    }
+                }
+                exit_code
             } else if let Some(ref path) = cli.file {
                 // -f file: execute file and exit.
                 repl::exec_file(&client, path, &mut settings, &resolved).await
