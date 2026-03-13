@@ -2740,8 +2740,9 @@ fn print_help() {
         r"
 Backslash commands:
   \q              quit samo
-  quit            quit samo
-  exit            quit samo
+  quit            quit samo (interactive mode only)
+  exit            quit samo (interactive mode only)
+  help            show this help overview (interactive mode only)
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
   \conninfo       show connection information
@@ -5253,19 +5254,19 @@ async fn handle_backslash_dumb(
     }
 }
 
-/// Return `true` when `trimmed` is a bare `quit` or `exit` and the query
-/// buffer is empty (primary prompt, not mid-statement).
+/// Print the bare-word `help` message, matching psql's output.
 ///
-/// This matches `PostgreSQL` 11+ behaviour: both keywords are recognised as
-/// exit commands in **all** input modes — interactive readline, dumb-terminal
-/// loop, piped stdin, and `-c` / `-f` single-command mode.
-#[inline]
-fn is_quit_exit(trimmed: &str, buf_empty: bool) -> bool {
-    if !buf_empty {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    lower == "quit" || lower == "exit"
+/// Shown when the user types `help` at an empty prompt, directing them to
+/// the standard backslash commands for further assistance.
+fn print_bare_help() {
+    println!(
+        "You are using samo, the command-line interface to PostgreSQL.\n\
+         Type:  \\copyright for distribution terms\n       \
+                \\h for help with SQL commands\n       \
+                \\? for help with samo commands\n       \
+                \\g or terminate with semicolon to execute query\n       \
+                \\q to quit"
+    );
 }
 
 /// Process one line of input in the readline loop.
@@ -5286,9 +5287,19 @@ async fn handle_line(
     // AI commands use a `/` prefix and are handled before backslash commands.
     let trimmed = line.trim();
 
-    // `quit` / `exit` bare words: handled in all modes via `is_quit_exit`.
-    if is_quit_exit(trimmed, buf.is_empty()) {
-        return HandleLineResult::Quit;
+    // `quit` and `exit` as bare words at the primary prompt exit interactively
+    // (PostgreSQL 11+ behaviour).  Only applies when the query buffer is empty
+    // (i.e. we are at the primary prompt, not mid-statement).
+    if buf.is_empty() {
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "quit" || lower == "exit" {
+            return HandleLineResult::Quit;
+        }
+        // `help` bare word: matches psql — show usage hint at primary prompt.
+        if lower == "help" {
+            print_bare_help();
+            return HandleLineResult::Continue;
+        }
     }
     if trimmed.starts_with('/') {
         stmt_buf.clear();

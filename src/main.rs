@@ -664,19 +664,26 @@ async fn main() {
             let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
             let is_scripting = !cli.command.is_empty() || cli.file.is_some();
             let is_interactive = !is_scripting && !is_piped;
-            if !cli.quiet && is_interactive {
-                // Version banner — matches psql's style of showing version on
-                // connect. Only shown for interactive sessions, not -c/-f/pipe.
-                println!("{}", version_string());
-                println!("Type \\? for help, \\q to quit.");
-                println!("{}", connection::connection_info(&resolved));
-                println!();
-            }
 
             let mut settings = build_settings(&cli, &cfg);
 
             // Detect database capabilities (pg_ash, server version, etc.).
+            // Run before the banner so we can include the server version.
             settings.db_capabilities = capabilities::detect(&client).await;
+
+            if !cli.quiet && is_interactive {
+                // Version banner — matches psql's style of showing version on
+                // connect. Only shown for interactive sessions, not -c/-f/pipe.
+                let server_ver = settings
+                    .db_capabilities
+                    .server_version
+                    .as_deref()
+                    .unwrap_or("unknown");
+                println!("{} (server PostgreSQL {})", version_string(), server_ver,);
+                println!("Type \"help\" for help.");
+                println!("{}", connection::connection_info(&resolved));
+            }
+
             if let capabilities::PgAshStatus::Available { ref version } =
                 settings.db_capabilities.pg_ash
             {
