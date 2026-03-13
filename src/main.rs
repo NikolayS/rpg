@@ -325,6 +325,92 @@ fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings construction helpers
+// ---------------------------------------------------------------------------
+
+/// Open the `-L` log file for append, exiting on failure.
+fn open_log_file(path: &str) -> Box<dyn std::io::Write> {
+    use std::fs::OpenOptions;
+    match OpenOptions::new().create(true).append(true).open(path) {
+        Ok(f) => Box::new(f),
+        Err(e) => {
+            eprintln!("samo: -L: could not open \"{path}\": {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Build a [`repl::ReplSettings`] from the parsed CLI flags.
+///
+/// Exits the process (code 2) if file-opening operations fail.
+fn build_settings(cli: &Cli) -> repl::ReplSettings {
+    // Build PsetConfig from CLI flags.
+    let mut pset = output::PsetConfig::default();
+    if cli.csv {
+        pset.format = output::OutputFormat::Csv;
+    } else if cli.json {
+        pset.format = output::OutputFormat::Json;
+    } else if cli.no_align {
+        pset.format = output::OutputFormat::Unaligned;
+    }
+    if cli.tuples_only {
+        pset.tuples_only = true;
+    }
+    if cli.field_separator_zero {
+        "\0".clone_into(&mut pset.field_sep);
+    } else if let Some(ref sep) = cli.field_separator {
+        sep.clone_into(&mut pset.field_sep);
+    }
+    if cli.record_separator_zero {
+        "\0".clone_into(&mut pset.record_sep);
+    } else if let Some(ref sep) = cli.record_separator {
+        sep.clone_into(&mut pset.record_sep);
+    }
+    for pset_arg in &cli.pset {
+        apply_cli_pset(&mut pset, pset_arg);
+    }
+
+    // Build variable store; apply -v NAME=VALUE assignments.
+    let mut vars = vars::Variables::new();
+    for assignment in &cli.variable {
+        if let Some((name, val)) = assignment.split_once('=') {
+            vars.set(name, val);
+        }
+    }
+
+    // -o / --output: redirect query output to file.
+    let output_target = cli
+        .output
+        .as_deref()
+        .map(|path| match io::open_output(Some(path)) {
+            Ok(w) => w.expect("open_output with Some path returns Some"),
+            Err(e) => {
+                eprintln!("samo: {e}");
+                std::process::exit(2);
+            }
+        });
+
+    // -L / --log-queries: open log file.
+    let log_file: Option<Box<dyn std::io::Write>> = cli.log_queries.as_deref().map(open_log_file);
+
+    repl::ReplSettings {
+        echo_hidden: cli.echo_hidden,
+        pset,
+        vars,
+        output_target,
+        log_file,
+        echo_queries: cli.echo_queries,
+        echo_errors: cli.echo_errors,
+        single_step: cli.single_step,
+        single_line: cli.single_line,
+        single_transaction: cli.single_transaction,
+        quiet: cli.quiet,
+        debug: cli.debug,
+        ..Default::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -347,7 +433,6 @@ async fn main() {
 
     match connection::connect(params, &opts).await {
         Ok((client, resolved)) => {
-            // Print connection info only in interactive mode.
             use std::io::IsTerminal;
             let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
             let is_scripting = cli.command.is_some() || cli.file.is_some();
@@ -355,48 +440,7 @@ async fn main() {
                 println!("{}", connection::connection_info(&resolved));
             }
 
-            // Build PsetConfig from CLI flags.
-            let mut pset = output::PsetConfig::default();
-            if cli.csv {
-                pset.format = output::OutputFormat::Csv;
-            } else if cli.json {
-                pset.format = output::OutputFormat::Json;
-            } else if cli.no_align {
-                pset.format = output::OutputFormat::Unaligned;
-            }
-            if cli.tuples_only {
-                pset.tuples_only = true;
-            }
-            if cli.field_separator_zero {
-                "\0".clone_into(&mut pset.field_sep);
-            } else if let Some(ref sep) = cli.field_separator {
-                sep.clone_into(&mut pset.field_sep);
-            }
-            if cli.record_separator_zero {
-                "\0".clone_into(&mut pset.record_sep);
-            } else if let Some(ref sep) = cli.record_separator {
-                sep.clone_into(&mut pset.record_sep);
-            }
-
-            // Handle `\pset` from -P flags (may be specified multiple times).
-            for pset_arg in &cli.pset {
-                apply_cli_pset(&mut pset, pset_arg);
-            }
-
-            // Build initial variable store; apply -v NAME=VALUE assignments.
-            let mut vars = vars::Variables::new();
-            for assignment in &cli.variable {
-                if let Some((name, val)) = assignment.split_once('=') {
-                    vars.set(name, val);
-                }
-            }
-
-            let mut settings = repl::ReplSettings {
-                echo_hidden: cli.echo_hidden,
-                pset,
-                vars,
-                ..Default::default()
-            };
+            let mut settings = build_settings(&cli);
 
             let exit_code = if let Some(ref cmd) = cli.command {
                 // -c "SQL": execute single command and exit.
@@ -409,7 +453,7 @@ async fn main() {
                 repl::exec_stdin(&client, &mut settings).await
             } else {
                 // Interactive REPL — consumes client and resolved.
-                repl::run_repl(client, resolved, settings, cli.no_readline).await
+                repl::run_repl(client, resolved, settings, cli.no_readline, cli.no_psqlrc).await
             };
 
             if exit_code != 0 {

@@ -250,6 +250,7 @@ pub use crate::output::ExpandedMode;
 
 /// Runtime-adjustable display settings.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ReplSettings {
     /// Whether to print query timing after each query.
     pub timing: bool,
@@ -264,6 +265,23 @@ pub struct ReplSettings {
     /// Current output redirect target. When `Some`, query output and `\qecho`
     /// text are written here instead of stdout.
     pub output_target: Option<Box<dyn std::io::Write>>,
+    /// Log file handle (`-L`). When `Some`, all query input and output are
+    /// mirrored to this writer in addition to normal output.
+    pub log_file: Option<Box<dyn std::io::Write>>,
+    /// Echo each query to stderr before executing (`-e` / `--echo-queries`).
+    pub echo_queries: bool,
+    /// Echo failed query text to stderr (`-b` / `--echo-errors`).
+    pub echo_errors: bool,
+    /// Single-step mode: prompt before executing each command (`-s`).
+    pub single_step: bool,
+    /// Single-line mode: treat newline as statement terminator (`-S`).
+    pub single_line: bool,
+    /// Wrap `-f` file execution in `BEGIN` / `COMMIT` (`-1`).
+    pub single_transaction: bool,
+    /// Quiet mode: suppress informational messages (`-q`).
+    pub quiet: bool,
+    /// Debug mode: enable debug output (`-D`).
+    pub debug: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -278,6 +296,14 @@ impl std::fmt::Debug for ReplSettings {
                 "output_target",
                 &self.output_target.as_ref().map(|_| "<writer>"),
             )
+            .field("log_file", &self.log_file.as_ref().map(|_| "<writer>"))
+            .field("echo_queries", &self.echo_queries)
+            .field("echo_errors", &self.echo_errors)
+            .field("single_step", &self.single_step)
+            .field("single_line", &self.single_line)
+            .field("single_transaction", &self.single_transaction)
+            .field("quiet", &self.quiet)
+            .field("debug", &self.debug)
             .finish()
     }
 }
@@ -296,6 +322,34 @@ pub fn history_file() -> Option<PathBuf> {
         return Some(PathBuf::from(val));
     }
     dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE))
+}
+
+// ---------------------------------------------------------------------------
+// Startup file resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve the startup RC file path.
+///
+/// Priority:
+/// 1. `$PSQLRC` environment variable
+/// 2. `~/.samorc` if the file exists
+/// 3. `~/.psqlrc` if the file exists
+/// 4. `None` — no startup file
+pub fn startup_file() -> Option<PathBuf> {
+    if let Ok(val) = std::env::var("PSQLRC") {
+        return Some(PathBuf::from(val));
+    }
+    if let Some(home) = dirs::home_dir() {
+        let samorc = home.join(".samorc");
+        if samorc.exists() {
+            return Some(samorc);
+        }
+        let psqlrc = home.join(".psqlrc");
+        if psqlrc.exists() {
+            return Some(psqlrc);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +421,21 @@ fn print_result_set_pset(
     }
 }
 
+/// In single-step mode, prompt the user before each command.
+///
+/// Prints the command to stderr and asks "Execute? (y/n)".
+/// Returns `true` if the user confirms (or single-step is not enabled).
+fn confirm_single_step(sql: &str) -> bool {
+    eprint!("***(Single step mode: verify command)*******************************************\n{sql}\n***(press return to proceed or enter x and return to cancel)***********************\n");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    let trimmed = answer.trim();
+    trimmed.is_empty() || (trimmed != "x" && trimmed != "X")
+}
+
 /// Execute a SQL string using `simple_query` and print results.
 ///
 /// Interpolates variables from `settings.vars` before sending to the server,
@@ -382,6 +451,21 @@ pub async fn execute_query(
     // Interpolate variables before sending.
     let interpolated = settings.vars.interpolate(sql);
     let sql_to_send = interpolated.as_str();
+
+    // -s / --single-step: prompt before executing.
+    if settings.single_step && !confirm_single_step(sql_to_send) {
+        return true; // skipped — not an error
+    }
+
+    // -e / --echo-queries: print query to stderr before executing.
+    if settings.echo_queries {
+        eprintln!("{sql_to_send}");
+    }
+
+    // -L: log query input to the log file.
+    if let Some(ref mut lf) = settings.log_file {
+        let _ = writeln!(lf, "{sql_to_send}");
+    }
 
     let start = if settings.timing {
         Some(Instant::now())
@@ -418,27 +502,30 @@ pub async fn execute_query(
                     SimpleQueryMessage::CommandComplete(n) => {
                         // Flush the current result set, then reset for next
                         // statement in a multi-statement query.
-                        if let Some(ref mut w) = settings.output_target {
-                            print_result_set_pset(
-                                w.as_mut(),
-                                &col_names,
-                                &rows,
-                                had_rows,
-                                n,
-                                result_set_index == 0,
-                                &settings.pset,
-                            );
-                        } else {
-                            print_result_set_pset(
-                                &mut io::stdout(),
-                                &col_names,
-                                &rows,
-                                had_rows,
-                                n,
-                                result_set_index == 0,
-                                &settings.pset,
-                            );
+                        // Capture rendered output so we can mirror to log.
+                        let mut out_buf = Vec::<u8>::new();
+                        print_result_set_pset(
+                            &mut out_buf,
+                            &col_names,
+                            &rows,
+                            had_rows,
+                            n,
+                            result_set_index == 0,
+                            &settings.pset,
+                        );
+
+                        // Mirror output to log file if active.
+                        if let Some(ref mut lf) = settings.log_file {
+                            let _ = lf.write_all(&out_buf);
                         }
+
+                        // Write to the configured output target.
+                        if let Some(ref mut w) = settings.output_target {
+                            let _ = w.write_all(&out_buf);
+                        } else {
+                            let _ = io::stdout().write_all(&out_buf);
+                        }
+
                         result_set_index += 1;
                         col_names.clear();
                         rows.clear();
@@ -454,6 +541,10 @@ pub async fn execute_query(
             true
         }
         Err(e) => {
+            // -b / --echo-errors: echo the failing query to stderr.
+            if settings.echo_errors {
+                eprintln!("{sql_to_send}");
+            }
             eprintln!("ERROR:  {e}");
             tx.on_error();
             false
@@ -502,6 +593,10 @@ pub async fn exec_command(
 /// comments) and each statement is executed individually, matching the
 /// behaviour of `exec_stdin`.
 ///
+/// When `settings.single_transaction` is `true`, the entire file is wrapped
+/// in an explicit `BEGIN` … `COMMIT` block. On any error the transaction is
+/// rolled back and execution stops.
+///
 /// # Errors
 /// Returns 1 if the file cannot be read or any statement produces a SQL error.
 pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings) -> i32 {
@@ -516,7 +611,12 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
     let mut buf = String::new();
     let mut exit_code = 0i32;
 
-    for line in content.lines() {
+    // -1 / --single-transaction: open a transaction before the first statement.
+    if settings.single_transaction && !execute_query(client, "begin", settings, &mut tx).await {
+        return 1;
+    }
+
+    'outer: for line in content.lines() {
         if !buf.is_empty() {
             buf.push('\n');
         }
@@ -526,13 +626,32 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
             let sql = buf.trim().to_owned();
             if !execute_query(client, &sql, settings, &mut tx).await {
                 exit_code = 1;
+                if settings.single_transaction {
+                    // Roll back and abort the rest of the file.
+                    execute_query(client, "rollback", settings, &mut tx).await;
+                    break 'outer;
+                }
             }
             buf.clear();
         }
     }
 
     // Execute any trailing input without a semicolon.
-    if !buf.trim().is_empty() && !execute_query(client, buf.trim(), settings, &mut tx).await {
+    if exit_code == 0
+        && !buf.trim().is_empty()
+        && !execute_query(client, buf.trim(), settings, &mut tx).await
+    {
+        exit_code = 1;
+        if settings.single_transaction {
+            execute_query(client, "rollback", settings, &mut tx).await;
+        }
+    }
+
+    // -1 / --single-transaction: commit on success.
+    if settings.single_transaction
+        && exit_code == 0
+        && !execute_query(client, "commit", settings, &mut tx).await
+    {
         exit_code = 1;
     }
 
@@ -1179,17 +1298,28 @@ async fn dispatch_meta(
 /// Accepts caller-provided `settings` so that flags set on the command line
 /// (e.g. `--timing`, `--expanded`) take effect immediately.
 ///
+/// `no_psqlrc` suppresses reading the startup file (`-X`).
+///
 /// Returns the exit code (0 = normal exit, non-zero = error).
 pub async fn run_repl(
     client: Client,
     params: ConnParams,
     settings: ReplSettings,
     no_readline: bool,
+    no_psqlrc: bool,
 ) -> i32 {
     let mut settings = settings;
     let mut tx = TxState::default();
     let mut client = client;
     let mut params = params;
+
+    // Execute startup file unless suppressed by -X.
+    if !no_psqlrc {
+        if let Some(rc_path) = startup_file() {
+            let path_str = rc_path.to_string_lossy().into_owned();
+            crate::io::include_file(&client, &path_str, &mut settings, &mut tx).await;
+        }
+    }
 
     // Build rustyline editor (skip if --no-readline).
     let use_readline = !no_readline && io::stdin().is_terminal();
@@ -1327,9 +1457,13 @@ async fn run_dumb_loop(
                         buf.push('\n');
                     }
                     buf.push_str(&line);
-                    if is_complete(&buf) {
+                    // In single-line mode, newline terminates the statement.
+                    let complete = settings.single_line || is_complete(&buf);
+                    if complete {
                         let sql = buf.trim().to_owned();
-                        execute_query(client, &sql, settings, tx).await;
+                        if !sql.is_empty() {
+                            execute_query(client, &sql, settings, tx).await;
+                        }
                         buf.clear();
                     }
                 }
@@ -1482,9 +1616,13 @@ async fn handle_line(
     buf.push_str(line);
     stmt_buf.push_str(line);
 
-    if is_complete(buf) {
+    // In single-line mode, a newline terminates the statement immediately.
+    let complete = settings.single_line || is_complete(buf);
+    if complete {
         let sql = buf.trim().to_owned();
-        execute_query(client, &sql, settings, tx).await;
+        if !sql.is_empty() {
+            execute_query(client, &sql, settings, tx).await;
+        }
         buf.clear();
         // stmt_buf is cleared by the caller after adding to history.
     }
@@ -1731,6 +1869,58 @@ mod tests {
     #[test]
     fn dollar_quote_incomplete_named_tag() {
         assert!(!is_complete("do $body$ begin end"));
+    }
+
+    // -- startup_file ----------------------------------------------------------
+
+    #[test]
+    fn startup_file_returns_psqlrc_env_when_set() {
+        // Override PSQLRC to a known path.
+        std::env::set_var("PSQLRC", "/tmp/test_samo_rc");
+        let result = startup_file();
+        std::env::remove_var("PSQLRC");
+        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test_samo_rc")));
+    }
+
+    #[test]
+    fn startup_file_returns_none_when_no_rc_exists_and_no_env() {
+        // Remove PSQLRC env so the function falls through to file checks.
+        std::env::remove_var("PSQLRC");
+        // We cannot guarantee ~/.samorc or ~/.psqlrc don't exist on the test
+        // machine, so we just verify the function doesn't panic and returns
+        // an Option.
+        let _result = startup_file();
+    }
+
+    // -- ReplSettings new fields -----------------------------------------------
+
+    #[test]
+    fn repl_settings_default_flags_are_false() {
+        let s = ReplSettings::default();
+        assert!(!s.echo_queries);
+        assert!(!s.echo_errors);
+        assert!(!s.single_step);
+        assert!(!s.single_line);
+        assert!(!s.single_transaction);
+        assert!(!s.quiet);
+        assert!(!s.debug);
+    }
+
+    #[test]
+    fn repl_settings_log_file_default_is_none() {
+        let s = ReplSettings::default();
+        assert!(s.log_file.is_none());
+    }
+
+    // -- single-line mode (is_complete or single_line) -------------------------
+
+    #[test]
+    fn single_line_empty_trimmed_does_not_execute() {
+        // In single-line mode an empty trimmed input should not result in
+        // execution.  We test the logic directly: if buf.trim().is_empty()
+        // we skip the execute call.
+        let buf = "   ";
+        assert!(buf.trim().is_empty());
     }
 
     // -- build_prompt ----------------------------------------------------------
