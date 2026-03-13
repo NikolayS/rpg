@@ -99,6 +99,34 @@ insert into products (name, price, active) values
 on conflict do nothing;
 
 -- ---------------------------------------------------------------------------
+-- Views (used by \sv integration tests)
+-- ---------------------------------------------------------------------------
+
+create or replace view active_products as
+    select
+        id,
+        name,
+        price
+    from products
+    where active = true;
+
+comment on view active_products is 'Products currently listed for sale';
+
+-- ---------------------------------------------------------------------------
+-- Functions (used by \sf integration tests)
+-- ---------------------------------------------------------------------------
+
+create or replace function user_order_count(p_user_id int8)
+returns int8
+language sql
+stable
+as $$
+    select count(*) from orders where user_id = p_user_id;
+$$;
+
+comment on function user_order_count(int8) is 'Returns the number of orders for a user';
+
+-- ---------------------------------------------------------------------------
 -- Seed data — orders
 -- ---------------------------------------------------------------------------
 

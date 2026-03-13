@@ -118,7 +118,9 @@ impl TestDb {
     pub async fn teardown_schema(&self) -> Result<(), Error> {
         self.client
             .batch_execute(
-                "drop table if exists orders cascade;
+                "drop function if exists user_order_count(int8) cascade;
+                 drop view if exists active_products cascade;
+                 drop table if exists orders cascade;
                  drop table if exists products cascade;
                  drop table if exists users cascade;",
             )

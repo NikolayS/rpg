@@ -451,8 +451,10 @@ pub async fn exec_command(
             echo_hidden: settings.echo_hidden,
             ..Default::default()
         };
-        let quit = dispatch_meta(parsed, client, params, &mut dummy_settings).await;
-        return i32::from(quit);
+        match dispatch_meta(parsed, client, params, &mut dummy_settings).await {
+            MetaResult::Quit => return 0,
+            MetaResult::Continue | MetaResult::Reconnected(..) => return 0,
+        }
     }
     let mut tx = TxState::default();
     i32::from(!execute_query(client, sql, settings, &mut tx).await)
@@ -546,11 +548,17 @@ pub async fn exec_stdin(client: &Client, settings: &ReplSettings) -> i32 {
 fn print_help() {
     println!(
         r"Backslash commands:
-  \q          quit samo
-  \timing [on|off]  toggle/set query timing display
-  \x [on|off|auto]  toggle/set expanded display
-  \conninfo   show connection information
-  \?          show this help
+  \q              quit samo
+  \timing [on|off]      toggle/set query timing display
+  \x [on|off|auto]      toggle/set expanded display
+  \conninfo       show connection information
+  \?              show this help
+
+Session commands:
+  \c [db [user [host [port]]]]  reconnect to database
+  \sf[+] <func>   show function source
+  \sv[+] <view>   show view definition
+  \h [command]    SQL syntax help
 
 Describe commands (stubs; see #27 for full implementation):
   \d  [pattern]     describe objects
@@ -613,19 +621,34 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// MetaResult — outcome of a dispatched meta-command
+// ---------------------------------------------------------------------------
+
+/// The outcome of dispatching a backslash meta-command.
+pub enum MetaResult {
+    /// Continue the REPL loop normally.
+    Continue,
+    /// Exit the REPL loop (`\q`).
+    Quit,
+    /// The connection was replaced: caller must swap client and params.
+    Reconnected(Box<tokio_postgres::Client>, ConnParams),
+}
+
 /// Dispatch a parsed meta-command, applying any side-effects to `settings`.
 ///
-/// Returns `true` if the REPL loop should exit.
+/// Returns a [`MetaResult`] indicating whether the loop should continue,
+/// exit, or replace the current connection.
 async fn dispatch_meta(
     parsed: crate::metacmd::ParsedMeta,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
-) -> bool {
+) -> MetaResult {
     use crate::metacmd::MetaCmd;
 
     match parsed.cmd {
-        MetaCmd::Quit => return true,
+        MetaCmd::Quit => return MetaResult::Quit,
         MetaCmd::Help => print_help(),
         MetaCmd::Timing(mode) => apply_timing(settings, mode),
         MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
@@ -634,6 +657,31 @@ async fn dispatch_meta(
         }
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
+        }
+        MetaCmd::SqlHelp => {
+            crate::session::sql_help(parsed.pattern.as_deref());
+        }
+        MetaCmd::ShowFunctionSource => match parsed.pattern.as_deref() {
+            Some(name) => {
+                crate::session::show_function_source(client, name, parsed.plus, parsed.echo_hidden)
+                    .await;
+            }
+            None => eprintln!("\\sf: function name required"),
+        },
+        MetaCmd::ShowViewDef => match parsed.pattern.as_deref() {
+            Some(name) => {
+                crate::session::show_view_def(client, name, parsed.plus, parsed.echo_hidden).await;
+            }
+            None => eprintln!("\\sv: view name required"),
+        },
+        MetaCmd::Reconnect => {
+            match crate::session::reconnect(parsed.pattern.as_deref(), params).await {
+                Ok((new_client, new_params)) => {
+                    println!("{}", crate::connection::connection_info(&new_params));
+                    return MetaResult::Reconnected(Box::new(new_client), new_params);
+                }
+                Err(e) => eprintln!("\\c: {e}"),
+            }
         }
         // Describe-family commands — delegate to the describe module.
         ref describe_cmd
@@ -666,13 +714,12 @@ async fn dispatch_meta(
         {
             crate::describe::execute(client, &parsed).await;
         }
-        // Session commands not yet implemented.
         ref stub => {
-            eprintln!("{}: not yet implemented", stub.label());
+            eprintln!("{}: not yet implemented (see #27)", stub.label());
         }
     }
 
-    false
+    MetaResult::Continue
 }
 
 /// Run the interactive REPL loop.
@@ -682,30 +729,30 @@ async fn dispatch_meta(
 ///
 /// Returns the exit code (0 = normal exit, non-zero = error).
 pub async fn run_repl(
-    client: &Client,
-    params: &ConnParams,
+    client: Client,
+    params: ConnParams,
     settings: ReplSettings,
     no_readline: bool,
 ) -> i32 {
     let mut settings = settings;
     let mut tx = TxState::default();
-    let dbname = params.dbname.clone();
+    let mut client = client;
+    let mut params = params;
 
     // Build rustyline editor (skip if --no-readline).
     let use_readline = !no_readline && io::stdin().is_terminal();
 
     if use_readline {
-        run_readline_loop(&dbname, client, params, &mut settings, &mut tx).await
+        run_readline_loop(&mut client, &mut params, &mut settings, &mut tx).await
     } else {
-        run_dumb_loop(&dbname, client, params, &mut settings, &mut tx).await
+        run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
     }
 }
 
 /// Run with rustyline readline support.
 async fn run_readline_loop(
-    dbname: &str,
-    client: &Client,
-    params: &ConnParams,
+    client: &mut Client,
+    params: &mut ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> i32 {
@@ -734,13 +781,13 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
-        let prompt = build_prompt(dbname, *tx, !buf.is_empty());
+        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty());
 
         match rl.readline(&prompt) {
             Ok(line) => {
                 // Ctrl-C on empty line: stay at prompt (readline already
                 // handles Ctrl-C during input by returning Interrupted).
-                let should_exit =
+                let result =
                     handle_line(&line, &mut buf, &mut stmt_buf, client, params, settings, tx).await;
 
                 // If buf is empty a statement was completed — add the full
@@ -750,8 +797,17 @@ async fn run_readline_loop(
                     stmt_buf.clear();
                 }
 
-                if should_exit {
-                    break;
+                match result {
+                    HandleLineResult::Quit => break,
+                    HandleLineResult::Reconnected(new_client, new_params) => {
+                        *client = *new_client;
+                        *params = new_params;
+                        // Reset transaction state on reconnect.
+                        *tx = TxState::default();
+                        buf.clear();
+                        stmt_buf.clear();
+                    }
+                    HandleLineResult::Continue => {}
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -782,9 +838,8 @@ async fn run_readline_loop(
 
 /// Run without readline (dumb terminal or --no-readline).
 async fn run_dumb_loop(
-    dbname: &str,
-    client: &Client,
-    params: &ConnParams,
+    client: &mut Client,
+    params: &mut ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> i32 {
@@ -793,7 +848,7 @@ async fn run_dumb_loop(
 
     loop {
         // Print prompt to stderr (so it doesn't mix with redirected output).
-        let prompt = build_prompt(dbname, *tx, !buf.is_empty());
+        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty());
         eprint!("{prompt}");
         let _ = io::stderr().flush();
 
@@ -803,8 +858,20 @@ async fn run_dumb_loop(
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 if line.trim_start().starts_with('\\') {
+<<<<<<< HEAD
                     if handle_backslash_dumb(line.trim(), client, params, settings).await {
                         break;
+=======
+                    match handle_backslash_dumb(line.trim(), client, params, settings).await {
+                        HandleLineResult::Quit => break,
+                        HandleLineResult::Reconnected(new_client, new_params) => {
+                            *client = *new_client;
+                            *params = new_params;
+                            *tx = TxState::default();
+                            buf.clear();
+                        }
+                        HandleLineResult::Continue => {}
+>>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
                     }
                 } else {
                     if !buf.is_empty() {
@@ -828,25 +895,53 @@ async fn run_dumb_loop(
     0
 }
 
+// ---------------------------------------------------------------------------
+// HandleLineResult — outcome of processing one input line
+// ---------------------------------------------------------------------------
+
+/// Outcome of processing a single input line in the REPL.
+enum HandleLineResult {
+    /// Continue the loop normally.
+    Continue,
+    /// Exit the loop (`\q`).
+    Quit,
+    /// Connection replaced by `\c`.
+    Reconnected(Box<tokio_postgres::Client>, ConnParams),
+}
+
 /// Handle a single input line in the dumb loop (backslash commands).
+<<<<<<< HEAD
 ///
 /// Returns `true` if the loop should exit (i.e. `\q` was issued).
+=======
+>>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
 async fn handle_backslash_dumb(
     input: &str,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
+<<<<<<< HEAD
 ) -> bool {
     let mut parsed = crate::metacmd::parse(input);
     parsed.echo_hidden = settings.echo_hidden;
     dispatch_meta(parsed, client, params, settings).await
+=======
+) -> HandleLineResult {
+    let mut parsed = crate::metacmd::parse(input);
+    parsed.echo_hidden = settings.echo_hidden;
+    match dispatch_meta(parsed, client, params, settings).await {
+        MetaResult::Quit => HandleLineResult::Quit,
+        MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
+        MetaResult::Continue => HandleLineResult::Continue,
+    }
+>>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
 }
 
 /// Process one line of input in the readline loop.
 ///
 /// `stmt_buf` accumulates the full multi-line statement for history recording.
 ///
-/// Returns `true` if the REPL should exit (i.e. `\q` was entered).
+/// Returns a [`HandleLineResult`] indicating how the loop should proceed.
 async fn handle_line(
     line: &str,
     buf: &mut String,
@@ -855,13 +950,21 @@ async fn handle_line(
     params: &ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
-) -> bool {
+) -> HandleLineResult {
     if line.trim_start().starts_with('\\') {
         // Backslash command — execute immediately.
         let mut parsed = crate::metacmd::parse(line.trim());
         parsed.echo_hidden = settings.echo_hidden;
+<<<<<<< HEAD
         let should_exit = dispatch_meta(parsed, client, params, settings).await;
         return should_exit;
+=======
+        return match dispatch_meta(parsed, client, params, settings).await {
+            MetaResult::Quit => HandleLineResult::Quit,
+            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
+            MetaResult::Continue => HandleLineResult::Continue,
+        };
+>>>>>>> 90a6fea (feat(meta): add session commands and enhanced help)
     }
 
     // SQL input: accumulate lines until we have a complete statement.
@@ -879,7 +982,7 @@ async fn handle_line(
         // stmt_buf is cleared by the caller after adding to history.
     }
 
-    false
+    HandleLineResult::Continue
 }
 
 // ---------------------------------------------------------------------------
