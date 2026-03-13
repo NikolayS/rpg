@@ -1127,7 +1127,7 @@ mod tests {
         // "select", "set", "security", "serial", "sequence"... should appear.
         let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
         assert!(
-            names.iter().any(|n| *n == "select"),
+            names.contains(&"select"),
             "expected 'select' in {names:?}"
         );
     }
