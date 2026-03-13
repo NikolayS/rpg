@@ -34,6 +34,71 @@ impl PgAshStatus {
     }
 }
 
+/// Connection pooler type detected in front of the database.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PoolerType {
+    /// No pooler detected; direct connection to Postgres.
+    #[default]
+    None,
+    /// `PgBouncer` pooler with the detected pool mode.
+    PgBouncer {
+        /// Pool mode reported by `SHOW pool_mode` (e.g. `"transaction"`).
+        pool_mode: String,
+    },
+    /// Supavisor pooler (Supabase's connection pooler).
+    Supavisor,
+    /// `PgCat` pooler.
+    PgCat,
+}
+
+impl PoolerType {
+    /// Whether any pooler is in use.
+    #[allow(dead_code)]
+    pub fn is_pooled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Return a warning string when transaction-mode pooling is active.
+    ///
+    /// Features such as prepared statements, advisory locks, and
+    /// session-level settings break under transaction-mode pooling.
+    /// Returns `None` when no relevant warning applies.
+    pub fn pooler_warning(&self) -> Option<&str> {
+        match self {
+            Self::PgBouncer { pool_mode } if pool_mode == "transaction" => Some(
+                "PgBouncer is running in transaction mode. \
+                 Prepared statements, advisory locks, and session-level \
+                 settings are not supported.",
+            ),
+            Self::Supavisor => Some(
+                "Supavisor is active. Some session-level features may \
+                 not be available depending on pool mode.",
+            ),
+            Self::PgCat => Some(
+                "PgCat is active. Some session-level features may \
+                 not be available depending on pool mode.",
+            ),
+            _ => None,
+        }
+    }
+}
+
+/// Managed Postgres provider detected from server GUCs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ManagedProvider {
+    /// Not a recognised managed provider.
+    #[default]
+    None,
+    /// Amazon RDS or Aurora.
+    Rds,
+    /// Google Cloud SQL.
+    CloudSql,
+    /// Supabase managed Postgres.
+    Supabase,
+    /// Neon serverless Postgres.
+    Neon,
+}
+
 /// Detected database capabilities.
 ///
 /// Populated once at connection time and stored in [`ReplSettings`] for
@@ -44,6 +109,10 @@ pub struct DbCapabilities {
     pub pg_ash: PgAshStatus,
     /// `PostgreSQL` server version string (e.g. `"16.2"`).
     pub server_version: Option<String>,
+    /// Connection pooler detected in front of this database.
+    pub pooler: PoolerType,
+    /// Managed Postgres provider, if recognised.
+    pub managed_provider: ManagedProvider,
 }
 
 impl DbCapabilities {
@@ -57,6 +126,18 @@ impl DbCapabilities {
     /// Whether `pg_stat_io` is available (PG 16+).
     pub fn has_pg_stat_io(&self) -> bool {
         self.pg_major_version().is_some_and(|v| v >= 16)
+    }
+
+    /// Whether a connection pooler is active.
+    #[allow(dead_code)]
+    pub fn is_pooled(&self) -> bool {
+        self.pooler.is_pooled()
+    }
+
+    /// Return a warning about pooler limitations, if applicable.
+    #[allow(dead_code)]
+    pub fn pooler_warning(&self) -> Option<&str> {
+        self.pooler.pooler_warning()
     }
 }
 
@@ -77,10 +158,14 @@ fn parse_pg_major_version(version_str: &str) -> Option<u32> {
 pub async fn detect(client: &tokio_postgres::Client) -> DbCapabilities {
     let pg_ash = detect_pg_ash(client).await;
     let server_version = detect_server_version(client).await;
+    let pooler = detect_pooler(client, server_version.as_deref()).await;
+    let managed_provider = detect_managed_provider(client).await;
 
     DbCapabilities {
         pg_ash,
         server_version,
+        pooler,
+        managed_provider,
     }
 }
 
@@ -145,6 +230,115 @@ async fn detect_server_version(client: &tokio_postgres::Client) -> Option<String
     }
 }
 
+/// Extract the first row / first column from a `simple_query` result.
+fn first_row_col(msgs: &[tokio_postgres::SimpleQueryMessage]) -> Option<String> {
+    msgs.iter().find_map(|m| {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = m {
+            row.get(0).map(String::from)
+        } else {
+            None
+        }
+    })
+}
+
+/// Detect whether a connection pooler is sitting in front of the database.
+///
+/// Detection strategy:
+/// 1. Attempt `SHOW pool_mode` — only `PgBouncer` exposes this GUC.
+/// 2. Check `SHOW server_version` for Supavisor / `PgCat` version strings.
+///
+/// Errors from individual probes are swallowed; the function always returns
+/// a valid [`PoolerType`].
+async fn detect_pooler(
+    client: &tokio_postgres::Client,
+    server_version: Option<&str>,
+) -> PoolerType {
+    // 1. PgBouncer: try SHOW pool_mode (only PgBouncer responds to this).
+    if let Ok(msgs) = client.simple_query("SHOW pool_mode").await {
+        if let Some(pool_mode) = first_row_col(&msgs) {
+            return PoolerType::PgBouncer { pool_mode };
+        }
+    }
+
+    // 2. Supavisor / PgCat: check version banner from server_version GUC.
+    if let Some(ver) = server_version {
+        let lower = ver.to_lowercase();
+        if lower.contains("supavisor") {
+            return PoolerType::Supavisor;
+        }
+        if lower.contains("pgcat") {
+            return PoolerType::PgCat;
+        }
+    }
+
+    PoolerType::None
+}
+
+/// Detect whether this is a managed Postgres provider.
+///
+/// Detection strategy (each probe is independent; first match wins):
+/// - RDS: `rds.extensions` GUC exists.
+/// - Cloud SQL: any `cloudsql.*` GUC exists.
+/// - Neon: any `neon.*` GUC exists.
+/// - Supabase: `supabase_admin` role exists in `pg_roles`.
+///
+/// All probes are fault-tolerant; errors are silently ignored.
+async fn detect_managed_provider(client: &tokio_postgres::Client) -> ManagedProvider {
+    // RDS: check for the rds.extensions GUC.
+    if let Ok(msgs) = client
+        .simple_query("select name from pg_settings where name like 'rds.%' limit 1")
+        .await
+    {
+        if msgs
+            .iter()
+            .any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        {
+            return ManagedProvider::Rds;
+        }
+    }
+
+    // Cloud SQL: check for cloudsql.* GUCs.
+    if let Ok(msgs) = client
+        .simple_query("select name from pg_settings where name like 'cloudsql.%' limit 1")
+        .await
+    {
+        if msgs
+            .iter()
+            .any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        {
+            return ManagedProvider::CloudSql;
+        }
+    }
+
+    // Neon: check for neon.* GUCs.
+    if let Ok(msgs) = client
+        .simple_query("select name from pg_settings where name like 'neon.%' limit 1")
+        .await
+    {
+        if msgs
+            .iter()
+            .any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        {
+            return ManagedProvider::Neon;
+        }
+    }
+
+    // Supabase: check for the supabase_admin role.
+    if let Ok(msgs) = client
+        .simple_query("select 1 from pg_catalog.pg_roles where rolname = 'supabase_admin'")
+        .await
+    {
+        if msgs
+            .iter()
+            .any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        {
+            return ManagedProvider::Supabase;
+        }
+    }
+
+    ManagedProvider::None
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -184,6 +378,8 @@ mod tests {
         let caps = DbCapabilities::default();
         assert!(!caps.pg_ash.is_available());
         assert!(caps.server_version.is_none());
+        assert!(!caps.is_pooled());
+        assert_eq!(caps.managed_provider, ManagedProvider::None);
     }
 
     #[test]
@@ -235,5 +431,93 @@ mod tests {
     fn has_pg_stat_io_no_version() {
         let caps = DbCapabilities::default();
         assert!(!caps.has_pg_stat_io());
+    }
+
+    // -- PoolerType tests ----------------------------------------------------
+
+    #[test]
+    fn pooler_type_default_is_none() {
+        assert_eq!(PoolerType::default(), PoolerType::None);
+    }
+
+    #[test]
+    fn pooler_type_none_is_not_pooled() {
+        assert!(!PoolerType::None.is_pooled());
+    }
+
+    #[test]
+    fn pooler_type_pgbouncer_is_pooled() {
+        let p = PoolerType::PgBouncer {
+            pool_mode: "transaction".to_owned(),
+        };
+        assert!(p.is_pooled());
+    }
+
+    #[test]
+    fn pooler_type_supavisor_is_pooled() {
+        assert!(PoolerType::Supavisor.is_pooled());
+    }
+
+    #[test]
+    fn pooler_type_pgcat_is_pooled() {
+        assert!(PoolerType::PgCat.is_pooled());
+    }
+
+    #[test]
+    fn pooler_warning_none_is_none() {
+        assert!(PoolerType::None.pooler_warning().is_none());
+    }
+
+    #[test]
+    fn pooler_warning_pgbouncer_session_mode_is_none() {
+        let p = PoolerType::PgBouncer {
+            pool_mode: "session".to_owned(),
+        };
+        assert!(p.pooler_warning().is_none());
+    }
+
+    #[test]
+    fn pooler_warning_pgbouncer_transaction_mode_has_warning() {
+        let p = PoolerType::PgBouncer {
+            pool_mode: "transaction".to_owned(),
+        };
+        assert!(p.pooler_warning().is_some());
+    }
+
+    #[test]
+    fn pooler_warning_supavisor_has_warning() {
+        assert!(PoolerType::Supavisor.pooler_warning().is_some());
+    }
+
+    #[test]
+    fn pooler_warning_pgcat_has_warning() {
+        assert!(PoolerType::PgCat.pooler_warning().is_some());
+    }
+
+    #[test]
+    fn db_capabilities_is_pooled_delegates_to_pooler() {
+        let caps = DbCapabilities {
+            pooler: PoolerType::PgBouncer {
+                pool_mode: "transaction".to_owned(),
+            },
+            ..Default::default()
+        };
+        assert!(caps.is_pooled());
+        assert!(caps.pooler_warning().is_some());
+    }
+
+    // -- ManagedProvider tests -----------------------------------------------
+
+    #[test]
+    fn managed_provider_default_is_none() {
+        assert_eq!(ManagedProvider::default(), ManagedProvider::None);
+    }
+
+    #[test]
+    fn managed_provider_variants_distinct() {
+        assert_ne!(ManagedProvider::Rds, ManagedProvider::None);
+        assert_ne!(ManagedProvider::CloudSql, ManagedProvider::Rds);
+        assert_ne!(ManagedProvider::Supabase, ManagedProvider::CloudSql);
+        assert_ne!(ManagedProvider::Neon, ManagedProvider::Supabase);
     }
 }
