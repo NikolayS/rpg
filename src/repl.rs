@@ -310,6 +310,10 @@ pub struct ReplSettings {
     /// `PAGER` environment variable to an external pager command.
     /// Only activates in interactive mode (not with `-c`, `-f`, or piped input).
     pub pager_enabled: bool,
+    /// Warn before executing destructive statements (DROP, TRUNCATE, etc.).
+    ///
+    /// Defaults to `true`. Disable with `\set DESTRUCTIVE_WARNING off`.
+    pub destructive_warning: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -347,6 +351,7 @@ impl std::fmt::Debug for ReplSettings {
             )
             .field("no_highlight", &self.no_highlight)
             .field("pager_enabled", &self.pager_enabled)
+            .field("destructive_warning", &self.destructive_warning)
             .finish()
     }
 }
@@ -375,6 +380,8 @@ impl Default for ReplSettings {
             no_highlight: false,
             // Pager is enabled by default in interactive mode.
             pager_enabled: true,
+            // Warn before destructive statements by default.
+            destructive_warning: true,
         }
     }
 }
@@ -547,6 +554,18 @@ pub async fn execute_query(
         return true; // skipped — not an error
     }
 
+    // Destructive statement guard: warn before DROP, TRUNCATE, DELETE without
+    // WHERE, etc.  In non-interactive mode the check is skipped automatically
+    // inside `confirm_destructive`.
+    if settings.destructive_warning {
+        if let Some(desc) = crate::safety::check_destructive(sql_to_send) {
+            if !crate::safety::confirm_destructive(desc) {
+                eprintln!("Statement cancelled.");
+                return true; // skipped — not an error
+            }
+        }
+    }
+
     // -e / --echo-queries: print query to stderr before executing.
     if settings.echo_queries {
         eprintln!("{sql_to_send}");
@@ -683,6 +702,16 @@ pub async fn execute_query_extended(
     // -s / --single-step: prompt before executing.
     if settings.single_step && !confirm_single_step(sql_to_send) {
         return true; // skipped — not an error
+    }
+
+    // Destructive statement guard.
+    if settings.destructive_warning {
+        if let Some(desc) = crate::safety::check_destructive(sql_to_send) {
+            if !crate::safety::confirm_destructive(desc) {
+                eprintln!("Statement cancelled.");
+                return true; // skipped — not an error
+            }
+        }
     }
 
     // -e / --echo-queries: print query to stderr before executing.
@@ -1938,6 +1967,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror PAGER on/off into the pager_enabled flag.
     if name == "PAGER" {
         settings.pager_enabled = value != "off";
+    }
+    // Mirror DESTRUCTIVE_WARNING on/off into the destructive_warning flag.
+    if name == "DESTRUCTIVE_WARNING" {
+        settings.destructive_warning = matches!(value, "on" | "true" | "1");
     }
 }
 

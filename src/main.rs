@@ -22,6 +22,7 @@ mod pattern;
 #[allow(dead_code)]
 mod query;
 mod repl;
+mod safety;
 mod session;
 mod vars;
 
