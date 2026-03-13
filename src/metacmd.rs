@@ -1872,7 +1872,10 @@ mod tests {
     #[test]
     fn parse_gx_to_file() {
         let m = parse("\\gx /tmp/out");
-        assert_eq!(m.cmd, MetaCmd::GoExecuteExpanded(Some("/tmp/out".to_owned())));
+        assert_eq!(
+            m.cmd,
+            MetaCmd::GoExecuteExpanded(Some("/tmp/out".to_owned()))
+        );
     }
 
     #[test]

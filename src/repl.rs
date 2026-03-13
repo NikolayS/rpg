@@ -1294,9 +1294,7 @@ async fn dispatch_io(
         MetaCmd::GoExecute(ref target) => {
             let result = match target.as_deref() {
                 None => MetaResult::ExecuteBuffer,
-                Some(t) if t.starts_with('|') => {
-                    MetaResult::ExecuteBufferPiped(t.to_owned())
-                }
+                Some(t) if t.starts_with('|') => MetaResult::ExecuteBufferPiped(t.to_owned()),
                 Some(f) => MetaResult::ExecuteBufferToFile(f.to_owned()),
             };
             Some(result)
