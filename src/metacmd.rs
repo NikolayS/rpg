@@ -251,6 +251,16 @@ pub enum MetaCmd {
     /// `pattern` field.  The `plus` flag activates verbose output.
     Dba,
 
+    // -- Named queries (#69) -----------------------------------------------
+    /// `\ns name query` — save a named query.
+    NamedSave(String, String),
+    /// `\n name [args...]` — execute a named query.
+    NamedExec(String, Vec<String>),
+    /// `\n+` — list all named queries.
+    NamedList,
+    /// `\nd name` — delete a named query.
+    NamedDelete(String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -409,6 +419,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('g') => parse_g_family(input),
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
+        Some('n') => parse_n_family(input),
         Some('!') => parse_shell(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
@@ -1092,6 +1103,68 @@ fn parse_b_family(input: &str) -> ParsedMeta {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let params = split_params(rest.trim());
             return ParsedMeta::simple(MetaCmd::Bind(params));
+        }
+    }
+
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+// ---------------------------------------------------------------------------
+// \n family parser — named queries (#69)
+// ---------------------------------------------------------------------------
+
+/// Parse `\ns name query`, `\nd name`, `\n+`, and `\n name [args...]`.
+///
+/// Disambiguation order (longest match first):
+///   `ns` → [`MetaCmd::NamedSave`]
+///   `nd` → [`MetaCmd::NamedDelete`]
+///   `n+` → [`MetaCmd::NamedList`]
+///   `n`  → [`MetaCmd::NamedExec`]
+fn parse_n_family(input: &str) -> ParsedMeta {
+    // `\ns name query` — save a named query.  Must come before bare `\n`.
+    if let Some(rest) = input.strip_prefix("ns") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim();
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or("").to_owned();
+            let query = parts.next().map_or("", str::trim).to_owned();
+            if name.is_empty() || query.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::NamedSave(name, query));
+        }
+    }
+
+    // `\nd name` — delete a named query.  Must come before bare `\n`.
+    if let Some(rest) = input.strip_prefix("nd") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let name = rest.trim().to_owned();
+            if name.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::NamedDelete(name));
+        }
+    }
+
+    // `\n+` — list all named queries.
+    if let Some(rest) = input.strip_prefix("n+") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::NamedList);
+        }
+    }
+
+    // `\n name [args...]` — execute a named query.
+    if let Some(rest) = input.strip_prefix('n') {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+            }
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or("").to_owned();
+            let args_str = parts.next().unwrap_or("").trim();
+            let args = split_params(args_str);
+            return ParsedMeta::simple(MetaCmd::NamedExec(name, args));
         }
     }
 
@@ -2569,5 +2642,77 @@ mod tests {
         let m = parse("\\dba nonexistent");
         assert_eq!(m.cmd, MetaCmd::Dba);
         assert_eq!(m.pattern, Some("nonexistent".to_owned()));
+    }
+
+    // -- Named queries (#69) ------------------------------------------------
+
+    #[test]
+    fn parse_named_save() {
+        let m =
+            parse("\\ns top_tables SELECT * FROM pg_stat_user_tables ORDER BY $1 DESC LIMIT $2");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::NamedSave(
+                "top_tables".to_owned(),
+                "SELECT * FROM pg_stat_user_tables ORDER BY $1 DESC LIMIT $2".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn parse_named_exec_with_args() {
+        let m = parse("\\n top_tables seq_scan 10");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::NamedExec(
+                "top_tables".to_owned(),
+                vec!["seq_scan".to_owned(), "10".to_owned()],
+            )
+        );
+    }
+
+    #[test]
+    fn parse_named_exec_no_args() {
+        let m = parse("\\n my_query");
+        assert_eq!(m.cmd, MetaCmd::NamedExec("my_query".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn parse_named_list() {
+        let m = parse("\\n+");
+        assert_eq!(m.cmd, MetaCmd::NamedList);
+    }
+
+    #[test]
+    fn parse_named_delete() {
+        let m = parse("\\nd top_tables");
+        assert_eq!(m.cmd, MetaCmd::NamedDelete("top_tables".to_owned()));
+    }
+
+    #[test]
+    fn parse_named_save_ns_not_confused_with_n() {
+        // `\ns` must not be mistaken for `\n` with arg `s`.
+        let m = parse("\\ns my_q select 1");
+        assert!(matches!(m.cmd, MetaCmd::NamedSave(_, _)));
+    }
+
+    #[test]
+    fn parse_named_delete_nd_not_confused_with_n() {
+        // `\nd` must not be mistaken for `\n` with arg `d`.
+        let m = parse("\\nd my_q");
+        assert!(matches!(m.cmd, MetaCmd::NamedDelete(_)));
+    }
+
+    #[test]
+    fn parse_named_save_missing_query_is_unknown() {
+        // `\ns name` with no query body should be Unknown.
+        let m = parse("\\ns only_name");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_named_delete_missing_name_is_unknown() {
+        let m = parse("\\nd");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
     }
 }

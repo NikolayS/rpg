@@ -2735,6 +2735,56 @@ async fn dispatch_meta(
             let subcommand = parsed.pattern.as_deref().unwrap_or("");
             crate::dba::execute(client, subcommand, parsed.plus).await;
         }
+        // Named queries (#69).
+        MetaCmd::NamedSave(ref name, ref query) => {
+            let mut nq = crate::named::NamedQueries::load();
+            nq.set(name, query);
+            match nq.save() {
+                Ok(()) => {
+                    if !settings.quiet {
+                        eprintln!("Saved query \"{name}\".");
+                    }
+                }
+                Err(e) => eprintln!("\\ns: {e}"),
+            }
+        }
+        MetaCmd::NamedExec(ref name, ref args) => {
+            let nq = crate::named::NamedQueries::load();
+            match nq.get(name) {
+                Some(query) => {
+                    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let sql = crate::named::NamedQueries::substitute(query, &arg_refs);
+                    execute_query(client, &sql, settings, tx).await;
+                }
+                None => eprintln!("\\n: unknown query \"{name}\""),
+            }
+        }
+        MetaCmd::NamedList => {
+            let nq = crate::named::NamedQueries::load();
+            let queries = nq.list();
+            if queries.is_empty() {
+                println!("No named queries saved.");
+            } else {
+                for (name, query) in queries {
+                    println!("  {name}: {query}");
+                }
+            }
+        }
+        MetaCmd::NamedDelete(ref name) => {
+            let mut nq = crate::named::NamedQueries::load();
+            if nq.delete(name) {
+                match nq.save() {
+                    Ok(()) => {
+                        if !settings.quiet {
+                            eprintln!("Deleted query \"{name}\".");
+                        }
+                    }
+                    Err(e) => eprintln!("\\nd: {e}"),
+                }
+            } else {
+                eprintln!("\\nd: unknown query \"{name}\"");
+            }
+        }
         // Describe-family commands — delegate to the describe module.
         ref describe_cmd
             if matches!(

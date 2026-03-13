@@ -17,6 +17,7 @@ mod highlight;
 mod io;
 mod logging;
 mod metacmd;
+mod named;
 #[allow(dead_code)]
 mod output;
 mod pager;
