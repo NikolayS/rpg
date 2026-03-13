@@ -2785,7 +2785,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] Protocol marketplace (shareable health check definitions)
 - [ ] Auto level for remaining features (requires extended Supervised validation + Auditor approval)
 - [ ] `pg_stat_io` integration (PG 16+) for I/O attribution in RCA
-- [ ] `pg_stat_progress_*` in `\dba` (VACUUM, CREATE INDEX, CLUSTER, ANALYZE progress monitoring)
+- [x] `pg_stat_progress_*` in `\dba` (VACUUM, CREATE INDEX, CLUSTER, ANALYZE progress monitoring)
 
 ---
 
