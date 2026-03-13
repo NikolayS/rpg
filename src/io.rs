@@ -53,14 +53,25 @@ pub fn include_file<'a>(
             }
         };
 
-        crate::repl::exec_lines(
+        let start_depth = settings.cond.depth();
+        let exit_code = crate::repl::exec_lines(
             client,
             content.lines().map(str::to_owned),
             settings,
             params,
             tx,
         )
-        .await
+        .await;
+
+        let end_depth = settings.cond.depth();
+        if end_depth > start_depth {
+            eprintln!(
+                "samo: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
+                end_depth - start_depth
+            );
+        }
+
+        exit_code
     })
 }
 

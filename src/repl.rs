@@ -1243,12 +1243,20 @@ async fn dispatch_meta(
     // -- Conditional commands: always process regardless of active state -----
     match &parsed.cmd {
         MetaCmd::If => {
-            let condition = eval_bool(parsed.pattern.as_deref().unwrap_or(""));
+            let expr = parsed.pattern.as_deref().unwrap_or("");
+            if expr.trim().is_empty() {
+                eprintln!("\\if: missing expression");
+            }
+            let condition = eval_bool(expr);
             settings.cond.push_if(condition);
             return MetaResult::Continue;
         }
         MetaCmd::Elif => {
-            let condition = eval_bool(parsed.pattern.as_deref().unwrap_or(""));
+            let expr = parsed.pattern.as_deref().unwrap_or("");
+            if expr.trim().is_empty() {
+                eprintln!("\\elif: missing expression");
+            }
+            let condition = eval_bool(expr);
             if let Err(e) = settings.cond.handle_elif(condition) {
                 eprintln!("{e}");
             }
