@@ -892,12 +892,23 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
     }
 }
 
-/// Format a human-friendly connection-success message.
+/// Format a human-friendly connection-success message, matching psql output.
+///
+/// TCP:    You are connected to database "db" as user "u" on host "h" at port "5432".
+/// Socket: You are connected to database "db" as user "u" via socket in "/run/pg" at port "5432".
 pub fn connection_info(params: &ConnParams) -> String {
-    format!(
-        "Connected to database \"{}\" as user \"{}\" on host \"{}\" at port {}.",
-        params.dbname, params.user, params.host, params.port,
-    )
+    let is_socket = params.host.starts_with('/');
+    if is_socket {
+        format!(
+            "You are connected to database \"{}\" as user \"{}\" via socket in \"{}\" at port \"{}\".",
+            params.dbname, params.user, params.host, params.port,
+        )
+    } else {
+        format!(
+            "You are connected to database \"{}\" as user \"{}\" on host \"{}\" at port \"{}\".",
+            params.dbname, params.user, params.host, params.port,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,5 +1313,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- connection_info format matches psql --------------------------------
+
+    #[test]
+    fn test_connection_info_tcp() {
+        let params = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            connection_info(&params),
+            "You are connected to database \"postgres\" as user \"postgres\" \
+             on host \"localhost\" at port \"5432\".",
+        );
+    }
+
+    #[test]
+    fn test_connection_info_socket() {
+        let params = ConnParams {
+            host: "/var/run/postgresql".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            connection_info(&params),
+            "You are connected to database \"mydb\" as user \"alice\" \
+             via socket in \"/var/run/postgresql\" at port \"5432\".",
+        );
     }
 }
