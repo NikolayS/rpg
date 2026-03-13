@@ -142,7 +142,7 @@ async fn run_and_print_full(
             print_table_inner(&col_names, &rows, title, show_row_count);
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(&e, Some(sql), false);
         }
     }
 

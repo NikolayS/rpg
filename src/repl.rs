@@ -693,6 +693,11 @@ pub struct ReplSettings {
     /// `exec_mode == Yolo`, all write queries are auto-executed regardless
     /// of the configured autonomy level. Use with extreme care.
     pub i_know_what_im_doing: bool,
+    /// Verbosity level for error display, mirroring psql's `\set VERBOSITY`.
+    ///
+    /// When `true`, SQLSTATE codes are appended to error output.
+    /// Defaults to `false` (psql default).
+    pub verbose_errors: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -751,6 +756,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("audit_log", &format!("{} entries", self.audit_log.len()))
             .field("db_capabilities", &self.db_capabilities)
             .field("i_know_what_im_doing", &self.i_know_what_im_doing)
+            .field("verbose_errors", &self.verbose_errors)
             .finish()
     }
 }
@@ -791,6 +797,7 @@ impl Default for ReplSettings {
             audit_log: crate::governance::AuditLog::new(),
             db_capabilities: crate::capabilities::DbCapabilities::default(),
             i_know_what_im_doing: false,
+            verbose_errors: false,
         }
     }
 }
@@ -1105,12 +1112,18 @@ pub async fn execute_query(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+            );
             tx.on_error();
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
-            let error_message = e.to_string();
+            let error_message = e
+                .as_db_error()
+                .map_or_else(|| e.to_string(), |db| db.message().to_owned());
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
                 error_message: error_message.clone(),
@@ -1212,12 +1225,18 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+            );
             tx.on_error();
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
-                error_message: e.to_string(),
+                error_message: e
+                    .as_db_error()
+                    .map_or_else(|| e.to_string(), |db| db.message().to_owned()),
                 sqlstate,
             });
             return false;
@@ -1299,14 +1318,20 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+            );
             tx.on_error();
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
-                error_message: e.to_string(),
+                error_message: e
+                    .as_db_error()
+                    .map_or_else(|| e.to_string(), |db| db.message().to_owned()),
                 sqlstate,
             });
 
@@ -1429,7 +1454,7 @@ async fn execute_named_stmt(
             true
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(&e, None, settings.verbose_errors);
             tx.on_error();
             false
         }
@@ -1682,7 +1707,11 @@ async fn execute_gexec(client: &Client, buf: &str, settings: &mut ReplSettings, 
             cells
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+            );
             tx.on_error();
             return;
         }
@@ -1705,7 +1734,11 @@ async fn execute_gexec(client: &Client, buf: &str, settings: &mut ReplSettings, 
                 tx.update_from_sql(&cell_sql);
             }
             Err(e) => {
-                eprintln!("ERROR:  {e}");
+                crate::output::eprint_db_error(
+                    &e,
+                    Some(&cell_sql),
+                    settings.verbose_errors,
+                );
                 tx.on_error();
             }
         }
@@ -1803,7 +1836,11 @@ async fn execute_gset(
             }
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+            );
             tx.on_error();
         }
     }
@@ -1861,7 +1898,11 @@ async fn execute_crosstabview(
             Some((col_names, rows))
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+            );
             tx.on_error();
             None
         }
@@ -1906,7 +1947,7 @@ async fn execute_crosstabview(
 ///
 /// When `buf` is empty, prints an informational message.
 /// On prepare error, prints the Postgres error message.
-async fn describe_buffer(client: &Client, buf: &str) {
+async fn describe_buffer(client: &Client, buf: &str, verbose_errors: bool) {
     if buf.is_empty() {
         println!("Query buffer is empty.");
         return;
@@ -1915,7 +1956,7 @@ async fn describe_buffer(client: &Client, buf: &str) {
     let stmt = match client.prepare(buf).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(&e, Some(buf), verbose_errors);
             return;
         }
     };
@@ -1949,7 +1990,7 @@ async fn describe_buffer(client: &Client, buf: &str) {
             .map(|i| row.get::<_, String>(i))
             .collect(),
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(&e, None, verbose_errors);
             return;
         }
     };
@@ -2161,7 +2202,12 @@ pub(crate) async fn exec_lines(
                 }
                 MetaResult::DescribeBuffer => {
                     // Buffer is NOT cleared after \gdesc.
-                    describe_buffer(client, buf.trim()).await;
+                    describe_buffer(
+                        client,
+                        buf.trim(),
+                        settings.verbose_errors,
+                    )
+                    .await;
                 }
                 MetaResult::CrosstabViewBuffer(args) => {
                     let sql = buf.trim().to_owned();
@@ -2183,7 +2229,11 @@ pub(crate) async fn exec_lines(
                                 settings.named_statements.insert(name, stmt);
                             }
                             Err(e) => {
-                                eprintln!("ERROR:  {e}");
+                                crate::output::eprint_db_error(
+                                    &e,
+                                    Some(&sql),
+                                    settings.verbose_errors,
+                                );
                                 exit_code = 1;
                                 if settings.single_transaction {
                                     break 'lines;
@@ -2259,7 +2309,12 @@ pub(crate) async fn exec_lines(
                         }
                     }
                     MetaResult::DescribeBuffer => {
-                        describe_buffer(client, buf.trim()).await;
+                        describe_buffer(
+                            client,
+                            buf.trim(),
+                            settings.verbose_errors,
+                        )
+                        .await;
                     }
                     MetaResult::CrosstabViewBuffer(args) => {
                         let sql = buf.trim().to_owned();
@@ -2491,6 +2546,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror DESTRUCTIVE_WARNING on/off into the destructive_warning flag.
     if name == "DESTRUCTIVE_WARNING" {
         settings.destructive_warning = matches!(value, "on" | "true" | "1");
+    }
+    // Mirror VERBOSITY into verbose_errors (psql: verbose shows SQLSTATE).
+    if name == "VERBOSITY" {
+        settings.verbose_errors = value == "verbose";
     }
     // Mirror EXPLAIN into auto_explain.
     if name == "EXPLAIN" {
@@ -4194,7 +4253,7 @@ async fn handle_backslash_dumb(
         MetaResult::DescribeBuffer => {
             // Buffer is NOT cleared after \gdesc (same as psql).
             let sql = buf.trim();
-            describe_buffer(client, sql).await;
+            describe_buffer(client, sql, settings.verbose_errors).await;
             HandleLineResult::Continue
         }
         MetaResult::GExecBuffer => {
@@ -4234,7 +4293,11 @@ async fn handle_backslash_dumb(
                     Ok(stmt) => {
                         settings.named_statements.insert(name.clone(), stmt);
                     }
-                    Err(e) => eprintln!("ERROR:  {e}"),
+                    Err(e) => crate::output::eprint_db_error(
+                        &e,
+                        Some(&sql),
+                        settings.verbose_errors,
+                    ),
                 }
             }
             HandleLineResult::Continue
@@ -4471,7 +4534,7 @@ async fn handle_line(
             MetaResult::DescribeBuffer => {
                 // Buffer is NOT cleared after \gdesc (same as psql).
                 let sql = buf.trim().to_owned();
-                describe_buffer(client, &sql).await;
+                describe_buffer(client, &sql, settings.verbose_errors).await;
                 HandleLineResult::Continue
             }
             MetaResult::GExecBuffer => {
@@ -4514,7 +4577,11 @@ async fn handle_line(
                         Ok(stmt) => {
                             settings.named_statements.insert(name.clone(), stmt);
                         }
-                        Err(e) => eprintln!("ERROR:  {e}"),
+                        Err(e) => crate::output::eprint_db_error(
+                            &e,
+                            Some(&sql),
+                            settings.verbose_errors,
+                        ),
                     }
                 }
                 HandleLineResult::Continue
@@ -5683,7 +5750,11 @@ async fn handle_ai_explain(
     let raw_messages = match messages_result {
         Ok(msgs) => msgs,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(&target_query),
+                settings.verbose_errors,
+            );
             return;
         }
     };
@@ -5867,7 +5938,11 @@ async fn handle_ai_optimize(
     let raw_messages = match client.simple_query(&explain_sql).await {
         Ok(msgs) => msgs,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            crate::output::eprint_db_error(
+                &e,
+                Some(&target_query),
+                settings.verbose_errors,
+            );
             return;
         }
     };

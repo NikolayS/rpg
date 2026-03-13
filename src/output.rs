@@ -507,6 +507,26 @@ pub fn format_pg_error(
     out
 }
 
+/// Print a `tokio_postgres::Error` to stderr in psql style.
+///
+/// Convenience wrapper around [`format_pg_error`] for call sites that do
+/// not need the string representation.  `sql` is the original query text
+/// (used to render the position marker); pass `None` when unavailable.
+/// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
+pub fn eprint_db_error(
+    err: &tokio_postgres::Error,
+    sql: Option<&str>,
+    verbose: bool,
+) {
+    let cfg = OutputConfig {
+        verbose_errors: verbose,
+        ..OutputConfig::default()
+    };
+    let msg = format_pg_error(err, sql, &cfg);
+    // format_pg_error always ends with a newline; use eprint! to avoid double.
+    eprint!("{msg}");
+}
+
 /// Write the `LINE N: …` context and the `^` position marker.
 fn write_error_position(out: &mut String, sql: &str, pos: &tokio_postgres::error::ErrorPosition) {
     // Postgres reports `position` as a 1-based byte offset into the query.
@@ -1284,5 +1304,35 @@ mod tests {
         let mut out = String::new();
         format_unaligned(&mut out, &rs, &cfg);
         assert!(out.contains("[NULL]"), "null display: {out}");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_pg_error — non-db-error path
+    // -----------------------------------------------------------------------
+
+    /// Construct a `tokio_postgres::Error` from an I/O error so we can test
+    /// the non-`DbError` branch of `format_pg_error` without a live database.
+    fn make_io_pg_error() -> tokio_postgres::Error {
+        // tokio_postgres::Error::from(io::Error) gives a non-db error.
+        tokio_postgres::Error::__private_api_timeout()
+    }
+
+    #[test]
+    fn test_format_pg_error_non_db_shows_error_prefix() {
+        let e = make_io_pg_error();
+        let cfg = OutputConfig::default();
+        let out = format_pg_error(&e, None, &cfg);
+        assert!(
+            out.starts_with("ERROR:  "),
+            "non-db error should start with ERROR:  — got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_pg_error_ends_with_newline() {
+        let e = make_io_pg_error();
+        let cfg = OutputConfig::default();
+        let out = format_pg_error(&e, None, &cfg);
+        assert!(out.ends_with('\n'), "output should end with newline: {out:?}");
     }
 }
