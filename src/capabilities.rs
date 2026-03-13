@@ -62,12 +62,7 @@ impl DbCapabilities {
 
 /// Parse the major version from a PG version string like `"16.2"` or `"14.11 (Ubuntu)"`.
 fn parse_pg_major_version(version_str: &str) -> Option<u32> {
-    version_str
-        .split('.')
-        .next()?
-        .trim()
-        .parse()
-        .ok()
+    version_str.split('.').next()?.trim().parse().ok()
 }
 
 // ---------------------------------------------------------------------------
