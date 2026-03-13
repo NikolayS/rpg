@@ -48,12 +48,9 @@ pub struct OutputConfig {
     pub expanded: bool,
     /// Unaligned output mode (-A).  When `true`, cells are separated by
     /// `field_separator` rather than being padded to column widths.
-    // TODO(issue #21): wire into format_aligned / format_expanded
-    #[allow(dead_code)]
+    /// Used by [`format_outcome`] to dispatch to unaligned rendering.
     pub no_align: bool,
     /// Tuples-only mode (-t).  Suppresses column headers and row-count footer.
-    // TODO(issue #21): suppress header/footer when true
-    #[allow(dead_code)]
     pub tuples_only: bool,
     /// Show verbose error detail including SQLSTATE.
     /// psql does not show SQLSTATE by default; set this for `\set VERBOSITY verbose`.
@@ -180,7 +177,15 @@ pub fn format_outcome(outcome: &QueryOutcome, cfg: &OutputConfig) -> String {
     for (idx, result) in outcome.results.iter().enumerate() {
         match result {
             StatementResult::Rows(rs) => {
-                if cfg.expanded {
+                if cfg.no_align {
+                    // Unaligned mode: build a minimal PsetConfig and delegate.
+                    let pcfg = PsetConfig {
+                        format: OutputFormat::Unaligned,
+                        tuples_only: cfg.tuples_only,
+                        ..PsetConfig::default()
+                    };
+                    format_unaligned(&mut out, rs, &pcfg);
+                } else if cfg.expanded {
                     format_expanded(&mut out, rs, cfg);
                 } else {
                     format_aligned(&mut out, rs, cfg);
@@ -225,18 +230,24 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
     let rows = &rs.rows;
 
     if cols.is_empty() {
-        // No columns: just print the row count footer.
-        write_row_count(out, rows.len());
+        // No columns: just print the row count footer (suppressed in tuples-only).
+        if !cfg.tuples_only {
+            write_row_count(out, rows.len());
+        }
         return rows.len();
     }
 
     // Calculate column widths: max(header width, max data width).
     let widths = column_widths(cols, rows, cfg);
 
-    // Header row — psql center-aligns text headers and right-aligns numeric ones.
-    write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
-    // Separator.
-    write_separator(out, &widths);
+    // Header row — suppressed in tuples-only mode.
+    if !cfg.tuples_only {
+        // psql center-aligns text headers and right-aligns numeric ones.
+        write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
+        // Separator.
+        write_separator(out, &widths);
+    }
+
     // Data rows.
     for row in rows {
         write_aligned_row(
@@ -252,8 +263,10 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
         );
     }
 
-    // Footer.
-    write_row_count(out, rows.len());
+    // Footer — suppressed in tuples-only mode.
+    if !cfg.tuples_only {
+        write_row_count(out, rows.len());
+    }
 
     rows.len()
 }
@@ -386,7 +399,10 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
     let rows = &rs.rows;
 
     if rows.is_empty() {
-        out.push_str("(0 rows)\n");
+        // In tuples-only mode psql omits the "(0 rows)" footer.
+        if !cfg.tuples_only {
+            out.push_str("(0 rows)\n");
+        }
         return;
     }
 
@@ -414,8 +430,10 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .unwrap_or(max_name_width + 3);
 
     for (rec_idx, row) in rows.iter().enumerate() {
-        // Record header: `-[ RECORD N ]---`
-        write_expanded_header(out, rec_idx + 1, max_data_width);
+        // Record header: `-[ RECORD N ]---` — suppressed in tuples-only mode.
+        if !cfg.tuples_only {
+            write_expanded_header(out, rec_idx + 1, max_data_width);
+        }
 
         for (i, col) in cols.iter().enumerate() {
             let val = row
@@ -1085,6 +1103,123 @@ mod tests {
             "header line should be 16 chars wide, got: {first_line:?}"
         );
         assert_eq!(first_line, "-[ RECORD 1 ]---");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_aligned tuples_only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_aligned_tuples_only_suppresses_header_and_footer() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![
+                mk_row(&[Some("1"), Some("Alice")]),
+                mk_row(&[Some("2"), Some("Bob")]),
+            ],
+        };
+        let mut out = String::new();
+        let cfg = OutputConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        format_aligned(&mut out, &rs, &cfg);
+        // Data rows must be present.
+        assert!(out.contains("Alice"), "data row missing: {out}");
+        assert!(out.contains("Bob"), "data row missing: {out}");
+        // Header, separator, and row-count footer must be absent.
+        assert!(!out.contains("id"), "header should be suppressed: {out}");
+        assert!(
+            !out.contains("-+-"),
+            "separator should be suppressed: {out}"
+        );
+        assert!(!out.contains("rows)"), "footer should be suppressed: {out}");
+    }
+
+    #[test]
+    fn test_aligned_tuples_only_empty_rows_no_footer() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true)],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        let cfg = OutputConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        format_aligned(&mut out, &rs, &cfg);
+        assert!(
+            out.is_empty(),
+            "tuples-only with no rows should produce no output: {out:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // format_expanded tuples_only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_expanded_tuples_only_suppresses_record_header() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![mk_row(&[Some("1"), Some("Alice")])],
+        };
+        let mut out = String::new();
+        let cfg = OutputConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        format_expanded(&mut out, &rs, &cfg);
+        // Data values must be present.
+        assert!(out.contains("Alice"), "value missing: {out}");
+        // Record header must be suppressed.
+        assert!(
+            !out.contains("-[ RECORD"),
+            "record header should be suppressed: {out}"
+        );
+    }
+
+    #[test]
+    fn test_expanded_tuples_only_empty_no_footer() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true)],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        let cfg = OutputConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        format_expanded(&mut out, &rs, &cfg);
+        assert!(
+            out.is_empty(),
+            "tuples-only with empty rows should produce no output: {out:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // format_outcome no_align dispatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_outcome_no_align_uses_unaligned_format() {
+        use crate::query::{QueryOutcome, RowSet, StatementResult};
+        let rs = RowSet {
+            columns: vec![mk_col("a", false), mk_col("b", false)],
+            rows: vec![mk_row(&[Some("1"), Some("2")])],
+        };
+        let outcome = QueryOutcome {
+            results: vec![StatementResult::Rows(rs)],
+            duration: Duration::ZERO,
+        };
+        let cfg = OutputConfig {
+            no_align: true,
+            ..Default::default()
+        };
+        let out = format_outcome(&outcome, &cfg);
+        // Unaligned: header + data row separated by `|`, no padding.
+        assert!(out.contains("a|b"), "expected unaligned header: {out}");
+        assert!(out.contains("1|2"), "expected unaligned data: {out}");
     }
 
     // -----------------------------------------------------------------------
