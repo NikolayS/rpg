@@ -2788,6 +2788,16 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [x] `pg_stat_progress_*` in `\dba` (VACUUM, CREATE INDEX, CLUSTER, ANALYZE progress monitoring)
 - [x] `\dba waits+` AI interpretation of wait event data (PR #131)
 - [x] `\l` PG version compatibility fix — correct column set for PG 14-18 (PR #123)
+- [x] `\dt`/`\di`/`\dv` specific relation-type titles matching psql (PR #136)
+- [x] Error message display with SQLSTATE, detail, hint, position (PR #137)
+- [x] Multiple `-c` flag support — execute commands sequentially (PR #138)
+- [x] `\copy` column list parsing fix (PR #140)
+- [x] Partial index WHERE clause in `\d` output (PR #145, #147)
+- [x] Verbose describe columns: `\dn+`, `\du+`, `\dv+`, `\dm+`, `\ds+` (PR #146)
+- [x] Persistence column in `\dv+`/`\dm+`/`\ds+` (PR #150)
+- [x] Golden file compat tests for describe commands (PR #133, #139, #147)
+- [x] YOLO autonomy boundary checks L1/L2/L3 (PR #134)
+- [x] `\dba bloat` query fix (PR #135)
 
 ---
 
