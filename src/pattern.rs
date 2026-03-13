@@ -56,6 +56,8 @@ pub fn to_like(pattern: &str) -> String {
 ///
 /// - `"public.users"` → `(Some("public"), "users")`
 /// - `"public.*"` → `(Some("public"), "*")`
+/// - `"*.migrations"` → `(Some("*"), "migrations")`
+/// - `"*.*"` → `(Some("*"), "*")`
 /// - `"users"` → `(None, "users")`
 /// - `"."` → `(Some(""), "")`
 pub fn split_schema(pattern: &str) -> (Option<&str>, &str) {
@@ -72,6 +74,16 @@ pub fn split_schema(pattern: &str) -> (Option<&str>, &str) {
 /// (`*` or `?`).
 fn has_wildcards(pattern: &str) -> bool {
     pattern.contains('*') || pattern.contains('?')
+}
+
+/// Return `true` when a pattern is a pure "match-everything" wildcard.
+///
+/// A pattern of `"*"` (a single bare star) translates to SQL `LIKE '%'` which
+/// matches every row and is therefore a no-op filter.  Detecting this case
+/// lets [`where_clause`] skip the redundant predicate, matching psql behaviour
+/// for patterns like `"*.migrations"` (any schema, name = `migrations`).
+fn is_match_all(pattern: &str) -> bool {
+    pattern == "*"
 }
 
 /// Build a SQL `WHERE` clause fragment for name-pattern filtering.
@@ -91,7 +103,9 @@ fn has_wildcards(pattern: &str) -> bool {
 /// an empty string when `pattern` is `None` (no filter required).
 ///
 /// When the pattern is schema-qualified and `schema_column` is provided, both
-/// columns are filtered.
+/// columns are filtered.  A schema part of `"*"` (match-all wildcard) is
+/// treated as "any schema" and produces no schema predicate, matching psql
+/// behaviour for patterns like `"*.migrations"`.
 ///
 /// The fragment uses single-quoted SQL string literals with the value
 /// SQL-escaped to prevent injection.  When wildcards are present a `LIKE`
@@ -108,7 +122,13 @@ pub fn where_clause(pattern: Option<&str>, column: &str, schema_column: Option<&
         let (schema_pat, name_pat) = split_schema(pat);
 
         if let Some(sp) = schema_pat {
-            let schema_clause = build_name_clause(sp, sc);
+            // Skip schema filter when the schema part is a bare "*" — it
+            // matches every schema and would produce a no-op LIKE '%'.
+            let schema_clause = if is_match_all(sp) {
+                String::new()
+            } else {
+                build_name_clause(sp, sc)
+            };
             let name_clause = build_name_clause(name_pat, column);
 
             if schema_clause.is_empty() && name_clause.is_empty() {
@@ -312,6 +332,71 @@ mod tests {
             where_clause(Some(".users"), "relname", Some("nspname")),
             "relname = 'users'"
         );
+    }
+
+    #[test]
+    fn where_clause_wildcard_schema_exact_name() {
+        // "*.migrations" — any schema, exact name "migrations".
+        // The wildcard schema part ("*") must not produce a no-op predicate.
+        assert_eq!(
+            where_clause(Some("*.migrations"), "relname", Some("nspname")),
+            "relname = 'migrations'"
+        );
+    }
+
+    #[test]
+    fn where_clause_wildcard_name_no_dot() {
+        // "*orders*" — no dot, so treated as a name-only pattern.
+        assert_eq!(
+            where_clause(Some("*orders*"), "relname", Some("nspname")),
+            "relname LIKE '%orders%' ESCAPE '\\'"
+        );
+    }
+
+    #[test]
+    fn where_clause_wildcard_schema_wildcard_name() {
+        // "*.*" — any schema, any name.  Schema part "*" is dropped (no-op);
+        // name part "*" maps to LIKE '%' (match-all, same as public.*).
+        assert_eq!(
+            where_clause(Some("*.*"), "relname", Some("nspname")),
+            "relname LIKE '%' ESCAPE '\\'"
+        );
+    }
+
+    #[test]
+    fn where_clause_wildcard_schema_wildcard_name_fragment() {
+        // "*.order*" — any schema, name starts with "order".
+        assert_eq!(
+            where_clause(Some("*.order*"), "relname", Some("nspname")),
+            "relname LIKE 'order%' ESCAPE '\\'"
+        );
+    }
+
+    #[test]
+    fn where_clause_schema_wildcard_name_fragment() {
+        // "pub*.users" — schema starts with "pub", exact name "users".
+        assert_eq!(
+            where_clause(Some("pub*.users"), "relname", Some("nspname")),
+            "nspname LIKE 'pub%' ESCAPE '\\' AND relname = 'users'"
+        );
+    }
+
+    // -- split_schema (schema-qualified wildcard patterns) --------------------
+
+    #[test]
+    fn split_schema_wildcard_schema() {
+        assert_eq!(split_schema("*.migrations"), (Some("*"), "migrations"));
+    }
+
+    #[test]
+    fn split_schema_both_wildcards() {
+        assert_eq!(split_schema("*.*"), (Some("*"), "*"));
+    }
+
+    #[test]
+    fn split_schema_wildcard_name_no_dot() {
+        // No dot — whole token is the name, schema is None.
+        assert_eq!(split_schema("*orders*"), (None, "*orders*"));
     }
 
     // -- to_regex --------------------------------------------------------------
