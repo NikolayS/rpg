@@ -160,6 +160,73 @@ impl IndexHealthReport {
     }
 }
 
+impl IndexFinding {
+    /// Convert this finding into an [`ActionProposal`] for Supervised mode.
+    ///
+    /// Returns `None` for findings without a concrete suggested action
+    /// (e.g., missing index findings that require query analysis first).
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        let action = self.suggested_action.as_ref()?;
+
+        let risk = match self.kind {
+            FindingKind::Invalid => {
+                "Dropping and recreating an invalid index is low-risk. \
+                 The index is already unusable."
+            }
+            FindingKind::Unused => {
+                "Dropping an unused index frees disk space and reduces write overhead. \
+                 Verify the index has been unused for a sufficient period."
+            }
+            FindingKind::Redundant => {
+                "Dropping a redundant index is safe — the covering index handles \
+                 the same queries. Verify in a staging environment first."
+            }
+            FindingKind::Bloated => {
+                "REINDEX CONCURRENTLY rebuilds the index without blocking writes. \
+                 May cause temporary increased I/O."
+            }
+            FindingKind::MissingIndex => return None,
+        };
+
+        let expected = match self.kind {
+            FindingKind::Invalid => "Remove invalid index, recreate cleanly".to_owned(),
+            FindingKind::Unused => {
+                let size = self
+                    .size_bytes
+                    .map_or_else(String::new, |b| format!(", freeing {}", format_bytes(b)));
+                format!("Drop unused index {}{size}", self.index_name)
+            }
+            FindingKind::Redundant => format!(
+                "Drop redundant index {}, reducing write amplification",
+                self.index_name
+            ),
+            FindingKind::Bloated => format!("Rebuild index {} to reclaim space", self.index_name),
+            FindingKind::MissingIndex => return None,
+        };
+
+        Some(crate::governance::ActionProposal {
+            feature: crate::governance::FeatureArea::IndexHealth,
+            severity: self.severity,
+            evidence_class: self.evidence_class,
+            finding: self.description.clone(),
+            proposed_action: action.clone(),
+            expected_outcome: expected,
+            risk: risk.to_owned(),
+            created_at: std::time::SystemTime::now(),
+        })
+    }
+}
+
+impl IndexHealthReport {
+    /// Convert all actionable findings into proposals for Supervised mode.
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(IndexFinding::to_proposal)
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SQL queries
 // ---------------------------------------------------------------------------
@@ -621,5 +688,74 @@ mod tests {
     fn bloated_indexes_sql_has_threshold() {
         assert!(BLOATED_INDEXES_SQL.contains("10485760")); // 10 MB minimum.
         assert!(BLOATED_INDEXES_SQL.contains("0.3")); // 30% bloat threshold.
+    }
+
+    #[test]
+    fn finding_to_proposal_with_action() {
+        let finding = IndexFinding {
+            kind: FindingKind::Unused,
+            schema: "public".to_owned(),
+            table: "orders".to_owned(),
+            index_name: "idx_old".to_owned(),
+            description: "Unused index".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: Some("DROP INDEX CONCURRENTLY public.idx_old".to_owned()),
+            size_bytes: Some(1_048_576),
+        };
+        let proposal = finding.to_proposal().unwrap();
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::IndexHealth
+        );
+        assert!(proposal.proposed_action.contains("DROP INDEX"));
+    }
+
+    #[test]
+    fn finding_to_proposal_missing_index_returns_none() {
+        let finding = IndexFinding {
+            kind: FindingKind::MissingIndex,
+            schema: "public".to_owned(),
+            table: "big_table".to_owned(),
+            index_name: String::new(),
+            description: "High seq scan count".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: None,
+            size_bytes: None,
+        };
+        assert!(finding.to_proposal().is_none());
+    }
+
+    #[test]
+    fn report_to_proposals_filters_actionable() {
+        let report = IndexHealthReport {
+            findings: vec![
+                IndexFinding {
+                    kind: FindingKind::Unused,
+                    schema: "s".to_owned(),
+                    table: "t".to_owned(),
+                    index_name: "idx1".to_owned(),
+                    description: "unused".to_owned(),
+                    severity: Severity::Warning,
+                    evidence_class: EvidenceClass::Heuristic,
+                    suggested_action: Some("DROP INDEX CONCURRENTLY s.idx1".to_owned()),
+                    size_bytes: None,
+                },
+                IndexFinding {
+                    kind: FindingKind::MissingIndex,
+                    schema: "s".to_owned(),
+                    table: "t2".to_owned(),
+                    index_name: String::new(),
+                    description: "missing".to_owned(),
+                    severity: Severity::Warning,
+                    evidence_class: EvidenceClass::Heuristic,
+                    suggested_action: None,
+                    size_bytes: None,
+                },
+            ],
+        };
+        let proposals = report.to_proposals();
+        assert_eq!(proposals.len(), 1);
     }
 }

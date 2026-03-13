@@ -16,9 +16,15 @@ use tokio_postgres::Client;
 ///
 /// `subcommand` is the first word after `\dba` (e.g. `"activity"`, `"locks"`).
 /// `verbose` is `true` when the `+` modifier was specified.
+/// `governance` is used for Supervised mode checks (index health proposals).
 ///
 /// Returns `true` if the subcommand was recognised, `false` otherwise.
-pub async fn execute(client: &Client, subcommand: &str, verbose: bool) -> bool {
+pub async fn execute(
+    client: &Client,
+    subcommand: &str,
+    verbose: bool,
+    governance: Option<&crate::config::GovernanceConfig>,
+) -> bool {
     match subcommand {
         "activity" | "act" => {
             dba_activity(client, verbose).await;
@@ -69,7 +75,7 @@ pub async fn execute(client: &Client, subcommand: &str, verbose: bool) -> bool {
             true
         }
         "indexes" | "idx" => {
-            dba_indexes(client, verbose).await;
+            dba_indexes(client, verbose, governance).await;
             true
         }
         "" | "help" => {
@@ -463,9 +469,25 @@ async fn dba_waits(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_indexes(client: &Client, _verbose: bool) {
+async fn dba_indexes(
+    client: &Client,
+    _verbose: bool,
+    governance: Option<&crate::config::GovernanceConfig>,
+) {
     let report = crate::index_health::analyze(client).await;
     report.display();
+
+    // In Supervised mode, offer to execute proposed remediation actions.
+    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
+        g.autonomy_for(crate::governance::FeatureArea::IndexHealth)
+    });
+    if autonomy == crate::governance::AutonomyLevel::Supervised {
+        let proposals = report.to_proposals();
+        if !proposals.is_empty() {
+            let mut audit_log = crate::governance::AuditLog::new();
+            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
+        }
+    }
 }
 
 async fn dba_config(client: &Client, _verbose: bool) {
