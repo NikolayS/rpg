@@ -885,7 +885,7 @@ order by 1"
 // ---------------------------------------------------------------------------
 
 async fn list_tablespaces(client: &Client, meta: &ParsedMeta) -> bool {
-    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "t.spcname", None);
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "spcname", None);
 
     let where_clause = if name_filter.is_empty() {
         String::new()
@@ -893,15 +893,34 @@ async fn list_tablespaces(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {name_filter}")
     };
 
-    let sql = format!(
-        "select
-    t.spcname as \"Name\",
-    pg_catalog.pg_get_userbyid(t.spcowner) as \"Owner\",
-    pg_catalog.pg_tablespace_location(t.oid) as \"Location\"
-from pg_catalog.pg_tablespace as t
+    let sql = if meta.plus {
+        format!(
+            "select
+    spcname as \"Name\",
+    pg_catalog.pg_get_userbyid(spcowner) as \"Owner\",
+    pg_catalog.pg_tablespace_location(oid) as \"Location\",
+    case when pg_catalog.array_length(spcacl, 1) = 0
+         then '(none)'
+         else pg_catalog.array_to_string(spcacl, E'\\n')
+    end as \"Access privileges\",
+    spcoptions as \"Options\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_tablespace_size(oid)) as \"Size\",
+    pg_catalog.shobj_description(oid, 'pg_tablespace') as \"Description\"
+from pg_catalog.pg_tablespace
 {where_clause}
 order by 1"
-    );
+        )
+    } else {
+        format!(
+            "select
+    spcname as \"Name\",
+    pg_catalog.pg_get_userbyid(spcowner) as \"Owner\",
+    pg_catalog.pg_tablespace_location(oid) as \"Location\"
+from pg_catalog.pg_tablespace
+{where_clause}
+order by 1"
+        )
+    };
 
     run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of tablespaces")).await
 }
@@ -1720,7 +1739,8 @@ order by 1"
 /// List operators.
 ///
 /// Matches psql's `\do [pattern]` output: Schema, Name, Left arg type,
-/// Right arg type, Result type.  With `+`, also adds a Description column.
+/// Right arg type, Result type, Description.  With `+`, Description uses the
+/// same coalesce but the query is otherwise identical.
 async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "o.oprname", Some("n.nspname"));
@@ -1728,7 +1748,13 @@ async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
     let sys_filter = if meta.system {
         String::new()
     } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+    };
+
+    let visibility_filter = if meta.system {
+        String::new()
+    } else {
+        "pg_catalog.pg_operator_is_visible(o.oid)".to_owned()
     };
 
     let where_parts: Vec<&str> = [
@@ -1736,6 +1762,11 @@ async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
             None
         } else {
             Some(sys_filter.as_str())
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
         },
         if name_filter.is_empty() {
             None
@@ -1753,40 +1784,28 @@ async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {}", where_parts.join("\n    and "))
     };
 
-    let sql = if meta.plus {
-        format!(
-            "select
+    // Both basic and verbose queries include Description; psql always shows it.
+    let sql = format!(
+        "select
     n.nspname as \"Schema\",
     o.oprname as \"Name\",
     case when o.oprkind = 'l' then null
          else pg_catalog.format_type(o.oprleft, null)
     end as \"Left arg type\",
-    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
+    case when o.oprkind = 'r' then null
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
     pg_catalog.format_type(o.oprresult, null) as \"Result type\",
-    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'), '') as \"Description\"
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'),
+             pg_catalog.obj_description(o.oprcode, 'pg_proc')) as \"Description\"
 from pg_catalog.pg_operator as o
 left join pg_catalog.pg_namespace as n
     on n.oid = o.oprnamespace
 {where_clause}
 order by 1, 2, 3, 4"
-        )
-    } else {
-        format!(
-            "select
-    n.nspname as \"Schema\",
-    o.oprname as \"Name\",
-    case when o.oprkind = 'l' then null
-         else pg_catalog.format_type(o.oprleft, null)
-    end as \"Left arg type\",
-    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
-    pg_catalog.format_type(o.oprresult, null) as \"Result type\"
-from pg_catalog.pg_operator as o
-left join pg_catalog.pg_namespace as n
-    on n.oid = o.oprnamespace
-{where_clause}
-order by 1, 2, 3, 4"
-        )
-    };
+    );
+
+    let _ = meta.plus; // both modes use the same query
 
     run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of operators")).await
 }
@@ -3005,8 +3024,11 @@ order by 1";
     // list_operators SQL generation
     // -----------------------------------------------------------------------
 
-    /// Verify that the non-verbose SQL for `\do` includes the five expected
-    /// columns and queries `pg_operator`.
+    /// Verify that the non-verbose SQL for `\do` includes all six expected
+    /// columns (including Description) and queries `pg_operator`.
+    ///
+    /// Bug #188: psql's basic `\do` always shows Description; samo previously
+    /// omitted it from the non-verbose path.
     #[test]
     fn list_operators_sql_has_expected_columns() {
         let sql = "select
@@ -3015,8 +3037,12 @@ order by 1";
     case when o.oprkind = 'l' then null
          else pg_catalog.format_type(o.oprleft, null)
     end as \"Left arg type\",
-    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
-    pg_catalog.format_type(o.oprresult, null) as \"Result type\"
+    case when o.oprkind = 'r' then null
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\",
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'),
+             pg_catalog.obj_description(o.oprcode, 'pg_proc')) as \"Description\"
 from pg_catalog.pg_operator as o
 left join pg_catalog.pg_namespace as n
     on n.oid = o.oprnamespace
@@ -3040,17 +3066,29 @@ order by 1, 2, 3, 4";
             "SQL must have Result type column: {sql}"
         );
         assert!(
+            sql.contains("\"Description\""),
+            "basic SQL must have Description column: {sql}"
+        );
+        assert!(
             sql.contains("pg_operator"),
             "SQL must query pg_operator: {sql}"
         );
+        // Right arg type must also use a CASE for oprkind='r' (unary left ops).
         assert!(
-            !sql.contains("\"Description\""),
-            "non-verbose SQL must not have Description: {sql}"
+            sql.contains("oprkind = 'r'"),
+            "SQL must guard Right arg type with oprkind = 'r': {sql}"
+        );
+        // Description must coalesce operator description with proc description.
+        assert!(
+            sql.contains("pg_proc"),
+            "Description must fall back to pg_proc description: {sql}"
         );
     }
 
-    /// Verify that verbose `\do+` SQL adds a Description column via
-    /// `obj_description`.
+    /// Verify that verbose `\do+` SQL also includes a Description column.
+    ///
+    /// After bug #188 the basic and verbose queries are identical; this test
+    /// guards that the column is present regardless of the plus flag.
     #[test]
     fn list_operators_plus_sql_has_description_column() {
         let sql = "select
@@ -3059,9 +3097,12 @@ order by 1, 2, 3, 4";
     case when o.oprkind = 'l' then null
          else pg_catalog.format_type(o.oprleft, null)
     end as \"Left arg type\",
-    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
+    case when o.oprkind = 'r' then null
+         else pg_catalog.format_type(o.oprright, null)
+    end as \"Right arg type\",
     pg_catalog.format_type(o.oprresult, null) as \"Result type\",
-    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'), '') as \"Description\"
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'),
+             pg_catalog.obj_description(o.oprcode, 'pg_proc')) as \"Description\"
 from pg_catalog.pg_operator as o
 left join pg_catalog.pg_namespace as n
     on n.oid = o.oprnamespace
@@ -3081,11 +3122,14 @@ order by 1, 2, 3, 4";
         );
     }
 
-    /// Verify that the system filter excludes `pg_catalog` when `S` is not set.
+    /// Verify that the system filter uses `<>` (not `not in`) and includes
+    /// `pg_operator_is_visible`, matching psql's exact query.
     #[test]
     fn list_operators_system_filter_excludes_pg_catalog() {
-        let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema')";
-        let where_clause = format!("where {sys_filter}");
+        let sys_filter =
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'";
+        let visibility_filter = "pg_catalog.pg_operator_is_visible(o.oid)";
+        let where_clause = format!("where {sys_filter}\n    and {visibility_filter}");
 
         assert!(
             where_clause.contains("pg_catalog"),
@@ -3094,6 +3138,14 @@ order by 1, 2, 3, 4";
         assert!(
             where_clause.contains("information_schema"),
             "system filter must reference information_schema: {where_clause}"
+        );
+        assert!(
+            where_clause.contains("pg_operator_is_visible"),
+            "filter must include visibility check: {where_clause}"
+        );
+        assert!(
+            !where_clause.contains("not in"),
+            "filter must use <> not 'not in': {where_clause}"
         );
     }
 
@@ -3110,6 +3162,94 @@ order by 1, 2, 3, 4";
         assert!(
             where_clause.contains("my_op"),
             "filter must include pattern value: {where_clause}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_tablespaces SQL generation — \db+ verbose columns (#178)
+    // -----------------------------------------------------------------------
+
+    /// Verify that the basic `\db` SQL includes the three expected columns
+    /// and does NOT include the verbose-only columns.
+    #[test]
+    fn list_tablespaces_sql_has_basic_columns() {
+        let sql = "select
+    spcname as \"Name\",
+    pg_catalog.pg_get_userbyid(spcowner) as \"Owner\",
+    pg_catalog.pg_tablespace_location(oid) as \"Location\"
+from pg_catalog.pg_tablespace
+order by 1";
+
+        assert!(sql.contains("\"Name\""), "SQL must have Name column: {sql}");
+        assert!(
+            sql.contains("\"Owner\""),
+            "SQL must have Owner column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Location\""),
+            "SQL must have Location column: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Access privileges\""),
+            "basic SQL must not have Access privileges: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Size\""),
+            "basic SQL must not have Size: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Description\""),
+            "basic SQL must not have Description: {sql}"
+        );
+    }
+
+    /// Verify that verbose `\db+` SQL adds Access privileges, Options, Size,
+    /// and Description columns, matching psql's exact query.
+    ///
+    /// Bug #178: samo previously had no plus branch for `\db`.
+    #[test]
+    fn list_tablespaces_plus_sql_has_verbose_columns() {
+        let sql = "select
+    spcname as \"Name\",
+    pg_catalog.pg_get_userbyid(spcowner) as \"Owner\",
+    pg_catalog.pg_tablespace_location(oid) as \"Location\",
+    case when pg_catalog.array_length(spcacl, 1) = 0
+         then '(none)'
+         else pg_catalog.array_to_string(spcacl, E'\\n')
+    end as \"Access privileges\",
+    spcoptions as \"Options\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_tablespace_size(oid)) as \"Size\",
+    pg_catalog.shobj_description(oid, 'pg_tablespace') as \"Description\"
+from pg_catalog.pg_tablespace
+order by 1";
+
+        assert!(
+            sql.contains("\"Access privileges\""),
+            "verbose SQL must have Access privileges: {sql}"
+        );
+        assert!(
+            sql.contains("\"Options\""),
+            "verbose SQL must have Options: {sql}"
+        );
+        assert!(
+            sql.contains("\"Size\""),
+            "verbose SQL must have Size: {sql}"
+        );
+        assert!(
+            sql.contains("\"Description\""),
+            "verbose SQL must have Description: {sql}"
+        );
+        assert!(
+            sql.contains("pg_tablespace_size"),
+            "verbose SQL must use pg_tablespace_size: {sql}"
+        );
+        assert!(
+            sql.contains("shobj_description"),
+            "verbose SQL must use shobj_description: {sql}"
+        );
+        assert!(
+            sql.contains("spcacl"),
+            "verbose SQL must reference spcacl for Access privileges: {sql}"
         );
     }
 
