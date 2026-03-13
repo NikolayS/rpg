@@ -2868,20 +2868,61 @@ async fn watch_query(client: &Client, sql: &str, interval_secs: f64, settings: &
     }
 }
 
+/// Parse a duration string like `"30s"`, `"5m"`, `"1h"`.
+///
+/// Returns `None` for invalid input.
+fn parse_duration(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('s') {
+        (n, 1u64)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3600)
+    } else {
+        // Bare number defaults to seconds.
+        (s, 1)
+    };
+    let num: u64 = num_str.parse().ok()?;
+    Some(std::time::Duration::from_secs(num * multiplier))
+}
+
 /// Run the observe loop — periodic database health snapshots.
 ///
 /// Polls key diagnostic views every 10 seconds and prints a timestamped
-/// summary.  Exits on Ctrl-C.  After exiting, offers an AI-generated
-/// summary of the observation period.
+/// summary.  Exits on Ctrl-C or when `duration_arg` elapses.  After
+/// exiting, offers an AI-generated summary of the observation period.
 #[allow(clippy::too_many_lines)]
-async fn observe_loop(client: &Client, settings: &mut ReplSettings, params: &ConnParams) {
+async fn observe_loop(
+    client: &Client,
+    settings: &mut ReplSettings,
+    params: &ConnParams,
+    duration_arg: Option<&str>,
+) {
     use std::fmt::Write as _;
     use std::time::Duration;
     use tokio::signal;
     use tokio::time::sleep;
 
-    eprintln!("-- Observing (Ctrl-C to stop)...");
+    let total_duration = duration_arg.and_then(parse_duration);
 
+    if let Some(d) = total_duration {
+        eprintln!(
+            "-- Observing for {}s (Ctrl-C to stop early)...",
+            d.as_secs()
+        );
+    } else {
+        if duration_arg.is_some() {
+            eprintln!("-- Invalid duration. Use e.g. \\observe 30s, \\observe 5m, \\observe 1h");
+            return;
+        }
+        eprintln!("-- Observing (Ctrl-C to stop)...");
+    }
+
+    let start = std::time::Instant::now();
     let mut snapshots: Vec<String> = Vec::new();
     let interval = Duration::from_secs(10);
 
@@ -2989,9 +3030,24 @@ async fn observe_loop(client: &Client, settings: &mut ReplSettings, params: &Con
         eprintln!("{report}");
         snapshots.push(report);
 
+        // Check if duration has elapsed.
+        if let Some(d) = total_duration {
+            if start.elapsed() >= d {
+                break;
+            }
+        }
+
         // Sleep for the interval, exit on Ctrl-C.
+        let remaining = total_duration.map(|d| d.saturating_sub(start.elapsed()));
+        let sleep_time = match remaining {
+            Some(r) if r < interval => r,
+            _ => interval,
+        };
+        if sleep_time.is_zero() {
+            break;
+        }
         tokio::select! {
-            () = sleep(interval) => {},
+            () = sleep(sleep_time) => {},
             _ = signal::ctrl_c() => {
                 break;
             },
@@ -3339,7 +3395,7 @@ async fn dispatch_meta(
             return MetaResult::SetExecMode(ExecMode::Yolo);
         }
         MetaCmd::ObserveMode => {
-            observe_loop(client, settings, params).await;
+            observe_loop(client, settings, params, parsed.pattern.as_deref()).await;
             return MetaResult::Continue;
         }
         MetaCmd::InteractiveMode => {
@@ -7289,5 +7345,57 @@ mod tests {
     fn tokens_used_default_is_zero() {
         let s = ReplSettings::default();
         assert_eq!(s.tokens_used, 0);
+    }
+
+    // -- parse_duration --------------------------------------------------------
+
+    #[test]
+    fn parse_duration_seconds() {
+        assert_eq!(
+            parse_duration("30s"),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn parse_duration_minutes() {
+        assert_eq!(
+            parse_duration("5m"),
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn parse_duration_hours() {
+        assert_eq!(
+            parse_duration("1h"),
+            Some(std::time::Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn parse_duration_bare_number() {
+        assert_eq!(
+            parse_duration("60"),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn parse_duration_empty() {
+        assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn parse_duration_invalid() {
+        assert_eq!(parse_duration("abc"), None);
+    }
+
+    #[test]
+    fn parse_duration_whitespace_trimmed() {
+        assert_eq!(
+            parse_duration("  10s  "),
+            Some(std::time::Duration::from_secs(10))
+        );
     }
 }
