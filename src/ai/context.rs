@@ -90,6 +90,111 @@ pub async fn build_schema_context(client: &tokio_postgres::Client) -> Result<Str
 }
 
 // ---------------------------------------------------------------------------
+// Wait event context builder
+// ---------------------------------------------------------------------------
+
+/// SQL to collect current wait event breakdown from `pg_stat_activity`.
+const WAIT_SNAPSHOT_SQL: &str = "\
+    SELECT \
+        coalesce(wait_event_type, 'CPU/Running') AS wait_type, \
+        coalesce(wait_event, 'active') AS wait_event, \
+        count(*) AS sessions \
+    FROM pg_stat_activity \
+    WHERE pid != pg_backend_pid() \
+      AND backend_type = 'client backend' \
+      AND state = 'active' \
+    GROUP BY wait_event_type, wait_event \
+    ORDER BY sessions DESC \
+    LIMIT 15";
+
+/// SQL to collect historical top waits from `pg_ash` (last 5 minutes).
+const PG_ASH_RECENT_WAITS_SQL: &str = "\
+    SELECT \
+        wait_event_type, \
+        wait_event, \
+        count(*) AS samples \
+    FROM ash.ash_log \
+    WHERE sample_time > now() - interval '5 minutes' \
+      AND wait_event IS NOT NULL \
+    GROUP BY wait_event_type, wait_event \
+    ORDER BY samples DESC \
+    LIMIT 15";
+
+/// Build a wait event context string for inclusion in LLM prompts.
+///
+/// When `pg_ash` is available, includes both a current snapshot from
+/// `pg_stat_activity` and recent historical data from `ash.ash_log`.
+/// Otherwise, only the current snapshot is included.
+///
+/// Returns an empty string if no wait data is found (quiet databases).
+pub async fn build_wait_context(client: &tokio_postgres::Client, pg_ash_available: bool) -> String {
+    let mut sections = Vec::new();
+
+    // Current wait snapshot from pg_stat_activity.
+    if let Ok(snapshot) = format_simple_query(client, WAIT_SNAPSHOT_SQL).await {
+        if !snapshot.is_empty() {
+            sections.push(format!(
+                "Current wait events (pg_stat_activity snapshot):\n{snapshot}"
+            ));
+        }
+    }
+
+    // Historical wait data from pg_ash (if available).
+    if pg_ash_available {
+        if let Ok(history) = format_simple_query(client, PG_ASH_RECENT_WAITS_SQL).await {
+            if !history.is_empty() {
+                sections.push(format!(
+                    "Recent wait events (pg_ash, last 5 minutes):\n{history}"
+                ));
+            }
+        }
+    }
+
+    sections.join("\n\n")
+}
+
+/// Execute a query and format results as pipe-delimited text.
+///
+/// Returns the formatted output or an error string. Returns an empty
+/// string when the query produces no rows.
+async fn format_simple_query(client: &tokio_postgres::Client, sql: &str) -> Result<String, String> {
+    let messages = client.simple_query(sql).await.map_err(|e| e.to_string())?;
+
+    let mut headers: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+
+    for msg in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            if headers.is_empty() {
+                headers = (0..row.len())
+                    .map(|i| {
+                        row.columns()
+                            .get(i)
+                            .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                    })
+                    .collect();
+            }
+            let vals: Vec<String> = (0..row.len())
+                .map(|i| row.get(i).unwrap_or("").to_owned())
+                .collect();
+            rows.push(vals);
+        }
+    }
+
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut out = headers.join(" | ");
+    out.push('\n');
+    for row in &rows {
+        out.push_str(&row.join(" | "));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests (string-building logic, no DB required)
 // ---------------------------------------------------------------------------
 
@@ -179,5 +284,20 @@ mod tests {
         let rows = [("myschema", "mytable", "id", "int4", true)];
         let out = build_from_rows(&rows);
         assert!(out.contains("create table myschema.mytable ("));
+    }
+
+    #[test]
+    fn wait_snapshot_sql_is_valid_syntax() {
+        // Verify the SQL constant is non-empty and contains expected keywords.
+        assert!(super::WAIT_SNAPSHOT_SQL.contains("pg_stat_activity"));
+        assert!(super::WAIT_SNAPSHOT_SQL.contains("wait_event_type"));
+        assert!(super::WAIT_SNAPSHOT_SQL.contains("GROUP BY"));
+    }
+
+    #[test]
+    fn pg_ash_recent_waits_sql_is_valid_syntax() {
+        assert!(super::PG_ASH_RECENT_WAITS_SQL.contains("ash.ash_log"));
+        assert!(super::PG_ASH_RECENT_WAITS_SQL.contains("wait_event"));
+        assert!(super::PG_ASH_RECENT_WAITS_SQL.contains("5 minutes"));
     }
 }

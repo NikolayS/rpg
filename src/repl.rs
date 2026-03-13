@@ -907,6 +907,7 @@ pub async fn execute_query(
     // Skip for statements that are already EXPLAIN, or for
     // non-query statements (SET, BEGIN, COMMIT, etc.).
     let auto_explained;
+    let mut auto_explain_active = false;
     let sql_to_send = if settings.auto_explain == AutoExplain::Off {
         interpolated.as_str()
     } else {
@@ -918,6 +919,7 @@ pub async fn execute_query(
         let already_explain = trimmed_upper.starts_with("EXPLAIN");
         if is_query && !already_explain {
             auto_explained = format!("{}{}", settings.auto_explain.prefix(), interpolated);
+            auto_explain_active = true;
             auto_explained.as_str()
         } else {
             interpolated.as_str()
@@ -959,6 +961,9 @@ pub async fn execute_query(
         None
     };
 
+    // Capture auto-EXPLAIN plan text for optional AI interpretation.
+    let mut auto_explain_plan: Option<String> = None;
+
     let success = match client.simple_query(sql_to_send).await {
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;
@@ -986,6 +991,20 @@ pub async fn execute_query(
                         rows.push(vals);
                     }
                     SimpleQueryMessage::CommandComplete(n) => {
+                        // Capture plan text from auto-EXPLAIN before clearing
+                        // rows. EXPLAIN output is a single-column result set.
+                        if auto_explain_active && result_set_index == 0 {
+                            let plan_text: String = rows
+                                .iter()
+                                .filter_map(|r| r.first())
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !plan_text.is_empty() {
+                                auto_explain_plan = Some(plan_text);
+                            }
+                        }
+
                         // Flush the current result set, then reset for next
                         // statement in a multi-statement query.
                         // Capture rendered output so we can mirror to log.
@@ -1057,6 +1076,12 @@ pub async fn execute_query(
         let elapsed = t.elapsed();
         // Timing always goes to stdout regardless of output redirection.
         println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+    }
+
+    // Auto-EXPLAIN AI interpretation: when AI is configured and auto-EXPLAIN
+    // produced plan output, stream a concise interpretation.
+    if let Some(ref plan_text) = auto_explain_plan {
+        interpret_auto_explain(plan_text, sql, settings).await;
     }
 
     // Store as the last successfully executed query (used by `\watch`).
@@ -4607,6 +4632,71 @@ async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &mut
     }
 }
 
+/// Interpret an auto-EXPLAIN plan with AI.
+///
+/// Called automatically after auto-EXPLAIN output is displayed. Uses a
+/// concise system prompt to produce a brief interpretation of the plan.
+/// Skips silently when AI is not configured or the token budget is exhausted.
+async fn interpret_auto_explain(
+    plan_text: &str,
+    original_query: &str,
+    settings: &mut ReplSettings,
+) {
+    if check_token_budget(settings) {
+        return;
+    }
+
+    let provider_name = match settings.config.ai.provider.as_deref() {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let Ok(provider) = crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) else {
+        return;
+    };
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: "You are a PostgreSQL performance expert. \
+                      Give a brief (2-4 sentence) interpretation of the \
+                      EXPLAIN plan. Focus on: most expensive nodes, \
+                      sequential scans, row estimate errors, and one \
+                      actionable suggestion if applicable."
+                .to_owned(),
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: format!("Query: {original_query}\n\nPlan:\n{plan_text}"),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: 300,
+        temperature: 0.0,
+    };
+
+    if let Ok(result) = provider.complete(&messages, &options).await {
+        record_token_usage(settings, &result);
+        let interpretation = result.content.trim();
+        if !interpretation.is_empty() {
+            eprintln!("\x1b[2m{interpretation}\x1b[0m");
+        }
+    }
+}
+
 async fn stream_completion(
     provider: &dyn crate::ai::LlmProvider,
     messages: &[crate::ai::Message],
@@ -4874,17 +4964,31 @@ async fn handle_ai_ask(
         }
     };
 
+    // Collect wait event context for richer analysis.
+    let wait_ctx = crate::ai::context::build_wait_context(
+        client,
+        settings.db_capabilities.pg_ash.is_available(),
+    )
+    .await;
+
+    let wait_section = if wait_ctx.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nDatabase activity:\n{wait_ctx}")
+    };
+
     let system_content = format!(
         "You are a PostgreSQL expert. \
          Generate SQL queries based on the user's request.\n\
          Database: {dbname}\n\n\
-         Schema:\n{schema}\n\n\
+         Schema:\n{schema}{wait}\n\n\
          Rules:\n\
          - Output ONLY the SQL query, nothing else\n\
          - Use standard PostgreSQL syntax\n\
          - If the request is ambiguous, make reasonable assumptions",
         dbname = params.dbname,
         schema = schema_ctx,
+        wait = wait_section,
     );
 
     // Build messages: system + conversation history + current prompt.
@@ -5342,6 +5446,22 @@ async fn handle_ai_explain(
         }
     };
 
+    // Collect wait event context for performance correlation.
+    let wait_ctx = crate::ai::context::build_wait_context(
+        client,
+        settings.db_capabilities.pg_ash.is_available(),
+    )
+    .await;
+
+    let wait_section = if wait_ctx.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nDatabase activity (use to correlate plan behavior \
+             with current wait patterns):\n{wait_ctx}"
+        )
+    };
+
     let system_content = format!(
         "You are a PostgreSQL performance expert. \
          Analyse the EXPLAIN ANALYZE plan provided by the user and give \
@@ -5349,11 +5469,13 @@ async fn handle_ai_explain(
          - Identify the most expensive nodes\n\
          - Flag sequential scans on large tables\n\
          - Note any high row-estimate errors\n\
-         - Suggest specific indexes or query rewrites when applicable\n\n\
+         - Suggest specific indexes or query rewrites when applicable\n\
+         - If wait event data is provided, correlate plan behavior with waits\n\n\
          Database: {dbname}\n\n\
-         Schema:\n{schema}",
+         Schema:\n{schema}{wait}",
         dbname = params.dbname,
         schema = schema_ctx,
+        wait = wait_section,
     );
 
     let user_content = format!("Query:\n{target_query}\n\nEXPLAIN ANALYZE output:\n{plan_text}");
