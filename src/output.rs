@@ -165,6 +165,11 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         OutputFormat::Json => format_json(out, rs, cfg),
         OutputFormat::Html => format_html(out, rs, cfg),
     }
+
+    // psql always prints a blank line after each result set (the trailing
+    // newline after `(N rows)` plus one more).  Add it here so all formats
+    // get consistent behaviour regardless of whether a footer is shown.
+    out.push('\n');
 }
 
 // ---------------------------------------------------------------------------
