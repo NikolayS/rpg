@@ -398,7 +398,7 @@ async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -
     let is_index_only = relkinds == ["i"];
 
     // Views, materialized views, and sequences use pg_relation_size in verbose
-    // mode and omit the Persistence / Access method columns (matches psql).
+    // mode and omit the Access method column (but do show Persistence).
     let is_view_or_seq = matches!(relkinds, ["v" | "m" | "S"]);
 
     let sql = if meta.plus {
@@ -439,6 +439,12 @@ order by 1, 2"
     c.relname as \"Name\",
     {type_expr} as \"Type\",
     pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
     pg_catalog.pg_size_pretty(pg_catalog.pg_relation_size(c.oid)) as \"Size\",
     coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
 from pg_catalog.pg_class as c
@@ -1962,6 +1968,57 @@ order by 2, 3"
         assert!(
             sql.contains("pg_table_size"),
             "plus SQL should use pg_table_size: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_relations SQL — \dv+/\dm+/\ds+ include Persistence column (#149)
+    // -----------------------------------------------------------------------
+
+    /// Verify that the verbose SQL for views, materialized views, and sequences
+    /// includes the Persistence column (after Owner, before Size) to match psql
+    /// output.  Regression test for bug #149.
+    #[test]
+    fn view_plus_sql_has_persistence_column() {
+        // Replicate the is_view_or_seq branch of list_relations for \dv+.
+        let sql = "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    c.relkind as \"Type\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    case c.relpersistence
+        when 'p' then 'permanent'
+        when 't' then 'temporary'
+        when 'u' then 'unlogged'
+        else c.relpersistence::text
+    end as \"Persistence\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_relation_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+where c.relkind in ('v')
+order by 1, 2";
+
+        assert!(
+            sql.contains("\"Persistence\""),
+            "view plus SQL must have Persistence column: {sql}"
+        );
+        // Persistence must come before Size in the column list.
+        let persistence_pos = sql.find("\"Persistence\"").unwrap();
+        let size_pos = sql.find("\"Size\"").unwrap();
+        assert!(
+            persistence_pos < size_pos,
+            "Persistence must appear before Size: {sql}"
+        );
+        // Access method column should NOT be present for views.
+        assert!(
+            !sql.contains("\"Access method\""),
+            "view plus SQL must NOT have Access method: {sql}"
+        );
+        assert!(
+            sql.contains("pg_relation_size"),
+            "view plus SQL should use pg_relation_size: {sql}"
         );
     }
 }
