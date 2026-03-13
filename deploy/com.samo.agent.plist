@@ -1,0 +1,61 @@
+<!-- Launchd plist for Samo daemon mode (macOS).
+
+Installation:
+  1. Copy binary to /usr/local/bin/samo
+  2. Copy config to /usr/local/etc/samo/config.toml
+  3. Copy this file to ~/Library/LaunchAgents/ (user) or
+     /Library/LaunchDaemons/ (system-wide)
+  4. Load: launchctl load ~/Library/LaunchAgents/com.samo.agent.plist
+
+Environment variables:
+  Set PGHOST, PGPORT, etc. in the EnvironmentVariables dict below,
+  or configure connection details in config.toml.
+-->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.samo.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/samo</string>
+        <string>daemon</string>
+        <string>--config</string>
+        <string>/usr/local/etc/samo/config.toml</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/samo/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/samo/stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Uncomment and set as needed:
+        <key>PGHOST</key>
+        <string>localhost</string>
+        <key>PGPORT</key>
+        <string>5432</string>
+        <key>PGUSER</key>
+        <string>samo</string>
+        <key>PGDATABASE</key>
+        <string>postgres</string>
+        -->
+    </dict>
+</dict>
+</plist>

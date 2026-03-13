@@ -24,6 +24,8 @@ mod highlight;
 #[allow(dead_code)]
 mod index_health;
 mod io;
+#[allow(dead_code)]
+mod issues;
 mod logging;
 mod metacmd;
 mod named;
@@ -41,6 +43,8 @@ mod safety;
 mod session;
 mod setup;
 mod vars;
+#[allow(dead_code)]
+mod verification;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
@@ -303,6 +307,10 @@ struct Cli {
     /// Path to PID file for daemon mode.
     #[arg(long, value_name = "PATH")]
     pid_file: Option<String>,
+
+    /// GitHub repository (owner/repo) for creating issues from findings.
+    #[arg(long, value_name = "OWNER/REPO")]
+    github_repo: Option<String>,
 }
 
 impl Cli {
@@ -641,7 +649,15 @@ async fn main() {
                     });
                 }
 
-                daemon::run(&client, &cfg, &resolved.dbname, &channels, cli.health_port).await;
+                daemon::run(
+                    &client,
+                    &cfg,
+                    &resolved.dbname,
+                    &channels,
+                    cli.health_port,
+                    cli.github_repo.as_deref(),
+                )
+                .await;
 
                 daemon::remove_pid_file(&pid_path);
                 0

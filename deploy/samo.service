@@ -1,0 +1,64 @@
+# Systemd unit file for Samo daemon mode.
+#
+# Installation:
+#   1. Copy this file to /etc/systemd/system/samo.service
+#   2. Copy samo binary to /usr/local/bin/samo
+#   3. Create config: /etc/samo/config.toml
+#   4. Create user:   useradd --system --no-create-home samo
+#   5. Enable:        systemctl enable --now samo
+#
+# Environment variables (set in /etc/samo/env or override file):
+#   PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD (or .pgpass)
+#   ANTHROPIC_API_KEY (optional, for AI features)
+
+[Unit]
+Description=Samo — self-driving Postgres agent
+Documentation=https://github.com/NikolayS/project-alpha
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=samo
+Group=samo
+
+ExecStart=/usr/local/bin/samo daemon --config /etc/samo/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Environment
+EnvironmentFile=-/etc/samo/env
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# Allow writing PID file and logs
+ReadWritePaths=/run/samo /var/log/samo
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# Resource limits
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=samo
+
+[Install]
+WantedBy=multi-user.target

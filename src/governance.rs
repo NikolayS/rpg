@@ -356,6 +356,103 @@ impl Auditor {
 
         AuditDecision::Approved { note: None }
     }
+
+    /// Whether a proposal warrants adversarial LLM review.
+    ///
+    /// Returns `true` for Auto-mode actions or high-severity findings.
+    pub fn needs_llm_review(proposal: &ActionProposal, autonomy: AutonomyLevel) -> bool {
+        autonomy == AutonomyLevel::Auto || proposal.severity == Severity::Critical
+    }
+
+    /// Adversarial LLM review for high-risk actions.
+    ///
+    /// Sends the proposal to a secondary LLM call that specifically looks
+    /// for reasons the action might be unsafe or counterproductive.
+    /// Falls back to rule-based approval if the LLM is unavailable.
+    pub async fn review_with_llm(
+        &self,
+        proposal: &ActionProposal,
+        current_autonomy: AutonomyLevel,
+        provider: &dyn crate::ai::LlmProvider,
+    ) -> AuditDecision {
+        // First, run the rule-based checks.
+        let rule_decision = self.review(proposal, current_autonomy);
+        if matches!(rule_decision, AuditDecision::Rejected { .. }) {
+            return rule_decision;
+        }
+
+        // Only invoke LLM for high-risk proposals.
+        if !Self::needs_llm_review(proposal, current_autonomy) {
+            return rule_decision;
+        }
+
+        // Build the adversarial review prompt.
+        let prompt = format!(
+            "You are a PostgreSQL safety auditor. A monitoring tool proposes the \
+             following action on a production database. Your job is to find reasons \
+             this action might be UNSAFE, COUNTERPRODUCTIVE, or UNNECESSARY.\n\n\
+             Finding: {}\n\
+             Proposed action: {}\n\
+             Expected outcome: {}\n\
+             Risk assessment: {}\n\
+             Severity: {:?}\n\
+             Evidence class: {:?}\n\n\
+             Reply with EXACTLY one of:\n\
+             APPROVE: <one-line reason>\n\
+             REJECT: <one-line reason>\n\n\
+             Be conservative. If in doubt, REJECT.",
+            proposal.finding,
+            proposal.proposed_action,
+            proposal.expected_outcome,
+            proposal.risk,
+            proposal.severity,
+            proposal.evidence_class,
+        );
+
+        let messages = vec![crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: prompt,
+        }];
+        let options = crate::ai::CompletionOptions {
+            max_tokens: 256,
+            temperature: 0.0,
+            ..Default::default()
+        };
+
+        match provider.complete(&messages, &options).await {
+            Ok(result) => parse_llm_audit_response(&result.content),
+            Err(e) => {
+                crate::logging::warn(
+                    "auditor",
+                    &format!("LLM review failed, falling back to rules: {e}"),
+                );
+                // Fail-open: if LLM is unavailable, use rule-based decision.
+                rule_decision
+            }
+        }
+    }
+}
+
+/// Parse the LLM's APPROVE/REJECT response.
+fn parse_llm_audit_response(response: &str) -> AuditDecision {
+    let trimmed = response.trim();
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if let Some(reason) = line.strip_prefix("APPROVE:") {
+            return AuditDecision::Approved {
+                note: Some(format!("[LLM] {}", reason.trim())),
+            };
+        }
+        if let Some(reason) = line.strip_prefix("REJECT:") {
+            return AuditDecision::Rejected {
+                reason: format!("[LLM] {}", reason.trim()),
+            };
+        }
+    }
+    // If the LLM didn't follow the format, reject (conservative).
+    AuditDecision::Rejected {
+        reason: "[LLM] Could not parse auditor response — rejecting as precaution".to_owned(),
+    }
 }
 
 /// Check if `current` autonomy level is within the bounds of `max_allowed`.
@@ -614,5 +711,84 @@ mod tests {
             reason: "too risky".to_owned(),
         };
         let _ = ActionOutcome::Skipped;
+    }
+
+    #[test]
+    fn parse_llm_approve_response() {
+        let decision = parse_llm_audit_response("APPROVE: action is safe and well-scoped");
+        match decision {
+            AuditDecision::Approved { note } => {
+                let n = note.unwrap();
+                assert!(n.contains("[LLM]"));
+                assert!(n.contains("safe"));
+            }
+            AuditDecision::Rejected { .. } => panic!("Expected Approved"),
+        }
+    }
+
+    #[test]
+    fn parse_llm_reject_response() {
+        let decision =
+            parse_llm_audit_response("REJECT: terminating this PID could cascade to replicas");
+        match decision {
+            AuditDecision::Rejected { reason } => {
+                assert!(reason.contains("[LLM]"));
+                assert!(reason.contains("cascade"));
+            }
+            AuditDecision::Approved { .. } => panic!("Expected Rejected"),
+        }
+    }
+
+    #[test]
+    fn parse_llm_multiline_response() {
+        let response = "Let me analyze this...\nAPPROVE: looks good\nSome trailing text";
+        let decision = parse_llm_audit_response(response);
+        assert!(matches!(decision, AuditDecision::Approved { .. }));
+    }
+
+    #[test]
+    fn parse_llm_garbage_response_rejects() {
+        let decision = parse_llm_audit_response("I think this is fine, go ahead");
+        assert!(matches!(decision, AuditDecision::Rejected { .. }));
+    }
+
+    #[test]
+    fn needs_llm_review_auto_mode() {
+        let proposal = ActionProposal {
+            feature: FeatureArea::Rca,
+            severity: Severity::Info,
+            evidence_class: EvidenceClass::Factual,
+            finding: "test".to_owned(),
+            proposed_action: "test".to_owned(),
+            expected_outcome: "test".to_owned(),
+            risk: "low".to_owned(),
+            created_at: SystemTime::now(),
+        };
+        // Auto mode always needs LLM review.
+        assert!(Auditor::needs_llm_review(&proposal, AutonomyLevel::Auto));
+        // Supervised + Info severity does not.
+        assert!(!Auditor::needs_llm_review(
+            &proposal,
+            AutonomyLevel::Supervised
+        ));
+    }
+
+    #[test]
+    fn needs_llm_review_critical_severity() {
+        let proposal = ActionProposal {
+            feature: FeatureArea::Rca,
+            severity: Severity::Critical,
+            evidence_class: EvidenceClass::Factual,
+            finding: "test".to_owned(),
+            proposed_action: "test".to_owned(),
+            expected_outcome: "test".to_owned(),
+            risk: "high".to_owned(),
+            created_at: SystemTime::now(),
+        };
+        // Critical severity always needs LLM review.
+        assert!(Auditor::needs_llm_review(
+            &proposal,
+            AutonomyLevel::Supervised
+        ));
     }
 }
