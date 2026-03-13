@@ -7,6 +7,7 @@ use clap::Parser;
 
 mod connection;
 mod describe;
+mod io;
 mod metacmd;
 #[allow(dead_code)]
 mod output;
@@ -390,7 +391,7 @@ async fn main() {
                 }
             }
 
-            let settings = repl::ReplSettings {
+            let mut settings = repl::ReplSettings {
                 echo_hidden: cli.echo_hidden,
                 pset,
                 vars,
@@ -399,13 +400,13 @@ async fn main() {
 
             let exit_code = if let Some(ref cmd) = cli.command {
                 // -c "SQL": execute single command and exit.
-                repl::exec_command(&client, cmd, &settings, &resolved).await
+                repl::exec_command(&client, cmd, &mut settings, &resolved).await
             } else if let Some(ref path) = cli.file {
                 // -f file: execute file and exit.
-                repl::exec_file(&client, path, &settings).await
+                repl::exec_file(&client, path, &mut settings).await
             } else if is_piped {
                 // Piped / redirected stdin: execute non-interactively.
-                repl::exec_stdin(&client, &settings).await
+                repl::exec_stdin(&client, &mut settings).await
             } else {
                 // Interactive REPL — consumes client and resolved.
                 repl::run_repl(client, resolved, settings, cli.no_readline).await
