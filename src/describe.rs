@@ -111,20 +111,28 @@ async fn run_and_print_full(
             let mut rows: Vec<Vec<String>> = Vec::new();
 
             for msg in messages {
-                if let SimpleQueryMessage::Row(row) = msg {
-                    if col_names.is_empty() {
-                        col_names = (0..row.len())
-                            .map(|i| {
-                                row.columns()
-                                    .get(i)
-                                    .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
-                            })
-                            .collect();
+                match msg {
+                    SimpleQueryMessage::RowDescription(columns) => {
+                        if col_names.is_empty() {
+                            col_names = columns.iter().map(|c| c.name().to_owned()).collect();
+                        }
                     }
-                    let vals: Vec<String> = (0..row.len())
-                        .map(|i| row.get(i).unwrap_or("").to_owned())
-                        .collect();
-                    rows.push(vals);
+                    SimpleQueryMessage::Row(row) => {
+                        if col_names.is_empty() {
+                            col_names = (0..row.len())
+                                .map(|i| {
+                                    row.columns()
+                                        .get(i)
+                                        .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                                })
+                                .collect();
+                        }
+                        let vals: Vec<String> = (0..row.len())
+                            .map(|i| row.get(i).unwrap_or("").to_owned())
+                            .collect();
+                        rows.push(vals);
+                    }
+                    _ => {}
                 }
             }
 
@@ -983,7 +991,7 @@ left join pg_catalog.pg_namespace as n
 order by 1, 2"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of domains")).await
 }
 
 // ---------------------------------------------------------------------------
