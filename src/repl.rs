@@ -2925,69 +2925,68 @@ fn parse_watch_interval(s: &str) -> f64 {
         .unwrap_or(WATCH_DEFAULT_INTERVAL)
 }
 
-/// Format a [`std::time::SystemTime`] as `YYYY-MM-DD HH:MM:SS` (UTC).
+/// Format a [`std::time::SystemTime`] as psql does for `\watch` headers.
+///
+/// Produces the ctime-like format that psql uses in local time:
+/// `Www Mmm DD HH:MM:SS YYYY`
+///
+/// Example: `Thu Mar 13 19:00:00 2026`
+///
+/// Uses `libc::localtime_r` to convert to local time so the output
+/// matches the user's timezone, consistent with psql behaviour.
 fn format_system_time(now: std::time::SystemTime) -> String {
+    const WDAY: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
     use std::time::{Duration, UNIX_EPOCH};
 
     let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    let total_secs = duration.as_secs();
+    // libc::time_t is i64 on 64-bit platforms; Unix timestamps fit safely.
+    #[allow(clippy::cast_possible_wrap)]
+    let unix_secs: libc::time_t = duration.as_secs() as libc::time_t;
 
-    // Split into days + time-of-day.
-    let days_since_epoch = total_secs / 86400;
-    let time_of_day = total_secs % 86400;
+    // SAFETY: localtime_r is thread-safe and only reads the time_t we pass.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&raw const unix_secs, &raw mut tm);
+    }
 
-    let hour = time_of_day / 3600;
-    let min = (time_of_day % 3600) / 60;
-    let sec = time_of_day % 60;
+    // clamp() guarantees the index is in-bounds; the value was already
+    // non-negative so the cast to usize is safe.
+    #[allow(clippy::cast_sign_loss)]
+    let wday = WDAY[tm.tm_wday.clamp(0, 6) as usize];
+    #[allow(clippy::cast_sign_loss)]
+    let mon = MON[tm.tm_mon.clamp(0, 11) as usize];
+    let day = tm.tm_mday;
+    let hour = tm.tm_hour;
+    let min = tm.tm_min;
+    let sec = tm.tm_sec;
+    let year = tm.tm_year + 1900;
 
-    // Convert days-since-Unix-epoch to Gregorian calendar date.
-    // Uses Julian Day Number arithmetic; Unix epoch = JDN 2 440 588.
-    // Reference: https://en.wikipedia.org/wiki/Julian_day#Converting_Julian_or_Gregorian_calendar_date_to_Julian_day_number
-    let jdn = days_since_epoch + 2_440_588;
-    let p1 = jdn + 32_044;
-    let p2 = (4 * p1 + 3) / 146_097;
-    let p3 = p1 - (146_097 * p2) / 4;
-    let p4 = (4 * p3 + 3) / 1_461;
-    let p5 = p3 - (1_461 * p4) / 4;
-    let p6 = (5 * p5 + 2) / 153;
-
-    let day = p5 - (153 * p6 + 2) / 5 + 1;
-    let month = p6 + 3 - 12 * (p6 / 10);
-    let year = 100 * p2 + p4 - 4_800 + p6 / 10;
-
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}")
+    format!("{wday} {mon} {day:2} {hour:02}:{min:02}:{sec:02} {year}")
 }
 
 /// Re-execute `sql` repeatedly, printing a timestamp header before each run.
 ///
 /// The loop exits when Ctrl-C (SIGINT) is received while sleeping between
 /// iterations.  Each iteration:
-/// 1. Prints timestamp header.
+/// 1. Prints timestamp header matching psql's ctime-like format.
 /// 2. Executes the query.
 /// 3. Sleeps `interval_secs`; if Ctrl-C arrives during the sleep, exits.
-///
-/// The screen is cleared (ANSI escape) at the start of each iteration
-/// after the first, matching psql `\watch` behaviour.
 async fn watch_query(client: &Client, sql: &str, interval_secs: f64, settings: &mut ReplSettings) {
     use std::time::Duration;
     use tokio::signal;
     use tokio::time::sleep;
 
-    let mut first = true;
     loop {
-        if first {
-            first = false;
-        } else {
-            // Clear screen before each subsequent iteration.
-            print!("\x1b[2J\x1b[H");
-        }
-
-        // Print timestamp header.
+        // Print timestamp header matching psql's ctime-like format.
         let ts = format_system_time(std::time::SystemTime::now());
         println!("{ts} (every {interval_secs}s)\n");
 
-        // Execute the stored query; use a dummy TxState (watch is read-only
-        // by convention; state changes inside the watch loop are not tracked).
+        // Execute the stored query.  Use a fresh TxState so that
+        // transaction state changes inside the loop are not persisted.
         let mut dummy_tx = TxState::default();
         execute_query(client, sql, settings, &mut dummy_tx).await;
 
@@ -3756,7 +3755,7 @@ async fn dispatch_meta(
                     watch_query(client, q, interval, settings).await;
                 }
                 None => {
-                    eprintln!("\\watch: no query to repeat");
+                    eprintln!("\\watch cannot be used with an empty query");
                 }
             }
         }
@@ -6745,18 +6744,42 @@ mod tests {
     }
 
     #[test]
-    fn format_system_time_unix_epoch() {
-        // Unix epoch should format as 1970-01-01 00:00:00
-        let epoch = std::time::SystemTime::UNIX_EPOCH;
-        assert_eq!(format_system_time(epoch), "1970-01-01 00:00:00");
+    fn format_system_time_output_structure() {
+        // Output must match the ctime-like psql format:
+        //   "Www Mmm DD HH:MM:SS YYYY"
+        // e.g. "Thu Mar 13 19:00:00 2026"
+        //
+        // Use 2026-03-13 12:00:00 UTC (noon UTC) to avoid timezone boundary
+        // effects that can shift the year at the Unix epoch.
+        use std::time::{Duration, UNIX_EPOCH};
+        let ts = UNIX_EPOCH + Duration::from_secs(1_773_316_800);
+        let s = format_system_time(ts);
+        // Must be at least 23 characters long.
+        assert!(s.len() >= 23, "output too short: {s:?}");
+        // Last 4 chars must be a 4-digit year.
+        let _year: i32 = s[s.len() - 4..].parse().expect("year digits");
+        // Must contain exactly 2 colons (HH:MM:SS).
+        let colon_count = s.chars().filter(|&c| c == ':').count();
+        assert_eq!(colon_count, 2, "expected 2 colons in {s:?}");
+        // Must start with a 3-letter weekday abbreviation.
+        let wdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        assert!(
+            wdays.iter().any(|w| s.starts_with(w)),
+            "expected weekday prefix in {s:?}"
+        );
     }
 
     #[test]
-    fn format_system_time_known_date() {
+    fn format_system_time_known_noon_utc() {
         use std::time::{Duration, UNIX_EPOCH};
-        // 2026-03-12 00:00:00 UTC = 1773273600 seconds since epoch
-        let ts = UNIX_EPOCH + Duration::from_secs(1_773_273_600);
-        assert_eq!(format_system_time(ts), "2026-03-12 00:00:00");
+        // 2026-03-13 12:00:00 UTC = 1_773_316_800 seconds since epoch.
+        // At noon UTC the date is the same across UTC-11..UTC+11 timezones.
+        let ts = UNIX_EPOCH + Duration::from_secs(1_773_316_800);
+        let s = format_system_time(ts);
+        assert!(s.contains("2026"), "expected year 2026 in {s:?}");
+        assert!(s.contains("Mar"), "expected 'Mar' in {s:?}");
+        let colon_count = s.chars().filter(|&c| c == ':').count();
+        assert_eq!(colon_count, 2, "expected 2 colons in {s:?}");
     }
 
     #[test]
