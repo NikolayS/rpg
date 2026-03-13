@@ -23,9 +23,12 @@ use crate::pattern;
 
 /// Dispatch a describe-family meta-command to the appropriate handler.
 ///
+/// `pg_major_version` is used to adapt catalog queries to the connected
+/// server (e.g. column renames between PG 15/16/17).
+///
 /// Returns `true` if the REPL loop should exit after this command (always
 /// `false` for describe commands — only `\q` exits).
-pub async fn execute(client: &Client, meta: &ParsedMeta) -> bool {
+pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Option<u32>) -> bool {
     match &meta.cmd {
         MetaCmd::DescribeObject => describe_object(client, meta).await,
         MetaCmd::ListTables => list_relations(client, meta, &["r", "p"]).await,
@@ -37,7 +40,7 @@ pub async fn execute(client: &Client, meta: &ParsedMeta) -> bool {
         MetaCmd::ListFunctions => list_functions(client, meta).await,
         MetaCmd::ListSchemas => list_schemas(client, meta).await,
         MetaCmd::ListRoles => list_roles(client, meta).await,
-        MetaCmd::ListDatabases => list_databases(client, meta).await,
+        MetaCmd::ListDatabases => list_databases(client, meta, pg_major_version).await,
         MetaCmd::ListExtensions => list_extensions(client, meta).await,
         MetaCmd::ListTablespaces => list_tablespaces(client, meta).await,
         MetaCmd::ListTypes => list_types(client, meta).await,
@@ -670,7 +673,11 @@ order by 1"
 // \l — list databases
 // ---------------------------------------------------------------------------
 
-async fn list_databases(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_databases(
+    client: &Client,
+    meta: &ParsedMeta,
+    pg_major_version: Option<u32>,
+) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "d.datname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -679,45 +686,81 @@ async fn list_databases(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {name_filter}")
     };
 
+    let ver = pg_major_version.unwrap_or(14);
+
+    // Locale columns differ across PG versions:
+    //   PG 14: no datlocprovider, no ICU locale/rules columns
+    //   PG 15: datlocprovider, daticulocale (no daticurules)
+    //   PG 16: datlocprovider, daticulocale, daticurules
+    //   PG 17+: datlocprovider (adds 'builtin'), datlocale (renamed), daticurules
+    let locale_provider = if ver >= 17 {
+        "case d.datlocprovider when 'b' then 'builtin' when 'c' then 'libc' when 'i' then 'icu' end as \"Locale Provider\","
+    } else if ver >= 15 {
+        "case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' end as \"Locale Provider\","
+    } else {
+        ""
+    };
+
+    let icu_locale = if ver >= 17 {
+        "d.datlocale as \"Locale\","
+    } else if ver >= 15 {
+        "d.daticulocale as \"ICU Locale\","
+    } else {
+        ""
+    };
+
+    let icu_rules = if ver >= 16 {
+        "d.daticurules as \"ICU Rules\","
+    } else {
+        ""
+    };
+
+    let acl = if ver >= 15 {
+        "case when pg_catalog.array_length(d.datacl, 1) = 0 then '(none)' \
+         else pg_catalog.array_to_string(d.datacl, E'\\n') end as \"Access privileges\""
+    } else {
+        "pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\""
+    };
+
     let sql = if meta.plus {
         format!(
-            "select
-    d.datname as \"Name\",
-    pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",
-    pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
-    case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' when 'b' then 'builtin' end as \"Locale Provider\",
-    d.datcollate as \"Collate\",
-    d.datctype as \"Ctype\",
-    d.daticulocale as \"ICU Locale\",
-    d.daticurules as \"ICU Rules\",
-    pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\",
-    case
-        when pg_catalog.has_database_privilege(d.datname, 'CONNECT')
-        then pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))
-        else 'No Access'
-    end as \"Size\",
-    t.spcname as \"Tablespace\",
-    coalesce(pg_catalog.shobj_description(d.oid, 'pg_database'), '') as \"Description\"
-from pg_catalog.pg_database as d
-join pg_catalog.pg_tablespace as t
-    on t.oid = d.dattablespace
-{where_clause}
+            "select \
+    d.datname as \"Name\", \
+    pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\", \
+    pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\", \
+    {locale_provider} \
+    d.datcollate as \"Collate\", \
+    d.datctype as \"Ctype\", \
+    {icu_locale} \
+    {icu_rules} \
+    {acl}, \
+    case \
+        when pg_catalog.has_database_privilege(d.datname, 'CONNECT') \
+        then pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname)) \
+        else 'No Access' \
+    end as \"Size\", \
+    t.spcname as \"Tablespace\", \
+    coalesce(pg_catalog.shobj_description(d.oid, 'pg_database'), '') as \"Description\" \
+from pg_catalog.pg_database as d \
+join pg_catalog.pg_tablespace as t \
+    on t.oid = d.dattablespace \
+{where_clause} \
 order by 1"
         )
     } else {
         format!(
-            "select
-    d.datname as \"Name\",
-    pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",
-    pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
-    case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' when 'b' then 'builtin' end as \"Locale Provider\",
-    d.datcollate as \"Collate\",
-    d.datctype as \"Ctype\",
-    d.daticulocale as \"ICU Locale\",
-    d.daticurules as \"ICU Rules\",
-    pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\"
-from pg_catalog.pg_database as d
-{where_clause}
+            "select \
+    d.datname as \"Name\", \
+    pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\", \
+    pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\", \
+    {locale_provider} \
+    d.datcollate as \"Collate\", \
+    d.datctype as \"Ctype\", \
+    {icu_locale} \
+    {icu_rules} \
+    {acl} \
+from pg_catalog.pg_database as d \
+{where_clause} \
 order by 1"
         )
     };
