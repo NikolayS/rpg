@@ -64,6 +64,10 @@ pub async fn execute(client: &Client, subcommand: &str, verbose: bool) -> bool {
             dba_config(client, verbose).await;
             true
         }
+        "waits" | "wait" => {
+            dba_waits(client, verbose).await;
+            true
+        }
         "" | "help" => {
             print_dba_help();
             true
@@ -215,6 +219,7 @@ fn print_dba_help() {
     println!("\\dba diagnostic commands:");
     println!("  \\dba activity    Active queries and sessions");
     println!("  \\dba locks       Lock tree (blocked/blocking)");
+    println!("  \\dba waits       Wait event breakdown");
     println!("  \\dba bloat       Table bloat estimates");
     println!("  \\dba vacuum      Vacuum status and dead tuples");
     println!("  \\dba tablesize   Largest tables");
@@ -225,7 +230,7 @@ fn print_dba_help() {
     println!("  \\dba replication Replication slot status");
     println!("  \\dba config      Non-default configuration parameters");
     println!();
-    println!("Aliases: act, lock, vac, ts, conn, unused, seq, cache, repl, conf");
+    println!("Aliases: act, lock, wait, vac, ts, conn, unused, seq, cache, repl, conf");
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +439,22 @@ async fn dba_replication(client: &Client, _verbose: bool) {
         confirmed_flush_lsn \
     from pg_replication_slots \
     order by slot_name";
+    run_and_print(client, sql).await;
+}
+
+async fn dba_waits(client: &Client, _verbose: bool) {
+    let sql = "SELECT \
+        coalesce(wait_event_type, 'CPU/Running') AS wait_type, \
+        coalesce(wait_event, 'active') AS wait_event, \
+        count(*) AS sessions, \
+        count(*) FILTER (WHERE state = 'active') AS active, \
+        count(*) FILTER (WHERE now() - query_start > interval '5 seconds') AS slow \
+    FROM pg_stat_activity \
+    WHERE pid != pg_backend_pid() \
+      AND backend_type = 'client backend' \
+    GROUP BY wait_event_type, wait_event \
+    ORDER BY sessions DESC \
+    LIMIT 25";
     run_and_print(client, sql).await;
 }
 
