@@ -86,6 +86,7 @@ pub async fn execute(client: &Client, subcommand: &str, verbose: bool) -> bool {
 /// If the query fails, the error is printed to stderr and the function
 /// returns without panicking.
 async fn run_and_print(client: &Client, sql: &str) {
+    crate::logging::trace("dba", &format!("diagnostic query: {}", sql.trim()));
     match client.simple_query(sql).await {
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;

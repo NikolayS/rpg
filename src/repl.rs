@@ -582,6 +582,8 @@ pub async fn execute_query(
         let _ = writeln!(lf, "{sql_to_send}");
     }
 
+    crate::logging::debug("repl", &format!("execute query: {}", sql_to_send.trim()));
+
     let start = if settings.timing {
         Some(Instant::now())
     } else {
@@ -2546,6 +2548,8 @@ async fn dispatch_meta(
 ) -> MetaResult {
     use crate::conditional::eval_bool;
     use crate::metacmd::MetaCmd;
+
+    crate::logging::trace("repl", &format!("dispatch meta-command: {:?}", parsed.cmd));
 
     // -- Conditional commands: always process regardless of active state -----
     match &parsed.cmd {

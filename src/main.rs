@@ -15,6 +15,7 @@ mod dba;
 mod describe;
 mod highlight;
 mod io;
+mod logging;
 mod metacmd;
 #[allow(dead_code)]
 mod output;
@@ -447,8 +448,38 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
 // TODO: Replace #[tokio::main] with explicit runtime construction
 // to optimize thread count per operating mode (issue #2, finding #9).
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     let mut cli = Cli::parse();
+
+    // Initialise structured logging before anything else.
+    //
+    // --debug sets level to Debug; --log-level overrides explicitly;
+    // default is Warn so routine runs are silent.
+    let log_level = if cli.debug {
+        logging::Level::Debug
+    } else {
+        cli.log_level
+            .as_deref()
+            .and_then(logging::Level::from_str)
+            .unwrap_or(logging::Level::Warn)
+    };
+
+    let log_writer: Option<Box<dyn std::io::Write + Send>> = cli.log_file.as_deref().map(|path| {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(f) => Box::new(f) as Box<dyn std::io::Write + Send>,
+            Err(e) => {
+                eprintln!("samo: --log-file: {e}");
+                std::process::exit(2);
+            }
+        }
+    });
+
+    logging::init(log_level, log_writer);
 
     // Load config hierarchy (system then user); non-fatal warnings are
     // printed to stderr unless --quiet suppresses them.
@@ -513,6 +544,13 @@ async fn main() {
     match connection::connect(params, &opts).await {
         Ok((client, resolved)) => {
             use std::io::IsTerminal;
+            logging::info(
+                "connection",
+                &format!(
+                    "connected: host={} port={} user={} dbname={}",
+                    resolved.host, resolved.port, resolved.user, resolved.dbname
+                ),
+            );
             let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
             let is_scripting = cli.command.is_some() || cli.file.is_some();
             if !cli.quiet && !is_scripting && !is_piped {
