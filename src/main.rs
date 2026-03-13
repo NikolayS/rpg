@@ -5,6 +5,7 @@
 
 use clap::Parser;
 
+mod conditional;
 mod connection;
 mod describe;
 mod io;
@@ -449,10 +450,10 @@ async fn main() {
                 repl::exec_command(&client, cmd, &mut settings, &resolved).await
             } else if let Some(ref path) = cli.file {
                 // -f file: execute file and exit.
-                repl::exec_file(&client, path, &mut settings).await
+                repl::exec_file(&client, path, &mut settings, &resolved).await
             } else if is_piped {
                 // Piped / redirected stdin: execute non-interactively.
-                repl::exec_stdin(&client, &mut settings).await
+                repl::exec_stdin(&client, &mut settings, &resolved).await
             } else {
                 // Interactive REPL — consumes client and resolved.
                 repl::run_repl(client, resolved, settings, cli.no_readline, cli.no_psqlrc).await

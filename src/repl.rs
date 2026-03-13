@@ -282,6 +282,8 @@ pub struct ReplSettings {
     pub quiet: bool,
     /// Debug mode: enable debug output (`-D`).
     pub debug: bool,
+    /// Conditional execution state (`\if` / `\elif` / `\else` / `\endif`).
+    pub cond: crate::conditional::ConditionalState,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -304,6 +306,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("single_transaction", &self.single_transaction)
             .field("quiet", &self.quiet)
             .field("debug", &self.debug)
+            .field("cond_depth", &self.cond.depth())
             .finish()
     }
 }
@@ -589,9 +592,10 @@ pub async fn exec_command(
 
 /// Execute all SQL statements from a file and exit.
 ///
-/// The file content is split at statement boundaries (`;` outside quotes and
-/// comments) and each statement is executed individually, matching the
-/// behaviour of `exec_stdin`.
+/// The file content is processed line by line.  Backslash meta-commands
+/// (including `\if` / `\elif` / `\else` / `\endif`) are dispatched
+/// immediately; SQL lines are accumulated until a complete statement is
+/// detected and then executed.  Suppressed branches are skipped.
 ///
 /// When `settings.single_transaction` is `true`, the entire file is wrapped
 /// in an explicit `BEGIN` … `COMMIT` block. On any error the transaction is
@@ -599,7 +603,12 @@ pub async fn exec_command(
 ///
 /// # Errors
 /// Returns 1 if the file cannot be read or any statement produces a SQL error.
-pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings) -> i32 {
+pub async fn exec_file(
+    client: &Client,
+    path: &str,
+    settings: &mut ReplSettings,
+    params: &ConnParams,
+) -> i32 {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -608,8 +617,6 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
         }
     };
     let mut tx = TxState::default();
-    let mut buf = String::new();
-    let mut exit_code = 0i32;
 
     // -1 / --single-transaction: open a transaction before the first statement.
     // Use simple_query directly so that begin/commit/rollback are not echoed,
@@ -622,46 +629,34 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
         tx.update_from_sql("begin");
     }
 
-    'outer: for line in content.lines() {
-        if !buf.is_empty() {
-            buf.push('\n');
-        }
-        buf.push_str(line);
+    let mut exit_code = exec_lines(
+        client,
+        content.lines().map(str::to_owned),
+        settings,
+        params,
+        &mut tx,
+    )
+    .await;
 
-        if is_complete(&buf) {
-            let sql = buf.trim().to_owned();
-            if !execute_query(client, &sql, settings, &mut tx).await {
-                exit_code = 1;
-                if settings.single_transaction {
-                    // Roll back and abort the rest of the file.
-                    let _ = client.simple_query("rollback").await;
-                    tx.update_from_sql("rollback");
-                    break 'outer;
-                }
-            }
-            buf.clear();
-        }
+    if settings.cond.depth() > 0 {
+        eprintln!(
+            "samo: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
+            settings.cond.depth()
+        );
     }
 
-    // Execute any trailing input without a semicolon.
-    if exit_code == 0
-        && !buf.trim().is_empty()
-        && !execute_query(client, buf.trim(), settings, &mut tx).await
-    {
-        exit_code = 1;
-        if settings.single_transaction {
+    // -1 / --single-transaction: commit on success, rollback on failure.
+    if settings.single_transaction {
+        if exit_code == 0 {
+            if let Err(e) = client.simple_query("commit").await {
+                eprintln!("samo: could not commit transaction: {e}");
+                exit_code = 1;
+            } else {
+                tx.update_from_sql("commit");
+            }
+        } else {
             let _ = client.simple_query("rollback").await;
             tx.update_from_sql("rollback");
-        }
-    }
-
-    // -1 / --single-transaction: commit on success.
-    if settings.single_transaction && exit_code == 0 {
-        if let Err(e) = client.simple_query("commit").await {
-            eprintln!("samo: could not commit transaction: {e}");
-            exit_code = 1;
-        } else {
-            tx.update_from_sql("commit");
         }
     }
 
@@ -669,36 +664,77 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
 }
 
 /// Execute SQL lines from stdin (non-interactive piped input).
-pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings) -> i32 {
+pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &ConnParams) -> i32 {
     let stdin = io::stdin();
-    let mut buf = String::new();
+    let lines = stdin.lock().lines().map_while(|l| match l {
+        Ok(line) => Some(line),
+        Err(e) => {
+            eprintln!("samo: read error: {e}");
+            None
+        }
+    });
     let mut tx = TxState::default();
+    let exit_code = exec_lines(client, lines, settings, params, &mut tx).await;
+
+    if settings.cond.depth() > 0 {
+        eprintln!(
+            "samo: warning: {} unterminated \\if block(s) at end of input",
+            settings.cond.depth()
+        );
+    }
+
+    exit_code
+}
+
+/// Shared line-processing core for `exec_file`, `exec_stdin`, and
+/// `io::include_file`.
+///
+/// Each line is either:
+/// - A backslash meta-command → dispatched immediately (always, for
+///   conditionals; skipped for others when suppressed).
+/// - A SQL fragment → accumulated into `buf`; flushed when complete.
+///   Skipped entirely when inside a suppressed branch.
+pub(crate) async fn exec_lines(
+    client: &Client,
+    lines: impl Iterator<Item = String>,
+    settings: &mut ReplSettings,
+    params: &ConnParams,
+    tx: &mut TxState,
+) -> i32 {
+    let mut buf = String::new();
     let mut exit_code = 0i32;
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("samo: read error: {e}");
-                return 1;
+    'lines: for line in lines {
+        if line.trim_start().starts_with('\\') {
+            // Dispatch meta-command (handles conditional tracking internally).
+            let mut parsed = crate::metacmd::parse(line.trim());
+            parsed.echo_hidden = settings.echo_hidden;
+            dispatch_meta(parsed, client, params, settings, tx).await;
+        } else if settings.cond.is_active() {
+            if !buf.is_empty() {
+                buf.push('\n');
             }
-        };
+            buf.push_str(&line);
 
-        if !buf.is_empty() {
-            buf.push('\n');
-        }
-        buf.push_str(&line);
-
-        if is_complete(&buf) {
-            if !execute_query(client, buf.trim(), settings, &mut tx).await {
-                exit_code = 1;
+            if is_complete(&buf) {
+                if !execute_query(client, buf.trim(), settings, tx).await {
+                    exit_code = 1;
+                    // In single-transaction mode, stop on first error so the
+                    // caller can roll back and skip the rest.
+                    if settings.single_transaction {
+                        break 'lines;
+                    }
+                }
+                buf.clear();
             }
-            buf.clear();
         }
     }
 
-    // Execute any trailing input without a semicolon.
-    if !buf.trim().is_empty() && !execute_query(client, buf.trim(), settings, &mut tx).await {
+    // Execute any trailing SQL without a terminating semicolon.
+    if !buf.trim().is_empty()
+        && settings.cond.is_active()
+        && !execute_query(client, buf.trim(), settings, tx).await
+    {
         exit_code = 1;
     }
 
@@ -1061,6 +1097,7 @@ pub enum MetaResult {
 async fn dispatch_io(
     parsed: &crate::metacmd::ParsedMeta,
     client: &Client,
+    params: &ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> Option<MetaResult> {
@@ -1070,7 +1107,7 @@ async fn dispatch_io(
         MetaCmd::Include => {
             match parsed.pattern.as_deref() {
                 Some(path) => {
-                    crate::io::include_file(client, path, settings, tx).await;
+                    crate::io::include_file(client, path, settings, tx, params).await;
                 }
                 None => eprintln!("\\i: file name required"),
             }
@@ -1082,7 +1119,7 @@ async fn dispatch_io(
             // (future work).
             match parsed.pattern.as_deref() {
                 Some(path) => {
-                    crate::io::include_file(client, path, settings, tx).await;
+                    crate::io::include_file(client, path, settings, tx, params).await;
                 }
                 None => eprintln!("\\ir: file name required"),
             }
@@ -1188,6 +1225,10 @@ fn dispatch_password(user: Option<&str>) {
 /// exit, or replace the current connection. Buffer-mutating commands
 /// (`\r`, `\p`, `\w`, `\e`) return special variants that the REPL loop
 /// handles where the buffer is accessible.
+///
+/// `\if` / `\elif` / `\else` / `\endif` are always processed to maintain
+/// correct nesting, even when inside a suppressed (inactive) branch.
+/// All other commands are skipped when the conditional state is inactive.
 #[allow(clippy::too_many_lines)]
 async fn dispatch_meta(
     parsed: crate::metacmd::ParsedMeta,
@@ -1196,10 +1237,53 @@ async fn dispatch_meta(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> MetaResult {
+    use crate::conditional::eval_bool;
     use crate::metacmd::MetaCmd;
 
+    // -- Conditional commands: always process regardless of active state -----
+    match &parsed.cmd {
+        MetaCmd::If => {
+            let expr = parsed.pattern.as_deref().unwrap_or("");
+            if expr.trim().is_empty() {
+                eprintln!("\\if: missing expression");
+            }
+            let condition = eval_bool(expr);
+            settings.cond.push_if(condition);
+            return MetaResult::Continue;
+        }
+        MetaCmd::Elif => {
+            let expr = parsed.pattern.as_deref().unwrap_or("");
+            if expr.trim().is_empty() {
+                eprintln!("\\elif: missing expression");
+            }
+            let condition = eval_bool(expr);
+            if let Err(e) = settings.cond.handle_elif(condition) {
+                eprintln!("{e}");
+            }
+            return MetaResult::Continue;
+        }
+        MetaCmd::Else => {
+            if let Err(e) = settings.cond.handle_else() {
+                eprintln!("{e}");
+            }
+            return MetaResult::Continue;
+        }
+        MetaCmd::Endif => {
+            if let Err(e) = settings.cond.pop_endif() {
+                eprintln!("{e}");
+            }
+            return MetaResult::Continue;
+        }
+        _ => {}
+    }
+
+    // -- All other commands: skip when in a suppressed branch ---------------
+    if !settings.cond.is_active() {
+        return MetaResult::Continue;
+    }
+
     // Try I/O commands first (they are the most numerous).
-    if let Some(result) = dispatch_io(&parsed, client, settings, tx).await {
+    if let Some(result) = dispatch_io(&parsed, client, params, settings, tx).await {
         return result;
     }
 
@@ -1327,7 +1411,7 @@ pub async fn run_repl(
     if !no_psqlrc {
         if let Some(rc_path) = startup_file() {
             let path_str = rc_path.to_string_lossy().into_owned();
-            crate::io::include_file(&client, &path_str, &mut settings, &mut tx).await;
+            crate::io::include_file(&client, &path_str, &mut settings, &mut tx, &params).await;
         }
     }
 
@@ -1425,6 +1509,13 @@ async fn run_readline_loop(
         let _ = rl.save_history(p);
     }
 
+    if settings.cond.depth() > 0 {
+        eprintln!(
+            "samo: warning: {} unterminated \\if block(s) at end of session",
+            settings.cond.depth()
+        );
+    }
+
     0
 }
 
@@ -1462,7 +1553,7 @@ async fn run_dumb_loop(
                         }
                         HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
-                } else {
+                } else if settings.cond.is_active() {
                     if !buf.is_empty() {
                         buf.push('\n');
                     }
@@ -1483,6 +1574,13 @@ async fn run_dumb_loop(
                 return 1;
             }
         }
+    }
+
+    if settings.cond.depth() > 0 {
+        eprintln!(
+            "samo: warning: {} unterminated \\if block(s) at end of input",
+            settings.cond.depth()
+        );
     }
 
     0
@@ -1619,6 +1717,11 @@ async fn handle_line(
     }
 
     // SQL input: accumulate lines until we have a complete statement.
+    // When inside a suppressed conditional branch, discard the input.
+    if !settings.cond.is_active() {
+        return HandleLineResult::Continue;
+    }
+
     if !buf.is_empty() {
         buf.push('\n');
         stmt_buf.push('\n');

@@ -7,10 +7,12 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Command;
 
 use tokio_postgres::Client;
 
+use crate::connection::ConnParams;
 use crate::repl::{ReplSettings, TxState};
 
 // ---------------------------------------------------------------------------
@@ -19,55 +21,58 @@ use crate::repl::{ReplSettings, TxState};
 
 /// Execute every statement in a SQL file, just as `\i` does in psql.
 ///
-/// Lines are accumulated into a buffer until a complete statement is detected
-/// (via [`crate::repl::is_complete`]); each complete statement is executed in
-/// turn. A trailing statement without a terminating semicolon is also
-/// executed.
+/// Lines are processed via the shared [`crate::repl::exec_lines`] helper,
+/// which handles both SQL accumulation and backslash meta-commands (including
+/// `\if` / `\elif` / `\else` / `\endif` for conditional execution).
 ///
 /// `tx` is the caller's transaction state and is updated in-place so that
 /// transaction context is inherited across `\i` / `\ir` inclusions.
 ///
 /// Returns 0 on success, 1 if the file cannot be read or any statement
 /// produces a SQL error.
-pub async fn include_file(
-    client: &Client,
-    path: &str,
-    settings: &mut ReplSettings,
-    tx: &mut TxState,
-) -> i32 {
-    let content = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("\\i: could not read \"{path}\": {e}");
-            return 1;
-        }
-    };
-
-    let mut buf = String::new();
-    let mut exit_code = 0i32;
-
-    for line in content.lines() {
-        if !buf.is_empty() {
-            buf.push('\n');
-        }
-        buf.push_str(line);
-
-        if crate::repl::is_complete(&buf) {
-            let sql = buf.trim().to_owned();
-            if !crate::repl::execute_query(client, &sql, settings, tx).await {
-                exit_code = 1;
+///
+/// # Note on boxing
+/// This function returns a [`Pin<Box<dyn Future>>`] rather than using
+/// `async fn` because `include_file` → `exec_lines` → `dispatch_meta` →
+/// `dispatch_io` → `include_file` forms a recursive async call cycle.
+/// `Box::pin` breaks the cycle by giving the future an explicit heap
+/// allocation and a fixed size.
+pub fn include_file<'a>(
+    client: &'a Client,
+    path: &'a str,
+    settings: &'a mut ReplSettings,
+    tx: &'a mut TxState,
+    params: &'a ConnParams,
+) -> Pin<Box<dyn std::future::Future<Output = i32> + 'a>> {
+    Box::pin(async move {
+        let content = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("\\i: could not read \"{path}\": {e}");
+                return 1;
             }
-            buf.clear();
+        };
+
+        let start_depth = settings.cond.depth();
+        let exit_code = crate::repl::exec_lines(
+            client,
+            content.lines().map(str::to_owned),
+            settings,
+            params,
+            tx,
+        )
+        .await;
+
+        let end_depth = settings.cond.depth();
+        if end_depth > start_depth {
+            eprintln!(
+                "samo: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
+                end_depth - start_depth
+            );
         }
-    }
 
-    // Trailing statement without a semicolon.
-    if !buf.trim().is_empty() && !crate::repl::execute_query(client, buf.trim(), settings, tx).await
-    {
-        exit_code = 1;
-    }
-
-    exit_code
+        exit_code
+    })
 }
 
 // ---------------------------------------------------------------------------

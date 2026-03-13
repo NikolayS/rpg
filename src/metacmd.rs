@@ -139,6 +139,20 @@ pub enum MetaCmd {
     /// `\password [user]` — prompt for a new password for a user.
     Password,
 
+    // -- Conditional execution (#37) --------------------------------------
+    /// `\if expression` — begin a conditional block.
+    ///
+    /// The expression is stored in the `pattern` field after parsing.
+    If,
+    /// `\elif expression` — alternate branch of a conditional block.
+    ///
+    /// The expression is stored in the `pattern` field after parsing.
+    Elif,
+    /// `\else` — unconditional alternate branch of a conditional block.
+    Else,
+    /// `\endif` — end a conditional block.
+    Endif,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -565,25 +579,19 @@ fn parse_l(input: &str) -> ParsedMeta {
 // I/O and utility command parsers (#33)
 // ---------------------------------------------------------------------------
 
-/// Parse `\e [file [line]]` and `\echo text` and `\encoding [enc]`.
+/// Parse `\e [file [line]]`, `\echo text`, `\encoding [enc]`, `\elif expr`,
+/// `\else`, and `\endif`.
+///
+/// Longer prefixes are checked first to avoid false prefix matches.
 fn parse_e_family(input: &str) -> ParsedMeta {
-    // Check longest prefixes first.
-    if let Some(rest) = input.strip_prefix("echo") {
+    // `\endif` — no argument.
+    if let Some(rest) = input.strip_prefix("endif") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let text = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::Echo,
-                plus: false,
-                system: false,
-                pattern: if text.is_empty() {
-                    None
-                } else {
-                    Some(text.to_owned())
-                },
-                echo_hidden: false,
-            };
+            return ParsedMeta::simple(MetaCmd::Endif);
         }
     }
+
+    // `\encoding [enc]` — must come before bare `\e`.
     if let Some(rest) = input.strip_prefix("encoding") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let enc = rest.trim();
@@ -600,6 +608,50 @@ fn parse_e_family(input: &str) -> ParsedMeta {
             };
         }
     }
+
+    // `\echo [text]` — must come before bare `\e`.
+    if let Some(rest) = input.strip_prefix("echo") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let text = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Echo,
+                plus: false,
+                system: false,
+                pattern: if text.is_empty() {
+                    None
+                } else {
+                    Some(text.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+
+    // `\elif <expression>` — expression captured in `pattern`.
+    if let Some(rest) = input.strip_prefix("elif") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let expr = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Elif,
+                plus: false,
+                system: false,
+                pattern: if expr.is_empty() {
+                    None
+                } else {
+                    Some(expr.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+
+    // `\else` — no argument.
+    if let Some(rest) = input.strip_prefix("else") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Else);
+        }
+    }
+
     // `\e [file [line]]`
     if let Some(rest) = input.strip_prefix('e') {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -620,8 +672,26 @@ fn parse_e_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\i file` and `\ir file`.
+/// Parse `\if expr`, `\i file`, and `\ir file`.
 fn parse_i_family(input: &str) -> ParsedMeta {
+    // `\if <expression>` — expression captured in `pattern`.
+    if let Some(rest) = input.strip_prefix("if") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let expr = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::If,
+                plus: false,
+                system: false,
+                pattern: if expr.is_empty() {
+                    None
+                } else {
+                    Some(expr.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+
     // `\ir` must be checked before `\i` (longer prefix first).
     if let Some(rest) = input.strip_prefix("ir") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -1618,5 +1688,74 @@ mod tests {
         // \password starts with 'p', must not match \p
         assert_eq!(parse("\\password user").cmd, MetaCmd::Password);
         assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
+    }
+
+    // -- \if / \elif / \else / \endif (#37) ----------------------------------
+
+    #[test]
+    fn parse_if_with_expression() {
+        let m = parse("\\if true");
+        assert_eq!(m.cmd, MetaCmd::If);
+        assert_eq!(m.pattern, Some("true".to_owned()));
+    }
+
+    #[test]
+    fn parse_if_bare_no_expression() {
+        let m = parse("\\if");
+        assert_eq!(m.cmd, MetaCmd::If);
+        assert!(m.pattern.is_none());
+    }
+
+    #[test]
+    fn parse_elif_with_expression() {
+        let m = parse("\\elif false");
+        assert_eq!(m.cmd, MetaCmd::Elif);
+        assert_eq!(m.pattern, Some("false".to_owned()));
+    }
+
+    #[test]
+    fn parse_elif_bare() {
+        let m = parse("\\elif");
+        assert_eq!(m.cmd, MetaCmd::Elif);
+        assert!(m.pattern.is_none());
+    }
+
+    #[test]
+    fn parse_else() {
+        assert_eq!(parse("\\else").cmd, MetaCmd::Else);
+        assert!(parse("\\else").pattern.is_none());
+    }
+
+    #[test]
+    fn parse_endif() {
+        assert_eq!(parse("\\endif").cmd, MetaCmd::Endif);
+    }
+
+    #[test]
+    fn parse_if_not_confused_with_include() {
+        // \if starts with 'i'; must not match \i or \ir
+        assert_eq!(parse("\\if true").cmd, MetaCmd::If);
+        assert_eq!(parse("\\i file.sql").cmd, MetaCmd::Include);
+        assert_eq!(parse("\\ir file.sql").cmd, MetaCmd::IncludeRelative);
+    }
+
+    #[test]
+    fn parse_elif_not_confused_with_echo_or_encoding() {
+        // \elif, \else, \endif start with 'e'; must not match \echo, \encoding, \e
+        assert_eq!(parse("\\elif true").cmd, MetaCmd::Elif);
+        assert_eq!(parse("\\else").cmd, MetaCmd::Else);
+        assert_eq!(parse("\\endif").cmd, MetaCmd::Endif);
+        assert_eq!(parse("\\echo hello").cmd, MetaCmd::Echo);
+        assert_eq!(parse("\\encoding UTF8").cmd, MetaCmd::Encoding);
+        assert_eq!(parse("\\e").cmd, MetaCmd::Edit);
+    }
+
+    #[test]
+    fn parse_if_variable_expression() {
+        // Variable interpolation has already occurred before parsing; the
+        // parser stores the resulting string verbatim in `pattern`.
+        let m = parse("\\if on");
+        assert_eq!(m.cmd, MetaCmd::If);
+        assert_eq!(m.pattern, Some("on".to_owned()));
     }
 }
