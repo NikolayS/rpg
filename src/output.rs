@@ -233,8 +233,8 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
     // Calculate column widths: max(header width, max data width).
     let widths = column_widths(cols, rows, cfg);
 
-    // Header row.
-    write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), false);
+    // Header row — psql right-aligns headers for numeric columns too.
+    write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
     // Separator.
     write_separator(out, &widths);
     // Data rows.
@@ -565,8 +565,9 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, ocfg: &OutputConfig, pcfg:
     let widths = column_widths(cols, rows, ocfg);
 
     // Header (suppressed in tuples-only mode).
+    // psql right-aligns headers for numeric columns, so pass is_data=true.
     if !pcfg.tuples_only {
-        write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), false);
+        write_aligned_row(out, cols, &widths, |col, _| col.name.clone(), true);
         write_separator(out, &widths);
     }
 
