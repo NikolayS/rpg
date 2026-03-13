@@ -487,10 +487,16 @@ fn split_schema_name(name: &str) -> (Option<String>, String) {
 /// When `plus` is true, line numbers are applied only to lines starting from
 /// the `AS $` dollar-quote marker (i.e. the function body).  Lines before that
 /// marker are printed with equivalent blank space so the body content stays
-/// aligned.  The number width is determined by the total number of body lines,
-/// and the format is `{number:<width$}` followed by a single space — matching
-/// psql's `\sf+` output exactly.  No line numbers are emitted for `\sv+`
-/// (views), where the entire text is treated as the body.
+/// aligned.  The number width is determined by the total number of body lines.
+///
+/// Format matches psql `print_function_source()`:
+/// - Header lines: `fprintf(output, "%*s\t", nln, "")` — spaces padded to
+///   `nln` width, then a TAB character.
+/// - Body lines: `fprintf(output, "%-*d\t", nln, lineno)` — left-aligned
+///   number in `nln` width, then a TAB character.
+///
+/// Using TAB (not spaces) means alignment is governed by terminal tab stops
+/// (every 8 columns), which is what psql produces.
 fn print_with_optional_line_numbers(text: &str, plus: bool) {
     if !plus {
         println!("{text}");
@@ -508,18 +514,18 @@ fn print_with_optional_line_numbers(text: &str, plus: bool) {
         .unwrap_or(0);
 
     let body_line_count = lines.len().saturating_sub(body_start);
-    // Width needed to right-align the largest line number.
+    // Width needed to left-align the largest line number.
     let width = body_line_count.to_string().len();
-    // Blank padding used for header lines (same width + 1 space separator).
-    let blank = " ".repeat(width + 1);
 
     let mut body_lineno: usize = 0;
     for (idx, line) in lines.iter().enumerate() {
         if idx < body_start {
-            println!("{blank}{line}");
+            // psql: fprintf(output, "%*s\t", nln, "")
+            println!("{:>width$}\t{line}", "");
         } else {
             body_lineno += 1;
-            println!("{body_lineno:<width$} {line}");
+            // psql: fprintf(output, "%-*d\t", nln, lineno)
+            println!("{body_lineno:<width$}\t{line}");
         }
     }
 }
