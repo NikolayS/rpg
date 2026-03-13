@@ -17,6 +17,7 @@
 mod common;
 
 use common::TestDb;
+use serial_test::serial;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -114,6 +115,7 @@ async fn smoke_server_version() {
 
 /// Load the test schema fixture and run basic queries against it.
 #[tokio::test]
+#[serial]
 async fn smoke_schema_and_data() {
     let db = connect_or_skip!();
 
@@ -285,6 +287,7 @@ fn query_connection_failure_exits_2() {
 
 /// `\dt` lists tables in the test schema.
 #[tokio::test]
+#[serial]
 async fn describe_dt_lists_tables() {
     let db = connect_or_skip!();
     db.teardown_schema().await.expect("teardown failed");
@@ -321,6 +324,7 @@ async fn describe_dt_lists_tables() {
 
 /// `\dt users` filters to a single table by name.
 #[tokio::test]
+#[serial]
 async fn describe_dt_with_pattern() {
     let db = connect_or_skip!();
     db.teardown_schema().await.expect("teardown failed");
@@ -347,6 +351,7 @@ async fn describe_dt_with_pattern() {
 
 /// `\d users` describes the users table columns.
 #[tokio::test]
+#[serial]
 async fn describe_d_table() {
     let db = connect_or_skip!();
     db.teardown_schema().await.expect("teardown failed");
@@ -375,6 +380,7 @@ async fn describe_d_table() {
 
 /// `\d` (no args) lists all relations.
 #[tokio::test]
+#[serial]
 async fn describe_d_no_args_lists_relations() {
     let db = connect_or_skip!();
     db.teardown_schema().await.expect("teardown failed");
@@ -397,6 +403,7 @@ async fn describe_d_no_args_lists_relations() {
 
 /// `\di` lists indexes.
 #[tokio::test]
+#[serial]
 async fn describe_di_lists_indexes() {
     let db = connect_or_skip!();
     db.teardown_schema().await.expect("teardown failed");
@@ -465,6 +472,7 @@ async fn describe_l_lists_databases() {
 
 /// `\dt+` shows the Size column in addition to the standard columns.
 #[tokio::test]
+#[serial]
 async fn describe_dt_plus_shows_size() {
     let db = connect_or_skip!();
     db.teardown_schema().await.expect("teardown failed");
