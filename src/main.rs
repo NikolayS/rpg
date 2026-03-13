@@ -24,6 +24,8 @@ mod highlight;
 #[allow(dead_code)]
 mod index_health;
 mod io;
+#[allow(dead_code)]
+mod issues;
 mod logging;
 mod metacmd;
 mod named;
