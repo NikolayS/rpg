@@ -301,6 +301,10 @@ pub struct ReplSettings {
     ///
     /// Maps statement name → compiled [`tokio_postgres::Statement`].
     pub named_statements: HashMap<String, tokio_postgres::Statement>,
+    /// Disable ANSI syntax highlighting in the interactive REPL.
+    ///
+    /// Set by `--no-highlight` CLI flag or `\set HIGHLIGHT off`.
+    pub no_highlight: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -336,6 +340,7 @@ impl std::fmt::Debug for ReplSettings {
                 "named_statements",
                 &format!("{} stmts", self.named_statements.len()),
             )
+            .field("no_highlight", &self.no_highlight)
             .finish()
     }
 }
@@ -1794,6 +1799,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "ECHO_HIDDEN" {
         settings.echo_hidden = value == "on";
     }
+    // Mirror HIGHLIGHT into the settings flag.
+    if name == "HIGHLIGHT" {
+        settings.no_highlight = value == "off";
+    }
 }
 
 /// Apply an `\unset` command.
@@ -2591,7 +2600,9 @@ async fn run_readline_loop(
             }
         }
     }
-    let helper = SamoHelper::new(Arc::clone(&cache));
+    // Enable syntax highlighting unless the user opted out or $TERM is dumb.
+    let highlight = !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb");
+    let helper = SamoHelper::new(Arc::clone(&cache), highlight);
 
     let mut rl: Editor<SamoHelper, FileHistory> = match Editor::with_config(config) {
         Ok(e) => e,
@@ -2627,6 +2638,14 @@ async fn run_readline_loop(
                 if buf.is_empty() && !stmt_buf.trim().is_empty() {
                     let _ = rl.add_history_entry(stmt_buf.trim());
                     stmt_buf.clear();
+                }
+
+                // Keep the helper's highlight state in sync with settings
+                // (allows `\set HIGHLIGHT off` to take effect live).
+                if let Some(h) = rl.helper_mut() {
+                    h.set_highlight(
+                        !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb"),
+                    );
                 }
 
                 match result {
