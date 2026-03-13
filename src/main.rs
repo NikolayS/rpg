@@ -31,6 +31,8 @@ mod pattern;
 #[allow(dead_code)]
 mod query;
 mod rca;
+#[allow(dead_code)]
+mod rca_actions;
 mod repl;
 mod safety;
 mod session;

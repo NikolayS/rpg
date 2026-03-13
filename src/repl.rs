@@ -6075,6 +6075,19 @@ async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &Co
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
+
+    // In Supervised mode, propose actionable mitigations after analysis.
+    let rca_autonomy = settings
+        .config
+        .governance
+        .autonomy_for(crate::governance::FeatureArea::Rca);
+    if rca_autonomy == crate::governance::AutonomyLevel::Supervised {
+        let proposals = crate::rca_actions::propose_mitigations(client).await;
+        if !proposals.is_empty() {
+            let mut audit_log = crate::governance::AuditLog::new();
+            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
