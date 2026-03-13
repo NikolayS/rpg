@@ -680,6 +680,54 @@ pub fn is_auto_permitted(feature: FeatureArea, proposed_action: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Veto tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks Auditor vetoes to downgrade specific action patterns to Supervised.
+///
+/// When the Auditor (rule-based or LLM) vetoes an Auto-mode action, the
+/// veto tracker records the feature+action pattern. Future proposals matching
+/// a vetoed pattern are automatically routed to Supervised mode.
+#[derive(Debug, Default)]
+pub struct VetoTracker {
+    /// Vetoed (feature, `action_pattern`) pairs.
+    vetoed: Vec<(FeatureArea, String)>,
+}
+
+impl VetoTracker {
+    /// Create a new empty veto tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a veto for a specific action.
+    pub fn record_veto(&mut self, feature: FeatureArea, action: &str) {
+        let pattern = action.to_lowercase();
+        if !self.is_vetoed(feature, action) {
+            self.vetoed.push((feature, pattern));
+        }
+    }
+
+    /// Check if an action has been previously vetoed.
+    pub fn is_vetoed(&self, feature: FeatureArea, action: &str) -> bool {
+        let action_lower = action.to_lowercase();
+        self.vetoed
+            .iter()
+            .any(|(f, p)| *f == feature && action_lower.contains(p.as_str()))
+    }
+
+    /// Number of active vetoes.
+    pub fn veto_count(&self) -> usize {
+        self.vetoed.len()
+    }
+
+    /// Clear all vetoes (manual reset).
+    pub fn clear(&mut self) {
+        self.vetoed.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1228,5 +1276,56 @@ mod tests {
     #[test]
     fn auto_not_permitted_vacuum() {
         assert!(!is_auto_permitted(FeatureArea::Vacuum, "VACUUM orders"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Veto tracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn veto_tracker_initially_empty() {
+        let tracker = VetoTracker::new();
+        assert_eq!(tracker.veto_count(), 0);
+        assert!(!tracker.is_vetoed(FeatureArea::Rca, "pg_cancel_backend"));
+    }
+
+    #[test]
+    fn veto_tracker_records_and_checks() {
+        let mut tracker = VetoTracker::new();
+        tracker.record_veto(FeatureArea::Rca, "pg_terminate_backend");
+        assert!(tracker.is_vetoed(FeatureArea::Rca, "SELECT pg_terminate_backend(1234)"));
+        assert!(!tracker.is_vetoed(FeatureArea::Rca, "SELECT pg_cancel_backend(5678)"));
+    }
+
+    #[test]
+    fn veto_tracker_case_insensitive() {
+        let mut tracker = VetoTracker::new();
+        tracker.record_veto(FeatureArea::IndexHealth, "REINDEX CONCURRENTLY");
+        assert!(tracker.is_vetoed(FeatureArea::IndexHealth, "reindex concurrently idx_foo"));
+    }
+
+    #[test]
+    fn veto_tracker_no_duplicate_vetoes() {
+        let mut tracker = VetoTracker::new();
+        tracker.record_veto(FeatureArea::Rca, "pg_terminate_backend");
+        tracker.record_veto(FeatureArea::Rca, "pg_terminate_backend");
+        assert_eq!(tracker.veto_count(), 1);
+    }
+
+    #[test]
+    fn veto_tracker_clear() {
+        let mut tracker = VetoTracker::new();
+        tracker.record_veto(FeatureArea::Rca, "pg_terminate_backend");
+        tracker.clear();
+        assert_eq!(tracker.veto_count(), 0);
+        assert!(!tracker.is_vetoed(FeatureArea::Rca, "pg_terminate_backend"));
+    }
+
+    #[test]
+    fn veto_tracker_per_feature() {
+        let mut tracker = VetoTracker::new();
+        tracker.record_veto(FeatureArea::Rca, "pg_terminate_backend");
+        // Same action pattern, different feature — not vetoed.
+        assert!(!tracker.is_vetoed(FeatureArea::IndexHealth, "pg_terminate_backend"));
     }
 }
