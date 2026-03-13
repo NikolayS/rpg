@@ -1163,8 +1163,8 @@ mod tests {
     // SQL generation — list_relations (tested by inspecting the SQL string)
     // -----------------------------------------------------------------------
 
-    /// Build the SQL that list_relations would produce and verify key fragments
-    /// are present for the basic \dt case.
+    /// Build the SQL that `list_relations` would produce and verify key fragments
+    /// are present for the basic `\dt` case.
     #[test]
     fn list_tables_sql_has_relkind_filter() {
         // We rebuild the SQL inline (matching list_relations logic) because the
@@ -1254,7 +1254,7 @@ mod tests {
     // print_table (smoke test via captured stdout)
     // -----------------------------------------------------------------------
 
-    /// Verify that print_table produces a (0 rows) footer for an empty result.
+    /// Verify that `print_table` produces a `(0 rows)` footer for an empty result.
     #[test]
     fn print_table_empty_rows_with_columns() {
         // We can't easily capture stdout in a unit test without extra deps,
