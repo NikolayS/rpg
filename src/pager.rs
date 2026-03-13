@@ -11,6 +11,13 @@
 //! Use `n` / `N` to jump forward / backward through matches.
 //! `Esc` during search input cancels without searching.
 //! The status bar shows "Match M of N" while a search is active.
+//!
+//! ## Column Freezing
+//!
+//! Press `f` to cycle through frozen column counts (0 → 1 → 2 → … → max → 0).
+//! Frozen columns are pinned at the left edge and remain visible during
+//! horizontal scrolling. A `│` separator is drawn between frozen and
+//! scrollable columns. The status bar shows "Frozen: N" when N > 0.
 
 use std::io;
 
@@ -51,7 +58,7 @@ pub fn run_pager(content: &str) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = PagerState::new();
+    let mut state = PagerState::new(&lines);
 
     // Run the event loop; always restore terminal state afterward.
     let result = run_pager_loop(&mut terminal, &lines, &mut state);
@@ -61,6 +68,43 @@ pub fn run_pager(content: &str) -> io::Result<()> {
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
 
     result
+}
+
+// ---------------------------------------------------------------------------
+// Column boundary detection
+// ---------------------------------------------------------------------------
+
+/// Parse the byte offsets of `|` separator characters from a psql-formatted
+/// header line.
+///
+/// For example, given `" id | name | value "`, returns the byte positions of
+/// each `|` character: `[4, 11]`. These offsets are used to split lines into
+/// frozen and scrollable portions.
+///
+/// The function scans the first non-divider line (a line that is not composed
+/// entirely of `-`, `+`, and whitespace) among the first few lines of content.
+pub fn detect_col_boundaries(lines: &[String]) -> Vec<usize> {
+    // Find the first line that looks like a data/header row (has `|`).
+    let header = lines
+        .iter()
+        .find(|l| l.contains('|') && !is_divider_line(l));
+    let Some(line) = header else {
+        return Vec::new();
+    };
+    line.char_indices()
+        .filter(|(_, c)| *c == '|')
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Returns `true` if `line` is a psql horizontal-rule line like
+/// `+------+-------+` or `--------+--------`.
+fn is_divider_line(line: &str) -> bool {
+    !line.is_empty()
+        && line
+            .chars()
+            .all(|c| c == '-' || c == '+' || c == ' ' || c == '|')
+        && line.contains('-')
 }
 
 // ---------------------------------------------------------------------------
@@ -138,10 +182,14 @@ struct PagerState {
     search_input: Option<String>,
     /// Direction of the pending search (`/` = forward, `?` = backward).
     search_forward: bool,
+    /// Number of columns currently frozen at the left edge (0 = none).
+    frozen_cols: usize,
+    /// Byte offsets of `|` separators detected in the header line.
+    col_boundaries: Vec<usize>,
 }
 
 impl PagerState {
-    fn new() -> Self {
+    fn new(lines: &[String]) -> Self {
         Self {
             scroll_y: 0,
             scroll_x: 0,
@@ -150,6 +198,8 @@ impl PagerState {
             current_match: 0,
             search_input: None,
             search_forward: true,
+            frozen_cols: 0,
+            col_boundaries: detect_col_boundaries(lines),
         }
     }
 
@@ -201,33 +251,60 @@ impl PagerState {
     fn in_search_input(&self) -> bool {
         self.search_input.is_some()
     }
+
+    /// Cycle frozen column count: 0 → 1 → … → `max_cols` → 0.
+    fn toggle_freeze(&mut self) {
+        let max_cols = self.col_boundaries.len();
+        if max_cols == 0 {
+            return;
+        }
+        self.frozen_cols = if self.frozen_cols >= max_cols {
+            0
+        } else {
+            self.frozen_cols + 1
+        };
+        // Reset horizontal scroll when changing freeze level.
+        self.scroll_x = 0;
+    }
+
+    /// Return the byte offset in a line where the frozen portion ends.
+    ///
+    /// When `frozen_cols` is N, we freeze everything up to (and including)
+    /// the Nth `|` character, so the split point is just after that `|`.
+    /// Returns `None` when no columns are frozen.
+    fn frozen_split_byte(&self) -> Option<usize> {
+        if self.frozen_cols == 0 {
+            return None;
+        }
+        // col_boundaries holds positions of each `|`.
+        // frozen_cols == 1 means we keep everything up through boundary[0].
+        let boundary_idx = self.frozen_cols.saturating_sub(1);
+        self.col_boundaries.get(boundary_idx).map(|&pos| pos + 1) // +1 to include the `|` itself
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
 
-/// Build a single `Line` for `line` at `line_idx`, applying horizontal scroll
-/// and search-match highlighting.
-fn build_line<'a>(
-    line: &'a str,
-    line_idx: usize,
+/// Build a single `Line` for `raw_line` at `line_idx` with horizontal scroll
+/// and search-match highlighting applied to the `display_str` slice.
+///
+/// `col_offset` is the byte offset into `raw_line` where `display_str` starts.
+fn build_line_from_slice<'a>(
+    raw_line: &'a str,
+    display_str: &'a str,
     col_offset: usize,
+    line_idx: usize,
     pat_len: usize,
     match_positions: &[(usize, usize)],
     current_match: usize,
 ) -> Line<'a> {
-    let display_str: &str = if col_offset < line.len() {
-        &line[col_offset..]
-    } else {
-        ""
-    };
-
     if pat_len == 0 {
         return Line::from(display_str.to_owned());
     }
 
-    // Gather (byte_col_in_line, global_match_index) for matches on this line.
+    // Gather (byte_col_in_raw_line, global_match_index) for matches on this line.
     let line_matches: Vec<(usize, usize)> = match_positions
         .iter()
         .enumerate()
@@ -243,12 +320,17 @@ fn build_line<'a>(
     let current_highlight_style = Style::default().bg(Color::LightYellow).fg(Color::Black);
 
     // Build spans by splitting around each match.
+    // `cursor` tracks our position in `display_str` (byte offset within it).
     let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = 0usize; // byte cursor in `display_str`
+    let mut cursor = 0usize;
+
+    // Ensure `raw_line` and `display_str` are consistent (display_str is a
+    // sub-slice of raw_line starting at col_offset).
+    let _ = raw_line; // acknowledged; col_offset is the bridge
 
     for (col, match_idx) in &line_matches {
-        // `col` is a byte offset in the original `line`.
-        // Skip matches entirely to the left of the visible area.
+        // `col` is a byte offset in `raw_line`.
+        // Skip matches entirely to the left of the visible slice.
         if *col + pat_len <= col_offset {
             continue;
         }
@@ -297,6 +379,107 @@ fn build_line<'a>(
     Line::from(spans)
 }
 
+/// Build a single `Line` for `line` at `line_idx`, applying horizontal scroll
+/// and search-match highlighting.
+fn build_line<'a>(
+    line: &'a str,
+    line_idx: usize,
+    col_offset: usize,
+    pat_len: usize,
+    match_positions: &[(usize, usize)],
+    current_match: usize,
+) -> Line<'a> {
+    let display_str: &str = if col_offset < line.len() {
+        &line[col_offset..]
+    } else {
+        ""
+    };
+    build_line_from_slice(
+        line,
+        display_str,
+        col_offset,
+        line_idx,
+        pat_len,
+        match_positions,
+        current_match,
+    )
+}
+
+/// Build a `Line` with a frozen prefix, a `│` separator, and a scrollable
+/// suffix (with `scroll_x` applied to the suffix).
+fn build_line_frozen<'a>(
+    line: &'a str,
+    line_idx: usize,
+    frozen_end: usize,
+    scroll_x: usize,
+    pat_len: usize,
+    match_positions: &[(usize, usize)],
+    current_match: usize,
+) -> Line<'a> {
+    // --- Frozen portion ---
+    let frozen_str: &str = if frozen_end <= line.len() {
+        // Clamp to a valid char boundary.
+        let end = if line.is_char_boundary(frozen_end) {
+            frozen_end
+        } else {
+            // Walk back to the nearest char boundary.
+            (0..frozen_end)
+                .rev()
+                .find(|&i| line.is_char_boundary(i))
+                .unwrap_or(0)
+        };
+        &line[..end]
+    } else {
+        line
+    };
+
+    // --- Scrollable portion (starts right after the frozen section) ---
+    let scrollable_start = frozen_end.min(line.len());
+    let scrollable_raw: &str = if scrollable_start < line.len() {
+        &line[scrollable_start..]
+    } else {
+        ""
+    };
+    let scroll_col = scroll_x.min(scrollable_raw.len());
+    // Clamp to char boundary.
+    let scroll_col = (0..=scroll_col)
+        .rev()
+        .find(|&i| scrollable_raw.is_char_boundary(i))
+        .unwrap_or(0);
+    let scrollable_str: &str = &scrollable_raw[scroll_col..];
+
+    // Absolute col_offset for the scrollable part in `line` coordinates.
+    let scrollable_col_offset = scrollable_start + scroll_col;
+
+    // Build each portion with highlight support.
+    let frozen_line = build_line_from_slice(
+        line,
+        frozen_str,
+        0,
+        line_idx,
+        pat_len,
+        match_positions,
+        current_match,
+    );
+    let scrollable_line = build_line_from_slice(
+        line,
+        scrollable_str,
+        scrollable_col_offset,
+        line_idx,
+        pat_len,
+        match_positions,
+        current_match,
+    );
+
+    // Combine: frozen spans + separator + scrollable spans.
+    let sep_style = Style::default().fg(Color::DarkGray);
+    let mut spans: Vec<Span> = frozen_line.spans;
+    spans.push(Span::styled("\u{2502}", sep_style)); // │
+    spans.extend(scrollable_line.spans);
+
+    Line::from(spans)
+}
+
 /// Draw one frame of the pager into `frame`.
 fn draw_frame(
     frame: &mut ratatui::Frame,
@@ -320,6 +503,7 @@ fn draw_frame(
     };
 
     let pat_len = state.search_pattern.as_deref().map_or(0, str::len);
+    let frozen_split = state.frozen_split_byte();
 
     let visible_lines: Vec<Line> = lines
         .iter()
@@ -327,14 +511,26 @@ fn draw_frame(
         .skip(state.scroll_y)
         .take(content_height)
         .map(|(line_idx, line)| {
-            build_line(
-                line,
-                line_idx,
-                state.scroll_x,
-                pat_len,
-                &state.match_positions,
-                state.current_match,
-            )
+            if let Some(frozen_end) = frozen_split {
+                build_line_frozen(
+                    line,
+                    line_idx,
+                    frozen_end,
+                    state.scroll_x,
+                    pat_len,
+                    &state.match_positions,
+                    state.current_match,
+                )
+            } else {
+                build_line(
+                    line,
+                    line_idx,
+                    state.scroll_x,
+                    pat_len,
+                    &state.match_positions,
+                    state.current_match,
+                )
+            }
         })
         .collect();
 
@@ -352,13 +548,16 @@ fn draw_frame(
             (state.scroll_y * 100) / max_scroll_y
         };
         let last_visible = (state.scroll_y + content_height).min(lines.len());
-        let base = format!(
+        let mut base = format!(
             " Lines {}-{} of {} ({pct}%) \
-             \u{2014} q:quit \u{2191}\u{2193}:scroll PgUp/PgDn:page /:search",
+             \u{2014} q:quit \u{2191}\u{2193}:scroll PgUp/PgDn:page /:search f:freeze",
             state.scroll_y + 1,
             last_visible,
             lines.len(),
         );
+        if state.frozen_cols > 0 {
+            base = format!("{base} \u{2014} Frozen: {}", state.frozen_cols);
+        }
         if !state.match_positions.is_empty() {
             format!(
                 "{base} \u{2014} Match {} of {}",
@@ -383,6 +582,118 @@ fn draw_frame(
 // Event loop
 // ---------------------------------------------------------------------------
 
+/// Compute the maximum horizontal scroll offset given the current state and
+/// terminal dimensions.
+fn max_scroll_x(lines: &[String], state: &PagerState, content_width: usize) -> usize {
+    let max_line_width = lines.iter().map(String::len).max().unwrap_or(0);
+    let scrollable_width = if let Some(frozen_end) = state.frozen_split_byte() {
+        // Frozen portion + `│` separator (1 display cell) consumes space.
+        content_width.saturating_sub(frozen_end + 1)
+    } else {
+        content_width
+    };
+    let scrollable_content_width = if state.frozen_cols > 0 {
+        let frozen_end = state.frozen_split_byte().unwrap_or(0);
+        lines
+            .iter()
+            .map(|l| l.len().saturating_sub(frozen_end))
+            .max()
+            .unwrap_or(0)
+    } else {
+        max_line_width
+    };
+    scrollable_content_width.saturating_sub(scrollable_width)
+}
+
+/// Handle a key event while in search-input mode.
+/// Returns `true` if the pager should quit.
+fn handle_search_key(key: event::KeyEvent, state: &mut PagerState, lines: &[String]) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            state.search_input = None;
+        }
+        KeyCode::Enter => {
+            if let Some(pattern) = state.search_input.take() {
+                let forward = state.search_forward;
+                state.apply_search(pattern, lines, forward);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut buf) = state.search_input {
+                buf.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(ref mut buf) = state.search_input {
+                buf.push(c);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Handle a key event while in normal navigation mode.
+/// Returns `true` if the pager should quit.
+fn handle_nav_key(
+    key: event::KeyEvent,
+    state: &mut PagerState,
+    max_scroll_y: usize,
+    max_x: usize,
+    content_height: usize,
+) -> bool {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Down | KeyCode::Char('j') => {
+            if state.scroll_y < max_scroll_y {
+                state.scroll_y += 1;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.scroll_y = state.scroll_y.saturating_sub(1);
+        }
+        KeyCode::PageDown | KeyCode::Char(' ') => {
+            state.scroll_y = (state.scroll_y + content_height).min(max_scroll_y);
+        }
+        KeyCode::PageUp | KeyCode::Char('b') => {
+            state.scroll_y = state.scroll_y.saturating_sub(content_height);
+        }
+        KeyCode::Home | KeyCode::Char('g') => {
+            state.scroll_y = 0;
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            state.scroll_y = max_scroll_y;
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            // Scroll 4 columns at a time.
+            state.scroll_x = (state.scroll_x + 4).min(max_x);
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.scroll_x = state.scroll_x.saturating_sub(4);
+        }
+        KeyCode::Char('f') => {
+            state.toggle_freeze();
+        }
+        KeyCode::Char('/') => {
+            state.search_input = Some(String::new());
+            state.search_forward = true;
+        }
+        KeyCode::Char('?') => {
+            state.search_input = Some(String::new());
+            state.search_forward = false;
+        }
+        KeyCode::Char('n') => {
+            state.next_match();
+        }
+        KeyCode::Char('N') => {
+            state.prev_match();
+        }
+        _ => {}
+    }
+    false
+}
+
 fn run_pager_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     lines: &[String],
@@ -390,96 +701,25 @@ fn run_pager_loop(
 ) -> io::Result<()> {
     loop {
         let area = terminal.size()?;
-        // Reserve 1 line for status bar at bottom.
         let content_height = area.height.saturating_sub(1) as usize;
         let content_width = area.width as usize;
-        let max_scroll_y = lines.len().saturating_sub(content_height);
-        let max_line_width = lines.iter().map(String::len).max().unwrap_or(0);
-        let max_scroll_x = max_line_width.saturating_sub(content_width);
+        let max_y = lines.len().saturating_sub(content_height);
+        let max_x = max_scroll_x(lines, state, content_width);
 
         terminal.draw(|frame| {
-            draw_frame(frame, lines, state, content_height, max_scroll_y);
+            draw_frame(frame, lines, state, content_height, max_y);
         })?;
 
         // Poll for input with a short timeout to remain responsive to resize.
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if state.in_search_input() {
-                    // --- Search input mode ---
-                    match key.code {
-                        KeyCode::Esc => {
-                            state.search_input = None;
-                        }
-                        KeyCode::Enter => {
-                            if let Some(pattern) = state.search_input.take() {
-                                let forward = state.search_forward;
-                                state.apply_search(pattern, lines, forward);
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if let Some(ref mut buf) = state.search_input {
-                                buf.pop();
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            if let Some(ref mut buf) = state.search_input {
-                                buf.push(c);
-                            }
-                        }
-                        _ => {}
-                    }
+                let quit = if state.in_search_input() {
+                    handle_search_key(key, state, lines)
                 } else {
-                    // --- Normal navigation mode ---
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            break;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if state.scroll_y < max_scroll_y {
-                                state.scroll_y += 1;
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            state.scroll_y = state.scroll_y.saturating_sub(1);
-                        }
-                        KeyCode::PageDown | KeyCode::Char(' ') => {
-                            state.scroll_y = (state.scroll_y + content_height).min(max_scroll_y);
-                        }
-                        KeyCode::PageUp | KeyCode::Char('b') => {
-                            state.scroll_y = state.scroll_y.saturating_sub(content_height);
-                        }
-                        KeyCode::Home | KeyCode::Char('g') => {
-                            state.scroll_y = 0;
-                        }
-                        KeyCode::End | KeyCode::Char('G') => {
-                            state.scroll_y = max_scroll_y;
-                        }
-                        KeyCode::Right | KeyCode::Char('l') => {
-                            if state.scroll_x < max_scroll_x {
-                                // Scroll 4 columns at a time.
-                                state.scroll_x = (state.scroll_x + 4).min(max_scroll_x);
-                            }
-                        }
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            state.scroll_x = state.scroll_x.saturating_sub(4);
-                        }
-                        KeyCode::Char('/') => {
-                            state.search_input = Some(String::new());
-                            state.search_forward = true;
-                        }
-                        KeyCode::Char('?') => {
-                            state.search_input = Some(String::new());
-                            state.search_forward = false;
-                        }
-                        KeyCode::Char('n') => {
-                            state.next_match();
-                        }
-                        KeyCode::Char('N') => {
-                            state.prev_match();
-                        }
-                        _ => {}
-                    }
+                    handle_nav_key(key, state, max_y, max_x, content_height)
+                };
+                if quit {
+                    break;
                 }
             }
             // Non-key events (resize, mouse, etc.) are silently ignored;
@@ -506,7 +746,10 @@ pub fn needs_paging(content: &str, rows: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_matches, first_match_from, last_match_before, needs_paging};
+    use super::{
+        detect_col_boundaries, find_matches, first_match_from, is_divider_line, last_match_before,
+        needs_paging,
+    };
 
     // --- needs_paging ---
 
@@ -653,5 +896,94 @@ mod tests {
         // before_line before all matches → wraps to last
         let matches = vec![(3, 0), (5, 1)];
         assert_eq!(last_match_before(&matches, 1), Some(1));
+    }
+
+    // --- is_divider_line ---
+
+    #[test]
+    fn test_is_divider_line_true() {
+        assert!(is_divider_line("+----+------+"));
+        assert!(is_divider_line("------+------"));
+        assert!(is_divider_line("+----------+"));
+    }
+
+    #[test]
+    fn test_is_divider_line_false() {
+        assert!(!is_divider_line(" id | name | value "));
+        assert!(!is_divider_line("  1 | alice | 42   "));
+        assert!(!is_divider_line(""));
+    }
+
+    // --- detect_col_boundaries ---
+
+    #[test]
+    fn test_detect_col_boundaries_empty() {
+        let lines: Vec<String> = vec![];
+        assert!(detect_col_boundaries(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_detect_col_boundaries_no_pipes() {
+        let lines = vec!["hello world".to_owned(), "foo bar".to_owned()];
+        assert!(detect_col_boundaries(&lines).is_empty());
+    }
+
+    #[test]
+    fn test_detect_col_boundaries_single_separator() {
+        // " id | name "  — pipe at position 4
+        let lines = vec![" id | name ".to_owned()];
+        let boundaries = detect_col_boundaries(&lines);
+        assert_eq!(boundaries, vec![4]);
+    }
+
+    #[test]
+    fn test_detect_col_boundaries_two_separators() {
+        // " id | name | value "
+        //  0123 4      5678901234
+        let line = " id | name | value ".to_owned();
+        // Count the bytes to find the `|` positions.
+        let expected: Vec<usize> = line
+            .char_indices()
+            .filter(|(_, c)| *c == '|')
+            .map(|(i, _)| i)
+            .collect();
+        let lines = vec![line];
+        assert_eq!(detect_col_boundaries(&lines), expected);
+        assert_eq!(expected.len(), 2);
+    }
+
+    #[test]
+    fn test_detect_col_boundaries_skips_divider_line() {
+        // The first line is a divider; the second is the real header.
+        let lines = vec![
+            "+----+------+".to_owned(),
+            " id | name ".to_owned(),
+            "  1 | alice".to_owned(),
+        ];
+        let boundaries = detect_col_boundaries(&lines);
+        // Should pick " id | name " which has `|` at position 4.
+        assert_eq!(boundaries, vec![4]);
+    }
+
+    #[test]
+    fn test_detect_col_boundaries_psql_style() {
+        // Typical psql aligned output:
+        //  id | username | email
+        // ----+----------+-------
+        //   1 | alice    | a@b.com
+        let lines = vec![
+            " id | username | email  ".to_owned(),
+            "----+----------+--------".to_owned(),
+            "  1 | alice    | a@b.com".to_owned(),
+        ];
+        let boundaries = detect_col_boundaries(&lines);
+        // Pipes are in the header line " id | username | email  "
+        let expected: Vec<usize> = lines[0]
+            .char_indices()
+            .filter(|(_, c)| *c == '|')
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(boundaries, expected);
+        assert_eq!(boundaries.len(), 2);
     }
 }
