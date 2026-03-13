@@ -681,8 +681,7 @@ async fn main() {
                 // Mirror psql: stop on first non-zero exit and propagate it.
                 let mut exit_code = 0i32;
                 for cmd in &cli.command {
-                    exit_code =
-                        repl::exec_command(&client, cmd, &mut settings, &resolved).await;
+                    exit_code = repl::exec_command(&client, cmd, &mut settings, &resolved).await;
                     if exit_code != 0 {
                         break;
                     }

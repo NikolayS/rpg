@@ -233,8 +233,7 @@ fn query_multi_statement() {
 /// sets — mirroring psql behaviour (issue #128).
 #[test]
 fn query_multiple_c_flags() {
-    let (stdout, _stderr, code) =
-        run_samo(&["-c", "select 1 as a", "-c", "select 2 as b"]);
+    let (stdout, _stderr, code) = run_samo(&["-c", "select 1 as a", "-c", "select 2 as b"]);
     assert_eq!(
         code, 0,
         "expected exit 0 for multiple -c flags:\nstdout={stdout}"
@@ -252,8 +251,7 @@ fn query_multiple_c_flags() {
 /// Multiple `-c` flags stop on the first error (psql-compatible).
 #[test]
 fn query_multiple_c_flags_stop_on_error() {
-    let (stdout, stderr, code) =
-        run_samo(&["-c", "SELEC 1", "-c", "select 2 as b"]);
+    let (stdout, stderr, code) = run_samo(&["-c", "SELEC 1", "-c", "select 2 as b"]);
     assert_eq!(
         code, 1,
         "expected exit 1 when first -c errors:\nstdout={stdout}\nstderr={stderr}"
