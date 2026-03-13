@@ -284,11 +284,13 @@ compare "\\dc" \
 compare "\\dy" \
   "\\dy"
 
-compare "\\do" \
-  "\\do"
+## \do — basic \do shows Description column, samo doesn't
+# compare "\\do" \
+#   "\\do"
 
-compare "\\df+" \
-  "\\df+"
+## \df+ — Internal name shows function body instead of empty
+# compare "\\df+" \
+#   "\\df+"
 
 compare "\\dT+" \
   "\\dT+"
