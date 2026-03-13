@@ -2656,8 +2656,7 @@ order by 1, 2, 3, 4"
     fn list_operators_plus_sql_has_description() {
         let meta = meta(MetaCmd::ListOperators, true, false, None);
 
-        let sql = format!(
-            "select
+        let sql = "select
     n.nspname as \"Schema\",
     o.oprname as \"Name\",
     case when o.oprkind = 'l' then null
@@ -2671,8 +2670,7 @@ order by 1, 2, 3, 4"
 from pg_catalog.pg_operator as o
 left join pg_catalog.pg_namespace as n
     on n.oid = o.oprnamespace
-order by 1, 2, 3, 4"
-        );
+order by 1, 2, 3, 4";
 
         assert!(meta.plus, "meta.plus should be true for verbose operators");
         assert!(
