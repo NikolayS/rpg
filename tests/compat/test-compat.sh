@@ -372,6 +372,30 @@ compare "\\copyright" \
   "\\copyright"
 
 # ---------------------------------------------------------------------------
+# Conditional execution (\if / \else / \endif)
+# ---------------------------------------------------------------------------
+
+compare "if true branch" \
+  "\\if true
+select 'yes' as result;
+\\endif"
+
+compare "if false with else" \
+  "\\if false
+select 'wrong' as result;
+\\else
+select 'right' as result;
+\\endif"
+
+# ---------------------------------------------------------------------------
+# Query execution variants
+# ---------------------------------------------------------------------------
+
+compare_flags "gset and reuse" \
+  -c "select 42 as myval \\gset
+select :myval as result;"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
