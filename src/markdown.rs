@@ -96,9 +96,7 @@ fn render(input: &str) -> String {
         let trimmed = line.trim();
         if trimmed.starts_with('|') && trimmed.ends_with('|') {
             // Peek ahead: if next line is a separator row, current is header.
-            let next_is_sep = lines
-                .get(i + 1)
-                .is_some_and(|l| is_table_separator(l));
+            let next_is_sep = lines.get(i + 1).is_some_and(|l| is_table_separator(l));
             let is_header = next_is_sep;
 
             render_table_row(&mut out, line, is_header);
@@ -479,9 +477,7 @@ fn is_table_separator(line: &str) -> bool {
     if !trimmed.starts_with('|') {
         return false;
     }
-    trimmed
-        .chars()
-        .all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
 /// Count leading space characters in `line`.

@@ -3777,7 +3777,14 @@ async fn observe_loop(
     };
 
     eprintln!("\n-- Summary:");
-    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
+    match stream_completion(
+        provider.as_ref(),
+        &messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -6411,7 +6418,14 @@ async fn handle_ai_plan(
     };
 
     eprintln!("-- Plan mode: investigating...");
-    let result = match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
+    let result = match stream_completion(
+        provider.as_ref(),
+        &messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -6550,7 +6564,14 @@ async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &Co
         temperature: 0.0,
     };
 
-    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
+    match stream_completion(
+        provider.as_ref(),
+        &messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -6720,7 +6741,14 @@ async fn handle_ai_explain(
     };
 
     println!();
-    match stream_completion(provider.as_ref(), &ai_messages, &options, settings.no_highlight).await {
+    match stream_completion(
+        provider.as_ref(),
+        &ai_messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -6938,7 +6966,14 @@ async fn handle_ai_optimize(
     };
 
     println!();
-    match stream_completion(provider.as_ref(), &ai_messages, &options, settings.no_highlight).await {
+    match stream_completion(
+        provider.as_ref(),
+        &ai_messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -7106,7 +7141,14 @@ async fn handle_ai_describe(
         temperature: 0.0,
     };
 
-    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
+    match stream_completion(
+        provider.as_ref(),
+        &messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
@@ -7191,7 +7233,14 @@ async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &Co
         temperature: 0.0,
     };
 
-    match stream_completion(provider.as_ref(), &messages, &options, settings.no_highlight).await {
+    match stream_completion(
+        provider.as_ref(),
+        &messages,
+        &options,
+        settings.no_highlight,
+    )
+    .await
+    {
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
