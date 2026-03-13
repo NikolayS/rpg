@@ -3743,6 +3743,7 @@ async fn dispatch_meta(
                     | MetaCmd::ListTablespaces
                     | MetaCmd::ListTypes
                     | MetaCmd::ListDomains
+                    | MetaCmd::ListEventTriggers
                     | MetaCmd::ListPrivileges
                     | MetaCmd::ListConversions
                     | MetaCmd::ListCasts
@@ -3750,6 +3751,7 @@ async fn dispatch_meta(
                     | MetaCmd::ListForeignServers
                     | MetaCmd::ListFdws
                     | MetaCmd::ListForeignTablesViaFdw
+                    | MetaCmd::ListOperators
                     | MetaCmd::ListUserMappings
             ) =>
         {
