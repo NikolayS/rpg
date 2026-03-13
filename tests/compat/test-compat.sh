@@ -315,17 +315,14 @@ compare_flags "unaligned csv from table" \
 # Expanded display mode
 # ---------------------------------------------------------------------------
 
-## expanded header width still wrong after #223 — too short
-# compare_flags "expanded single row" \
-#   -x -c "select 1 as num, 'hello' as greeting"
+compare_flags "expanded single row" \
+  -x -c "select 1 as num, 'hello' as greeting"
 
-## expanded header width still wrong after #223
-# compare_flags "expanded multi-row" \
-#   -x -c "select id, name from users order by id limit 3"
+compare_flags "expanded multi-row" \
+  -x -c "select id, name from users order by id limit 3"
 
-## expanded header width still wrong after #223
-# compare_flags "expanded with null" \
-#   -x -c "select null::text as val, 42 as num"
+compare_flags "expanded with null" \
+  -x -c "select null::text as val, 42 as num"
 
 # ---------------------------------------------------------------------------
 # Show source commands
