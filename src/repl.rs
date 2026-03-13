@@ -968,8 +968,9 @@ pub async fn exec_command(
     params: &crate::connection::ConnParams,
 ) -> i32 {
     if sql.trim_start().starts_with('\\') {
-        // Backslash meta-command in -c mode: parse and execute.
-        let mut parsed = crate::metacmd::parse(sql.trim());
+        // Backslash meta-command in -c mode: interpolate variables, then parse.
+        let interpolated = settings.vars.interpolate(sql.trim());
+        let mut parsed = crate::metacmd::parse(&interpolated);
         parsed.echo_hidden = settings.echo_hidden;
         let mut dummy_settings = ReplSettings {
             echo_hidden: settings.echo_hidden,
@@ -1099,8 +1100,10 @@ pub(crate) async fn exec_lines(
 
     'lines: for line in lines {
         if line.trim_start().starts_with('\\') {
-            // Dispatch meta-command (handles conditional tracking internally).
-            let mut parsed = crate::metacmd::parse(line.trim());
+            // Interpolate variables in the meta-command line (psql behaviour:
+            // `:varname` is expanded before the backslash parser sees it).
+            let interpolated = settings.vars.interpolate(line.trim());
+            let mut parsed = crate::metacmd::parse(&interpolated);
             parsed.echo_hidden = settings.echo_hidden;
             let result = dispatch_meta(parsed, client, params, settings, tx).await;
             // Handle buffer-aware results that exec_lines must act on directly.
@@ -1132,7 +1135,8 @@ pub(crate) async fn exec_lines(
                     }
                     buf.push_str(sql_part.trim_end());
                 }
-                let mut parsed = crate::metacmd::parse(meta_part);
+                let interpolated_meta = settings.vars.interpolate(meta_part);
+                let mut parsed = crate::metacmd::parse(&interpolated_meta);
                 parsed.echo_hidden = settings.echo_hidden;
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
@@ -2343,7 +2347,8 @@ async fn handle_backslash_dumb(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> HandleLineResult {
-    let mut parsed = crate::metacmd::parse(input);
+    let interpolated = settings.vars.interpolate(input);
+    let mut parsed = crate::metacmd::parse(&interpolated);
     parsed.echo_hidden = settings.echo_hidden;
     match dispatch_meta(parsed, client, params, settings, tx).await {
         MetaResult::Quit => HandleLineResult::Quit,
@@ -2476,7 +2481,8 @@ async fn handle_line(
         // Record the command in stmt_buf so the caller adds it to readline history.
         stmt_buf.clear();
         stmt_buf.push_str(line);
-        let mut parsed = crate::metacmd::parse(line.trim());
+        let interpolated = settings.vars.interpolate(line.trim());
+        let mut parsed = crate::metacmd::parse(&interpolated);
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
@@ -2623,8 +2629,9 @@ async fn handle_line(
             stmt_buf.push(' ');
         }
         stmt_buf.push_str(meta_part);
-        // Dispatch the backslash command.
-        let mut parsed = crate::metacmd::parse(meta_part);
+        // Dispatch the backslash command (interpolate variables first).
+        let interpolated_meta = settings.vars.interpolate(meta_part);
+        let mut parsed = crate::metacmd::parse(&interpolated_meta);
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
