@@ -128,6 +128,40 @@ pub fn where_clause(pattern: Option<&str>, column: &str, schema_column: Option<&
     }
 }
 
+/// Convert a psql-style pattern to a `PostgreSQL` regex string.
+///
+/// psql's `\dC` (and a few other commands) filter type names using the `~`
+/// regex operator rather than `LIKE`.  The conversion rules are:
+///
+/// - `*`  → `.*`   (any sequence of characters)
+/// - `?`  → `.`    (any single character)
+/// - All other characters are treated as literals and must be regex-escaped.
+///
+/// The returned string is wrapped in the `^(…)$` anchor that psql uses, and
+/// is ready to embed inside a single-quoted SQL string literal (single quotes
+/// inside the value are doubled).
+pub fn to_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 8);
+    out.push_str("^(");
+    for ch in pattern.chars() {
+        match ch {
+            // psql wildcards → regex equivalents
+            '*' => out.push_str(".*"),
+            '?' => out.push('.'),
+            // SQL single-quote escape
+            '\'' => out.push_str("''"),
+            // Escape regex metacharacters that are literals in psql patterns
+            '.' | '^' | '$' | '+' | '{' | '}' | '[' | ']' | '(' | ')' | '|' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            other => out.push(other),
+        }
+    }
+    out.push_str(")$");
+    out
+}
+
 /// Build a single-column filter clause (helper for [`where_clause`]).
 fn build_name_clause(pattern: &str, column: &str) -> String {
     if pattern.is_empty() {
@@ -278,5 +312,38 @@ mod tests {
             where_clause(Some(".users"), "relname", Some("nspname")),
             "relname = 'users'"
         );
+    }
+
+    // -- to_regex --------------------------------------------------------------
+
+    #[test]
+    fn to_regex_plain_literal() {
+        assert_eq!(to_regex("integer"), "^(integer)$");
+    }
+
+    #[test]
+    fn to_regex_star_wildcard() {
+        assert_eq!(to_regex("int*"), "^(int.*)$");
+    }
+
+    #[test]
+    fn to_regex_question_wildcard() {
+        assert_eq!(to_regex("int?"), "^(int.)$");
+    }
+
+    #[test]
+    fn to_regex_escapes_dot() {
+        // A literal dot in the pattern must not act as a regex wildcard.
+        assert_eq!(to_regex("a.b"), "^(a\\.b)$");
+    }
+
+    #[test]
+    fn to_regex_escapes_single_quote() {
+        assert_eq!(to_regex("o'clock"), "^(o''clock)$");
+    }
+
+    #[test]
+    fn to_regex_escapes_regex_metacharacters() {
+        assert_eq!(to_regex("a(b)"), "^(a\\(b\\))$");
     }
 }

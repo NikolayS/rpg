@@ -1298,38 +1298,67 @@ order by 1, 3, 2"
 ///
 /// Matches psql's `\dC [pattern]` output: Source type, Target type,
 /// Function, Implicit?
+///
+/// The visibility filter (`pg_type_is_visible`) mirrors psql: only casts
+/// where the source **or** target type is visible in the current
+/// `search_path` are shown.  When a pattern is supplied it is matched
+/// against both `typname` and the formatted type name (`format_type()`),
+/// using the same `~` regex operator that psql uses.
 async fn list_casts(client: &Client, meta: &ParsedMeta) -> bool {
-    // Filter on source or target type name when a pattern is given.
-    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "st.typname", None);
-
-    let where_clause = if name_filter.is_empty() {
-        String::new()
-    } else {
-        // Also match on target type name.
-        let target_filter = pattern::where_clause(meta.pattern.as_deref(), "tt.typname", None);
-        format!("where ({name_filter} or {target_filter})")
+    // Build the WHERE clause.  psql always applies a visibility filter; when
+    // a pattern is present it is also matched against type names via regex.
+    let where_clause = match meta.pattern.as_deref() {
+        None => {
+            // No pattern: show any cast where source or target is visible.
+            "where (
+    pg_catalog.pg_type_is_visible(ts.oid)
+    or pg_catalog.pg_type_is_visible(tt.oid)
+)"
+            .to_owned()
+        }
+        Some(pat) => {
+            // Pattern: match on typname OR format_type(), with visibility.
+            let re = pattern::to_regex(pat);
+            format!(
+                "where (
+    (ts.typname operator(pg_catalog.~) '{re}' collate pg_catalog.default
+        or pg_catalog.format_type(ts.oid, null) operator(pg_catalog.~) '{re}' collate pg_catalog.default)
+    and pg_catalog.pg_type_is_visible(ts.oid)
+)
+or (
+    (tt.typname operator(pg_catalog.~) '{re}' collate pg_catalog.default
+        or pg_catalog.format_type(tt.oid, null) operator(pg_catalog.~) '{re}' collate pg_catalog.default)
+    and pg_catalog.pg_type_is_visible(tt.oid)
+)"
+            )
+        }
     };
 
     let sql = format!(
         "select
     pg_catalog.format_type(c.castsource, null) as \"Source type\",
     pg_catalog.format_type(c.casttarget, null) as \"Target type\",
-    case when c.castfunc = 0 then '(binary coercible)'
-         else p.proname
+    case
+        when c.castmethod = 'b' then '(binary coercible)'
+        when c.castmethod = 'i' then '(with inout)'
+        else p.proname
     end as \"Function\",
-    case c.castcontext
-        when 'e' then 'no'
-        when 'a' then 'in assignment'
-        when 'i' then 'yes'
-        else c.castcontext::text
+    case
+        when c.castcontext = 'e' then 'no'
+        when c.castcontext = 'a' then 'in assignment'
+        else 'yes'
     end as \"Implicit?\"
 from pg_catalog.pg_cast as c
-left join pg_catalog.pg_type as st
-    on st.oid = c.castsource
-left join pg_catalog.pg_type as tt
-    on tt.oid = c.casttarget
 left join pg_catalog.pg_proc as p
-    on p.oid = c.castfunc
+    on c.castfunc = p.oid
+left join pg_catalog.pg_type as ts
+    on c.castsource = ts.oid
+left join pg_catalog.pg_namespace as ns
+    on ns.oid = ts.typnamespace
+left join pg_catalog.pg_type as tt
+    on c.casttarget = tt.oid
+left join pg_catalog.pg_namespace as nt
+    on nt.oid = tt.typnamespace
 {where_clause}
 order by 1, 2"
     );
