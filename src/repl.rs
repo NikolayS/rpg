@@ -1105,7 +1105,14 @@ pub async fn execute_query(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql_to_send),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
 
             // Capture context for /fix.
@@ -1212,7 +1219,14 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql_to_send),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             settings.last_error = Some(LastError {
@@ -1299,7 +1313,14 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql_to_send),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
 
             // Capture context for /fix.
@@ -1429,7 +1450,14 @@ async fn execute_named_stmt(
             true
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    None,
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
             false
         }
@@ -1682,7 +1710,14 @@ async fn execute_gexec(client: &Client, buf: &str, settings: &mut ReplSettings, 
             cells
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql_to_send),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
             return;
         }
@@ -1705,7 +1740,14 @@ async fn execute_gexec(client: &Client, buf: &str, settings: &mut ReplSettings, 
                 tx.update_from_sql(&cell_sql);
             }
             Err(e) => {
-                eprintln!("ERROR:  {e}");
+                eprint!(
+                    "{}",
+                    crate::output::format_pg_error(
+                        &e,
+                        Some(&cell_sql),
+                        &crate::output::OutputConfig::default(),
+                    )
+                );
                 tx.on_error();
             }
         }
@@ -1803,7 +1845,14 @@ async fn execute_gset(
             }
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql_to_send),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
         }
     }
@@ -1861,7 +1910,14 @@ async fn execute_crosstabview(
             Some((col_names, rows))
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql_to_send),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             tx.on_error();
             None
         }
@@ -1915,7 +1971,14 @@ async fn describe_buffer(client: &Client, buf: &str) {
     let stmt = match client.prepare(buf).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(buf),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             return;
         }
     };
@@ -1949,7 +2012,14 @@ async fn describe_buffer(client: &Client, buf: &str) {
             .map(|i| row.get::<_, String>(i))
             .collect(),
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    None,
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             return;
         }
     };
@@ -2183,7 +2253,14 @@ pub(crate) async fn exec_lines(
                                 settings.named_statements.insert(name, stmt);
                             }
                             Err(e) => {
-                                eprintln!("ERROR:  {e}");
+                                eprint!(
+                                    "{}",
+                                    crate::output::format_pg_error(
+                                        &e,
+                                        Some(&sql),
+                                        &crate::output::OutputConfig::default(),
+                                    )
+                                );
                                 exit_code = 1;
                                 if settings.single_transaction {
                                     break 'lines;
@@ -4234,7 +4311,14 @@ async fn handle_backslash_dumb(
                     Ok(stmt) => {
                         settings.named_statements.insert(name.clone(), stmt);
                     }
-                    Err(e) => eprintln!("ERROR:  {e}"),
+                    Err(e) => eprint!(
+                        "{}",
+                        crate::output::format_pg_error(
+                            &e,
+                            Some(&sql),
+                            &crate::output::OutputConfig::default(),
+                        )
+                    ),
                 }
             }
             HandleLineResult::Continue
@@ -4514,7 +4598,14 @@ async fn handle_line(
                         Ok(stmt) => {
                             settings.named_statements.insert(name.clone(), stmt);
                         }
-                        Err(e) => eprintln!("ERROR:  {e}"),
+                        Err(e) => eprint!(
+                            "{}",
+                            crate::output::format_pg_error(
+                                &e,
+                                Some(&sql),
+                                &crate::output::OutputConfig::default(),
+                            )
+                        ),
                     }
                 }
                 HandleLineResult::Continue
@@ -5683,7 +5774,14 @@ async fn handle_ai_explain(
     let raw_messages = match messages_result {
         Ok(msgs) => msgs,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(&explain_sql),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             return;
         }
     };
@@ -5867,7 +5965,14 @@ async fn handle_ai_optimize(
     let raw_messages = match client.simple_query(&explain_sql).await {
         Ok(msgs) => msgs,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(&explain_sql),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             return;
         }
     };

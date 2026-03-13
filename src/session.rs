@@ -151,7 +151,14 @@ pub async fn show_function_source(client: &Client, name: &str, plus: bool, echo_
     let rows = match client.simple_query(&sql).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(&sql),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             return;
         }
     };
@@ -212,7 +219,14 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
     let rows = match client.simple_query(&sql).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(&sql),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
             return;
         }
     };

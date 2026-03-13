@@ -142,7 +142,14 @@ async fn run_and_print_full(
             print_table_inner(&col_names, &rows, title, show_row_count);
         }
         Err(e) => {
-            eprintln!("ERROR:  {e}");
+            eprint!(
+                "{}",
+                crate::output::format_pg_error(
+                    &e,
+                    Some(sql),
+                    &crate::output::OutputConfig::default(),
+                )
+            );
         }
     }
 
@@ -1017,7 +1024,14 @@ order by 2, 3"
 
             let matches: Vec<(String, String)> = match client.simple_query(&lookup_sql).await {
                 Err(e) => {
-                    eprintln!("ERROR: {e}");
+                    eprint!(
+                        "{}",
+                        crate::output::format_pg_error(
+                            &e,
+                            Some(&lookup_sql),
+                            &crate::output::OutputConfig::default(),
+                        )
+                    );
                     return false;
                 }
                 Ok(msgs) => {
