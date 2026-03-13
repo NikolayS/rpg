@@ -679,6 +679,114 @@ async fn execute_piped(
     }
 }
 
+/// Execute `buf`, then execute each non-NULL result cell as a separate SQL
+/// statement (`\gexec`).
+///
+/// The initial query is run via `simple_query`.  For each row, for each
+/// column, if the cell value is `Some` and non-empty, that value is executed
+/// as a SQL statement.  `tokio_postgres` returns `None` for NULL cells via
+/// `SimpleQueryRow::get()`; both `None` and empty-string cells are skipped.
+///
+/// On success the command tag (e.g. `"CREATE TABLE"`) is printed.  On error
+/// the error message is printed and processing continues with the next cell.
+///
+/// The caller is responsible for clearing `buf` after this returns.
+async fn execute_gexec(client: &Client, buf: &str, settings: &mut ReplSettings, tx: &mut TxState) {
+    use tokio_postgres::SimpleQueryMessage;
+
+    // Interpolate variables (mirrors execute_query).
+    let interpolated = settings.vars.interpolate(buf);
+    let sql_to_send = interpolated.as_str();
+
+    // Collect result cell values from the initial query.
+    let cell_sqls: Vec<String> = match client.simple_query(sql_to_send).await {
+        Ok(messages) => {
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let vals: Vec<Option<String>> = (0..row.len())
+                        .map(|i| row.get(i).map(str::to_owned))
+                        .collect();
+                    rows.push(vals);
+                }
+            }
+
+            tx.update_from_sql(sql_to_send);
+
+            // Flatten row-major: row 0 col 0, row 0 col 1, …, row 1 col 0, …
+            // NULL (None) and empty-string cells are both skipped.
+            let mut cells = Vec::new();
+            for row in rows {
+                for s in row.into_iter().flatten() {
+                    if !s.is_empty() {
+                        cells.push(s);
+                    }
+                }
+            }
+            cells
+        }
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            tx.on_error();
+            return;
+        }
+    };
+
+    // Execute each cell value as a SQL statement.
+    for cell_sql in cell_sqls {
+        match client.simple_query(&cell_sql).await {
+            Ok(messages) => {
+                for msg in messages {
+                    if let SimpleQueryMessage::CommandComplete(n) = msg {
+                        // Extract the command tag from the completion count.
+                        // tokio-postgres 0.7 CommandComplete carries only the
+                        // row count as u64; derive the tag by inspecting the
+                        // first keyword of the cell SQL.
+                        let tag = command_tag_for(&cell_sql, n);
+                        println!("{tag}");
+                    }
+                }
+                tx.update_from_sql(&cell_sql);
+            }
+            Err(e) => {
+                eprintln!("ERROR:  {e}");
+                tx.on_error();
+            }
+        }
+    }
+}
+
+/// Derive a psql-style command tag string from the first keyword of `sql`
+/// and the affected-row count `n`.
+///
+/// For most DDL statements the tag is just the uppercased verb + noun
+/// (e.g. `"CREATE TABLE"`).  For INSERT/UPDATE/DELETE/SELECT we append the
+/// row count.
+fn command_tag_for(sql: &str, n: u64) -> String {
+    let upper = sql.trim().to_uppercase();
+    let words: Vec<&str> = upper.split_whitespace().take(2).collect();
+    let first = words.first().copied().unwrap_or("");
+    let second = words.get(1).copied().unwrap_or("");
+
+    match first {
+        "INSERT" => format!("INSERT 0 {n}"),
+        "UPDATE" => format!("UPDATE {n}"),
+        "DELETE" => format!("DELETE {n}"),
+        "SELECT" | "VALUES" | "TABLE" | "MOVE" | "FETCH" | "COPY" => {
+            format!("{first} {n}")
+        }
+        _ => {
+            // DDL and other statements: two-word tag (e.g. "CREATE TABLE").
+            if second.is_empty() {
+                first.to_owned()
+            } else {
+                format!("{first} {second}")
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // \gdesc — describe buffer columns without executing (#52)
 // ---------------------------------------------------------------------------
@@ -1336,6 +1444,8 @@ pub enum MetaResult {
     ExecuteBufferExpandedToFile(String),
     /// Describe the result columns of the buffer without executing it (`\gdesc`).
     DescribeBuffer,
+    /// Execute the current buffer, then execute each result cell as SQL (`\gexec`).
+    GExecBuffer,
 }
 
 /// Default `\watch` interval in seconds.
@@ -1557,6 +1667,7 @@ async fn dispatch_io(
             Some(result)
         }
         MetaCmd::GDesc => Some(MetaResult::DescribeBuffer),
+        MetaCmd::GExec => Some(MetaResult::GExecBuffer),
         _ => None,
     }
 }
@@ -1987,6 +2098,7 @@ enum HandleLineResult {
 ///
 /// Buffer-mutating commands (`\r`, `\p`, `\w`, `\e`) are handled inline
 /// here because the dumb loop owns the buffer directly.
+#[allow(clippy::too_many_lines)]
 async fn handle_backslash_dumb(
     input: &str,
     buf: &mut String,
@@ -2087,6 +2199,14 @@ async fn handle_backslash_dumb(
             let sql = buf.trim();
             describe_buffer(client, sql).await;
             HandleLineResult::Continue
+        }
+        MetaResult::GExecBuffer => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                execute_gexec(client, &sql, settings, tx).await;
+            }
+            HandleLineResult::BufferUpdated
         }
         MetaResult::Continue => HandleLineResult::Continue,
     }
@@ -2212,6 +2332,15 @@ async fn handle_line(
                 let sql = buf.trim().to_owned();
                 describe_buffer(client, &sql).await;
                 HandleLineResult::Continue
+            }
+            MetaResult::GExecBuffer => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_gexec(client, &sql, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
             }
             MetaResult::Continue => HandleLineResult::Continue,
         };
@@ -2626,5 +2755,68 @@ mod tests {
             build_prompt("mydb", TxState::InTransaction, true),
             "mydb-*> "
         );
+    }
+
+    // -- \gexec parser ---------------------------------------------------------
+
+    #[test]
+    fn parse_gexec_bare() {
+        assert_eq!(
+            crate::metacmd::parse("\\gexec").cmd,
+            crate::metacmd::MetaCmd::GExec
+        );
+    }
+
+    #[test]
+    fn parse_gexec_with_trailing_space() {
+        // Trailing whitespace must still be recognised.
+        assert_eq!(
+            crate::metacmd::parse("\\gexec ").cmd,
+            crate::metacmd::MetaCmd::GExec
+        );
+    }
+
+    #[test]
+    fn parse_gexec_prefix_not_g() {
+        // \gexecfoo is not \gexec.
+        assert!(matches!(
+            crate::metacmd::parse("\\gexecfoo").cmd,
+            crate::metacmd::MetaCmd::Unknown(_)
+        ));
+    }
+
+    // -- command_tag_for -------------------------------------------------------
+
+    #[test]
+    fn command_tag_create_table() {
+        assert_eq!(
+            command_tag_for("CREATE TABLE t1(id int)", 0),
+            "CREATE TABLE"
+        );
+    }
+
+    #[test]
+    fn command_tag_insert() {
+        assert_eq!(command_tag_for("INSERT INTO t VALUES (1)", 1), "INSERT 0 1");
+    }
+
+    #[test]
+    fn command_tag_update() {
+        assert_eq!(command_tag_for("UPDATE t SET x=1", 3), "UPDATE 3");
+    }
+
+    #[test]
+    fn command_tag_delete() {
+        assert_eq!(command_tag_for("DELETE FROM t", 2), "DELETE 2");
+    }
+
+    #[test]
+    fn command_tag_select() {
+        assert_eq!(command_tag_for("SELECT 1", 1), "SELECT 1");
+    }
+
+    #[test]
+    fn command_tag_drop_table() {
+        assert_eq!(command_tag_for("DROP TABLE t1", 0), "DROP TABLE");
     }
 }
