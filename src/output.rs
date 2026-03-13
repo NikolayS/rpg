@@ -443,7 +443,7 @@ fn write_expanded_header(out: &mut String, record_num: usize, max_data_width: us
     let prefix = format!("-[ RECORD {record_num} ]");
     let dashes_needed = max_data_width.saturating_sub(prefix.len());
     let _ = write!(out, "{prefix}");
-    for _ in 0..dashes_needed.max(1) {
+    for _ in 0..dashes_needed {
         out.push('-');
     }
     out.push('\n');
