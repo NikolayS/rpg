@@ -748,6 +748,13 @@ pub struct ReplSettings {
     /// When `true`, SQLSTATE codes are appended to error output.
     /// Defaults to `false` (psql default).
     pub verbose_errors: bool,
+    /// Path of the currently-executing script file, if any.
+    ///
+    /// Set whenever a file is being processed via `\i`, `\ir`, or `-f`.
+    /// Used by `\ir` to resolve relative file paths against the directory
+    /// of the current script rather than the process working directory,
+    /// matching psql behaviour.
+    pub current_file: Option<String>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -807,6 +814,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("db_capabilities", &self.db_capabilities)
             .field("i_know_what_im_doing", &self.i_know_what_im_doing)
             .field("verbose_errors", &self.verbose_errors)
+            .field("current_file", &self.current_file)
             .finish()
     }
 }
@@ -848,6 +856,7 @@ impl Default for ReplSettings {
             db_capabilities: crate::capabilities::DbCapabilities::default(),
             i_know_what_im_doing: false,
             verbose_errors: false,
+            current_file: None,
         }
     }
 }
@@ -3289,12 +3298,17 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::IncludeRelative => {
-            // In the interactive REPL \ir and \i behave identically; the
-            // distinction matters only when we already track a "current file"
-            // (future work).
+            // \ir resolves the path relative to the directory of the currently
+            // executing script file (psql behaviour).  When there is no current
+            // script (e.g. interactive REPL), it falls back to the process CWD,
+            // which is identical to \i behaviour.
             match parsed.pattern.as_deref() {
-                Some(path) => {
-                    crate::io::include_file(client, path, settings, tx, params).await;
+                Some(raw_path) => {
+                    let resolved = crate::io::resolve_relative_path(
+                        raw_path,
+                        settings.current_file.as_deref(),
+                    );
+                    crate::io::include_file(client, &resolved, settings, tx, params).await;
                 }
                 None => eprintln!("\\ir: file name required"),
             }

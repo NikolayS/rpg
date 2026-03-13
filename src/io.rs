@@ -6,7 +6,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 
@@ -48,10 +48,21 @@ pub fn include_file<'a>(
         let content = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("\\i: could not read \"{path}\": {e}");
+                // Match psql's error format: "{path}: {os error string}"
+                // Rust appends " (os error N)" to the OS message; strip it.
+                let full = e.to_string();
+                let msg = full
+                    .find(" (os error ")
+                    .map_or(full.as_str(), |pos| &full[..pos]);
+                eprintln!("{path}: {msg}");
                 return 1;
             }
         };
+
+        // Save and update current_file so that nested \ir commands resolve
+        // paths relative to the directory of this file.
+        let prev_file = settings.current_file.clone();
+        settings.current_file = Some(path.to_owned());
 
         let start_depth = settings.cond.depth();
         let exit_code = crate::repl::exec_lines(
@@ -63,6 +74,10 @@ pub fn include_file<'a>(
         )
         .await;
 
+        // Restore the previous current_file so callers see the right value
+        // after this include returns.
+        settings.current_file = prev_file;
+
         let end_depth = settings.cond.depth();
         if end_depth > start_depth {
             eprintln!(
@@ -73,6 +88,31 @@ pub fn include_file<'a>(
 
         exit_code
     })
+}
+
+// ---------------------------------------------------------------------------
+// Path resolution for \ir
+// ---------------------------------------------------------------------------
+
+/// Resolve a path for `\ir` (include-relative).
+///
+/// If `raw` is absolute, returns it unchanged.  Otherwise, resolves it
+/// relative to the directory of `current_file` when one is set; if
+/// `current_file` is `None` the path is returned as-is (equivalent to
+/// CWD-relative, matching `\i` behaviour).
+pub fn resolve_relative_path(raw: &str, current_file: Option<&str>) -> String {
+    let raw_path = Path::new(raw);
+    if raw_path.is_absolute() {
+        return raw.to_owned();
+    }
+    if let Some(cf) = current_file {
+        let base: PathBuf = Path::new(cf)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        return base.join(raw_path).to_string_lossy().into_owned();
+    }
+    raw.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -369,5 +409,38 @@ mod tests {
         // cat should succeed and return the original content unchanged.
         assert!(result.is_ok(), "edit with cat should succeed: {result:?}");
         assert_eq!(result.unwrap(), content);
+    }
+
+    // -- resolve_relative_path -----------------------------------------------
+
+    #[test]
+    fn resolve_relative_no_current_file_returns_as_is() {
+        let result = resolve_relative_path("foo.sql", None);
+        assert_eq!(result, "foo.sql");
+    }
+
+    #[test]
+    fn resolve_relative_absolute_path_unchanged() {
+        let result = resolve_relative_path("/abs/path/foo.sql", Some("/some/script.sql"));
+        assert_eq!(result, "/abs/path/foo.sql");
+    }
+
+    #[test]
+    fn resolve_relative_relative_to_current_file_dir() {
+        let result = resolve_relative_path("bar.sql", Some("/scripts/main.sql"));
+        assert_eq!(result, "/scripts/bar.sql");
+    }
+
+    #[test]
+    fn resolve_relative_current_file_in_root() {
+        // When the current file is at the root, parent is "/".
+        let result = resolve_relative_path("foo.sql", Some("/root.sql"));
+        assert_eq!(result, "/foo.sql");
+    }
+
+    #[test]
+    fn resolve_relative_subdirectory() {
+        let result = resolve_relative_path("sub/child.sql", Some("/scripts/main.sql"));
+        assert_eq!(result, "/scripts/sub/child.sql");
     }
 }
