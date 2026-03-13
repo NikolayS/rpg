@@ -312,6 +312,38 @@ compare_flags "unaligned csv from table" \
   --csv -c "select id, name from users order by id limit 3"
 
 # ---------------------------------------------------------------------------
+# Show source commands
+# ---------------------------------------------------------------------------
+
+compare "\\sf user_order_count" \
+  "\\sf user_order_count"
+
+compare "\\sf+ user_order_count" \
+  "\\sf+ user_order_count"
+
+compare "\\sv active_products" \
+  "\\sv active_products"
+
+compare "\\sv+ active_products" \
+  "\\sv+ active_products"
+
+# ---------------------------------------------------------------------------
+# Foreign data wrapper commands
+# ---------------------------------------------------------------------------
+
+compare "\\des" \
+  "\\des"
+
+compare "\\dew" \
+  "\\dew"
+
+compare "\\det" \
+  "\\det"
+
+compare "\\deu" \
+  "\\deu"
+
+# ---------------------------------------------------------------------------
 # Info commands
 # ---------------------------------------------------------------------------
 
