@@ -148,7 +148,7 @@ mod tests {
         let opts = CompletionOptions::default();
         assert!(opts.model.is_empty());
         assert_eq!(opts.max_tokens, 4096);
-        assert_eq!(opts.temperature, 0.0);
+        assert!(opts.temperature.abs() < f32::EPSILON);
     }
 
     #[test]
