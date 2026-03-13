@@ -288,6 +288,7 @@ pub async fn run_auto_flow(
     proposals: &[ActionProposal],
     audit_log: &mut AuditLog,
     circuit_breaker: &mut crate::governance::CircuitBreaker,
+    veto_tracker: &mut crate::governance::VetoTracker,
 ) -> usize {
     if proposals.is_empty() {
         return 0;
@@ -322,10 +323,28 @@ pub async fn run_auto_flow(
             continue;
         }
 
+        // Check veto tracker — previously vetoed actions skip Auto.
+        if veto_tracker.is_vetoed(proposal.feature, &proposal.proposed_action) {
+            crate::logging::info(
+                "auto",
+                &format!("Skipping (vetoed): {}", proposal.proposed_action),
+            );
+            log_action(
+                audit_log,
+                proposal,
+                ActionOutcome::Vetoed {
+                    reason: "Previously vetoed by Auditor".to_owned(),
+                },
+                None,
+            );
+            continue;
+        }
+
         // Auditor review (rule-based).
         let decision = auditor.review(proposal, AutonomyLevel::Auto);
         if let AuditDecision::Rejected { reason } = decision {
             crate::logging::info("auto", &format!("Auditor rejected: {reason}"));
+            veto_tracker.record_veto(proposal.feature, &proposal.proposed_action);
             log_action(audit_log, proposal, ActionOutcome::Vetoed { reason }, None);
             continue;
         }

@@ -234,6 +234,7 @@ pub async fn run(
 
     let mut detector = AnomalyDetector::new();
     let mut circuit_breaker = crate::governance::CircuitBreaker::new();
+    let mut veto_tracker = crate::governance::VetoTracker::new();
     let mut audit_log = crate::governance::AuditLog::new();
     let interval = Duration::from_secs(10);
 
@@ -357,6 +358,7 @@ pub async fn run(
                         &proposals,
                         &mut audit_log,
                         &mut circuit_breaker,
+                        &mut veto_tracker,
                     )
                     .await;
                     if executed > 0 {
