@@ -8,6 +8,7 @@ use clap::Parser;
 mod conditional;
 mod connection;
 mod copy;
+mod crosstab;
 mod describe;
 mod io;
 mod metacmd;
