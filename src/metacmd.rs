@@ -261,6 +261,14 @@ pub enum MetaCmd {
     /// `\nd name` — delete a named query.
     NamedDelete(String),
 
+    // -- Input mode --------------------------------------------------------
+    /// `\sql` — switch to SQL input mode.
+    SqlMode,
+    /// `\text2sql` / `\t2s` — switch to text-to-SQL input mode.
+    Text2SqlMode,
+    /// `\mode` — show current input mode.
+    ShowMode,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -420,6 +428,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('l') => parse_l(input),
         Some('d') => parse_d_family(input),
         Some('n') => parse_n_family(input),
+        Some('m') => parse_m_family(input),
         Some('!') => parse_shell(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
@@ -444,6 +453,12 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
 
 /// Dispatch `s`-family commands: `\set`, `\sf`, `\sv`.
 fn parse_s_family(input: &str) -> ParsedMeta {
+    // \sql — switch to SQL mode
+    if let Some(rest) = input.strip_prefix("sql") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::SqlMode);
+        }
+    }
     if let Some(after) = input.strip_prefix("set") {
         if after.is_empty() || after.starts_with(char::is_whitespace) {
             return parse_set(input);
@@ -501,6 +516,17 @@ fn parse_pset(input: &str) -> ParsedMeta {
 /// This function is called only when the `t` arm is reached; it must
 /// distinguish `\t` from `\timing` by checking for the full word.
 fn parse_t_family(input: &str) -> ParsedMeta {
+    // `\text2sql` / `\t2s` — switch to text-to-SQL mode
+    if let Some(rest) = input.strip_prefix("text2sql") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Text2SqlMode);
+        }
+    }
+    if let Some(rest) = input.strip_prefix("t2s") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Text2SqlMode);
+        }
+    }
     // `\timing …` takes priority over `\t`
     if let Some(rest) = input.strip_prefix("timing") {
         let arg = rest.trim();
@@ -521,6 +547,16 @@ fn parse_t_family(input: &str) -> ParsedMeta {
                 _ => None,
             };
             return ParsedMeta::simple(MetaCmd::TuplesOnly(mode));
+        }
+    }
+    ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
+}
+
+/// Parse `\mode` — show current input mode.
+fn parse_m_family(input: &str) -> ParsedMeta {
+    if let Some(rest) = input.strip_prefix("mode") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ShowMode);
         }
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -2714,5 +2750,33 @@ mod tests {
     fn parse_named_delete_missing_name_is_unknown() {
         let m = parse("\\nd");
         assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    // -- Input mode commands ---------------------------------------------------
+
+    #[test]
+    fn parse_sql_mode() {
+        assert_eq!(parse("\\sql").cmd, MetaCmd::SqlMode);
+    }
+
+    #[test]
+    fn parse_text2sql_mode() {
+        assert_eq!(parse("\\text2sql").cmd, MetaCmd::Text2SqlMode);
+    }
+
+    #[test]
+    fn parse_t2s_alias() {
+        assert_eq!(parse("\\t2s").cmd, MetaCmd::Text2SqlMode);
+    }
+
+    #[test]
+    fn parse_show_mode() {
+        assert_eq!(parse("\\mode").cmd, MetaCmd::ShowMode);
+    }
+
+    #[test]
+    fn parse_mode_prefix_unknown() {
+        // \modex should be unknown, not \mode
+        assert!(matches!(parse("\\modex").cmd, MetaCmd::Unknown(_)));
     }
 }

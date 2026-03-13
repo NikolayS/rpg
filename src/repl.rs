@@ -115,12 +115,16 @@ impl TxState {
 ///
 /// Format: `dbname=>` (idle), `dbname=*>` (in-tx), `dbname=!>` (failed).
 /// Continuation uses `-` instead of `=` as the first separator.
-pub fn build_prompt(dbname: &str, tx: TxState, continuation: bool) -> String {
+pub fn build_prompt(dbname: &str, tx: TxState, continuation: bool, mode: InputMode) -> String {
     let infix = tx.infix();
+    let mode_tag = match mode {
+        InputMode::Sql => String::new(),
+        InputMode::Text2Sql => " text2sql".to_owned(),
+    };
     if continuation {
-        format!("{dbname}-{infix}> ")
+        format!("{dbname}{mode_tag}-{infix}> ")
     } else {
-        format!("{dbname}={infix}> ")
+        format!("{dbname}{mode_tag}={infix}> ")
     }
 }
 
@@ -250,6 +254,23 @@ pub fn is_complete(buf: &str) -> bool {
 pub use crate::output::ExpandedMode;
 
 // ---------------------------------------------------------------------------
+// Input mode
+// ---------------------------------------------------------------------------
+
+/// The current input interpretation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// Standard SQL input (default). Lines are accumulated and executed
+    /// when a semicolon terminator is found.
+    #[default]
+    Sql,
+    /// Text-to-SQL mode. Each non-empty line is treated as a natural
+    /// language prompt and forwarded to `/ask`.  Lines starting with `;`
+    /// are sent as raw SQL.
+    Text2Sql,
+}
+
+// ---------------------------------------------------------------------------
 // Last-error context (used by /fix)
 // ---------------------------------------------------------------------------
 
@@ -333,6 +354,8 @@ pub struct ReplSettings {
     ///
     /// Used by `\c @profile` to look up named connection profiles.
     pub config: crate::config::Config,
+    /// Current input interpretation mode.
+    pub input_mode: InputMode,
     /// Context from the most-recently failed query.
     ///
     /// Populated whenever a query returns an error; cleared on the next
@@ -378,6 +401,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("pager_enabled", &self.pager_enabled)
             .field("destructive_warning", &self.destructive_warning)
             .field("config_profiles", &self.config.connections.len())
+            .field("input_mode", &self.input_mode)
             .field(
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
@@ -413,6 +437,7 @@ impl Default for ReplSettings {
             // Warn before destructive statements by default.
             destructive_warning: true,
             config: crate::config::Config::default(),
+            input_mode: InputMode::default(),
             last_error: None,
         }
     }
@@ -2310,6 +2335,10 @@ pub enum MetaResult {
     ///
     /// Sends `DEALLOCATE name` to the server and removes it from the local map.
     ClosePrepared(String),
+    /// Switch input mode (`\sql`, `\text2sql`, `\t2s`).
+    SetInputMode(InputMode),
+    /// Show current mode summary (`\mode`).
+    ShowMode,
 }
 
 /// Default `\watch` interval in seconds.
@@ -2664,6 +2693,15 @@ async fn dispatch_meta(
         MetaCmd::Copyright => {
             print_copyright();
         }
+        MetaCmd::SqlMode => {
+            return MetaResult::SetInputMode(InputMode::Sql);
+        }
+        MetaCmd::Text2SqlMode => {
+            return MetaResult::SetInputMode(InputMode::Text2Sql);
+        }
+        MetaCmd::ShowMode => {
+            return MetaResult::ShowMode;
+        }
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
@@ -2967,7 +3005,7 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
-        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty());
+        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty(), settings.input_mode);
 
         match rl.readline(&prompt) {
             Ok(line) => {
@@ -3049,7 +3087,7 @@ async fn run_dumb_loop(
 
     loop {
         // Print prompt to stderr (so it doesn't mix with redirected output).
-        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty());
+        let prompt = build_prompt(&params.dbname, *tx, !buf.is_empty(), settings.input_mode);
         eprint!("{prompt}");
         let _ = io::stderr().flush();
 
@@ -3421,6 +3459,23 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::Continue
         }
+        MetaResult::SetInputMode(mode) => {
+            settings.input_mode = mode;
+            let label = match mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            };
+            eprintln!("Input mode: {label}");
+            HandleLineResult::Continue
+        }
+        MetaResult::ShowMode => {
+            let label = match settings.input_mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            };
+            eprintln!("Input mode: {label}");
+            HandleLineResult::Continue
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -3446,6 +3501,27 @@ async fn handle_line(
         stmt_buf.clear();
         stmt_buf.push_str(line);
         dispatch_ai_command(trimmed, client, params, settings, tx).await;
+        return HandleLineResult::Continue;
+    }
+
+    // Text2SQL mode: non-empty lines that don't start with `\` or `;` are
+    // treated as natural language prompts forwarded to `/ask`.
+    // Lines starting with `;` are sent as raw SQL (the `;` prefix is stripped).
+    if settings.input_mode == InputMode::Text2Sql
+        && !trimmed.is_empty()
+        && !trimmed.starts_with('\\')
+    {
+        stmt_buf.clear();
+        stmt_buf.push_str(line);
+        if let Some(raw_sql) = trimmed.strip_prefix(';') {
+            let sql = raw_sql.trim();
+            if !sql.is_empty() {
+                execute_query(client, sql, settings, tx).await;
+            }
+        } else {
+            // Forward as /ask prompt.
+            handle_ai_ask(client, trimmed, settings, params, tx).await;
+        }
         return HandleLineResult::Continue;
     }
 
@@ -3637,6 +3713,23 @@ async fn handle_line(
                          does not exist"
                     );
                 }
+                HandleLineResult::Continue
+            }
+            MetaResult::SetInputMode(mode) => {
+                settings.input_mode = mode;
+                let label = match mode {
+                    InputMode::Sql => "sql",
+                    InputMode::Text2Sql => "text2sql",
+                };
+                eprintln!("Input mode: {label}");
+                HandleLineResult::Continue
+            }
+            MetaResult::ShowMode => {
+                let label = match settings.input_mode {
+                    InputMode::Sql => "sql",
+                    InputMode::Text2Sql => "text2sql",
+                };
+                eprintln!("Input mode: {label}");
                 HandleLineResult::Continue
             }
             MetaResult::Continue => HandleLineResult::Continue,
@@ -4878,32 +4971,65 @@ mod tests {
 
     #[test]
     fn prompt_idle() {
-        assert_eq!(build_prompt("mydb", TxState::Idle, false), "mydb=> ");
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, false, InputMode::Sql),
+            "mydb=> "
+        );
     }
 
     #[test]
     fn prompt_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, false),
+            build_prompt("mydb", TxState::InTransaction, false, InputMode::Sql),
             "mydb=*> "
         );
     }
 
     #[test]
     fn prompt_failed_transaction() {
-        assert_eq!(build_prompt("mydb", TxState::Failed, false), "mydb=!> ");
+        assert_eq!(
+            build_prompt("mydb", TxState::Failed, false, InputMode::Sql),
+            "mydb=!> "
+        );
     }
 
     #[test]
     fn prompt_continuation() {
-        assert_eq!(build_prompt("mydb", TxState::Idle, true), "mydb-> ");
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, true, InputMode::Sql),
+            "mydb-> "
+        );
     }
 
     #[test]
     fn prompt_continuation_in_transaction() {
         assert_eq!(
-            build_prompt("mydb", TxState::InTransaction, true),
+            build_prompt("mydb", TxState::InTransaction, true, InputMode::Sql),
             "mydb-*> "
+        );
+    }
+
+    #[test]
+    fn prompt_text2sql_mode() {
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, false, InputMode::Text2Sql),
+            "mydb text2sql=> "
+        );
+    }
+
+    #[test]
+    fn prompt_text2sql_continuation() {
+        assert_eq!(
+            build_prompt("mydb", TxState::Idle, true, InputMode::Text2Sql),
+            "mydb text2sql-> "
+        );
+    }
+
+    #[test]
+    fn prompt_text2sql_in_transaction() {
+        assert_eq!(
+            build_prompt("mydb", TxState::InTransaction, false, InputMode::Text2Sql),
+            "mydb text2sql=*> "
         );
     }
 
