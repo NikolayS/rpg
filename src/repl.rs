@@ -4701,6 +4701,47 @@ fn ask_yn_prompt(prompt: &str, default_yes: bool) -> bool {
     answer.starts_with('y')
 }
 
+/// User's choice when asked about executing AI-generated SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskChoice {
+    /// Execute as-is.
+    Yes,
+    /// Skip execution.
+    No,
+    /// Open in `$EDITOR` first, then execute the edited version.
+    Edit,
+}
+
+/// Prompt the user with `[Y/n/e]` (yes / no / edit) and return their choice.
+///
+/// `default_yes` controls the behaviour when the user presses Enter without
+/// typing: `true` → defaults to `Yes`, `false` → defaults to `No`.
+fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return AskChoice::No;
+    }
+    let answer = input.trim().to_lowercase();
+    if answer.is_empty() {
+        return if default_yes {
+            AskChoice::Yes
+        } else {
+            AskChoice::No
+        };
+    }
+    if answer.starts_with('e') {
+        AskChoice::Edit
+    } else if answer.starts_with('y') {
+        AskChoice::Yes
+    } else {
+        AskChoice::No
+    }
+}
+
 /// Handle a `/ask <prompt>` command end-to-end.
 ///
 /// Checks AI configuration, builds schema context, sends the prompt to the
@@ -4829,29 +4870,48 @@ async fn handle_ai_ask(
     let yolo = settings.exec_mode == ExecMode::Yolo;
     let auto_exec = yolo || (read_only && settings.config.ai.auto_execute_readonly);
 
-    let should_execute = if auto_exec {
+    let choice = if auto_exec {
         if yolo && !read_only {
             eprintln!("-- YOLO: auto-executing write query");
         }
-        true
+        AskChoice::Yes
     } else {
-        ask_yn_prompt(
+        ask_yne_prompt(
             if read_only {
-                "Execute? [Y/n] "
+                "Execute? [Y/n/e] "
             } else {
-                "Execute (write query)? [y/N] "
+                "Execute (write query)? [y/N/e] "
             },
             read_only,
         )
     };
 
-    if should_execute {
-        let ok = execute_query(client, sql, settings, tx).await;
-        if ok {
-            settings
-                .conversation
-                .push_query_result(sql, "(executed successfully)");
+    match choice {
+        AskChoice::Yes => {
+            let ok = execute_query(client, sql, settings, tx).await;
+            if ok {
+                settings
+                    .conversation
+                    .push_query_result(sql, "(executed successfully)");
+            }
         }
+        AskChoice::Edit => match crate::io::edit(sql, None, None) {
+            Ok(edited) => {
+                let edited = edited.trim();
+                if edited.is_empty() {
+                    eprintln!("(empty — skipped)");
+                } else {
+                    let ok = execute_query(client, edited, settings, tx).await;
+                    if ok {
+                        settings
+                            .conversation
+                            .push_query_result(edited, "(executed after edit)");
+                    }
+                }
+            }
+            Err(e) => eprintln!("{e}"),
+        },
+        AskChoice::No => {}
     }
 }
 
@@ -6361,6 +6421,22 @@ mod tests {
         let input = "/compact";
         let focus = input.strip_prefix("/compact").map(str::trim);
         assert_eq!(focus, Some(""));
+    }
+
+    // -- AskChoice enum ---------------------------------------------------------
+
+    #[test]
+    fn ask_choice_enum_values() {
+        // Just verify the enum variants exist and are distinct.
+        assert_ne!(AskChoice::Yes, AskChoice::No);
+        assert_ne!(AskChoice::Yes, AskChoice::Edit);
+        assert_ne!(AskChoice::No, AskChoice::Edit);
+    }
+
+    #[test]
+    fn ask_choice_debug_format() {
+        // Ensure Debug trait works (derived).
+        let _ = format!("{:?}", AskChoice::Edit);
     }
 
     // -- /explain helpers ------------------------------------------------------
