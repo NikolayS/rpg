@@ -626,6 +626,11 @@ pub struct ReplSettings {
     /// Stores recent user prompts, assistant responses, and query results
     /// so follow-up `/ask` commands can reference prior context.
     pub conversation: ConversationContext,
+    /// Cumulative token usage across all AI calls in this session.
+    ///
+    /// Tracks total input + output tokens consumed.  When a `token_budget`
+    /// is configured, AI calls are refused once this exceeds the budget.
+    pub tokens_used: u64,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -680,6 +685,7 @@ impl std::fmt::Debug for ReplSettings {
                     self.conversation.token_estimate()
                 ),
             )
+            .field("tokens_used", &self.tokens_used)
             .finish()
     }
 }
@@ -716,6 +722,7 @@ impl Default for ReplSettings {
             auto_explain: AutoExplain::default(),
             last_error: None,
             conversation: ConversationContext::new(),
+            tokens_used: 0,
         }
     }
 }
@@ -2265,6 +2272,7 @@ AI commands:
   /describe <table> AI-generated table description
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
+  /budget           show token usage and remaining budget
 
 Input/execution modes:
   \sql              switch to SQL input mode (default)
@@ -2795,7 +2803,7 @@ async fn watch_query(client: &Client, sql: &str, interval_secs: f64, settings: &
 /// summary.  Exits on Ctrl-C.  After exiting, offers an AI-generated
 /// summary of the observation period.
 #[allow(clippy::too_many_lines)]
-async fn observe_loop(client: &Client, settings: &ReplSettings, params: &ConnParams) {
+async fn observe_loop(client: &Client, settings: &mut ReplSettings, params: &ConnParams) {
     use std::fmt::Write as _;
     use std::time::Duration;
     use tokio::signal;
@@ -2987,8 +2995,9 @@ async fn observe_loop(client: &Client, settings: &ReplSettings, params: &ConnPar
     };
 
     eprintln!("\n-- Summary:");
-    if let Err(e) = stream_completion(provider.as_ref(), &messages, &options).await {
-        eprintln!("AI error: {e}");
+    match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(result) => record_token_usage(settings, &result),
+        Err(e) => eprintln!("AI error: {e}"),
     }
 }
 
@@ -4527,7 +4536,11 @@ async fn handle_line(
 /// Called automatically when `[ai] auto_explain_errors = true`.  The
 /// suggestion is dimmed to visually distinguish it from the error itself.
 /// Uses a small `max_tokens` budget to keep latency low.
-async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &ReplSettings) {
+async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &mut ReplSettings) {
+    if check_token_budget(settings) {
+        return;
+    }
+
     let provider_name = match settings.config.ai.provider.as_deref() {
         Some(p) if !p.is_empty() => p,
         _ => return, // AI not configured — silently skip.
@@ -4571,6 +4584,7 @@ async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &Rep
 
     // Use non-streaming for lower latency on a short response.
     if let Ok(result) = provider.complete(&messages, &options).await {
+        record_token_usage(settings, &result);
         let suggestion = result.content.trim();
         if !suggestion.is_empty() {
             // Print dimmed (ANSI escape: dim = \x1b[2m, reset = \x1b[0m).
@@ -4614,6 +4628,13 @@ async fn dispatch_ai_command(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) {
+    // Budget gate — skip for /clear and /compact (they don't use tokens).
+    let is_budget_exempt =
+        input == "/clear" || input.starts_with("/compact") || input.starts_with("/budget");
+    if !is_budget_exempt && check_token_budget(settings) {
+        return;
+    }
+
     if let Some(prompt) = input.strip_prefix("/ask").map(str::trim) {
         if prompt.is_empty() {
             eprintln!("Usage: /ask <natural language description>");
@@ -4651,10 +4672,19 @@ async fn dispatch_ai_command(
                 settings.conversation.token_estimate(),
             );
         }
+    } else if input == "/budget" {
+        let budget = settings.config.ai.token_budget;
+        let used = settings.tokens_used;
+        if budget == 0 {
+            eprintln!("Token budget: unlimited ({used} tokens used this session)");
+        } else {
+            let remaining = budget.saturating_sub(used);
+            eprintln!("Token budget: {used}/{budget} used, {remaining} remaining");
+        }
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize, /describe, /clear, /compact"
+             Available: /ask, /fix, /explain, /optimize, /describe, /clear, /compact, /budget"
         );
     }
 }
@@ -4679,6 +4709,33 @@ fn strip_sql_fences(s: &str) -> &str {
     } else {
         trimmed
     }
+}
+
+/// Check whether the session token budget has been exceeded.
+///
+/// Returns `true` (and prints a message) if the budget is exceeded,
+/// meaning the caller should abort the AI operation.
+/// Returns `false` if the budget is unlimited (0) or not yet reached.
+fn check_token_budget(settings: &ReplSettings) -> bool {
+    let budget = settings.config.ai.token_budget;
+    if budget == 0 {
+        return false; // No budget limit.
+    }
+    if settings.tokens_used >= budget {
+        eprintln!(
+            "Token budget exhausted ({used}/{budget} tokens used). \
+             AI commands are disabled for this session.",
+            used = settings.tokens_used,
+        );
+        true
+    } else {
+        false
+    }
+}
+
+/// Record token usage from a completion result.
+fn record_token_usage(settings: &mut ReplSettings, result: &crate::ai::CompletionResult) {
+    settings.tokens_used += u64::from(result.input_tokens) + u64::from(result.output_tokens);
 }
 
 /// Prompt the user with a yes/no question and return their answer.
@@ -4834,7 +4891,10 @@ async fn handle_ai_ask(
     };
 
     let generated_sql = match provider.complete(&messages, &options).await {
-        Ok(result) => result.content,
+        Ok(result) => {
+            record_token_usage(settings, &result);
+            result.content
+        }
         Err(e) => {
             eprintln!("AI error: {e}");
             return;
@@ -5043,7 +5103,7 @@ async fn handle_ai_plan(
 /// sends it to the configured LLM with schema context, and prints an
 /// explanation plus a corrected SQL query.  Gracefully degrades when no
 /// prior error exists or when AI is not configured.
-async fn handle_ai_fix(client: &Client, settings: &ReplSettings, params: &ConnParams) {
+async fn handle_ai_fix(client: &Client, settings: &mut ReplSettings, params: &ConnParams) {
     // Require a prior error to fix.
     let last_error = if let Some(e) = &settings.last_error {
         e.clone()
@@ -5143,7 +5203,7 @@ async fn handle_ai_fix(client: &Client, settings: &ReplSettings, params: &ConnPa
     };
 
     match stream_completion(provider.as_ref(), &messages, &options).await {
-        Ok(_result) => {}
+        Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -5183,7 +5243,7 @@ fn build_explain_sql(target_query: &str) -> String {
 async fn handle_ai_explain(
     client: &Client,
     query_arg: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &ConnParams,
 ) {
     // Resolve target query.
@@ -5299,8 +5359,9 @@ async fn handle_ai_explain(
     };
 
     println!();
-    if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
-        eprintln!("AI error: {e}");
+    match stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        Ok(result) => record_token_usage(settings, &result),
+        Err(e) => eprintln!("AI error: {e}"),
     }
 }
 
@@ -5349,7 +5410,7 @@ fn extract_table_names(sql: &str) -> Vec<String> {
 async fn handle_ai_optimize(
     client: &Client,
     query_arg: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &ConnParams,
 ) {
     // Resolve target query.
@@ -5520,8 +5581,9 @@ async fn handle_ai_optimize(
     };
 
     println!();
-    if let Err(e) = stream_completion(provider.as_ref(), &ai_messages, &options).await {
-        eprintln!("AI error: {e}");
+    match stream_completion(provider.as_ref(), &ai_messages, &options).await {
+        Ok(result) => record_token_usage(settings, &result),
+        Err(e) => eprintln!("AI error: {e}"),
     }
 }
 
@@ -5534,7 +5596,7 @@ async fn handle_ai_optimize(
 async fn handle_ai_describe(
     client: &Client,
     table_name: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &ConnParams,
 ) {
     let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
@@ -5692,8 +5754,9 @@ async fn handle_ai_describe(
         temperature: 0.0,
     };
 
-    if let Err(e) = stream_completion(provider.as_ref(), &messages, &options).await {
-        eprintln!("AI error: {e}");
+    match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(result) => record_token_usage(settings, &result),
+        Err(e) => eprintln!("AI error: {e}"),
     }
 }
 
@@ -6837,5 +6900,68 @@ mod tests {
         ctx.push_user("x".repeat(2000));
         assert_eq!(ctx.entries.len(), 1);
         assert!(!ctx.auto_compact_if_needed(10)); // threshold = 7 tokens
+    }
+
+    // -- Token budget ---------------------------------------------------------
+
+    #[test]
+    fn check_budget_unlimited_returns_false() {
+        let settings = ReplSettings::default();
+        // Default budget is 0 (unlimited).
+        assert_eq!(settings.config.ai.token_budget, 0);
+        assert!(!check_token_budget(&settings));
+    }
+
+    #[test]
+    fn check_budget_within_limit() {
+        let mut settings = ReplSettings::default();
+        settings.config.ai.token_budget = 10_000;
+        settings.tokens_used = 5_000;
+        assert!(!check_token_budget(&settings));
+    }
+
+    #[test]
+    fn check_budget_at_limit() {
+        let mut settings = ReplSettings::default();
+        settings.config.ai.token_budget = 10_000;
+        settings.tokens_used = 10_000;
+        assert!(check_token_budget(&settings));
+    }
+
+    #[test]
+    fn check_budget_over_limit() {
+        let mut settings = ReplSettings::default();
+        settings.config.ai.token_budget = 10_000;
+        settings.tokens_used = 15_000;
+        assert!(check_token_budget(&settings));
+    }
+
+    #[test]
+    fn record_usage_increments_total() {
+        let mut settings = ReplSettings::default();
+        assert_eq!(settings.tokens_used, 0);
+
+        let result = crate::ai::CompletionResult {
+            content: String::new(),
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+        record_token_usage(&mut settings, &result);
+        assert_eq!(settings.tokens_used, 150);
+
+        // Second call adds to the running total.
+        let result2 = crate::ai::CompletionResult {
+            content: String::new(),
+            input_tokens: 200,
+            output_tokens: 100,
+        };
+        record_token_usage(&mut settings, &result2);
+        assert_eq!(settings.tokens_used, 450);
+    }
+
+    #[test]
+    fn tokens_used_default_is_zero() {
+        let s = ReplSettings::default();
+        assert_eq!(s.tokens_used, 0);
     }
 }

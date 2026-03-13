@@ -117,6 +117,12 @@ pub struct AiConfig {
     /// Defaults to 128000 (128k).
     #[serde(default = "default_context_window")]
     pub context_window: u32,
+    /// Maximum total tokens to consume in a session.
+    ///
+    /// When the cumulative token usage (input + output across all AI calls)
+    /// reaches this limit, further AI requests are refused until the session
+    /// is restarted.  Defaults to 0 (unlimited).
+    pub token_budget: u64,
 }
 
 fn default_context_window() -> u32 {
@@ -138,6 +144,7 @@ impl Default for AiConfig {
             auto_execute_readonly: false,
             auto_explain_errors: true,
             context_window: default_context_window(),
+            token_budget: 0,
         }
     }
 }
@@ -240,6 +247,11 @@ fn merge_config(base: Config, overlay: Config) -> Config {
                 base.ai.context_window
             } else {
                 overlay.ai.context_window
+            },
+            token_budget: if overlay.ai.token_budget == 0 {
+                base.ai.token_budget
+            } else {
+                overlay.ai.token_budget
             },
         },
         connections: {
@@ -589,6 +601,7 @@ provider = "ollama"
                 auto_execute_readonly: false,
                 auto_explain_errors: true,
                 context_window: 128_000,
+                token_budget: 0,
             },
             ..Default::default()
         };
@@ -602,6 +615,7 @@ provider = "ollama"
                 auto_execute_readonly: false,
                 auto_explain_errors: true,
                 context_window: 128_000,
+                token_budget: 0,
             },
             ..Default::default()
         };
@@ -623,6 +637,7 @@ provider = "ollama"
                 auto_execute_readonly: false,
                 auto_explain_errors: true,
                 context_window: 128_000,
+                token_budget: 0,
             },
             ..Default::default()
         };
