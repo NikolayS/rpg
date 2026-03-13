@@ -1990,7 +1990,22 @@ Describe commands (stubs; see #27 for full implementation):
   \des [pattern]    list foreign servers
   \dew [pattern]    list foreign-data wrappers
   \det [pattern]    list foreign tables via FDW
-  \deu [pattern]    list user mappings"
+  \deu [pattern]    list user mappings
+
+AI commands:
+  /ask <prompt>     natural language to SQL
+  /explain          explain the last query plan
+  /fix              diagnose and fix the last error
+  /optimize <query> suggest query optimizations
+
+Input/execution modes:
+  \sql              switch to SQL input mode (default)
+  \text2sql / \t2s  switch to text2sql input mode
+  \plan             enter plan execution mode
+  \yolo             enter YOLO execution mode
+  \observe          enter observe execution mode
+  \interactive      return to interactive mode (default)
+  \mode             show current input and execution mode"
     );
 }
 
