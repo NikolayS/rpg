@@ -1888,9 +1888,7 @@ async fn dispatch_io(
             }
             Some(MetaResult::Continue)
         }
-        MetaCmd::CrosstabView(ref args) => {
-            Some(MetaResult::CrosstabViewBuffer(args.clone()))
-        }
+        MetaCmd::CrosstabView(ref args) => Some(MetaResult::CrosstabViewBuffer(args.clone())),
         _ => None,
     }
 }

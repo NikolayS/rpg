@@ -62,12 +62,9 @@ impl ColSpec {
                     ))
                 }
             }
-            Self::Name(name) => headers
-                .iter()
-                .position(|h| h == name)
-                .ok_or_else(|| {
-                    format!("\\crosstabview: column \"{name}\" not found in query result")
-                }),
+            Self::Name(name) => headers.iter().position(|h| h == name).ok_or_else(|| {
+                format!("\\crosstabview: column \"{name}\" not found in query result")
+            }),
         }
     }
 }
@@ -143,40 +140,25 @@ pub fn pivot(
     }
 
     // Resolve column indices (defaults: 0, 1, 2).
-    let idx_v = args
-        .col_v
-        .as_ref()
-        .map_or(Ok(0), |s| s.resolve(headers))?;
-    let idx_h = args
-        .col_h
-        .as_ref()
-        .map_or(Ok(1), |s| s.resolve(headers))?;
-    let idx_d = args
-        .col_d
-        .as_ref()
-        .map_or(Ok(2), |s| s.resolve(headers))?;
+    let idx_v = args.col_v.as_ref().map_or(Ok(0), |s| s.resolve(headers))?;
+    let idx_h = args.col_h.as_ref().map_or(Ok(1), |s| s.resolve(headers))?;
+    let idx_d = args.col_d.as_ref().map_or(Ok(2), |s| s.resolve(headers))?;
 
     // Validate: colV / colH / colD must all be distinct.
     if idx_v == idx_h {
-        return Err(
-            "\\crosstabview: column for row headers (colV) must be \
+        return Err("\\crosstabview: column for row headers (colV) must be \
              different from column for column headers (colH)"
-                .to_owned(),
-        );
+            .to_owned());
     }
     if idx_v == idx_d {
-        return Err(
-            "\\crosstabview: column for row headers (colV) must be \
+        return Err("\\crosstabview: column for row headers (colV) must be \
              different from data column (colD)"
-                .to_owned(),
-        );
+            .to_owned());
     }
     if idx_h == idx_d {
-        return Err(
-            "\\crosstabview: column for column headers (colH) must be \
+        return Err("\\crosstabview: column for column headers (colH) must be \
              different from data column (colD)"
-                .to_owned(),
-        );
+            .to_owned());
     }
 
     // Collect distinct colH values in encounter order; then optionally sort.
@@ -278,10 +260,7 @@ pub fn format_pivot(out: &mut String, pivot_headers: &[String], pivot_rows: &[Ve
     let ncols = pivot_headers.len();
 
     // Compute column widths: max of header width and all cell widths.
-    let mut widths: Vec<usize> = pivot_headers
-        .iter()
-        .map(|h| h.width())
-        .collect();
+    let mut widths: Vec<usize> = pivot_headers.iter().map(|h| h.width()).collect();
 
     for row in pivot_rows {
         for (col_idx, cell) in row.iter().enumerate() {
