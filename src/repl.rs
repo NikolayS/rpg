@@ -443,13 +443,7 @@ pub async fn execute_query(
                     SimpleQueryMessage::CommandComplete(n) => {
                         // Flush the current result set, then reset for next
                         // statement in a multi-statement query.
-                        print_result_set(
-                            &col_names,
-                            &rows,
-                            had_rows,
-                            n,
-                            result_set_index == 0,
-                        );
+                        print_result_set(&col_names, &rows, had_rows, n, result_set_index == 0);
                         result_set_index += 1;
                         col_names.clear();
                         rows.clear();
