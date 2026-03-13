@@ -593,6 +593,42 @@ async fn describe_d_table() {
     );
 }
 
+/// `\d products` shows the partial index WHERE clause for `products_active_idx`.
+///
+/// Regression test for issue #144: partial index predicates must appear in
+/// `\d <table>` output as `WHERE <predicate>`, matching psql behaviour.
+#[tokio::test]
+#[serial]
+async fn describe_d_table_partial_index_where_clause() {
+    let db = connect_or_skip!();
+    db.teardown_schema().await.expect("teardown failed");
+    db.run_fixture("schema.sql")
+        .await
+        .expect("schema fixture failed");
+
+    let (stdout, stderr, code) = run_samo(&["-c", r"\d products"]);
+    db.teardown_schema().await.expect("teardown failed");
+
+    assert_eq!(
+        code, 0,
+        "\\d products should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // The fixture creates `products_active_idx` as a partial index with
+    // `WHERE active = true`. The output must include the predicate.
+    assert!(
+        stdout.contains("products_active_idx"),
+        "\\d products should list 'products_active_idx':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("WHERE"),
+        "\\d products should show WHERE clause for partial index:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("active"),
+        "\\d products WHERE clause should contain predicate column:\n{stdout}"
+    );
+}
+
 /// `\d` (no args) lists all relations.
 #[tokio::test]
 #[serial]

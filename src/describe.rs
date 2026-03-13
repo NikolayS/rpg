@@ -1352,6 +1352,7 @@ limit 1"
 
     // 2. Indexes — query returns raw fields; we format as psql indented text.
     // psql format: "name" PRIMARY KEY, btree (cols)  or  "name" btree (cols)
+    // col 6: pg_get_expr(indpred) is non-NULL for partial indexes (WHERE clause)
     let idx_sql = format!(
         "select
     i.relname as idx_name,
@@ -1364,7 +1365,8 @@ limit 1"
      where conrelid = ix.indrelid
        and conindid = i.oid
        and contype in ('p','u')
-     limit 1) as con_name
+     limit 1) as con_name,
+    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as idx_pred
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
     on i.oid = ix.indexrelid
@@ -1440,8 +1442,8 @@ order by 1, 2"
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
-        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str)
-        let mut index_rows: Vec<(String, bool, bool, String, String)> = Vec::new();
+        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred)
+        let mut index_rows: Vec<(String, bool, bool, String, String, String)> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
                 let idx_name = row.get(0).unwrap_or("").to_owned();
@@ -1450,12 +1452,21 @@ order by 1, 2"
                 let amname = row.get(3).unwrap_or("").to_owned();
                 let idx_oid_str = row.get(4).unwrap_or("0").to_owned();
                 // col 5 = con_name (used implicitly via is_primary/is_unique flags)
-                index_rows.push((idx_name, is_primary, is_unique, amname, idx_oid_str));
+                // col 6 = pg_get_expr(indpred): non-empty for partial indexes
+                let idx_pred = row.get(6).unwrap_or("").to_owned();
+                index_rows.push((
+                    idx_name,
+                    is_primary,
+                    is_unique,
+                    amname,
+                    idx_oid_str,
+                    idx_pred,
+                ));
             }
         }
         if !index_rows.is_empty() {
             println!("Indexes:");
-            for (idx_name, is_primary, is_unique, amname, idx_oid_str) in &index_rows {
+            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred) in &index_rows {
                 // Extract column list from pg_get_indexdef (the part inside parens).
                 let indexdef_sql =
                     format!("select pg_catalog.pg_get_indexdef({idx_oid_str}, 0, true)");
@@ -1483,7 +1494,13 @@ order by 1, 2"
                     String::new()
                 };
 
-                println!("    \"{idx_name}\"{type_label} {amname} {col_expr}");
+                let pred_suffix = if idx_pred.is_empty() {
+                    String::new()
+                } else {
+                    format!(" WHERE {idx_pred}")
+                };
+
+                println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}");
             }
         }
     }
