@@ -4235,9 +4235,13 @@ async fn handle_ai_ask(
 
     // Decide whether to execute.
     let read_only = !is_write_query(sql);
-    let auto_exec = read_only && settings.config.ai.auto_execute_readonly;
+    let yolo = settings.exec_mode == ExecMode::Yolo;
+    let auto_exec = yolo || (read_only && settings.config.ai.auto_execute_readonly);
 
     let should_execute = if auto_exec {
+        if yolo && !read_only {
+            eprintln!("-- YOLO: auto-executing write query");
+        }
         true
     } else {
         ask_yn_prompt(
