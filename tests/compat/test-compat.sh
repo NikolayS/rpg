@@ -267,16 +267,14 @@ compare "\\dT" \
 compare "\\dD" \
   "\\dD"
 
-## \dp — column/format mismatch (#173)
-# compare "\\dp" \
-#   "\\dp"
+compare "\\dp" \
+  "\\dp"
 
 compare "\\dd" \
   "\\dd"
 
-## \dC — cast list format mismatch (#174)
-# compare "\\dC" \
-#   "\\dC"
+compare "\\dC" \
+  "\\dC"
 
 compare "\\dc" \
   "\\dc"
@@ -284,24 +282,21 @@ compare "\\dc" \
 compare "\\dy" \
   "\\dy"
 
-## \do — basic \do shows Description column, samo doesn't
-# compare "\\do" \
-#   "\\do"
+compare "\\do" \
+  "\\do"
 
-## \df+ — Internal name shows function body instead of empty
-# compare "\\df+" \
-#   "\\df+"
+compare "\\df+" \
+  "\\df+"
 
 compare "\\dT+" \
   "\\dT+"
 
-## \dx+ — missing verbose columns (#178)
+## \dx+ — psql uses per-extension object listing, different approach (deferred)
 # compare "\\dx+" \
 #   "\\dx+"
 
-## \db+ — missing verbose columns (#178)
-# compare "\\db+" \
-#   "\\db+"
+compare "\\db+" \
+  "\\db+"
 
 # ---------------------------------------------------------------------------
 # Output modes via extra CLI flags
