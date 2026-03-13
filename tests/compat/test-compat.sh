@@ -315,17 +315,14 @@ compare_flags "unaligned csv from table" \
 # Expanded display mode
 # ---------------------------------------------------------------------------
 
-## -x produces empty output with -c (#214)
-# compare_flags "expanded single row" \
-#   -x -c "select 1 as num, 'hello' as greeting"
+compare_flags "expanded single row" \
+  -x -c "select 1 as num, 'hello' as greeting"
 
-## -x produces empty output with -c (#214)
-# compare_flags "expanded multi-row" \
-#   -x -c "select id, name from users order by id limit 3"
+compare_flags "expanded multi-row" \
+  -x -c "select id, name from users order by id limit 3"
 
-## -x produces empty output with -c (#214)
-# compare_flags "expanded with null" \
-#   -x -c "select null::text as val, 42 as num"
+compare_flags "expanded with null" \
+  -x -c "select null::text as val, 42 as num"
 
 # ---------------------------------------------------------------------------
 # Show source commands
@@ -338,13 +335,11 @@ compare "\\sf user_order_count" \
 # compare "\\sf+ user_order_count" \
 #   "\\sf+ user_order_count"
 
-## \sv — missing CREATE OR REPLACE VIEW header + trailing semicolon (#209)
-# compare "\\sv active_products" \
-#   "\\sv active_products"
+compare "\\sv active_products" \
+  "\\sv active_products"
 
-## \sv+ — same issue as \sv (#209)
-# compare "\\sv+ active_products" \
-#   "\\sv+ active_products"
+compare "\\sv+ active_products" \
+  "\\sv+ active_products"
 
 # ---------------------------------------------------------------------------
 # Foreign data wrapper commands
