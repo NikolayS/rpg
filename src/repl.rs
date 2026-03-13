@@ -2366,11 +2366,8 @@ pub async fn exec_command(
     params: &crate::connection::ConnParams,
 ) -> i32 {
     // `quit` / `exit` passed via -c should exit cleanly (psql behaviour).
-    {
-        let lower = sql.trim().to_ascii_lowercase();
-        if lower == "quit" || lower == "exit" {
-            return 0;
-        }
+    if is_quit_exit(sql.trim(), true) {
+        return 0;
     }
     if sql.trim_start().starts_with('\\') {
         // Backslash meta-command in -c mode.
@@ -2545,11 +2542,8 @@ pub(crate) async fn exec_lines(
 
     'lines: for line in lines {
         // `quit` / `exit` bare words work in all modes (psql behaviour).
-        if buf.is_empty() {
-            let lower = line.trim().to_ascii_lowercase();
-            if lower == "quit" || lower == "exit" {
-                break 'lines;
-            }
+        if is_quit_exit(line.trim(), buf.is_empty()) {
+            break 'lines;
         }
         if line.trim_start().starts_with('\\') {
             // Interpolate variables in the meta-command line (psql behaviour:
@@ -4848,11 +4842,8 @@ async fn run_dumb_loop(
             Ok(_) => {
                 let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 // `quit` / `exit` bare words exit in all modes.
-                if buf.is_empty() {
-                    let lower = line.trim().to_ascii_lowercase();
-                    if lower == "quit" || lower == "exit" {
-                        break;
-                    }
+                if is_quit_exit(line.trim(), buf.is_empty()) {
+                    break;
                 }
                 if line.trim_start().starts_with('\\') {
                     match handle_backslash_dumb(line.trim(), &mut buf, client, params, settings, tx)
@@ -5278,6 +5269,21 @@ fn print_bare_help() {
     );
 }
 
+/// Return `true` when `trimmed` is a bare `quit` or `exit` and the query
+/// buffer is empty (primary prompt, not mid-statement).
+///
+/// This matches `PostgreSQL` 11+ behaviour: both keywords are recognised as
+/// exit commands in **all** input modes — interactive readline, dumb-terminal
+/// loop, piped stdin, and `-c` / `-f` single-command mode.
+#[inline]
+fn is_quit_exit(trimmed: &str, buf_empty: bool) -> bool {
+    if !buf_empty {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "quit" || lower == "exit"
+}
+
 /// Process one line of input in the readline loop.
 ///
 /// `stmt_buf` accumulates the full multi-line statement for history recording.
@@ -5296,19 +5302,14 @@ async fn handle_line(
     // AI commands use a `/` prefix and are handled before backslash commands.
     let trimmed = line.trim();
 
-    // `quit` and `exit` as bare words at the primary prompt exit interactively
-    // (PostgreSQL 11+ behaviour).  Only applies when the query buffer is empty
-    // (i.e. we are at the primary prompt, not mid-statement).
-    if buf.is_empty() {
-        let lower = trimmed.to_ascii_lowercase();
-        if lower == "quit" || lower == "exit" {
-            return HandleLineResult::Quit;
-        }
-        // `help` bare word: matches psql — show usage hint at primary prompt.
-        if lower == "help" {
-            print_bare_help();
-            return HandleLineResult::Continue;
-        }
+    // `quit` / `exit` bare words: handled in all modes via `is_quit_exit`.
+    if is_quit_exit(trimmed, buf.is_empty()) {
+        return HandleLineResult::Quit;
+    }
+    // `help` bare word: matches psql — show usage hint at primary prompt.
+    if buf.is_empty() && trimmed.eq_ignore_ascii_case("help") {
+        print_bare_help();
+        return HandleLineResult::Continue;
     }
     if trimmed.starts_with('/') {
         stmt_buf.clear();
