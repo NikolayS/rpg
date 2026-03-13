@@ -788,10 +788,10 @@ pub async fn connect(
         SslMode::Disable => connect_plain(&pg_config, &params).await?,
         SslMode::Prefer => match connect_tls(&pg_config, &params).await {
             Ok(c) => c,
-            Err(e) => {
-                // Intentionally swallow TLS errors in prefer mode and fall
-                // back to a plain connection. Log for debugging.
-                eprintln!("samo: TLS unavailable ({e}), falling back to plain connection");
+            Err(_) => {
+                // sslmode=prefer: silently fall back to a plain connection
+                // when TLS is unavailable. This matches psql's default
+                // behavior — no warning is shown to the user.
                 connect_plain(&pg_config, &params).await?
             }
         },
