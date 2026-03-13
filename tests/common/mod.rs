@@ -12,6 +12,10 @@
 //! }
 //! ```
 
+// Not all helpers are used in every test binary — suppress the warning for
+// shared utility code.
+#![allow(dead_code)]
+
 use std::env;
 
 use tokio_postgres::{Client, Error, NoTls};

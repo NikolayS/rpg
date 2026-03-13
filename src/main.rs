@@ -3,13 +3,14 @@
 //! This is the CLI entry point. It parses psql-compatible flags and
 //! samo-specific options, then dispatches to the appropriate subsystem.
 
-use std::io::Read;
-
 use clap::Parser;
 
 mod connection;
+#[allow(dead_code)]
 mod output;
+#[allow(dead_code)]
 mod query;
+mod repl;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("SAMO_GIT_HASH");
@@ -267,51 +268,6 @@ impl Cli {
             sslmode: self.sslmode.clone(),
         }
     }
-
-    /// Build output configuration from CLI flags.
-    fn output_config(&self) -> output::OutputConfig {
-        // Warn about output format flags that are not yet implemented.
-        if self.csv {
-            eprintln!("samo: --csv is not yet supported, using default output");
-        }
-        if self.json {
-            eprintln!("samo: --json is not yet supported, using default output");
-        }
-
-        output::OutputConfig {
-            no_align: self.no_align,
-            tuples_only: self.tuples_only,
-            ..Default::default()
-        }
-    }
-
-    /// Returns `true` when running in a non-interactive scripting mode
-    /// (`-c`, `-f`, or piped stdin).  Connection info is suppressed in these
-    /// modes to match psql behaviour.
-    fn is_scripting_mode(&self) -> bool {
-        self.command.is_some() || self.file.is_some()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Detect whether stdin is a TTY
-// ---------------------------------------------------------------------------
-
-/// Returns `true` when stdin is connected to a terminal (interactive session).
-fn stdin_is_tty() -> bool {
-    // Use `isatty` on the raw fd 0.
-    // Safety: fd 0 is always open for the lifetime of the process.
-    #[cfg(unix)]
-    {
-        // SAFETY: libc::isatty takes an fd and is always safe to call.
-        unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-Unix (Windows) we conservatively say stdin is a TTY so
-        // we don't accidentally hang trying to read piped input.
-        true
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,107 +294,37 @@ async fn main() {
     match connection::connect(params, &opts).await {
         Ok((client, resolved)) => {
             // Print connection info only in interactive mode.
-            // In -c / -f / piped-stdin mode psql does not print it.
-            let is_piped = !cli.interactive && !stdin_is_tty();
-            let interactive = !cli.is_scripting_mode() && !is_piped;
-            if !cli.quiet && interactive {
+            use std::io::IsTerminal;
+            let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
+            let is_scripting = cli.command.is_some() || cli.file.is_some();
+            if !cli.quiet && !is_scripting && !is_piped {
                 println!("{}", connection::connection_info(&resolved));
             }
 
-            let cfg = cli.output_config();
+            let settings = repl::ReplSettings::default();
 
-            // Dispatch: -c → execute command and exit.
-            if let Some(ref sql) = cli.command {
-                run_sql_and_exit(&client, sql, &cfg).await;
-            }
+            let exit_code = if let Some(ref cmd) = cli.command {
+                // -c "SQL": execute single command and exit.
+                repl::exec_command(&client, cmd, &settings).await
+            } else if let Some(ref path) = cli.file {
+                // -f file: execute file and exit.
+                repl::exec_file(&client, path, &settings).await
+            } else if is_piped {
+                // Piped / redirected stdin: execute non-interactively.
+                repl::exec_stdin(&client, &settings).await
+            } else {
+                // Interactive REPL.
+                repl::run_repl(&client, &resolved, settings, cli.no_readline).await
+            };
 
-            // Dispatch: -f → execute file and exit.
-            if let Some(ref path) = cli.file {
-                run_file_and_exit(&client, path, &cfg).await;
-            }
-
-            // Dispatch: piped stdin (non-TTY, non-interactive).
-            if is_piped {
-                let mut sql = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut sql)
-                    .unwrap_or_else(|e| {
-                        eprintln!("samo: could not read stdin: {e}");
-                        std::process::exit(1);
-                    });
-                run_sql_and_exit(&client, &sql, &cfg).await;
-            }
-
-            // Interactive mode: REPL (issue #20 — not yet implemented).
-            if !cli.quiet {
-                println!("(interactive mode not yet implemented — disconnecting)");
-            }
             drop(client);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Err(e) => {
             eprintln!("samo: {e}");
             std::process::exit(2);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Execution helpers
-// ---------------------------------------------------------------------------
-
-/// Execute SQL string, print output, exit with appropriate code.
-async fn run_sql_and_exit(client: &tokio_postgres::Client, sql: &str, cfg: &output::OutputConfig) {
-    match query::execute_sql(client, sql).await {
-        Ok(outcome) => {
-            let formatted = output::format_outcome(&outcome, cfg);
-            print!("{formatted}");
-            std::process::exit(0);
-        }
-        Err(query::QueryError::Postgres(ref pg_err)) => {
-            let msg = output::format_pg_error(pg_err, Some(sql), cfg);
-            eprint!("{msg}");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("samo: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Read SQL from a file, execute it, print output, exit.
-///
-/// The file is read once and the SQL string is reused for both execution
-/// and error-position display, avoiding a TOCTOU race where the file could
-/// change between the first and second read.
-async fn run_file_and_exit(
-    client: &tokio_postgres::Client,
-    path: &str,
-    cfg: &output::OutputConfig,
-) {
-    // Read the file once up-front so we have the SQL for error position display.
-    let sql = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("samo: could not read \"{path}\": {e}");
-            std::process::exit(1);
-        }
-    };
-
-    match query::execute_sql(client, &sql).await {
-        Ok(outcome) => {
-            let formatted = output::format_outcome(&outcome, cfg);
-            print!("{formatted}");
-            std::process::exit(0);
-        }
-        Err(query::QueryError::Postgres(ref pg_err)) => {
-            let msg = output::format_pg_error(pg_err, Some(&sql), cfg);
-            eprint!("{msg}");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("samo: {e}");
-            std::process::exit(1);
         }
     }
 }
