@@ -517,6 +517,18 @@ impl ConversationContext {
         self.approx_tokens
     }
 
+    /// Auto-compact if the approximate token count exceeds 70% of the
+    /// configured context window.  Returns `true` if compaction occurred.
+    fn auto_compact_if_needed(&mut self, context_window: u32) -> bool {
+        let threshold = (u64::from(context_window) * 70 / 100) as usize;
+        if self.approx_tokens > threshold && self.entries.len() > 4 {
+            self.compact(None);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drop oldest entries until we're within `max_entries`.
     fn trim(&mut self) {
         while self.entries.len() > self.max_entries {
@@ -4797,6 +4809,14 @@ async fn handle_ai_ask(
         .conversation
         .push_assistant(format!("Generated SQL:\n```sql\n{sql}\n```"));
 
+    // Auto-compact when approaching the context window limit.
+    if settings
+        .conversation
+        .auto_compact_if_needed(settings.config.ai.context_window)
+    {
+        eprintln!("-- AI context auto-compacted to save tokens");
+    }
+
     // Display with syntax highlighting when available.
     if settings.no_highlight {
         println!("{sql}");
@@ -6709,5 +6729,37 @@ mod tests {
     fn repl_settings_conversation_default_is_empty() {
         let s = ReplSettings::default();
         assert!(s.conversation.is_empty());
+    }
+
+    #[test]
+    fn conversation_auto_compact_below_threshold() {
+        let mut ctx = ConversationContext::new();
+        ctx.push_user("short message".to_owned());
+        // With a 128k context window, a short message is well below 70%.
+        assert!(!ctx.auto_compact_if_needed(128_000));
+    }
+
+    #[test]
+    fn conversation_auto_compact_above_threshold() {
+        let mut ctx = ConversationContext::new();
+        // Push enough data to exceed 70% of a tiny context window (100 tokens).
+        // 100 tokens * 70% = 70 tokens. At ~4 chars/token, that's ~280 chars.
+        for i in 0..20 {
+            ctx.push_user(format!("message {i} with enough content to fill tokens"));
+        }
+        assert!(ctx.entries.len() > 4);
+        let compacted = ctx.auto_compact_if_needed(100);
+        assert!(compacted);
+        // After compaction: 1 summary + 4 recent.
+        assert_eq!(ctx.entries.len(), 5);
+    }
+
+    #[test]
+    fn conversation_auto_compact_too_few_entries() {
+        let mut ctx = ConversationContext::new();
+        // Even if tokens are high, don't compact if <= 4 entries.
+        ctx.push_user("x".repeat(2000));
+        assert_eq!(ctx.entries.len(), 1);
+        assert!(!ctx.auto_compact_if_needed(10)); // threshold = 7 tokens
     }
 }
