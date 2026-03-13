@@ -2668,6 +2668,13 @@ AI commands:
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
 
+Named queries:
+  \ns <name> <query>  save a named query (name: alphanumerics + underscores)
+  \n  <name> [args…]  execute a named query; $1,$2,… replaced by args
+  \n+                 list all named queries with their SQL
+  \nd <name>          delete a named query
+  \np <name>          print a named query without executing
+
 Input/execution modes:
   \sql              switch to SQL input mode (default)
   \text2sql / \t2s  switch to text2sql input mode
@@ -4112,15 +4119,22 @@ async fn dispatch_meta(
         }
         // Named queries (#69).
         MetaCmd::NamedSave(ref name, ref query) => {
-            let mut nq = crate::named::NamedQueries::load();
-            nq.set(name, query);
-            match nq.save() {
-                Ok(()) => {
-                    if !settings.quiet {
-                        eprintln!("Saved query \"{name}\".");
+            if crate::named::NamedQueries::is_valid_name(name) {
+                let mut nq = crate::named::NamedQueries::load();
+                nq.set(name, query);
+                match nq.save() {
+                    Ok(()) => {
+                        if !settings.quiet {
+                            eprintln!("Saved query \"{name}\".");
+                        }
                     }
+                    Err(e) => eprintln!("\\ns: {e}"),
                 }
-                Err(e) => eprintln!("\\ns: {e}"),
+            } else {
+                eprintln!(
+                    "\\ns: invalid query name \"{name}\": \
+                     names must contain only alphanumerics and underscores"
+                );
             }
         }
         MetaCmd::NamedExec(ref name, ref args) => {
@@ -4158,6 +4172,13 @@ async fn dispatch_meta(
                 }
             } else {
                 eprintln!("\\nd: unknown query \"{name}\"");
+            }
+        }
+        MetaCmd::NamedPrint(ref name) => {
+            let nq = crate::named::NamedQueries::load();
+            match nq.get(name) {
+                Some(query) => println!("{query}"),
+                None => eprintln!("\\np: unknown query \"{name}\""),
             }
         }
         // Describe-family commands — delegate to the describe module.
