@@ -1857,6 +1857,9 @@ async fn handle_line(
 ) -> HandleLineResult {
     if line.trim_start().starts_with('\\') {
         // Backslash command — execute immediately, with access to the buffer.
+        // Record the command in stmt_buf so the caller adds it to readline history.
+        stmt_buf.clear();
+        stmt_buf.push_str(line);
         let mut parsed = crate::metacmd::parse(line.trim());
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {

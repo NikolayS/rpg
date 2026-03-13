@@ -71,11 +71,21 @@ fn stub_not_implemented(label: &str) -> bool {
 // Internal execution helper
 // ---------------------------------------------------------------------------
 
-/// Execute `sql` via `simple_query`, print an aligned table, and return
-/// `false` (never exits the REPL).
+/// Execute `sql` via `simple_query`, print an aligned table (with an optional
+/// centered title), and return `false` (never exits the REPL).
 ///
 /// When `echo_hidden` is `true` the SQL is echoed to stderr first.
 async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
+    run_and_print_titled(client, sql, echo_hidden, None).await
+}
+
+/// Like `run_and_print` but also prints a centered title above the table.
+async fn run_and_print_titled(
+    client: &Client,
+    sql: &str,
+    echo_hidden: bool,
+    title: Option<&str>,
+) -> bool {
     if echo_hidden {
         eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
     }
@@ -105,7 +115,7 @@ async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
                 }
             }
 
-            print_table(&col_names, &rows);
+            print_table(&col_names, &rows, title);
         }
         Err(e) => {
             eprintln!("ERROR:  {e}");
@@ -115,16 +125,17 @@ async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
     false
 }
 
-/// Print a column-aligned table to stdout.
+/// Print a column-aligned table to stdout, optionally with a centered title.
 ///
 /// Matches the psql default output format:
 /// ```text
+///                List of relations     ← optional centered title
 ///  col1 | col2
 /// ------+------
 ///  val  | val
 /// (N rows)
 /// ```
-fn print_table(col_names: &[String], rows: &[Vec<String>]) {
+fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
     if col_names.is_empty() {
         let n = rows.len();
         let word = if n == 1 { "row" } else { "rows" };
@@ -139,6 +150,21 @@ fn print_table(col_names: &[String], rows: &[Vec<String>]) {
             if i < widths.len() {
                 widths[i] = widths[i].max(val.len());
             }
+        }
+    }
+
+    // Total table width: 1 (leading space) + sum(widths) + 3*(ncols-1) (` | `) + 1 (trailing space).
+    let ncols = widths.len();
+    let table_width = 1 + widths.iter().sum::<usize>() + if ncols > 1 { 3 * (ncols - 1) } else { 0 } + 1;
+
+    // Optional title centered to table width.
+    if let Some(t) = title {
+        let tlen = t.len();
+        if tlen >= table_width {
+            println!("{t}");
+        } else {
+            let padding = (table_width - tlen) / 2;
+            println!("{:>width$}", t, width = padding + tlen);
         }
     }
 
@@ -272,7 +298,7 @@ order by 1, 2"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of relations")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +381,7 @@ order by 1, 2, 4"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of functions")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +440,7 @@ order by 1"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of schemas")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -430,26 +456,29 @@ async fn list_roles(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {name_filter}")
     };
 
+    // psql shows "Role name", "Attributes", "Member of" — attributes are
+    // expressed as a comma-separated list of capability words, matching psql's
+    // \du output format.
     let sql = format!(
         "select
     r.rolname as \"Role name\",
-    r.rolsuper as \"Superuser\",
-    r.rolinherit as \"Inherit\",
-    r.rolcreaterole as \"Create role\",
-    r.rolcreatedb as \"Create DB\",
-    r.rolcanlogin as \"Can login\",
-    r.rolreplication as \"Replication\",
-    r.rolconnlimit as \"Connections\",
-    r.rolvaliduntil as \"Password valid until\",
+    case when r.rolsuper then 'Superuser' else '' end
+    || case when not r.rolinherit then case when r.rolsuper then ', No inherit' else 'No inherit' end else '' end
+    || case when r.rolcreaterole then case when r.rolsuper or not r.rolinherit then ', Create role' else 'Create role' end else '' end
+    || case when r.rolcreatedb then case when r.rolsuper or not r.rolinherit or r.rolcreaterole then ', Create DB' else 'Create DB' end else '' end
+    || case when not r.rolcanlogin then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb then ', Cannot login' else 'Cannot login' end else '' end
+    || case when r.rolreplication then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin then ', Replication' else 'Replication' end else '' end
+    || case when r.rolbypassrls then case when r.rolsuper or not r.rolinherit or r.rolcreaterole or r.rolcreatedb or not r.rolcanlogin or r.rolreplication then ', Bypass RLS' else 'Bypass RLS' end else '' end
+    as \"Attributes\",
     coalesce(
-        array_to_string(
+        pg_catalog.array_to_string(
             array(
                 select b.rolname
                 from pg_catalog.pg_auth_members as m
                 join pg_catalog.pg_roles as b on b.oid = m.roleid
                 where m.member = r.oid
                 order by 1
-            ), ','
+            ), ', '
         ), ''
     ) as \"Member of\"
 from pg_catalog.pg_roles as r
@@ -457,7 +486,7 @@ from pg_catalog.pg_roles as r
 order by 1"
     );
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of roles")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +508,12 @@ async fn list_databases(client: &Client, meta: &ParsedMeta) -> bool {
     d.datname as \"Name\",
     pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",
     pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
+    case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' when 'b' then 'builtin' end as \"Locale Provider\",
     d.datcollate as \"Collate\",
     d.datctype as \"Ctype\",
+    d.daticulocale as \"ICU Locale\",
+    d.daticurules as \"ICU Rules\",
+    pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\",
     case
         when pg_catalog.has_database_privilege(d.datname, 'CONNECT')
         then pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))
@@ -500,15 +533,19 @@ order by 1"
     d.datname as \"Name\",
     pg_catalog.pg_get_userbyid(d.datdba) as \"Owner\",
     pg_catalog.pg_encoding_to_char(d.encoding) as \"Encoding\",
+    case d.datlocprovider when 'c' then 'libc' when 'i' then 'icu' when 'b' then 'builtin' end as \"Locale Provider\",
     d.datcollate as \"Collate\",
-    d.datctype as \"Ctype\"
+    d.datctype as \"Ctype\",
+    d.daticulocale as \"ICU Locale\",
+    d.daticurules as \"ICU Rules\",
+    pg_catalog.array_to_string(d.datacl, E'\\n') as \"Access privileges\"
 from pg_catalog.pg_database as d
 {where_clause}
 order by 1"
         )
     };
 
-    run_and_print(client, &sql, meta.echo_hidden).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of databases")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -963,28 +1000,19 @@ order by a.attnum"
         )
     };
 
-    // Use schema-qualified name for display header.
-    let display_name = if let Some(s) = schema_part {
-        if s.is_empty() {
-            name_part.to_owned()
-        } else {
-            format!("{s}.{name_part}")
-        }
-    } else {
-        name_part.to_owned()
-    };
-
-    // Bug 7: fetch relkind to determine the correct object-type label.
+    // Fetch relkind and actual schema to determine the correct object-type label
+    // and build a fully-qualified display name (psql always shows "schema.name").
     let relkind_sql = format!(
-        "select c.relkind::text
+        "select c.relkind::text, n.nspname
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
 where {name_cond}
 limit 1"
     );
-    let obj_label = {
+    let (obj_label, display_name) = {
         let mut label = "Table";
+        let mut resolved_schema = String::new();
         if let Ok(msgs) = client.simple_query(&relkind_sql).await {
             use tokio_postgres::SimpleQueryMessage;
             for msg in msgs {
@@ -1001,11 +1029,18 @@ limit 1"
                         "c" => "Composite type",
                         _ => "Relation",
                     };
+                    row.get(1).unwrap_or("").clone_into(&mut resolved_schema);
                     break;
                 }
             }
         }
-        label
+        // psql always shows schema-qualified name: Table "public.users"
+        let fq_name = if resolved_schema.is_empty() {
+            name_part.to_owned()
+        } else {
+            format!("{resolved_schema}.{name_part}")
+        };
+        (label, fq_name)
     };
 
     println!("{obj_label} \"{display_name}\"");
@@ -1138,7 +1173,7 @@ order by 1"
         let (cols, rows) = collect_messages(messages);
         if !rows.is_empty() {
             println!("Indexes:");
-            print_table(&cols, &rows);
+            print_table(&cols, &rows, None);
         }
     }
 
@@ -1149,7 +1184,7 @@ order by 1"
         let (cols, rows) = collect_messages(messages);
         if !rows.is_empty() {
             println!("Check constraints:");
-            print_table(&cols, &rows);
+            print_table(&cols, &rows, None);
         }
     }
 
@@ -1160,7 +1195,7 @@ order by 1"
         let (cols, rows) = collect_messages(messages);
         if !rows.is_empty() {
             println!("Foreign-key constraints:");
-            print_table(&cols, &rows);
+            print_table(&cols, &rows, None);
         }
     }
 
@@ -1171,7 +1206,7 @@ order by 1"
         let (cols, rows) = collect_messages(messages);
         if !rows.is_empty() {
             println!("Referenced by:");
-            print_table(&cols, &rows);
+            print_table(&cols, &rows, None);
         }
     }
 
@@ -1447,7 +1482,7 @@ order by 2, 3"
         let cols = vec!["Schema".to_owned(), "Name".to_owned()];
         let rows: Vec<Vec<String>> = vec![];
         // Should not panic.
-        print_table(&cols, &rows);
+        print_table(&cols, &rows, None);
     }
 
     #[test]
@@ -1455,13 +1490,13 @@ order by 2, 3"
         let cols = vec!["Name".to_owned()];
         let rows = vec![vec!["users".to_owned()]];
         // Should not panic.
-        print_table(&cols, &rows);
+        print_table(&cols, &rows, None);
     }
 
     #[test]
     fn print_table_empty_no_columns() {
         // Edge case: no columns, no rows — prints (0 rows).
-        print_table(&[], &[]);
+        print_table(&[], &[], None);
     }
 
     // -----------------------------------------------------------------------
