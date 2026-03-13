@@ -375,6 +375,8 @@ fn build_settings(cli: &Cli) -> repl::ReplSettings {
     for assignment in &cli.variable {
         if let Some((name, val)) = assignment.split_once('=') {
             vars.set(name, val);
+        } else {
+            eprintln!("samo: -v requires name=value");
         }
     }
 

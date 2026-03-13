@@ -612,8 +612,14 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
     let mut exit_code = 0i32;
 
     // -1 / --single-transaction: open a transaction before the first statement.
-    if settings.single_transaction && !execute_query(client, "begin", settings, &mut tx).await {
-        return 1;
+    // Use simple_query directly so that begin/commit/rollback are not echoed,
+    // logged, or prompted (they are internal bookkeeping, not user SQL).
+    if settings.single_transaction {
+        if let Err(e) = client.simple_query("begin").await {
+            eprintln!("samo: could not begin transaction: {e}");
+            return 1;
+        }
+        tx.update_from_sql("begin");
     }
 
     'outer: for line in content.lines() {
@@ -628,7 +634,8 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
                 exit_code = 1;
                 if settings.single_transaction {
                     // Roll back and abort the rest of the file.
-                    execute_query(client, "rollback", settings, &mut tx).await;
+                    let _ = client.simple_query("rollback").await;
+                    tx.update_from_sql("rollback");
                     break 'outer;
                 }
             }
@@ -643,16 +650,19 @@ pub async fn exec_file(client: &Client, path: &str, settings: &mut ReplSettings)
     {
         exit_code = 1;
         if settings.single_transaction {
-            execute_query(client, "rollback", settings, &mut tx).await;
+            let _ = client.simple_query("rollback").await;
+            tx.update_from_sql("rollback");
         }
     }
 
     // -1 / --single-transaction: commit on success.
-    if settings.single_transaction
-        && exit_code == 0
-        && !execute_query(client, "commit", settings, &mut tx).await
-    {
-        exit_code = 1;
+    if settings.single_transaction && exit_code == 0 {
+        if let Err(e) = client.simple_query("commit").await {
+            eprintln!("samo: could not commit transaction: {e}");
+            exit_code = 1;
+        } else {
+            tx.update_from_sql("commit");
+        }
     }
 
     exit_code
