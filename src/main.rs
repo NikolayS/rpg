@@ -5,6 +5,7 @@
 
 use clap::Parser;
 
+mod actor;
 mod ai;
 mod capabilities;
 mod complete;
