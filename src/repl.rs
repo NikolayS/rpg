@@ -2277,6 +2277,7 @@ AI commands:
   /fix              diagnose and fix the last error
   /optimize <query> suggest query optimizations
   /describe <table> AI-generated table description
+  /rca              root cause analysis of current database state
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
@@ -4628,6 +4629,7 @@ async fn stream_completion(
 /// - `/fix` — explain and fix the last error
 /// - `/explain [query]` — explain query plan with AI interpretation
 /// - `/optimize [query]` — suggest query optimizations
+/// - `/rca` — root cause analysis of current database state
 async fn dispatch_ai_command(
     input: &str,
     client: &Client,
@@ -4688,10 +4690,12 @@ async fn dispatch_ai_command(
             let remaining = budget.saturating_sub(used);
             eprintln!("Token budget: {used}/{budget} used, {remaining} remaining");
         }
+    } else if input == "/rca" || input.starts_with("/rca ") {
+        handle_ai_rca(client, settings, params).await;
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize, /describe, /clear, /compact, /budget"
+             Available: /ask, /fix, /explain, /optimize, /describe, /rca, /clear, /compact, /budget"
         );
     }
 }
@@ -5752,6 +5756,96 @@ async fn handle_ai_describe(
         crate::ai::Message {
             role: crate::ai::Role::User,
             content: format!("Describe table '{table_name}':\n\n{table_info}"),
+        },
+    ];
+
+    let options = crate::ai::CompletionOptions {
+        model: settings.config.ai.model.clone().unwrap_or_default(),
+        max_tokens: settings.config.ai.max_tokens,
+        temperature: 0.0,
+    };
+
+    match stream_completion(provider.as_ref(), &messages, &options).await {
+        Ok(result) => record_token_usage(settings, &result),
+        Err(e) => eprintln!("AI error: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /rca — Root Cause Analysis
+// ---------------------------------------------------------------------------
+
+/// Handle the `/rca` command: collect diagnostic snapshot and analyze.
+async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &ConnParams) {
+    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
+    if provider_name.is_empty() {
+        // Without AI, still collect and display the diagnostic snapshot.
+        eprintln!("AI not configured — collecting raw diagnostic data only.");
+        let pg_ash = settings
+            .config
+            .governance
+            .autonomy_for(crate::governance::FeatureArea::Rca);
+        let _ = pg_ash; // autonomy level not used in Observe mode yet
+        let snapshot = crate::rca::collect_snapshot(client, false).await;
+        print!("{}", snapshot.to_prompt());
+        return;
+    }
+
+    eprintln!("Collecting diagnostic data...");
+
+    // Detect pg_ash availability from capabilities (set at connect time).
+    let pg_ash_available = false; // Placeholder until capabilities module is merged.
+
+    let snapshot = crate::rca::collect_snapshot(client, pg_ash_available).await;
+
+    // Show raw data summary.
+    let data_steps = snapshot.steps.iter().filter(|s| s.has_data).count();
+    let total_steps = snapshot.steps.len();
+    eprintln!("Collected {data_steps}/{total_steps} steps with data. Analyzing...\n");
+
+    let api_key = settings
+        .config
+        .ai
+        .api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok());
+
+    let provider = match crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("AI error: {e}");
+            return;
+        }
+    };
+
+    // Build schema context for richer analysis.
+    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("Schema context error: {e}");
+            String::new()
+        }
+    };
+
+    let system_content = crate::rca::rca_system_prompt(&schema_ctx);
+    let user_content = format!(
+        "Database: {dbname}\n\n{snapshot}",
+        dbname = params.dbname,
+        snapshot = snapshot.to_prompt(),
+    );
+
+    let messages = vec![
+        crate::ai::Message {
+            role: crate::ai::Role::System,
+            content: system_content,
+        },
+        crate::ai::Message {
+            role: crate::ai::Role::User,
+            content: user_content,
         },
     ];
 
