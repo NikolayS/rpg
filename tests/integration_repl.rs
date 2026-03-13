@@ -445,3 +445,78 @@ async fn repl_gexec_skips_null_cells() {
         "NULL cell should be absent from non-null list"
     );
 }
+
+// ---------------------------------------------------------------------------
+// \gset — execute buffer and store columns as variables
+// ---------------------------------------------------------------------------
+
+/// Helper: run the samo binary with a piped script and return stdout.
+fn run_samo_script(script: &str) -> String {
+    use std::io::Write as _;
+
+    let host = std::env::var("TEST_PGHOST").unwrap_or_else(|_| "localhost".to_owned());
+    let port = std::env::var("TEST_PGPORT").unwrap_or_else(|_| "15432".to_owned());
+    let user = std::env::var("TEST_PGUSER").unwrap_or_else(|_| "testuser".to_owned());
+    let password = std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
+    let dbname = std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
+
+    let bin = env!("CARGO_BIN_EXE_samo");
+
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "-h",
+            &host,
+            "-p",
+            &port,
+            "-U",
+            &user,
+            "-d",
+            &dbname,
+            "-X",
+            "--no-readline",
+        ])
+        .env("PGPASSWORD", &password)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn samo binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.as_bytes());
+    }
+    let output = child.wait_with_output().expect("failed to wait for samo");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// `\gset` stores each column of a single-row result as a psql variable.
+///
+/// After `select 1 as x, 'hello' as y \gset`, `\echo :x` must print `1`
+/// and `\echo :y` must print `hello`.
+#[tokio::test]
+async fn gset_stores_columns_as_variables() {
+    let _ = connect_or_skip!();
+
+    let stdout = run_samo_script("select 1 as x, 'hello' as y \\gset\n\\echo :x\n\\echo :y\n");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.iter().any(|l| l.trim() == "1"),
+        "expected '1' in output for :x, got: {stdout:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.trim() == "hello"),
+        "expected 'hello' in output for :y, got: {stdout:?}"
+    );
+}
+
+/// `\gset my_` stores columns prefixed with `my_`.
+#[tokio::test]
+async fn gset_stores_columns_with_prefix() {
+    let _ = connect_or_skip!();
+
+    let stdout = run_samo_script("select 1 as x \\gset my_\n\\echo :my_x\n");
+    assert!(
+        stdout.lines().any(|l| l.trim() == "1"),
+        "expected '1' in output for :my_x, got: {stdout:?}"
+    );
+}

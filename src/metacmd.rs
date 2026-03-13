@@ -177,6 +177,12 @@ pub enum MetaCmd {
     /// silently skipped.  Errors in individual cell statements are printed but
     /// do not stop processing of remaining cells.
     GExec,
+    /// `\gset [prefix]` — execute buffer and store each column as a variable.
+    ///
+    /// The query must return exactly one row.  For each column, a variable
+    /// named `{prefix}{column_name}` is set to the cell value (empty string
+    /// for NULL).  `prefix` defaults to the empty string when omitted.
+    GSet(Option<String>),
 
     // -- Watch (#47) -------------------------------------------------------
     /// `\watch [interval]` — re-execute the last query every N seconds.
@@ -913,23 +919,34 @@ fn parse_shell(input: &str) -> ParsedMeta {
 // \g / \gx parser (#46)
 // ---------------------------------------------------------------------------
 
-/// Parse `\g [file||cmd]`, `\gx [file]`, `\gdesc`, and `\gexec`.
+/// Parse `\g [file||cmd]`, `\gx [file]`, `\gdesc`, `\gexec`, and `\gset [prefix]`.
 ///
 /// Disambiguation order (longest match first):
 ///   `gexec` → [`MetaCmd::GExec`]
+///   `gset`  → [`MetaCmd::GSet`]
 ///   `gdesc` → [`MetaCmd::GDesc`]
-///   `gset`  → not handled here (unknown)
 ///   `gx`    → [`MetaCmd::GoExecuteExpanded`]
 ///   `g`     → [`MetaCmd::GoExecute`]
 ///
-/// Any unknown `g`-prefixed command (e.g. `\gset`) falls through to
-/// [`MetaCmd::Unknown`].
+/// Any unrecognised `g`-prefixed command falls through to [`MetaCmd::Unknown`].
 fn parse_g_family(input: &str) -> ParsedMeta {
     // `\gexec` — execute buffer, then execute each result cell as SQL.
     // Checked before the generic long-prefix guard below.
     if let Some(rest) = input.strip_prefix("gexec") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::GExec);
+        }
+    }
+
+    // `\gset [prefix]` — store each column of the single result row as a variable.
+    if let Some(rest) = input.strip_prefix("gset") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let prefix = rest.trim();
+            return ParsedMeta::simple(MetaCmd::GSet(if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.to_owned())
+            }));
         }
     }
 
@@ -940,15 +957,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
         }
     }
 
-    // Longer g-prefixed commands that must not be misread as \g.
-    // Check them first so `\gset foo` → Unknown, not GoExecute("set foo").
-    for long_prefix in &["gset"] {
-        if let Some(rest) = input.strip_prefix(long_prefix) {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
-            }
-        }
-    }
+    // (gexec and gset are both handled above; no further long-prefix guards needed.)
 
     // `\gx [file]` — expanded execute; must be checked before bare `\g`.
     if let Some(rest) = input.strip_prefix("gx") {
@@ -1934,9 +1943,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_g_not_confused_with_gset() {
+    fn parse_g_not_confused_with_gset_gexec_gdesc() {
         // These longer g-prefixed commands must NOT parse as GoExecute.
-        assert!(matches!(parse("\\gset foo").cmd, MetaCmd::Unknown(_)));
+        assert!(!matches!(parse("\\gexec").cmd, MetaCmd::GoExecute(_)));
+        assert!(!matches!(parse("\\gset").cmd, MetaCmd::GoExecute(_)));
+        assert!(!matches!(parse("\\gdesc").cmd, MetaCmd::GoExecute(_)));
     }
 
     // -- \gdesc (#52) --------------------------------------------------------
@@ -1965,6 +1976,26 @@ mod tests {
         // \gx must not fall through to \g.
         assert!(matches!(parse("\\gx").cmd, MetaCmd::GoExecuteExpanded(_)));
         assert!(matches!(parse("\\g").cmd, MetaCmd::GoExecute(_)));
+    }
+
+    // -- \gset ---------------------------------------------------------------
+
+    #[test]
+    fn parse_gset_no_prefix() {
+        let m = parse("\\gset");
+        assert_eq!(m.cmd, MetaCmd::GSet(None));
+    }
+
+    #[test]
+    fn parse_gset_with_prefix() {
+        let m = parse("\\gset my_");
+        assert_eq!(m.cmd, MetaCmd::GSet(Some("my_".to_owned())));
+    }
+
+    #[test]
+    fn parse_gset_not_confused_with_g() {
+        // \gset must NOT fall through to GoExecute.
+        assert!(!matches!(parse("\\gset").cmd, MetaCmd::GoExecute(_)));
     }
 
     // -- \watch (#47) --------------------------------------------------------

@@ -787,6 +787,73 @@ fn command_tag_for(sql: &str, n: u64) -> String {
     }
 }
 
+/// Execute `buf` and store each column of the single result row as a variable.
+///
+/// - Exactly 1 row: for each column, sets `{prefix}{column_name}` to the
+///   cell value (empty string for NULL), matching psql behaviour.
+/// - 0 rows: prints an error message and leaves existing variables unchanged.
+/// - >1 rows: prints an error message and leaves existing variables unchanged.
+/// - SQL error: prints the error message and updates `tx` state.
+async fn execute_gset(
+    client: &Client,
+    buf: &str,
+    prefix: Option<&str>,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+) {
+    let prefix = prefix.unwrap_or("");
+
+    // Interpolate variables before sending (mirrors execute_query behaviour).
+    let interpolated = settings.vars.interpolate(buf);
+    let sql_to_send = interpolated.as_str();
+
+    match client.simple_query(sql_to_send).await {
+        Ok(messages) => {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut col_names: Vec<String> = Vec::new();
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    if col_names.is_empty() {
+                        col_names = (0..row.len())
+                            .map(|i| {
+                                row.columns()
+                                    .get(i)
+                                    .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                            })
+                            .collect();
+                    }
+                    let vals: Vec<Option<String>> = (0..row.len())
+                        .map(|i| row.get(i).map(str::to_owned))
+                        .collect();
+                    rows.push(vals);
+                }
+            }
+
+            match rows.len() {
+                0 => eprintln!("\\gset: no rows returned for \\gset"),
+                1 => {
+                    tx.update_from_sql(sql_to_send);
+                    // Store last query for \watch compatibility.
+                    settings.last_query = Some(buf.to_owned());
+                    let row = &rows[0];
+                    for (col, val) in col_names.iter().zip(row.iter()) {
+                        let var_name = format!("{prefix}{col}");
+                        let var_value = val.as_deref().unwrap_or("");
+                        settings.vars.set(&var_name, var_value);
+                    }
+                }
+                n => eprintln!("\\gset: more than one row returned ({n} rows)"),
+            }
+        }
+        Err(e) => {
+            eprintln!("ERROR:  {e}");
+            tx.on_error();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // \gdesc — describe buffer columns without executing (#52)
 // ---------------------------------------------------------------------------
@@ -1446,6 +1513,8 @@ pub enum MetaResult {
     DescribeBuffer,
     /// Execute the current buffer, then execute each result cell as SQL (`\gexec`).
     GExecBuffer,
+    /// Execute the current buffer and store each column as a variable (`\gset [prefix]`).
+    GSet(Option<String>),
 }
 
 /// Default `\watch` interval in seconds.
@@ -1668,6 +1737,7 @@ async fn dispatch_io(
         }
         MetaCmd::GDesc => Some(MetaResult::DescribeBuffer),
         MetaCmd::GExec => Some(MetaResult::GExecBuffer),
+        MetaCmd::GSet(ref prefix) => Some(MetaResult::GSet(prefix.clone())),
         _ => None,
     }
 }
@@ -2208,6 +2278,14 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::BufferUpdated
         }
+        MetaResult::GSet(prefix) => {
+            let sql = buf.trim().to_owned();
+            buf.clear();
+            if !sql.is_empty() {
+                execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
+            }
+            HandleLineResult::BufferUpdated
+        }
         MetaResult::Continue => HandleLineResult::Continue,
     }
 }
@@ -2339,6 +2417,15 @@ async fn handle_line(
                 stmt_buf.clear();
                 if !sql.is_empty() {
                     execute_gexec(client, &sql, settings, tx).await;
+                }
+                HandleLineResult::BufferUpdated
+            }
+            MetaResult::GSet(prefix) => {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                stmt_buf.clear();
+                if !sql.is_empty() {
+                    execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
                 }
                 HandleLineResult::BufferUpdated
             }
