@@ -4559,6 +4559,7 @@ pub async fn run_repl(
 }
 
 /// Run with rustyline readline support.
+#[allow(clippy::too_many_lines)]
 async fn run_readline_loop(
     client: &mut Client,
     params: &mut ConnParams,
@@ -4612,10 +4613,42 @@ async fn run_readline_loop(
 
         match rl.readline(&prompt) {
             Ok(line) => {
-                // Ctrl-C on empty line: stay at prompt (readline already
-                // handles Ctrl-C during input by returning Interrupted).
+                // Obtain a cancel token *before* the query executes so that
+                // a concurrent Ctrl-C handler can send a CancelRequest to the
+                // server mid-query.
+                let cancel_token = client.cancel_token();
+
+                // Spawn a background task that listens for Ctrl-C while the
+                // current line (and any query it triggers) is being processed.
+                // When Ctrl-C arrives it sends a PostgreSQL CancelRequest so
+                // the server aborts the running query; the query future then
+                // resolves with an error and control returns to the prompt.
+                // A oneshot channel lets us tear down the task once the line
+                // has been handled without a spurious cancel on the next query.
+                let (cancel_done_tx, cancel_done_rx) = tokio::sync::oneshot::channel::<()>();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {
+                            // Best-effort: ignore send errors (connection may
+                            // have already closed or no query was running).
+                            let _ = cancel_token
+                                .cancel_query(tokio_postgres::NoTls)
+                                .await;
+                        }
+                        _ = cancel_done_rx => {
+                            // Line processing finished before Ctrl-C — nothing
+                            // to do.
+                        }
+                    }
+                });
+
                 let result =
                     handle_line(&line, &mut buf, &mut stmt_buf, client, params, settings, tx).await;
+
+                // Signal the cancel-guard task that we are done with this
+                // line; if Ctrl-C has not fired yet it can exit cleanly.
+                // Ignore the error — the task may have already completed.
+                let _ = cancel_done_tx.send(());
 
                 // If buf is empty a statement was completed — add the full
                 // accumulated statement text to history.
@@ -4646,12 +4679,14 @@ async fn run_readline_loop(
                 }
             }
             Err(ReadlineError::Interrupted) => {
-                // Ctrl-C: clear current buffer, back to prompt.
+                // Ctrl-C at idle prompt: psql prints a blank line and
+                // re-prompts.  Clear any partial multi-line buffer so the
+                // user gets a clean slate.
+                println!();
                 if !buf.is_empty() {
                     buf.clear();
                     stmt_buf.clear();
                 }
-                // On empty line Ctrl-C does nothing (just re-prompt).
             }
             Err(ReadlineError::Eof) => {
                 // Ctrl-D on empty line: exit cleanly.
