@@ -2658,7 +2658,7 @@ order by 1, 2";
     /// Regression test for bug #159: `\dm+` was missing the Access method
     /// column and reported "0 bytes" because matviews were incorrectly grouped
     /// with views/sequences in the `is_view_or_seq` branch.  Matviews are
-    /// heap-stored and must use the default branch (pg_table_size + Access
+    /// heap-stored and must use the default branch (`pg_table_size` + Access
     /// method).
     #[test]
     fn matview_plus_sql_has_access_method_and_table_size() {
