@@ -78,6 +78,8 @@ pub enum MetaCmd {
     ListUserMappings,
     /// `\dy [pattern]` — list event triggers.
     ListEventTriggers,
+    /// `\do [pattern]` — list operators.
+    ListOperators,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -316,6 +318,7 @@ impl MetaCmd {
             Self::ListForeignTablesViaFdw => "\\det",
             Self::ListUserMappings => "\\deu",
             Self::ListEventTriggers => "\\dy",
+            Self::ListOperators => "\\do",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -1382,6 +1385,7 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("dd", MetaCmd::ListComments),
     ("dc", MetaCmd::ListConversions),
     ("dy", MetaCmd::ListEventTriggers),
+    ("do", MetaCmd::ListOperators),
 ];
 
 /// Parse the `\d` family of commands.
@@ -1699,6 +1703,32 @@ mod tests {
         let m = parse("\\dy my_trigger");
         assert_eq!(m.cmd, MetaCmd::ListEventTriggers);
         assert_eq!(m.pattern, Some("my_trigger".to_owned()));
+    }
+
+    #[test]
+    fn parse_do_operators() {
+        assert_eq!(parse("\\do").cmd, MetaCmd::ListOperators);
+    }
+
+    #[test]
+    fn parse_do_operators_plus_modifier() {
+        let m = parse("\\do+");
+        assert_eq!(m.cmd, MetaCmd::ListOperators);
+        assert!(m.plus);
+    }
+
+    #[test]
+    fn parse_do_operators_system_modifier() {
+        let m = parse("\\doS");
+        assert_eq!(m.cmd, MetaCmd::ListOperators);
+        assert!(m.system);
+    }
+
+    #[test]
+    fn parse_do_operators_with_pattern() {
+        let m = parse("\\do my_op");
+        assert_eq!(m.cmd, MetaCmd::ListOperators);
+        assert_eq!(m.pattern, Some("my_op".to_owned()));
     }
 
     #[test]

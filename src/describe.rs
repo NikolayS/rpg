@@ -54,6 +54,7 @@ pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Optio
         MetaCmd::ListForeignTablesViaFdw => list_foreign_tables_via_fdw(client, meta).await,
         MetaCmd::ListUserMappings => list_user_mappings(client, meta).await,
         MetaCmd::ListEventTriggers => list_event_triggers(client, meta).await,
+        MetaCmd::ListOperators => list_operators(client, meta).await,
         // Non-describe commands should never reach this function.
         _ => false,
     }
@@ -67,6 +68,7 @@ pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Optio
 /// centered title), and return `false` (never exits the REPL).
 ///
 /// When `echo_hidden` is `true` the SQL is echoed to stderr first.
+#[allow(dead_code)]
 async fn run_and_print(client: &Client, sql: &str, echo_hidden: bool) -> bool {
     run_and_print_titled(client, sql, echo_hidden, None).await
 }
@@ -1541,6 +1543,84 @@ order by 1"
 }
 
 // ---------------------------------------------------------------------------
+// \do — list operators
+// ---------------------------------------------------------------------------
+
+/// List operators.
+///
+/// Matches psql's `\do [pattern]` output: Schema, Name, Left arg type,
+/// Right arg type, Result type.  With `+`, also adds a Description column.
+async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "o.oprname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\",
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'), '') as \"Description\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+{where_clause}
+order by 1, 2, 3, 4"
+        )
+    } else {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+{where_clause}
+order by 1, 2, 3, 4"
+        )
+    };
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of operators")).await
+}
+
+// ---------------------------------------------------------------------------
 // \d [table] — describe a specific table, or list all relations
 // ---------------------------------------------------------------------------
 
@@ -2690,6 +2770,118 @@ order by 1";
         );
         assert!(
             where_clause.contains("my_trigger"),
+            "filter must include pattern value: {where_clause}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_operators SQL generation
+    // -----------------------------------------------------------------------
+
+    /// Verify that the non-verbose SQL for `\do` includes the five expected
+    /// columns and queries `pg_operator`.
+    #[test]
+    fn list_operators_sql_has_expected_columns() {
+        let sql = "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+order by 1, 2, 3, 4";
+
+        assert!(
+            sql.contains("\"Schema\""),
+            "SQL must have Schema column: {sql}"
+        );
+        assert!(sql.contains("\"Name\""), "SQL must have Name column: {sql}");
+        assert!(
+            sql.contains("\"Left arg type\""),
+            "SQL must have Left arg type column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Right arg type\""),
+            "SQL must have Right arg type column: {sql}"
+        );
+        assert!(
+            sql.contains("\"Result type\""),
+            "SQL must have Result type column: {sql}"
+        );
+        assert!(
+            sql.contains("pg_operator"),
+            "SQL must query pg_operator: {sql}"
+        );
+        assert!(
+            !sql.contains("\"Description\""),
+            "non-verbose SQL must not have Description: {sql}"
+        );
+    }
+
+    /// Verify that verbose `\do+` SQL adds a Description column via
+    /// `obj_description`.
+    #[test]
+    fn list_operators_plus_sql_has_description_column() {
+        let sql = "select
+    n.nspname as \"Schema\",
+    o.oprname as \"Name\",
+    case when o.oprkind = 'l' then null
+         else pg_catalog.format_type(o.oprleft, null)
+    end as \"Left arg type\",
+    pg_catalog.format_type(o.oprright, null) as \"Right arg type\",
+    pg_catalog.format_type(o.oprresult, null) as \"Result type\",
+    coalesce(pg_catalog.obj_description(o.oid, 'pg_operator'), '') as \"Description\"
+from pg_catalog.pg_operator as o
+left join pg_catalog.pg_namespace as n
+    on n.oid = o.oprnamespace
+order by 1, 2, 3, 4";
+
+        assert!(
+            sql.contains("\"Description\""),
+            "verbose SQL must have Description column: {sql}"
+        );
+        assert!(
+            sql.contains("obj_description"),
+            "verbose SQL must use obj_description: {sql}"
+        );
+        assert!(
+            sql.contains("pg_operator"),
+            "verbose SQL must query pg_operator: {sql}"
+        );
+    }
+
+    /// Verify that the system filter excludes pg_catalog when `S` is not set.
+    #[test]
+    fn list_operators_system_filter_excludes_pg_catalog() {
+        let sys_filter = "n.nspname not in ('pg_catalog', 'information_schema')";
+        let where_clause = format!("where {sys_filter}");
+
+        assert!(
+            where_clause.contains("pg_catalog"),
+            "system filter must reference pg_catalog: {where_clause}"
+        );
+        assert!(
+            where_clause.contains("information_schema"),
+            "system filter must reference information_schema: {where_clause}"
+        );
+    }
+
+    /// Verify that a pattern filter is applied to `oprname`.
+    #[test]
+    fn list_operators_pattern_filter_applied() {
+        let name_filter = pattern::where_clause(Some("my_op"), "o.oprname", Some("n.nspname"));
+        let where_clause = format!("where {name_filter}");
+
+        assert!(
+            where_clause.contains("o.oprname"),
+            "filter must reference o.oprname: {where_clause}"
+        );
+        assert!(
+            where_clause.contains("my_op"),
             "filter must include pattern value: {where_clause}"
         );
     }
