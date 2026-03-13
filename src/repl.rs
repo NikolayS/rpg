@@ -1284,12 +1284,7 @@ fn format_system_time(now: std::time::SystemTime) -> String {
 ///
 /// The screen is cleared (ANSI escape) at the start of each iteration
 /// after the first, matching psql `\watch` behaviour.
-async fn watch_query(
-    client: &Client,
-    sql: &str,
-    interval_secs: f64,
-    settings: &mut ReplSettings,
-) {
+async fn watch_query(client: &Client, sql: &str, interval_secs: f64, settings: &mut ReplSettings) {
     use std::time::Duration;
     use tokio::signal;
     use tokio::time::sleep;
@@ -1597,9 +1592,7 @@ async fn dispatch_meta(
             apply_set_title(settings, title.as_deref());
         }
         MetaCmd::Watch => {
-            let interval = parse_watch_interval(
-                parsed.pattern.as_deref().unwrap_or(""),
-            );
+            let interval = parse_watch_interval(parsed.pattern.as_deref().unwrap_or(""));
             // Capture the last query before the (potentially long) watch loop
             // to avoid borrow issues with `settings`.
             let sql = settings.last_query.clone();
