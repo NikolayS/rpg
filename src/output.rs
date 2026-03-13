@@ -376,7 +376,7 @@ fn write_row_count(out: &mut String, n: usize) {
 /// Render a [`RowSet`] in psql `\x` expanded format.
 ///
 /// ```text
-/// -[ RECORD 1 ]---+------------------
+/// -[ RECORD 1 ]------
 /// id               | 1
 /// name             | Alice
 /// email            | alice@example.com
@@ -398,7 +398,7 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .unwrap_or(0);
 
     for (rec_idx, row) in rows.iter().enumerate() {
-        // Record header: `-[ RECORD N ]---+---`
+        // Record header: `-[ RECORD N ]---`
         write_expanded_header(out, rec_idx + 1, max_name_width);
 
         for (i, col) in cols.iter().enumerate() {
@@ -418,10 +418,10 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
     }
 }
 
-/// Write the `-[ RECORD N ]---+---` header line for expanded output.
+/// Write the `-[ RECORD N ]---` header line for expanded output.
 fn write_expanded_header(out: &mut String, record_num: usize, name_col_width: usize) {
-    // Matches psql: `-[ RECORD 1 ]-----+`
-    // Left part has at least 2 dashes before `[`.
+    // Matches psql: `-[ RECORD 1 ]---`
+    // Dashes fill to the right so the total width matches the name column.
     let prefix = format!("-[ RECORD {record_num} ]");
     let total_left = name_col_width + 1; // +1 for the leading space in data rows
     let dashes_needed = total_left.saturating_sub(prefix.len());
@@ -429,7 +429,6 @@ fn write_expanded_header(out: &mut String, record_num: usize, name_col_width: us
     for _ in 0..dashes_needed.max(1) {
         out.push('-');
     }
-    out.push_str("+-");
     out.push('\n');
 }
 
