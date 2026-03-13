@@ -268,7 +268,6 @@ impl Cli {
             sslmode: self.sslmode.clone(),
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +314,7 @@ async fn main() {
                 repl::exec_stdin(&client, &settings).await
             } else {
                 // Interactive REPL.
-                repl::run_repl(&client, &resolved, cli.no_readline).await
+                repl::run_repl(&client, &resolved, settings, cli.no_readline).await
             };
 
             drop(client);

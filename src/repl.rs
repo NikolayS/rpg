@@ -60,23 +60,36 @@ impl TxState {
     ///
     /// - `BEGIN` (or `START TRANSACTION`) → enter transaction block
     /// - `COMMIT` (or `END`) → return to idle
-    /// - `ROLLBACK` → return to idle
-    /// - `SAVEPOINT` / `RELEASE` / `ROLLBACK TO` → no state change at block level
+    /// - `ROLLBACK` (or `ABORT`) → return to idle
+    /// - `ROLLBACK TO [SAVEPOINT]` → no state change (still in transaction)
+    /// - `SAVEPOINT` / `RELEASE` → no state change at block level
+    ///
+    /// NOTE: Client-side SQL inspection is inherently limited — it cannot
+    /// handle all edge cases (e.g. statements inside PL/pgSQL, implicit
+    /// transaction management by the server). Proper server-side tracking
+    /// via `ReadyForQuery` transaction status byte is future work.
     pub fn update_from_sql(&mut self, sql: &str) {
         // Grab the first keyword(s) from the (possibly multi-statement) input.
+        // Strip trailing punctuation (e.g. `;`) from each token so that
+        // `"begin;"` is treated the same as `"begin"`.
         let upper = sql.trim().to_uppercase();
-        let first = upper
+        let words: Vec<&str> = upper
             .split_whitespace()
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(" ");
-        if first.starts_with("BEGIN") || first.starts_with("START TRANSACTION") {
+            .take(3)
+            .map(|w| w.trim_end_matches(|c: char| !c.is_alphabetic()))
+            .collect();
+        let first = words.first().copied().unwrap_or("");
+        let second = words.get(1).copied().unwrap_or("");
+
+        if first == "BEGIN" || (first == "START" && second == "TRANSACTION") {
             *self = Self::InTransaction;
-        } else if first.starts_with("COMMIT")
-            || first.starts_with("END")
-            || first.starts_with("ROLLBACK")
-        {
+        } else if first == "COMMIT" || first == "END" {
             *self = Self::Idle;
+        } else if first == "ROLLBACK" || first == "ABORT" {
+            // `ROLLBACK TO [SAVEPOINT] name` stays inside the transaction.
+            if second != "TO" {
+                *self = Self::Idle;
+            }
         }
     }
 
@@ -196,10 +209,19 @@ pub fn is_complete(buf: &str) -> bool {
         if bytes[i] == b'$' {
             let rest = &buf[i..];
             if let Some(end) = rest[1..].find('$') {
-                let tag = &rest[..end + 2]; // includes both $ delimiters
-                dollar_tag = Some(tag.to_owned());
-                i += tag.len();
-                continue;
+                let inner = &rest[1..=end]; // text between the two $
+                                            // Validate: tag must be empty ($$) or contain only letters,
+                                            // digits, and underscores, and must NOT be purely digits
+                                            // (which would be a positional parameter like $1, $2, …).
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2]; // includes both $ delimiters
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
             }
         }
 
@@ -292,13 +314,9 @@ pub struct ReplSettings {
 ///
 /// Priority:
 /// 1. `PSQL_HISTORY` environment variable
-/// 2. `HISTFILE` environment variable
-/// 3. `~/.samo_history`
+/// 2. `~/.samo_history`
 pub fn history_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("PSQL_HISTORY") {
-        return Some(PathBuf::from(val));
-    }
-    if let Ok(val) = std::env::var("HISTFILE") {
         return Some(PathBuf::from(val));
     }
     dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE))
@@ -312,14 +330,21 @@ pub fn history_file() -> Option<PathBuf> {
 ///
 /// This is a stub implementation. Issue #19 will replace this with proper
 /// column-aligned output formatting.
-pub async fn execute_query(client: &Client, sql: &str, settings: &ReplSettings, tx: &mut TxState) {
+///
+/// Returns `true` on success, `false` if the query produced a SQL error.
+pub async fn execute_query(
+    client: &Client,
+    sql: &str,
+    settings: &ReplSettings,
+    tx: &mut TxState,
+) -> bool {
     let start = if settings.timing {
         Some(Instant::now())
     } else {
         None
     };
 
-    match client.simple_query(sql).await {
+    let success = match client.simple_query(sql).await {
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
@@ -402,17 +427,21 @@ pub async fn execute_query(client: &Client, sql: &str, settings: &ReplSettings, 
                     println!("{n}");
                 }
             }
+            true
         }
         Err(e) => {
             eprintln!("ERROR:  {e}");
             tx.on_error();
+            false
         }
-    }
+    };
 
     if let Some(t) = start {
         let elapsed = t.elapsed();
         println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
     }
+
+    success
 }
 
 // ---------------------------------------------------------------------------
@@ -427,14 +456,17 @@ pub async fn exec_command(client: &Client, sql: &str, settings: &ReplSettings) -
         eprintln!("samo: backslash commands not supported in -c mode");
         return 1;
     }
-    execute_query(client, sql, settings, &mut tx).await;
-    0
+    i32::from(!execute_query(client, sql, settings, &mut tx).await)
 }
 
 /// Execute all SQL statements from a file and exit.
 ///
+/// The file content is split at statement boundaries (`;` outside quotes and
+/// comments) and each statement is executed individually, matching the
+/// behaviour of `exec_stdin`.
+///
 /// # Errors
-/// Returns an error message string if the file cannot be read.
+/// Returns 1 if the file cannot be read or any statement produces a SQL error.
 pub async fn exec_file(client: &Client, path: &str, settings: &ReplSettings) -> i32 {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -444,8 +476,30 @@ pub async fn exec_file(client: &Client, path: &str, settings: &ReplSettings) -> 
         }
     };
     let mut tx = TxState::default();
-    execute_query(client, &content, settings, &mut tx).await;
-    0
+    let mut buf = String::new();
+    let mut exit_code = 0i32;
+
+    for line in content.lines() {
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        buf.push_str(line);
+
+        if is_complete(&buf) {
+            let sql = buf.trim().to_owned();
+            if !execute_query(client, &sql, settings, &mut tx).await {
+                exit_code = 1;
+            }
+            buf.clear();
+        }
+    }
+
+    // Execute any trailing input without a semicolon.
+    if !buf.trim().is_empty() && !execute_query(client, buf.trim(), settings, &mut tx).await {
+        exit_code = 1;
+    }
+
+    exit_code
 }
 
 /// Execute SQL lines from stdin (non-interactive piped input).
@@ -453,6 +507,7 @@ pub async fn exec_stdin(client: &Client, settings: &ReplSettings) -> i32 {
     let stdin = io::stdin();
     let mut buf = String::new();
     let mut tx = TxState::default();
+    let mut exit_code = 0i32;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -469,17 +524,19 @@ pub async fn exec_stdin(client: &Client, settings: &ReplSettings) -> i32 {
         buf.push_str(&line);
 
         if is_complete(&buf) {
-            execute_query(client, buf.trim(), settings, &mut tx).await;
+            if !execute_query(client, buf.trim(), settings, &mut tx).await {
+                exit_code = 1;
+            }
             buf.clear();
         }
     }
 
     // Execute any trailing input without a semicolon.
-    if !buf.trim().is_empty() {
-        execute_query(client, buf.trim(), settings, &mut tx).await;
+    if !buf.trim().is_empty() && !execute_query(client, buf.trim(), settings, &mut tx).await {
+        exit_code = 1;
     }
 
-    0
+    exit_code
 }
 
 // ---------------------------------------------------------------------------
@@ -534,9 +591,17 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
 
 /// Run the interactive REPL loop.
 ///
+/// Accepts caller-provided `settings` so that flags set on the command line
+/// (e.g. `--timing`, `--expanded`) take effect immediately.
+///
 /// Returns the exit code (0 = normal exit, non-zero = error).
-pub async fn run_repl(client: &Client, params: &ConnParams, no_readline: bool) -> i32 {
-    let mut settings = ReplSettings::default();
+pub async fn run_repl(
+    client: &Client,
+    params: &ConnParams,
+    settings: ReplSettings,
+    no_readline: bool,
+) -> i32 {
+    let mut settings = settings;
     let mut tx = TxState::default();
     let dbname = params.dbname.clone();
 
@@ -546,7 +611,7 @@ pub async fn run_repl(client: &Client, params: &ConnParams, no_readline: bool) -
     if use_readline {
         run_readline_loop(&dbname, client, params, &mut settings, &mut tx).await
     } else {
-        run_dumb_loop(&dbname, client, &mut settings, &mut tx).await
+        run_dumb_loop(&dbname, client, params, &mut settings, &mut tx).await
     }
 }
 
@@ -579,6 +644,8 @@ async fn run_readline_loop(
     }
 
     let mut buf = String::new();
+    // Accumulates the complete multi-line statement text for history.
+    let mut stmt_buf = String::new();
 
     loop {
         let prompt = build_prompt(dbname, *tx, !buf.is_empty());
@@ -587,17 +654,25 @@ async fn run_readline_loop(
             Ok(line) => {
                 // Ctrl-C on empty line: stay at prompt (readline already
                 // handles Ctrl-C during input by returning Interrupted).
-                handle_line(&line, &mut buf, client, params, settings, tx, dbname).await;
+                let should_exit =
+                    handle_line(&line, &mut buf, &mut stmt_buf, client, params, settings, tx).await;
 
-                // If buf is empty a statement was completed — add to history.
-                if buf.is_empty() && !line.trim().is_empty() {
-                    let _ = rl.add_history_entry(line.as_str());
+                // If buf is empty a statement was completed — add the full
+                // accumulated statement text to history.
+                if buf.is_empty() && !stmt_buf.trim().is_empty() {
+                    let _ = rl.add_history_entry(stmt_buf.trim());
+                    stmt_buf.clear();
+                }
+
+                if should_exit {
+                    break;
                 }
             }
             Err(ReadlineError::Interrupted) => {
                 // Ctrl-C: clear current buffer, back to prompt.
                 if !buf.is_empty() {
                     buf.clear();
+                    stmt_buf.clear();
                 }
                 // On empty line Ctrl-C does nothing (just re-prompt).
             }
@@ -623,6 +698,7 @@ async fn run_readline_loop(
 async fn run_dumb_loop(
     dbname: &str,
     client: &Client,
+    params: &ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> i32 {
@@ -639,11 +715,11 @@ async fn run_dumb_loop(
         match stdin.lock().read_line(&mut line) {
             Ok(0) => break, // EOF / Ctrl-D
             Ok(_) => {
-                let line = line.trim_end_matches('\n').to_owned();
-                // We don't have access to `params` here easily — pass None.
-                // For the dumb loop we just do execute inline.
+                let line = line.trim_end_matches(['\r', '\n']).to_owned();
                 if line.trim_start().starts_with('\\') {
-                    handle_backslash_dumb(line.trim(), settings);
+                    if handle_backslash_dumb(line.trim(), params, settings) {
+                        break;
+                    }
                 } else {
                     if !buf.is_empty() {
                         buf.push('\n');
@@ -667,11 +743,13 @@ async fn run_dumb_loop(
 }
 
 /// Handle a single input line in the dumb loop (backslash commands).
-fn handle_backslash_dumb(input: &str, settings: &mut ReplSettings) {
+///
+/// Returns `true` if the loop should exit (i.e. `\q` was issued).
+fn handle_backslash_dumb(input: &str, params: &ConnParams, settings: &mut ReplSettings) -> bool {
     let cmd = parse_backslash(input);
     match cmd {
         BackslashCmd::Quit => {
-            std::process::exit(0);
+            return true;
         }
         BackslashCmd::Help => {
             print_help();
@@ -679,34 +757,36 @@ fn handle_backslash_dumb(input: &str, settings: &mut ReplSettings) {
         BackslashCmd::Timing(mode) => apply_timing(settings, mode),
         BackslashCmd::Expanded(mode) => apply_expanded(settings, mode),
         BackslashCmd::ConnInfo => {
-            // Without params reference, print minimal info.
-            println!("(connection info not available in dumb mode)");
+            println!("{}", crate::connection::connection_info(params));
         }
         BackslashCmd::Unknown(name) => {
             eprintln!("Invalid command {name}. Try \\? for help.");
         }
     }
+    false
 }
 
 /// Process one line of input in the readline loop.
 ///
-/// Returns `true` if the REPL should exit.
+/// `stmt_buf` accumulates the full multi-line statement for history recording.
+///
+/// Returns `true` if the REPL should exit (i.e. `\q` was entered).
 async fn handle_line(
     line: &str,
     buf: &mut String,
+    stmt_buf: &mut String,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
-    _dbname: &str,
-) {
+) -> bool {
     if line.trim_start().starts_with('\\') {
         // Backslash command — execute immediately.
         let cmd = parse_backslash(line.trim());
         match cmd {
             BackslashCmd::Quit => {
-                // Save history and exit.
-                std::process::exit(0);
+                // Signal the caller to break the loop so history is saved.
+                return true;
             }
             BackslashCmd::Help => {
                 print_help();
@@ -720,20 +800,25 @@ async fn handle_line(
                 eprintln!("Invalid command {name}. Try \\? for help.");
             }
         }
-        return;
+        return false;
     }
 
     // SQL input: accumulate lines until we have a complete statement.
     if !buf.is_empty() {
         buf.push('\n');
+        stmt_buf.push('\n');
     }
     buf.push_str(line);
+    stmt_buf.push_str(line);
 
     if is_complete(buf) {
         let sql = buf.trim().to_owned();
         execute_query(client, &sql, settings, tx).await;
         buf.clear();
+        // stmt_buf is cleared by the caller after adding to history.
     }
+
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +995,58 @@ mod tests {
         let mut tx = TxState::InTransaction;
         tx.update_from_sql("select 1;");
         assert_eq!(tx, TxState::InTransaction);
+    }
+
+    #[test]
+    fn tx_abort_returns_to_idle() {
+        let mut tx = TxState::InTransaction;
+        tx.update_from_sql("ABORT;");
+        assert_eq!(tx, TxState::Idle);
+    }
+
+    #[test]
+    fn tx_abort_lowercase_returns_to_idle() {
+        let mut tx = TxState::InTransaction;
+        tx.update_from_sql("abort;");
+        assert_eq!(tx, TxState::Idle);
+    }
+
+    #[test]
+    fn tx_rollback_to_savepoint_stays_in_transaction() {
+        let mut tx = TxState::InTransaction;
+        tx.update_from_sql("ROLLBACK TO SAVEPOINT sp1;");
+        assert_eq!(tx, TxState::InTransaction);
+    }
+
+    #[test]
+    fn tx_rollback_to_stays_in_transaction() {
+        let mut tx = TxState::InTransaction;
+        tx.update_from_sql("rollback to sp1;");
+        assert_eq!(tx, TxState::InTransaction);
+    }
+
+    // -- dollar-quote tag validation --------------------------------------------
+
+    #[test]
+    fn dollar_param_not_treated_as_dollar_quote() {
+        // $1 is a positional parameter, not a dollar-quote open tag.
+        // The semicolon outside $1 should still terminate the statement.
+        assert!(is_complete("select $1;"));
+    }
+
+    #[test]
+    fn dollar_quote_empty_tag_valid() {
+        assert!(is_complete("do $$ begin end $$;"));
+    }
+
+    #[test]
+    fn dollar_quote_named_tag_valid() {
+        assert!(is_complete("do $body$ begin end $body$;"));
+    }
+
+    #[test]
+    fn dollar_quote_incomplete_named_tag() {
+        assert!(!is_complete("do $body$ begin end"));
     }
 
     // -- build_prompt ----------------------------------------------------------
