@@ -268,10 +268,7 @@ pub fn expand_prompt(template: &str, ctx: &PromptContext<'_>) -> String {
             }
             'm' => {
                 // Short host: everything before the first `.`.
-                let short = ctx
-                    .host
-                    .split_once('.')
-                    .map_or(ctx.host, |(left, _)| left);
+                let short = ctx.host.split_once('.').map_or(ctx.host, |(left, _)| left);
                 out.push_str(short);
             }
             '>' => {
@@ -7370,8 +7367,7 @@ mod tests {
             user: "alice".to_owned(),
             ..ConnParams::default()
         };
-        let result =
-            build_prompt_from_settings(&settings, &params, TxState::InTransaction, false);
+        let result = build_prompt_from_settings(&settings, &params, TxState::InTransaction, false);
         assert_eq!(result, "mydb=*> ");
     }
 
