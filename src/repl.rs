@@ -3883,11 +3883,7 @@ async fn handle_ai_ask(
 ///
 /// Returns `true` for `INSERT`, `UPDATE`, `DELETE`, and `MERGE`.
 fn is_write_query(sql: &str) -> bool {
-    let first = sql
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_uppercase();
+    let first = sql.split_whitespace().next().unwrap_or("").to_uppercase();
     matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")
 }
 
