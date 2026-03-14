@@ -47,6 +47,12 @@ pub struct Config {
     /// External connector configuration (Datadog, pganalyze, etc.).
     #[serde(default)]
     pub connectors: Option<ConnectorsConfig>,
+    /// Severity-based notification routing.
+    ///
+    /// Specifies which notification channels (by name) receive alerts at
+    /// each severity level.  When absent, all channels receive all alerts.
+    #[serde(default)]
+    pub notification_routing: NotificationRouting,
 }
 
 // ---------------------------------------------------------------------------
@@ -841,6 +847,38 @@ pub struct SyncConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Notification routing
+// ---------------------------------------------------------------------------
+
+/// Severity-based notification routing.
+///
+/// Specifies which notification channel names receive alerts at each
+/// severity level.  An empty `Vec` means "route to all channels".
+///
+/// Channel names must match the variant tag used in the daemon's
+/// `--slack-webhook`, `--webhook-url`, etc. flags.  This config is
+/// evaluated at alert dispatch time; consumers not yet wired in v1
+/// treat an empty list as "send to all".
+///
+/// ```toml
+/// [notification_routing]
+/// critical = ["slack", "pagerduty"]
+/// warning  = ["slack"]
+/// info     = []
+/// ```
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct NotificationRouting {
+    /// Channel names that receive `critical` severity alerts.
+    pub critical: Vec<String>,
+    /// Channel names that receive `warning` severity alerts.
+    pub warning: Vec<String>,
+    /// Channel names that receive `info` severity alerts.
+    pub info: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Project config (.rpg.toml)
 // ---------------------------------------------------------------------------
 
@@ -1227,6 +1265,24 @@ fn merge_config(base: Config, overlay: Config) -> Config {
         project_named_queries: base.project_named_queries,
         // Overlay connector config wins when present; base is used otherwise.
         connectors: overlay.connectors.or(base.connectors),
+        // Overlay routing wins when it has any entries; fall back to base.
+        notification_routing: {
+            let o = overlay.notification_routing;
+            let b = base.notification_routing;
+            NotificationRouting {
+                critical: if o.critical.is_empty() {
+                    b.critical
+                } else {
+                    o.critical
+                },
+                warning: if o.warning.is_empty() {
+                    b.warning
+                } else {
+                    o.warning
+                },
+                info: if o.info.is_empty() { b.info } else { o.info },
+            }
+        },
     }
 }
 

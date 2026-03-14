@@ -45,6 +45,7 @@ mod vars;
 
 // Phase 2/3 infrastructure — compiled but not yet wired into the main
 // dispatch loop. Each module suppresses dead_code at the item level.
+mod alert_delivery;
 mod anomaly;
 mod backup_monitoring;
 mod bloat;
@@ -370,6 +371,13 @@ struct Cli {
     /// Generic webhook URL for daemon notifications (POSTs JSON).
     #[arg(long, value_name = "URL")]
     webhook_url: Option<String>,
+
+    /// HMAC-SHA256 signing secret for the generic webhook.
+    ///
+    /// When set, each webhook POST includes an `X-Rpg-Signature-256` header
+    /// with the hex-encoded HMAC-SHA256 signature of the request body.
+    #[arg(long, value_name = "SECRET")]
+    webhook_secret: Option<String>,
 
     /// `PagerDuty` Events API v2 routing key for daemon notifications.
     #[arg(long, value_name = "KEY")]
@@ -909,7 +917,10 @@ async fn main() {
                     });
                 }
                 if let Some(ref url) = cli.webhook_url {
-                    channels.push(daemon::NotificationChannel::Webhook { url: url.clone() });
+                    channels.push(daemon::NotificationChannel::Webhook {
+                        url: url.clone(),
+                        secret: cli.webhook_secret.clone(),
+                    });
                 }
                 if let Some(ref key) = cli.pagerduty_key {
                     channels.push(daemon::NotificationChannel::PagerDuty {
