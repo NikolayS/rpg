@@ -4,6 +4,23 @@
 //! URI / conninfo strings, `pg_service.conf`, environment variables,
 //! `.pgpass`, and defaults.
 //! Then establishes a `tokio-postgres` connection with optional TLS.
+//!
+//! ## Multi-host support
+//!
+//! Connection strings may specify multiple hosts:
+//! - URI: `postgresql://h1,h2,h3/db` or `postgresql://h1:5432,h2:5433/db`
+//! - conninfo: `host=h1,h2,h3 port=5432,5433`
+//!
+//! Hosts are tried in order until one accepts a connection that satisfies
+//! the requested `target_session_attrs`.
+//!
+//! ## `target_session_attrs`
+//!
+//! After connecting, the session is verified against the requested attribute.
+//! Configured via:
+//! - `PGTARGETSESSIONATTRS` environment variable
+//! - `target_session_attrs` URI query parameter
+//! - `target_session_attrs` conninfo key
 
 use std::collections::HashMap;
 use std::env;
@@ -64,6 +81,17 @@ pub enum ConnectionError {
 
     #[error("service file error: {0}")]
     ServiceFileError(String),
+
+    /// All hosts were tried but none satisfied `target_session_attrs`.
+    #[error(
+        "no suitable host found: tried {tried} host(s), \
+         none matched target_session_attrs={attrs}"
+    )]
+    NoSuitableHost { tried: usize, attrs: String },
+
+    /// Unknown value supplied for `target_session_attrs`.
+    #[error("invalid target_session_attrs value: \"{0}\"")]
+    InvalidTargetSessionAttrs(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +184,64 @@ impl SslMode {
 }
 
 // ---------------------------------------------------------------------------
+// Target session attributes
+// ---------------------------------------------------------------------------
+
+/// Specifies which session properties a candidate host must satisfy.
+///
+/// Mirrors the `target_session_attrs` libpq parameter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TargetSessionAttrs {
+    /// Accept any connection (default).
+    #[default]
+    Any,
+    /// The session must be read-write (`transaction_read_only = off`).
+    ReadWrite,
+    /// The session must be read-only (`transaction_read_only = on`).
+    ReadOnly,
+    /// The host must be the primary (`transaction_read_only = off`).
+    Primary,
+    /// The host must be a standby (`pg_is_in_recovery() = true`).
+    Standby,
+    /// Prefer a standby; fall back to any host if none available.
+    PreferStandby,
+}
+
+impl TargetSessionAttrs {
+    /// Parse from a string value (case-insensitive, hyphens and underscores
+    /// both accepted).
+    pub fn parse(s: &str) -> Result<Self, ConnectionError> {
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "any" => Ok(Self::Any),
+            "read_write" => Ok(Self::ReadWrite),
+            "read_only" => Ok(Self::ReadOnly),
+            "primary" => Ok(Self::Primary),
+            "standby" => Ok(Self::Standby),
+            "prefer_standby" => Ok(Self::PreferStandby),
+            _ => Err(ConnectionError::InvalidTargetSessionAttrs(s.to_owned())),
+        }
+    }
+
+    /// Human-readable name used in error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::ReadWrite => "read-write",
+            Self::ReadOnly => "read-only",
+            Self::Primary => "primary",
+            Self::Standby => "standby",
+            Self::PreferStandby => "prefer-standby",
+        }
+    }
+}
+
+impl fmt::Display for TargetSessionAttrs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resolved connection parameters
 // ---------------------------------------------------------------------------
 
@@ -164,6 +250,15 @@ impl SslMode {
 pub struct ConnParams {
     pub host: String,
     pub port: u16,
+    /// All candidate `(host, port)` pairs for a multi-host connection.
+    ///
+    /// When a single host is given this contains exactly one entry.  The
+    /// values here are tried in order by [`connect`].  After a successful
+    /// connection, `host` and `port` are updated to reflect the host that
+    /// was actually used.
+    pub hosts: Vec<(String, u16)>,
+    /// Requested session attribute filter.
+    pub target_session_attrs: TargetSessionAttrs,
     pub user: String,
     pub dbname: String,
     pub password: Option<String>,
@@ -210,6 +305,8 @@ impl fmt::Debug for ConnParams {
         f.debug_struct("ConnParams")
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("hosts", &self.hosts)
+            .field("target_session_attrs", &self.target_session_attrs)
             .field("user", &self.user)
             .field("dbname", &self.dbname)
             .field("password", &self.password.as_ref().map(|_| "***"))
@@ -228,9 +325,13 @@ impl fmt::Debug for ConnParams {
 
 impl Default for ConnParams {
     fn default() -> Self {
+        let host = default_host();
+        let port = 5432u16;
         Self {
-            host: default_host(),
-            port: 5432,
+            hosts: vec![(host.clone(), port)],
+            host,
+            port,
+            target_session_attrs: TargetSessionAttrs::default(),
             user: default_user(),
             dbname: String::new(), // filled in by resolve — set to user
             password: None,
@@ -424,6 +525,12 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
                 .ok()
                 .and_then(|v| v.parse().ok())
         });
+
+    // Multi-host list — built after host/port are resolved.
+    resolve_hosts(&mut params, uri_ref, ci_ref);
+
+    // target_session_attrs — URI query param, conninfo key, then env.
+    resolve_target_session_attrs(&mut params, uri_ref, ci_ref)?;
 
     Ok(params)
 }
@@ -623,6 +730,76 @@ fn resolve_options(
         .or_else(|| env::var("PGOPTIONS").ok());
 }
 
+/// Build the canonical multi-host list in `params.hosts`.
+///
+/// Priority:
+/// 1. Multi-host from URI (already parsed into `uri.hosts`)
+/// 2. Multi-host from conninfo `host=h1,h2 port=5432,5433`
+/// 3. Single host already resolved into `params.host` / `params.port`
+fn resolve_hosts(
+    params: &mut ConnParams,
+    uri: Option<&UriParams>,
+    conninfo: Option<&HashMap<String, String>>,
+) {
+    // URI multi-host takes precedence.
+    if let Some(u) = uri {
+        if u.hosts.len() > 1 {
+            params.hosts.clone_from(&u.hosts);
+            return;
+        }
+    }
+
+    // conninfo multi-host: `host=h1,h2,h3 port=5432,5433`
+    if let Some(ci) = conninfo {
+        if let Some(host_val) = ci.get("host") {
+            let host_parts: Vec<&str> = host_val.split(',').map(str::trim).collect();
+            if host_parts.len() > 1 {
+                // Parse ports — comma-separated; last port is reused.
+                let port_parts: Vec<u16> = ci
+                    .get("port")
+                    .map(|p| {
+                        p.split(',')
+                            .filter_map(|s| s.trim().parse::<u16>().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let default_port = params.port; // already resolved
+                let mut last_port = default_port;
+                let mut host_list: Vec<(String, u16)> = Vec::with_capacity(host_parts.len());
+                for (i, h) in host_parts.iter().enumerate() {
+                    if let Some(&p) = port_parts.get(i) {
+                        last_port = p;
+                    }
+                    host_list.push(((*h).to_owned(), last_port));
+                }
+                params.hosts = host_list;
+                return;
+            }
+        }
+    }
+
+    // Fallback: single host from the already-resolved fields.
+    params.hosts = vec![(params.host.clone(), params.port)];
+}
+
+fn resolve_target_session_attrs(
+    params: &mut ConnParams,
+    uri: Option<&UriParams>,
+    conninfo: Option<&HashMap<String, String>>,
+) -> Result<(), ConnectionError> {
+    params.target_session_attrs = if let Some(tsa) = uri.and_then(|u| u.target_session_attrs) {
+        tsa
+    } else if let Some(val) = conninfo.and_then(|c| c.get("target_session_attrs")) {
+        TargetSessionAttrs::parse(val)?
+    } else if let Ok(val) = env::var("PGTARGETSESSIONATTRS") {
+        TargetSessionAttrs::parse(&val)?
+    } else {
+        TargetSessionAttrs::Any
+    };
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // URI parsing
 // ---------------------------------------------------------------------------
@@ -632,6 +809,11 @@ fn resolve_options(
 struct UriParams {
     host: Option<String>,
     port: Option<u16>,
+    /// Parsed multi-host list.  When the URI authority contains comma-
+    /// separated hosts, all entries land here (and `host`/`port` reflect
+    /// only the *first* entry for backward-compat callers that don't look
+    /// at `hosts`).
+    hosts: Vec<(String, u16)>,
     user: Option<String>,
     password: Option<String>,
     dbname: Option<String>,
@@ -642,9 +824,15 @@ struct UriParams {
     application_name: Option<String>,
     connect_timeout: Option<u64>,
     options: Option<String>,
+    target_session_attrs: Option<TargetSessionAttrs>,
 }
 
 /// Parse a `postgresql://` or `postgres://` URI into individual fields.
+///
+/// Supports multi-host syntax: `postgresql://h1,h2:5433,h3/db` where each
+/// comma-separated token is an individual `host[:port]`.  Ports are matched
+/// positionally; the last port is reused for any remaining hosts.
+#[allow(clippy::too_many_lines)]
 fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
     let err = |msg: String| ConnectionError::InvalidConnectionString(msg);
 
@@ -670,7 +858,7 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
 
     params.dbname = db.map(percent_decode);
 
-    // Parse authority: [user[:password]@]host[:port]
+    // Parse authority: [user[:password]@]host[:port][,host[:port]...]
     let (userinfo, hostport) = match authority.split_once('@') {
         Some((u, h)) => (Some(u), h),
         None => (None, authority),
@@ -693,35 +881,67 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
     }
 
     if !hostport.is_empty() {
-        // Handle IPv6 bracket notation [::1]:5432
-        if let Some(rest_after_bracket) = hostport.strip_prefix('[') {
-            if let Some((ipv6, port_part)) = rest_after_bracket.split_once(']') {
-                params.host = Some(ipv6.to_owned());
-                if let Some(port_str) = port_part.strip_prefix(':') {
-                    params.port = Some(
-                        port_str
-                            .parse::<u16>()
-                            .map_err(|_| err(format!("invalid port in URI: {port_str}")))?,
-                    );
+        // Multi-host: split on ',' and parse each token as host[:port].
+        // IPv6 bracket notation is supported per token.
+        let tokens: Vec<&str> = hostport.split(',').collect();
+        let mut parsed: Vec<(String, Option<u16>)> = Vec::with_capacity(tokens.len());
+
+        for token in &tokens {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            if let Some(rest_after_bracket) = token.strip_prefix('[') {
+                // IPv6 [::1]:port
+                if let Some((ipv6, port_part)) = rest_after_bracket.split_once(']') {
+                    let port = if let Some(port_str) = port_part.strip_prefix(':') {
+                        Some(
+                            port_str
+                                .parse::<u16>()
+                                .map_err(|_| err(format!("invalid port in URI: {port_str}")))?,
+                        )
+                    } else {
+                        None
+                    };
+                    parsed.push((ipv6.to_owned(), port));
+                } else {
+                    return Err(err("unterminated IPv6 bracket in URI".to_owned()));
                 }
             } else {
-                return Err(err("unterminated IPv6 bracket in URI".to_owned()));
-            }
-        } else {
-            match hostport.rsplit_once(':') {
-                Some((h, p)) => {
-                    if !h.is_empty() {
-                        params.host = Some(percent_decode(h));
+                // Plain host or host:port.
+                // Use rsplit_once so a bare IPv6 without brackets (unusual)
+                // doesn't accidentally split on an address colon.
+                match token.rsplit_once(':') {
+                    Some((h, p)) => {
+                        let port = p
+                            .parse::<u16>()
+                            .map_err(|_| err(format!("invalid port in URI: {p}")))?;
+                        parsed.push((percent_decode(h), Some(port)));
                     }
-                    params.port = Some(
-                        p.parse::<u16>()
-                            .map_err(|_| err(format!("invalid port in URI: {p}")))?,
-                    );
-                }
-                None => {
-                    params.host = Some(percent_decode(hostport));
+                    None => {
+                        parsed.push((percent_decode(token), None));
+                    }
                 }
             }
+        }
+
+        if !parsed.is_empty() {
+            // Determine the "last known port" for reuse on hosts without an
+            // explicit port: default 5432, overridden by the last explicit port
+            // seen so far as we walk left-to-right.
+            let mut last_port: u16 = 5432;
+            let mut host_list: Vec<(String, u16)> = Vec::with_capacity(parsed.len());
+            for (h, p) in parsed {
+                if let Some(port) = p {
+                    last_port = port;
+                }
+                host_list.push((h, last_port));
+            }
+
+            // Populate the legacy single-host fields from the first entry.
+            params.host = Some(host_list[0].0.clone());
+            params.port = Some(host_list[0].1);
+            params.hosts = host_list;
         }
     }
 
@@ -738,6 +958,9 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                     "application_name" => params.application_name = Some(val),
                     "connect_timeout" => params.connect_timeout = val.parse().ok(),
                     "options" => params.options = Some(val),
+                    "target_session_attrs" => {
+                        params.target_session_attrs = Some(TargetSessionAttrs::parse(&val)?);
+                    }
                     // Ignore unknown query params rather than erroring.
                     _ => {}
                 }
@@ -1569,8 +1792,10 @@ where
 /// Establish a connection to Postgres and return both the `Client` and the
 /// fully-resolved `ConnParams` that were used.
 ///
-/// Accepting a pre-resolved `ConnParams` ensures the caller (e.g. `main`)
-/// always uses the same parameters that were passed to the driver.
+/// When `params.hosts` contains multiple entries, each host is tried in order
+/// until one accepts a connection that satisfies `params.target_session_attrs`.
+/// For `prefer-standby` the entire list is tried for standbys first; if none
+/// qualify, the list is retried accepting any host.
 pub async fn connect(
     mut params: ConnParams,
     opts: &CliConnOpts,
@@ -1578,88 +1803,222 @@ pub async fn connect(
     // Resolve password (pre-connect: may prompt if -W).
     resolve_password(&mut params, opts.force_password, opts.no_password, false)?;
 
-    // Build tokio-postgres config.
-    let mut pg_config = tokio_postgres::Config::new();
-    pg_config
-        .host(&params.host)
-        .port(params.port)
-        .user(&params.user)
-        .dbname(&params.dbname)
-        .application_name(&params.application_name);
+    let hosts = params.hosts.clone();
+    let tsa = params.target_session_attrs;
 
-    if let Some(ref pw) = params.password {
-        pg_config.password(pw);
+    // For prefer-standby we may need two passes.
+    // Use a fixed-size array to avoid heap allocation; track length separately.
+    let passes_buf: [TargetSessionAttrs; 2];
+    let passes: &[TargetSessionAttrs] = match tsa {
+        TargetSessionAttrs::PreferStandby => {
+            passes_buf = [TargetSessionAttrs::Standby, TargetSessionAttrs::Any];
+            &passes_buf
+        }
+        other => {
+            passes_buf = [other, other]; // second slot unused
+            &passes_buf[..1]
+        }
+    };
+
+    let mut last_err: Option<ConnectionError> = None;
+
+    'outer: for &effective_tsa in passes {
+        for (host, port) in &hosts {
+            // Build a fresh tokio-postgres config for this candidate host.
+            let mut pg_config = tokio_postgres::Config::new();
+            pg_config
+                .host(host)
+                .port(*port)
+                .user(&params.user)
+                .dbname(&params.dbname)
+                .application_name(&params.application_name);
+
+            if let Some(ref pw) = params.password {
+                pg_config.password(pw);
+            }
+            if let Some(timeout) = params.connect_timeout {
+                pg_config.connect_timeout(std::time::Duration::from_secs(timeout));
+            }
+            if let Some(ref opts_str) = params.options {
+                pg_config.options(opts_str);
+            }
+
+            // Temporarily set the candidate host in params so the TLS
+            // helper functions (verify-full) use the right hostname.
+            params.host = host.clone();
+            params.port = *port;
+
+            let result = connect_one(&pg_config, &params).await;
+            let (client, tls_info) = match result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            // Verify session attributes if needed.
+            if effective_tsa != TargetSessionAttrs::Any {
+                match check_session_attrs(&client, effective_tsa).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // This host doesn't match; drop the client and try next.
+                        last_err = Some(ConnectionError::NoSuitableHost {
+                            tried: hosts.len(),
+                            attrs: tsa.to_string(),
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        continue;
+                    }
+                }
+            }
+
+            // Successful connection on this host.
+            params.tls_info = tls_info;
+            // host/port already updated above.
+
+            // Resolve hostname → IP for \conninfo display.
+            if !params.host.starts_with('/') && !is_numeric_addr(&params.host) {
+                let addr_str = format!("{}:{}", params.host, params.port);
+                if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str())
+                {
+                    if let Some(addr) = addrs.next() {
+                        params.resolved_addr = Some(addr.ip().to_string());
+                    }
+                }
+            }
+
+            return Ok((client, params));
+        }
+
+        // If we exhausted all hosts on the standby pass and none qualified,
+        // the outer loop will retry with Any.  If this was already the Any
+        // pass (or single-pass mode), we break and fall through to the error.
+        if effective_tsa == TargetSessionAttrs::Any || passes.len() == 1 {
+            break 'outer;
+        }
     }
 
-    if let Some(timeout) = params.connect_timeout {
-        pg_config.connect_timeout(std::time::Duration::from_secs(timeout));
-    }
+    Err(last_err.unwrap_or(ConnectionError::NoSuitableHost {
+        tried: hosts.len(),
+        attrs: tsa.to_string(),
+    }))
+}
 
-    if let Some(ref opts_str) = params.options {
-        pg_config.options(opts_str);
-    }
-
-    let (client, tls_info) = match params.sslmode {
-        SslMode::Disable => (connect_plain(&pg_config, &params).await?, None),
+/// Attempt a single connection (one host) respecting `params.sslmode`.
+///
+/// Returns the connected `Client` together with the captured [`TlsInfo`] when
+/// TLS was used, or `None` for a plain connection.
+async fn connect_one(
+    pg_config: &tokio_postgres::Config,
+    params: &ConnParams,
+) -> Result<(Client, Option<TlsInfo>), ConnectionError> {
+    let result = match params.sslmode {
+        SslMode::Disable => (connect_plain(pg_config, params).await?, None),
 
         // sslmode=allow: try plain first; if the server rejects it and
         // demands SSL, retry with TLS.
-        SslMode::Allow => match connect_plain(&pg_config, &params).await {
+        SslMode::Allow => match connect_plain(pg_config, params).await {
             Ok(c) => (c, None),
             Err(ConnectionError::SslRequired) => {
-                let (c, info) = connect_tls_default(&pg_config, &params).await?;
+                let (c, info) = connect_tls_default(pg_config, params).await?;
                 (c, Some(info))
             }
             Err(e) => return Err(e),
         },
 
-        SslMode::Prefer => match connect_tls_default(&pg_config, &params).await {
+        SslMode::Prefer => match connect_tls_default(pg_config, params).await {
             Ok((c, info)) => (c, Some(info)),
             Err(_) => {
                 // sslmode=prefer: silently fall back to a plain connection
                 // when TLS is unavailable. This matches psql's default
                 // behavior — no warning is shown to the user.
-                (connect_plain(&pg_config, &params).await?, None)
+                (connect_plain(pg_config, params).await?, None)
             }
         },
 
         SslMode::Require => {
-            pg_config.ssl_mode(TokioSslMode::Require);
-            let (c, info) = connect_tls_default(&pg_config, &params).await?;
+            let mut cfg = pg_config.clone();
+            cfg.ssl_mode(TokioSslMode::Require);
+            let (c, info) = connect_tls_default(&cfg, params).await?;
             (c, Some(info))
         }
 
         SslMode::VerifyCa => {
-            pg_config.ssl_mode(TokioSslMode::Require);
-            let tls_cfg = make_tls_config_verify_ca(&params)?;
-            let (c, info) = connect_tls_with_config(&pg_config, &params, tls_cfg).await?;
+            let mut cfg = pg_config.clone();
+            cfg.ssl_mode(TokioSslMode::Require);
+            let tls_cfg = make_tls_config_verify_ca(params)?;
+            let (c, info) = connect_tls_with_config(&cfg, params, tls_cfg).await?;
             (c, Some(info))
         }
 
         SslMode::VerifyFull => {
-            pg_config.ssl_mode(TokioSslMode::Require);
-            let tls_cfg = make_tls_config_verify_full(&params)?;
-            let (c, info) = connect_tls_with_config(&pg_config, &params, tls_cfg).await?;
+            let mut cfg = pg_config.clone();
+            cfg.ssl_mode(TokioSslMode::Require);
+            let tls_cfg = make_tls_config_verify_full(params)?;
+            let (c, info) = connect_tls_with_config(&cfg, params, tls_cfg).await?;
             (c, Some(info))
         }
     };
+    Ok(result)
+}
 
-    params.tls_info = tls_info;
+/// Verify that a newly-established `client` satisfies `tsa`.
+///
+/// Returns `Ok(true)` when the host qualifies, `Ok(false)` when it does not.
+/// Errors indicate a query failure, not a mismatch.
+async fn check_session_attrs(
+    client: &Client,
+    tsa: TargetSessionAttrs,
+) -> Result<bool, ConnectionError> {
+    match tsa {
+        TargetSessionAttrs::Any | TargetSessionAttrs::PreferStandby => Ok(true),
 
-    // Resolve the hostname to a numeric IP so \conninfo can display it like
-    // psql does: `on host "localhost" (address "127.0.0.1") at port "5432".`
-    // Only attempt this for TCP connections (not Unix sockets) and only when
-    // the host is not already a numeric address.
-    if !params.host.starts_with('/') && !is_numeric_addr(&params.host) {
-        let addr_str = format!("{}:{}", params.host, params.port);
-        if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str()) {
-            if let Some(addr) = addrs.next() {
-                params.resolved_addr = Some(addr.ip().to_string());
-            }
+        TargetSessionAttrs::ReadWrite | TargetSessionAttrs::Primary => {
+            // read-write / primary: transaction_read_only must be 'off'.
+            let row = client
+                .query_one("show transaction_read_only", &[])
+                .await
+                .map_err(|e| ConnectionError::ConnectionFailed {
+                    host: String::new(),
+                    port: 0,
+                    reason: format!("could not check transaction_read_only: {e}"),
+                })?;
+            let val: &str = row.get(0);
+            Ok(val.trim() == "off")
+        }
+
+        TargetSessionAttrs::ReadOnly => {
+            // read-only: transaction_read_only must be 'on'.
+            let row = client
+                .query_one("show transaction_read_only", &[])
+                .await
+                .map_err(|e| ConnectionError::ConnectionFailed {
+                    host: String::new(),
+                    port: 0,
+                    reason: format!("could not check transaction_read_only: {e}"),
+                })?;
+            let val: &str = row.get(0);
+            Ok(val.trim() == "on")
+        }
+
+        TargetSessionAttrs::Standby => {
+            // standby: pg_is_in_recovery() must return true.
+            let row = client
+                .query_one("select pg_is_in_recovery()", &[])
+                .await
+                .map_err(|e| ConnectionError::ConnectionFailed {
+                    host: String::new(),
+                    port: 0,
+                    reason: format!("could not check pg_is_in_recovery(): {e}"),
+                })?;
+            let in_recovery: bool = row.get(0);
+            Ok(in_recovery)
         }
     }
-
-    Ok((client, params))
 }
 
 /// Connect without TLS.
@@ -2853,6 +3212,72 @@ sslmode=verify-full
         );
     }
 
+    // -- TargetSessionAttrs parsing -----------------------------------------
+
+    #[test]
+    fn test_target_session_attrs_parse_all_values() {
+        assert_eq!(
+            TargetSessionAttrs::parse("any").unwrap(),
+            TargetSessionAttrs::Any
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("read-write").unwrap(),
+            TargetSessionAttrs::ReadWrite
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("read_write").unwrap(),
+            TargetSessionAttrs::ReadWrite
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("read-only").unwrap(),
+            TargetSessionAttrs::ReadOnly
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("read_only").unwrap(),
+            TargetSessionAttrs::ReadOnly
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("primary").unwrap(),
+            TargetSessionAttrs::Primary
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("standby").unwrap(),
+            TargetSessionAttrs::Standby
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("prefer-standby").unwrap(),
+            TargetSessionAttrs::PreferStandby
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("prefer_standby").unwrap(),
+            TargetSessionAttrs::PreferStandby
+        );
+        // Case-insensitive.
+        assert_eq!(
+            TargetSessionAttrs::parse("ANY").unwrap(),
+            TargetSessionAttrs::Any
+        );
+        assert_eq!(
+            TargetSessionAttrs::parse("READ-WRITE").unwrap(),
+            TargetSessionAttrs::ReadWrite
+        );
+        // Unknown value → error.
+        assert!(TargetSessionAttrs::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn test_target_session_attrs_display() {
+        assert_eq!(TargetSessionAttrs::Any.to_string(), "any");
+        assert_eq!(TargetSessionAttrs::ReadWrite.to_string(), "read-write");
+        assert_eq!(TargetSessionAttrs::ReadOnly.to_string(), "read-only");
+        assert_eq!(TargetSessionAttrs::Primary.to_string(), "primary");
+        assert_eq!(TargetSessionAttrs::Standby.to_string(), "standby");
+        assert_eq!(
+            TargetSessionAttrs::PreferStandby.to_string(),
+            "prefer-standby"
+        );
+    }
+
     #[test]
     fn test_parse_service_file_comments_and_blanks() {
         let contents = "\
@@ -2983,6 +3408,25 @@ host=myhost
 
     #[test]
     #[serial]
+    fn test_target_session_attrs_default_is_any() {
+        let _guard = EnvGuard::new(&["PGTARGETSESSIONATTRS"]);
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.target_session_attrs, TargetSessionAttrs::Any);
+    }
+
+    #[test]
+    #[serial]
+    fn test_target_session_attrs_from_env() {
+        let _guard = EnvGuard::new(&["PGTARGETSESSIONATTRS"]);
+        env::set_var("PGTARGETSESSIONATTRS", "read-write");
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.target_session_attrs, TargetSessionAttrs::ReadWrite);
+    }
+
+    #[test]
+    #[serial]
     fn test_conninfo_service_key_selects_service() {
         let _guard = EnvGuard::new(&[
             "PGHOST",
@@ -3016,6 +3460,24 @@ host=myhost
         assert_eq!(params.user, "ciuser");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn test_target_session_attrs_from_uri() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGTARGETSESSIONATTRS",
+        ]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("postgresql://h1,h2/db?target_session_attrs=standby".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.target_session_attrs, TargetSessionAttrs::Standby);
     }
 
     #[test]
@@ -3057,6 +3519,24 @@ host=myhost
         assert_eq!(params.port, 5432);
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn test_target_session_attrs_from_conninfo() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGTARGETSESSIONATTRS",
+        ]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("host=h1,h2 target_session_attrs=primary".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.target_session_attrs, TargetSessionAttrs::Primary);
     }
 
     #[test]
@@ -3121,5 +3601,154 @@ host=myhost
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // -- Multi-host URI parsing ---------------------------------------------
+
+    #[test]
+    fn test_parse_uri_multihost_no_ports() {
+        let up = parse_uri("postgresql://h1,h2,h3/db").unwrap();
+        assert_eq!(
+            up.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5432),
+                ("h3".to_owned(), 5432),
+            ]
+        );
+        assert_eq!(up.host, Some("h1".to_owned()));
+        assert_eq!(up.port, Some(5432));
+        assert_eq!(up.dbname, Some("db".to_owned()));
+    }
+
+    #[test]
+    fn test_parse_uri_multihost_with_ports() {
+        let up = parse_uri("postgresql://h1:5432,h2:5433,h3:5434/db").unwrap();
+        assert_eq!(
+            up.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5433),
+                ("h3".to_owned(), 5434),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_uri_multihost_port_reuse() {
+        // Last explicit port is reused for hosts without one.
+        let up = parse_uri("postgresql://h1:5432,h2,h3/db").unwrap();
+        assert_eq!(
+            up.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5432),
+                ("h3".to_owned(), 5432),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_uri_single_host_populates_hosts() {
+        let up = parse_uri("postgresql://myhost:5433/db").unwrap();
+        assert_eq!(up.hosts, vec![("myhost".to_owned(), 5433)]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_params_multihost_uri() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGTARGETSESSIONATTRS",
+        ]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("postgresql://h1:5432,h2:5433,h3/db".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5433),
+                ("h3".to_owned(), 5433), // port reused
+            ]
+        );
+        // host/port reflect the first entry.
+        assert_eq!(params.host, "h1");
+        assert_eq!(params.port, 5432);
+    }
+
+    // -- Multi-host conninfo parsing ----------------------------------------
+
+    #[test]
+    #[serial]
+    fn test_resolve_params_multihost_conninfo() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGTARGETSESSIONATTRS",
+        ]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("host=h1,h2,h3 port=5432,5433 dbname=mydb".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5433),
+                ("h3".to_owned(), 5433), // port reused
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_params_multihost_conninfo_single_port() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGTARGETSESSIONATTRS",
+        ]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("host=h1,h2,h3 port=6543 dbname=mydb".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![
+                ("h1".to_owned(), 6543),
+                ("h2".to_owned(), 6543),
+                ("h3".to_owned(), 6543),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_params_single_host_populates_hosts() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGTARGETSESSIONATTRS",
+        ]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("postgresql://myhost:9999/mydb".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.hosts, vec![("myhost".to_owned(), 9999)]);
     }
 }
