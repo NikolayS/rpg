@@ -10,6 +10,8 @@ use async_trait::async_trait;
 use crate::governance::Severity;
 
 pub mod cloudwatch;
+pub mod connector_health;
+pub mod connector_setup;
 pub mod datadog;
 pub mod github;
 pub mod gitlab;
@@ -20,6 +22,9 @@ pub mod pganalyze;
 pub mod postgresai;
 pub mod script;
 pub mod supabase;
+
+pub use connector_health::{check_all_connectors, format_json_entry, format_text_line};
+pub use connector_setup::build_connector_registry;
 
 #[cfg(test)]
 pub mod testing;
