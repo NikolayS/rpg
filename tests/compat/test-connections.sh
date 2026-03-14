@@ -15,11 +15,6 @@ IFS=$'\n\t'
 PASS=0
 FAIL=0
 RPG=""
-TEST_PGHOST=""
-TEST_PGPORT=""
-TEST_PGUSER=""
-TEST_PGPASSWORD=""
-TEST_PGDATABASE=""
 TMPDIR_CONN=""
 
 # ---------------------------------------------------------------------------
@@ -117,33 +112,34 @@ test_tcp_flags() {
     -c '\conninfo'
 }
 
-# (b) Bare positional args: dbname user host port
+# (b) Bare positional args: dbname user (psql only supports 2 positional
+#     args; host and port are passed as flags)
 test_positional_args() {
   local rpg_out psql_out
   rpg_out=$(
     env PGPASSWORD="${TEST_PGPASSWORD}" \
       "${RPG}" \
+        -h "${TEST_PGHOST}" \
+        -p "${TEST_PGPORT}" \
         -c '\conninfo' \
         "${TEST_PGDATABASE}" \
         "${TEST_PGUSER}" \
-        "${TEST_PGHOST}" \
-        "${TEST_PGPORT}" \
         2>&1 | normalize
   ) || true
   psql_out=$(
     env PGPASSWORD="${TEST_PGPASSWORD}" \
       psql --no-psqlrc \
+        -h "${TEST_PGHOST}" \
+        -p "${TEST_PGPORT}" \
         -c '\conninfo' \
         "${TEST_PGDATABASE}" \
         "${TEST_PGUSER}" \
-        "${TEST_PGHOST}" \
-        "${TEST_PGPORT}" \
         2>&1 | normalize
   ) || true
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
-    pass_test "bare positional args (dbname user host port)"
+    pass_test "bare positional args (dbname user)"
   else
-    fail_test "bare positional args (dbname user host port)" \
+    fail_test "bare positional args (dbname user)" \
       "${psql_out}" "${rpg_out}"
   fi
 }
@@ -210,35 +206,39 @@ test_env_vars_only() {
   fi
 }
 
-# (f) -d flag overrides positional dbname argument
+# (f) -d flag overrides PGDATABASE env var
+#     psql only accepts dbname as a positional arg; passing extra positional
+#     args emits a warning and is unreliable.  Test the override via env var
+#     instead: set PGDATABASE=wrongdb but pass -d <real-db> — connection
+#     should succeed, proving -d wins.
 test_flag_overrides_positional() {
   local rpg_out psql_out
   rpg_out=$(
     env PGPASSWORD="${TEST_PGPASSWORD}" \
+    PGDATABASE=wrongdb \
       "${RPG}" \
         -h "${TEST_PGHOST}" \
         -p "${TEST_PGPORT}" \
         -U "${TEST_PGUSER}" \
         -d "${TEST_PGDATABASE}" \
         -c 'select 1' \
-        wrongdb \
         2>&1 | normalize
   ) || true
   psql_out=$(
     env PGPASSWORD="${TEST_PGPASSWORD}" \
+    PGDATABASE=wrongdb \
       psql --no-psqlrc \
         -h "${TEST_PGHOST}" \
         -p "${TEST_PGPORT}" \
         -U "${TEST_PGUSER}" \
         -d "${TEST_PGDATABASE}" \
         -c 'select 1' \
-        wrongdb \
         2>&1 | normalize
   ) || true
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
-    pass_test "-d flag overrides positional dbname"
+    pass_test "-d flag overrides PGDATABASE env var"
   else
-    fail_test "-d flag overrides positional dbname" "${psql_out}" "${rpg_out}"
+    fail_test "-d flag overrides PGDATABASE env var" "${psql_out}" "${rpg_out}"
   fi
 }
 
