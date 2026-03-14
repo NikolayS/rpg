@@ -309,6 +309,7 @@ pub async fn execute_query(
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            let is_sql_error = e.as_db_error().is_some();
             let error_message = e
                 .as_db_error()
                 .map_or_else(|| e.to_string(), |db| db.message().to_owned());
@@ -319,9 +320,26 @@ pub async fn execute_query(
             });
 
             // Inline error suggestion: if AI is configured and
-            // auto_explain_errors is on, show a brief hint.
+            // auto_explain_errors is on, show a brief LLM hint.
             if settings.config.ai.auto_explain_errors {
                 suggest_error_fix_inline(sql_to_send, &error_message, settings).await;
+            }
+
+            // Auto-suggest /fix: show a dim hint pointing the user to /fix.
+            // Only shown for SQL errors (not connection errors), when AI is
+            // configured, auto_suggest_fix is enabled, and the user did not
+            // just invoke /fix (to avoid hint loops).
+            if is_sql_error
+                && settings.auto_suggest_fix
+                && !settings.last_was_fix
+                && settings
+                    .config
+                    .ai
+                    .provider
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty())
+            {
+                eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
             }
 
             false
@@ -363,6 +381,11 @@ pub async fn execute_query(
         // Increment session query counter.
         settings.query_count = settings.query_count.saturating_add(1);
     }
+
+    // Always clear the /fix-loop guard after each execution so the next
+    // query (regardless of whether this one succeeded or failed) can show
+    // the hint again if appropriate.
+    settings.last_was_fix = false;
 
     success
 }
@@ -442,6 +465,7 @@ pub async fn execute_query_extended(
             crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            let is_sql_error = e.as_db_error().is_some();
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
                 error_message: e
@@ -449,6 +473,20 @@ pub async fn execute_query_extended(
                     .map_or_else(|| e.to_string(), |db| db.message().to_owned()),
                 sqlstate,
             });
+            // Auto-suggest /fix hint for SQL errors when AI is configured.
+            if is_sql_error
+                && settings.auto_suggest_fix
+                && !settings.last_was_fix
+                && settings
+                    .config
+                    .ai
+                    .provider
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty())
+            {
+                eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+            }
+            settings.last_was_fix = false;
             return false;
         }
     };
@@ -536,13 +574,29 @@ pub async fn execute_query_extended(
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+            let is_sql_error = e.as_db_error().is_some();
+            let error_message = e
+                .as_db_error()
+                .map_or_else(|| e.to_string(), |db| db.message().to_owned());
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
-                error_message: e
-                    .as_db_error()
-                    .map_or_else(|| e.to_string(), |db| db.message().to_owned()),
+                error_message,
                 sqlstate,
             });
+
+            // Auto-suggest /fix hint for SQL errors when AI is configured.
+            if is_sql_error
+                && settings.auto_suggest_fix
+                && !settings.last_was_fix
+                && settings
+                    .config
+                    .ai
+                    .provider
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty())
+            {
+                eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+            }
 
             false
         }
@@ -572,6 +626,9 @@ pub async fn execute_query_extended(
         // Increment session query counter.
         settings.query_count = settings.query_count.saturating_add(1);
     }
+
+    // Always clear the /fix-loop guard after each execution.
+    settings.last_was_fix = false;
 
     success
 }
