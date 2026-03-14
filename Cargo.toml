@@ -44,6 +44,7 @@ webpki-roots = "0.26"
 [dev-dependencies]
 anyhow = "1"
 serial_test = "3"
+tempfile = "3"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 
 [lints.clippy]

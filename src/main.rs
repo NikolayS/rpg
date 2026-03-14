@@ -582,21 +582,20 @@ async fn main() {
             .unwrap_or(logging::Level::Warn)
     };
 
-    let log_writer: Option<Box<dyn std::io::Write + Send>> = cli.log_file.as_deref().map(|path| {
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            Ok(f) => Box::new(f) as Box<dyn std::io::Write + Send>,
-            Err(e) => {
-                eprintln!("samo: --log-file: {e}");
-                std::process::exit(2);
-            }
-        }
-    });
+    // Load config early so we can read [logging] rotation settings.
+    // We load it again below after profile/flag resolution, but the
+    // logging config is stable (not affected by connection flags).
+    let (early_cfg, _) = config::load_config();
+    let rotation = logging::RotationConfig::from_mb(
+        early_cfg.logging.max_file_size_mb,
+        early_cfg.logging.max_files,
+    );
 
-    logging::init(log_level, log_writer);
+    if let Some(path) = cli.log_file.as_deref() {
+        logging::init_rotating(log_level, std::path::PathBuf::from(path), rotation);
+    } else {
+        logging::init(log_level, None);
+    }
 
     // --generate-wrappers: emit SQL and exit (no DB connection needed).
     if let Some(ref pg_ver_str) = cli.generate_wrappers {

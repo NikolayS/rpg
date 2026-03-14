@@ -3,8 +3,24 @@
 //! Provides a simple, lightweight logging system with configurable
 //! log levels, output targets, and structured formatting.
 //! Does NOT use the `log` or `tracing` crate — keeps dependencies minimal.
+//!
+//! # Log rotation
+//!
+//! When a `log_file` path and non-zero `max_file_size_mb` are provided to
+//! [`init`], the logger automatically rotates the active file whenever it
+//! would exceed `max_file_size_mb` MiB:
+//!
+//! - `samo.log`   → renamed to `samo.log.1`
+//! - `samo.log.1` → renamed to `samo.log.2`
+//! - …
+//! - `samo.log.{max_files}` → deleted
+//!
+//! A fresh `samo.log` is then opened for writing.  Set `max_file_size_mb = 0`
+//! to disable rotation entirely.
 
+use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -49,6 +65,34 @@ impl Level {
 }
 
 // ---------------------------------------------------------------------------
+// Rotation config
+// ---------------------------------------------------------------------------
+
+/// Log-rotation parameters threaded into [`init`].
+#[derive(Debug, Clone, Copy)]
+pub struct RotationConfig {
+    /// Rotate when the active file exceeds this many bytes.  `0` = disabled.
+    pub max_bytes: u64,
+    /// Maximum number of `.log.N` archives to keep.
+    pub max_files: u32,
+}
+
+impl RotationConfig {
+    /// Build from MiB + file count (the values stored in `LoggingConfig`).
+    pub fn from_mb(max_file_size_mb: u32, max_files: u32) -> Self {
+        Self {
+            max_bytes: u64::from(max_file_size_mb) * 1024 * 1024,
+            max_files,
+        }
+    }
+
+    /// Return `true` if rotation is enabled (non-zero size limit).
+    pub fn enabled(self) -> bool {
+        self.max_bytes > 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Global logger
 // ---------------------------------------------------------------------------
 
@@ -59,20 +103,169 @@ static LOGGER: OnceLock<Arc<Mutex<Logger>>> = OnceLock::new();
 struct Logger {
     /// Maximum level to emit.
     level: Level,
-    /// Optional file sink (appended to).
-    file: Option<Box<dyn Write + Send>>,
+    /// File sink — `Some` when `--log-file` was given.
+    file: Option<FileSink>,
     /// Whether to also write to stderr.
     stderr: bool,
 }
 
-/// Initialise the global logger.
+/// Wraps an open log file together with the metadata needed for rotation.
+struct FileSink {
+    /// Path to the active log file (e.g. `/var/log/samo/samo.log`).
+    path: PathBuf,
+    /// Open handle to `path`.
+    writer: Box<dyn Write + Send>,
+    /// Bytes written to the current file (approximate; updated after each
+    /// write so we avoid a `stat()` on every log line in the common case).
+    bytes_written: u64,
+    /// Rotation parameters.
+    rotation: RotationConfig,
+}
+
+impl FileSink {
+    /// Write `data` to the file, rotating first if the size threshold would
+    /// be exceeded.
+    fn write_all(&mut self, data: &[u8]) {
+        // Rotate before writing if the file would overflow.
+        if self.rotation.enabled()
+            && self.bytes_written + data.len() as u64 > self.rotation.max_bytes
+        {
+            self.rotate();
+        }
+        if self.writer.write_all(data).is_ok() {
+            self.bytes_written += data.len() as u64;
+        }
+    }
+
+    /// Flush the underlying writer.
+    fn flush(&mut self) {
+        let _ = self.writer.flush();
+    }
+
+    /// Rotate archived files and open a fresh active log.
+    ///
+    /// ```text
+    /// samo.log.{max_files}   → deleted
+    /// samo.log.{max_files-1} → samo.log.{max_files}
+    /// …
+    /// samo.log.1             → samo.log.2
+    /// samo.log               → samo.log.1
+    /// (new) samo.log         opened for writing
+    /// ```
+    fn rotate(&mut self) {
+        // Flush + drop the current writer before renaming.
+        let _ = self.writer.flush();
+
+        let max = self.rotation.max_files;
+
+        // Delete the oldest archive if it exists.
+        let oldest = numbered_path(&self.path, max);
+        if oldest.exists() {
+            let _ = fs::remove_file(&oldest);
+        }
+
+        // Shift existing archives: N-1 → N, …, 1 → 2.
+        for n in (1..max).rev() {
+            let src = numbered_path(&self.path, n);
+            let dst = numbered_path(&self.path, n + 1);
+            if src.exists() {
+                let _ = fs::rename(&src, &dst);
+            }
+        }
+
+        // Rename the active file to .1.
+        if self.path.exists() {
+            let archive = numbered_path(&self.path, 1);
+            let _ = fs::rename(&self.path, &archive);
+        }
+
+        // Open a new active file.
+        if let Ok(f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            self.writer = Box::new(f);
+            self.bytes_written = 0;
+        } else {
+            // If we cannot open the new file, fall back to stderr.
+            self.writer = Box::new(std::io::stderr());
+            self.bytes_written = 0;
+        }
+    }
+}
+
+/// Return the path for archive number `n` (e.g. `samo.log` → `samo.log.3`).
+fn numbered_path(base: &std::path::Path, n: u32) -> PathBuf {
+    let mut s = base.as_os_str().to_owned();
+    s.push(format!(".{n}"));
+    PathBuf::from(s)
+}
+
+// ---------------------------------------------------------------------------
+// Public init / set_level
+// ---------------------------------------------------------------------------
+
+/// Initialise the global logger (no rotation).
 ///
-/// May be called only once; subsequent calls are silently ignored (the
-/// `OnceLock` guarantees this).
+/// `log_file` is a pre-opened writer; pass `None` to log to stderr only.
+/// May be called only once; subsequent calls are silently ignored.
 pub fn init(level: Level, log_file: Option<Box<dyn Write + Send>>) {
+    init_with_rotation(level, None, log_file.map(|w| (PathBuf::new(), w)), None);
+}
+
+/// Initialise the global logger with optional file rotation.
+///
+/// - `log_path` — path to the active log file (needed to build archive names).
+/// - `rotation`  — rotation config; pass `None` to disable.
+///
+/// May be called only once; subsequent calls are silently ignored.
+pub fn init_rotating(level: Level, log_path: PathBuf, rotation: RotationConfig) {
+    // Determine initial bytes written so the first rotation threshold is
+    // computed correctly even if the file already exists.
+    let existing_bytes = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+
+    match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(f) => {
+            let sink = FileSink {
+                path: log_path,
+                writer: Box::new(f),
+                bytes_written: existing_bytes,
+                rotation,
+            };
+            let logger = Logger {
+                level,
+                file: Some(sink),
+                stderr: true,
+            };
+            let _ = LOGGER.set(Arc::new(Mutex::new(logger)));
+        }
+        Err(e) => {
+            eprintln!("samo: --log-file: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Internal helper used by both public `init` variants.
+fn init_with_rotation(
+    level: Level,
+    _path: Option<PathBuf>,
+    writer: Option<(PathBuf, Box<dyn Write + Send>)>,
+    _rotation: Option<RotationConfig>,
+) {
+    let file = writer.map(|(_p, w)| FileSink {
+        path: PathBuf::new(),
+        writer: w,
+        bytes_written: 0,
+        rotation: RotationConfig {
+            max_bytes: 0,
+            max_files: 0,
+        },
+    });
     let logger = Logger {
         level,
-        file: log_file,
+        file,
         stderr: true,
     };
     let _ = LOGGER.set(Arc::new(Mutex::new(logger)));
@@ -119,9 +312,9 @@ pub fn log(level: Level, component: &str, message: &str) {
     if logger.stderr {
         let _ = std::io::stderr().write_all(line.as_bytes());
     }
-    if let Some(ref mut f) = logger.file {
-        let _ = f.write_all(line.as_bytes());
-        let _ = f.flush();
+    if let Some(ref mut sink) = logger.file {
+        sink.write_all(line.as_bytes());
+        sink.flush();
     }
 }
 
@@ -308,5 +501,107 @@ mod tests {
             let n: u64 = part.parse().expect("each part should be numeric");
             assert!(n < 60, "each part should be < 60 (got {n} in {ts})");
         }
+    }
+
+    // -- numbered_path --------------------------------------------------------
+
+    #[test]
+    fn numbered_path_appends_suffix() {
+        let base = PathBuf::from("/tmp/samo.log");
+        assert_eq!(numbered_path(&base, 1), PathBuf::from("/tmp/samo.log.1"));
+        assert_eq!(numbered_path(&base, 3), PathBuf::from("/tmp/samo.log.3"));
+    }
+
+    // -- RotationConfig -------------------------------------------------------
+
+    #[test]
+    fn rotation_config_from_mb_zero_disabled() {
+        let r = RotationConfig::from_mb(0, 5);
+        assert!(!r.enabled());
+        assert_eq!(r.max_bytes, 0);
+    }
+
+    #[test]
+    fn rotation_config_from_mb_nonzero_enabled() {
+        let r = RotationConfig::from_mb(10, 5);
+        assert!(r.enabled());
+        assert_eq!(r.max_bytes, 10 * 1024 * 1024);
+    }
+
+    // -- FileSink rotation logic ---------------------------------------------
+
+    /// Build a `FileSink` pointing at `path` with the given threshold.
+    fn make_sink(path: PathBuf, max_bytes: u64, max_files: u32) -> FileSink {
+        let f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open test log file");
+        FileSink {
+            path,
+            writer: Box::new(f),
+            bytes_written: 0,
+            rotation: RotationConfig {
+                max_bytes,
+                max_files,
+            },
+        }
+    }
+
+    #[test]
+    fn rotation_triggers_at_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("test.log");
+
+        // 20-byte threshold; write 15 bytes first so the next write overflows.
+        let mut sink = make_sink(log_path.clone(), 20, 3);
+        sink.write_all(b"123456789012345"); // 15 bytes — under threshold
+        assert!(log_path.exists());
+        assert!(!numbered_path(&log_path, 1).exists());
+
+        sink.write_all(b"0123456789"); // 10 more bytes: 15+10 > 20 → rotate
+                                       // After rotation the archive .1 must exist.
+        assert!(
+            numbered_path(&log_path, 1).exists(),
+            "expected .1 archive after rotation"
+        );
+        // The active file exists and contains the post-rotation write.
+        assert!(log_path.exists());
+    }
+
+    #[test]
+    fn rotation_deletes_oldest_when_max_files_exceeded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("test.log");
+
+        // max_files = 2, threshold = 5 bytes
+        let mut sink = make_sink(log_path.clone(), 5, 2);
+
+        // Each write is 6 bytes → triggers a rotation every time.
+        for _ in 0..4 {
+            sink.write_all(b"AAAAAA"); // 6 bytes > 5 → rotate before write
+        }
+
+        // .1 and .2 must exist; .3 must NOT (max_files = 2).
+        assert!(numbered_path(&log_path, 1).exists(), ".1 should exist");
+        assert!(numbered_path(&log_path, 2).exists(), ".2 should exist");
+        assert!(
+            !numbered_path(&log_path, 3).exists(),
+            ".3 should NOT exist (max_files=2)"
+        );
+    }
+
+    #[test]
+    fn no_rotation_when_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("test.log");
+
+        // max_bytes = 0 → disabled
+        let mut sink = make_sink(log_path.clone(), 0, 5);
+        // Write lots of data; no archive should ever be created.
+        for _ in 0..10 {
+            sink.write_all(b"0123456789");
+        }
+        assert!(!numbered_path(&log_path, 1).exists());
     }
 }

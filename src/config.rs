@@ -32,6 +32,8 @@ pub struct Config {
     pub ai: AiConfig,
     /// Per-feature autonomy levels for the governance framework.
     pub governance: GovernanceConfig,
+    /// Structured-log file rotation settings.
+    pub logging: LoggingConfig,
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
@@ -210,6 +212,42 @@ impl Default for AiConfig {
             context_window: default_context_window(),
             token_budget: 0,
             show_sql: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logging / rotation settings
+// ---------------------------------------------------------------------------
+
+/// Structured-log file rotation settings.
+///
+/// Applied when `--log-file` is set.  Set `max_file_size_mb = 0` to
+/// disable rotation entirely.
+///
+/// ```toml
+/// [logging]
+/// max_file_size_mb = 10
+/// max_files = 5
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    /// Rotate the log file when it exceeds this size in MiB.
+    ///
+    /// `0` disables rotation.  Default: `10`.
+    pub max_file_size_mb: u32,
+    /// Maximum number of rotated files to keep (`.log.1` … `.log.N`).
+    ///
+    /// Default: `5`.
+    pub max_files: u32,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            max_file_size_mb: 10,
+            max_files: 5,
         }
     }
 }
@@ -482,6 +520,20 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             show_sql: overlay.ai.show_sql || base.ai.show_sql,
         },
         governance: merge_governance(base.governance, overlay.governance),
+        logging: LoggingConfig {
+            max_file_size_mb: if overlay.logging.max_file_size_mb
+                == LoggingConfig::default().max_file_size_mb
+            {
+                base.logging.max_file_size_mb
+            } else {
+                overlay.logging.max_file_size_mb
+            },
+            max_files: if overlay.logging.max_files == LoggingConfig::default().max_files {
+                base.logging.max_files
+            } else {
+                overlay.logging.max_files
+            },
+        },
         connections: {
             let mut merged = base.connections;
             merged.extend(overlay.connections);
@@ -795,6 +847,7 @@ dbname = "testdb"
             },
             ai: AiConfig::default(),
             governance: GovernanceConfig::default(),
+            logging: LoggingConfig::default(),
             connections: HashMap::new(),
             connection: ConnectionConfig::default(),
         };
@@ -812,6 +865,7 @@ dbname = "testdb"
             },
             ai: AiConfig::default(),
             governance: GovernanceConfig::default(),
+            logging: LoggingConfig::default(),
             connections: HashMap::new(),
             connection: ConnectionConfig::default(),
         };
