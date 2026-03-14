@@ -1031,6 +1031,15 @@ pub struct ReplSettings {
     ///
     /// Updated after each query execution.
     pub last_query_duration_ms: Option<u64>,
+    /// Show an inline hint ("type /fix …") after a SQL error.
+    ///
+    /// Defaults to `true`. Disable with `\set AUTO_SUGGEST off`.
+    /// Only shown when AI is configured and the error is a SQL error.
+    pub auto_suggest_fix: bool,
+    /// Set to `true` immediately before `/fix` runs so that the inline
+    /// hint is suppressed for any error produced by the fixed query,
+    /// avoiding suggestion loops.  Cleared after each query execution.
+    pub last_was_fix: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1123,6 +1132,8 @@ impl std::fmt::Debug for ReplSettings {
             .field("ai_context_files", &self.ai_context_files.len())
             .field("statusline", &self.statusline.as_ref().map(|s| s.enabled))
             .field("last_query_duration_ms", &self.last_query_duration_ms)
+            .field("auto_suggest_fix", &self.auto_suggest_fix)
+            .field("last_was_fix", &self.last_was_fix)
             .finish()
     }
 }
@@ -1182,6 +1193,8 @@ impl Default for ReplSettings {
             ai_context_files: Vec::new(),
             statusline: None,
             last_query_duration_ms: None,
+            auto_suggest_fix: true,
+            last_was_fix: false,
         }
     }
 }
@@ -1991,6 +2004,16 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             println!("Vi mode enabled. Takes effect on next session.");
         } else {
             println!("Emacs mode (default). Takes effect on next session.");
+        }
+    }
+    // Mirror AUTO_SUGGEST into auto_suggest_fix.
+    if name == "AUTO_SUGGEST" {
+        let on = value != "off" && value != "false" && value != "0";
+        settings.auto_suggest_fix = on;
+        if on {
+            println!("Auto-suggest /fix hint enabled.");
+        } else {
+            println!("Auto-suggest /fix hint disabled.");
         }
     }
     // Mirror STATUSLINE into the status bar enabled flag.
@@ -5533,6 +5556,50 @@ mod tests {
         apply_set(&mut settings, "TOKEN_BUDGET", "10000");
         apply_set(&mut settings, "TOKEN_BUDGET", "20000");
         assert_eq!(settings.config.ai.token_budget, 20_000);
+    }
+
+    // -- \set AUTO_SUGGEST (#368) ----------------------------------------------
+
+    #[test]
+    fn auto_suggest_fix_default_is_true() {
+        let s = ReplSettings::default();
+        assert!(s.auto_suggest_fix);
+    }
+
+    #[test]
+    fn last_was_fix_default_is_false() {
+        let s = ReplSettings::default();
+        assert!(!s.last_was_fix);
+    }
+
+    #[test]
+    fn set_auto_suggest_off_disables_flag() {
+        let mut settings = ReplSettings::default();
+        assert!(settings.auto_suggest_fix);
+        apply_set(&mut settings, "AUTO_SUGGEST", "off");
+        assert!(!settings.auto_suggest_fix);
+    }
+
+    #[test]
+    fn set_auto_suggest_on_enables_flag() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AUTO_SUGGEST", "off");
+        apply_set(&mut settings, "AUTO_SUGGEST", "on");
+        assert!(settings.auto_suggest_fix);
+    }
+
+    #[test]
+    fn set_auto_suggest_false_disables_flag() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AUTO_SUGGEST", "false");
+        assert!(!settings.auto_suggest_fix);
+    }
+
+    #[test]
+    fn set_auto_suggest_zero_disables_flag() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AUTO_SUGGEST", "0");
+        assert!(!settings.auto_suggest_fix);
     }
 
     // -- \set VI ---------------------------------------------------------------

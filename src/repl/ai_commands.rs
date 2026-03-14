@@ -1139,6 +1139,9 @@ pub(super) async fn handle_ai_fix(
         let choice = ask_yne_prompt("Execute? [Y/n/e] ", true);
         match choice {
             AskChoice::Yes => {
+                // Mark that this execution originates from /fix so the
+                // auto-suggest hint is suppressed for any resulting error.
+                settings.last_was_fix = true;
                 execute_query(client, fix_sql, settings, tx).await;
             }
             AskChoice::Edit => match crate::io::edit(fix_sql, None, None) {
@@ -1147,6 +1150,7 @@ pub(super) async fn handle_ai_fix(
                     if edited.is_empty() {
                         eprintln!("(empty — skipped)");
                     } else {
+                        settings.last_was_fix = true;
                         execute_query(client, edited, settings, tx).await;
                     }
                 }
