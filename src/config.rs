@@ -109,6 +109,18 @@ pub struct DisplayConfig {
     /// vi_mode = true
     /// ```
     pub vi_mode: bool,
+    /// Show the persistent status bar at the bottom of the terminal.
+    ///
+    /// When `true` (the default in interactive sessions), a one-line bar is
+    /// rendered at the bottom of the terminal showing connection info, mode,
+    /// transaction state, query timing, and AI token usage.
+    ///
+    /// Disable with `\set STATUSLINE off` at runtime or:
+    /// ```toml
+    /// [display]
+    /// statusline_enabled = false
+    /// ```
+    pub statusline_enabled: bool,
 }
 
 impl Default for DisplayConfig {
@@ -121,6 +133,8 @@ impl Default for DisplayConfig {
             pager_min_lines: 0,
             border: 1,
             vi_mode: false,
+            // Default ON — overridden to OFF in non-interactive sessions.
+            statusline_enabled: true,
         }
     }
 }
@@ -807,6 +821,9 @@ fn merge_config(base: Config, overlay: Config) -> Config {
                 overlay.display.border
             },
             vi_mode: overlay.display.vi_mode || base.display.vi_mode,
+            // Prefer explicit false from overlay over base default.
+            statusline_enabled: overlay.display.statusline_enabled
+                && base.display.statusline_enabled,
         },
         safety: SafetyConfig {
             destructive_warning: overlay.safety.destructive_warning,

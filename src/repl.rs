@@ -1057,6 +1057,16 @@ pub struct ReplSettings {
     /// These files are read at AI-call time and appended to the system
     /// prompt so the LLM has project-specific schema and query context.
     pub ai_context_files: Vec<String>,
+
+    // -- Status bar (FR-25) ------------------------------------------------
+    /// Persistent status bar rendered at the bottom of the terminal.
+    ///
+    /// Present only in interactive sessions; `None` in non-interactive paths.
+    pub statusline: Option<crate::statusline::StatusLine>,
+    /// Last query duration in milliseconds (for the status bar).
+    ///
+    /// Updated after each query execution.
+    pub last_query_duration_ms: Option<u64>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1147,6 +1157,8 @@ impl std::fmt::Debug for ReplSettings {
                 &self.project_context.as_deref().map(|_| "<text>"),
             )
             .field("ai_context_files", &self.ai_context_files.len())
+            .field("statusline", &self.statusline.as_ref().map(|s| s.enabled))
+            .field("last_query_duration_ms", &self.last_query_duration_ms)
             .finish()
     }
 }
@@ -1204,6 +1216,8 @@ impl Default for ReplSettings {
             last_row_count: None,
             project_context: None,
             ai_context_files: Vec::new(),
+            statusline: None,
+            last_query_duration_ms: None,
         }
     }
 }
@@ -1427,7 +1441,9 @@ pub async fn execute_query(
 
     crate::logging::debug("repl", &format!("execute query: {}", sql_to_send.trim()));
 
-    let start = if settings.timing {
+    // Always capture start time when timing display or status bar is active.
+    let needs_timing = settings.timing || settings.statusline.is_some();
+    let start = if needs_timing {
         Some(Instant::now())
     } else {
         None
@@ -1572,8 +1588,15 @@ pub async fn execute_query(
 
     if let Some(t) = start {
         let elapsed = t.elapsed();
-        // Timing always goes to stdout regardless of output redirection.
-        println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+        // as_millis() returns u128; truncate to u64 (safe for any realistic duration).
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_ms = elapsed.as_millis() as u64;
+        // Timing output always goes to stdout regardless of output redirection.
+        if settings.timing {
+            println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+        }
+        // Store duration for the status bar.
+        settings.last_query_duration_ms = Some(elapsed_ms);
     }
 
     // Auto-EXPLAIN AI interpretation: when AI is configured and auto-EXPLAIN
@@ -1651,7 +1674,9 @@ pub async fn execute_query_extended(
         let _ = writeln!(lf, "{sql_to_send}");
     }
 
-    let start = if settings.timing {
+    // Always capture start time when timing display or status bar is active.
+    let needs_timing_ext = settings.timing || settings.statusline.is_some();
+    let start = if needs_timing_ext {
         Some(Instant::now())
     } else {
         None
@@ -1775,7 +1800,12 @@ pub async fn execute_query_extended(
 
     if let Some(t) = start {
         let elapsed = t.elapsed();
-        println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_ms = elapsed.as_millis() as u64;
+        if settings.timing {
+            println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
+        }
+        settings.last_query_duration_ms = Some(elapsed_ms);
     }
 
     if success {
@@ -2066,7 +2096,17 @@ async fn execute_query_interactive(
         term_rows.saturating_sub(2),
         settings.pager_min_lines,
     ) {
+        // Clear status bar before handing off to pager (pager takes full screen).
+        if let Some(ref sl) = settings.statusline {
+            sl.clear();
+            sl.teardown_scroll_region();
+        }
         run_pager_for_text(settings, &text, &captured);
+        // Re-establish scroll region and re-render status bar after pager exits.
+        if let Some(ref sl) = settings.statusline {
+            sl.setup_scroll_region();
+            sl.render();
+        }
     } else {
         let _ = io::stdout().write_all(&captured);
     }
@@ -2088,6 +2128,24 @@ async fn execute_query_interactive(
             });
             flush_audit_entry(settings, &entry);
         }
+    }
+
+    // Update status bar with latest state after query completes.
+    let duration_ms = settings.last_query_duration_ms.unwrap_or(0);
+    let tokens_used = settings.tokens_used;
+    let token_budget = settings.config.ai.max_tokens;
+    let input_mode = settings.input_mode;
+    let exec_mode = settings.exec_mode;
+    let tx_state = *tx;
+    if let Some(ref mut sl) = settings.statusline {
+        sl.update(
+            tx_state,
+            duration_ms,
+            tokens_used,
+            token_budget,
+            input_mode,
+            exec_mode,
+        );
     }
 
     ok
@@ -2155,7 +2213,17 @@ async fn execute_query_extended_interactive(
         term_rows.saturating_sub(2),
         settings.pager_min_lines,
     ) {
+        // Clear status bar before handing off to pager.
+        if let Some(ref sl) = settings.statusline {
+            sl.clear();
+            sl.teardown_scroll_region();
+        }
         run_pager_for_text(settings, &text, &captured);
+        // Re-establish scroll region and re-render after pager exits.
+        if let Some(ref sl) = settings.statusline {
+            sl.setup_scroll_region();
+            sl.render();
+        }
     } else {
         let _ = io::stdout().write_all(&captured);
     }
@@ -2177,6 +2245,24 @@ async fn execute_query_extended_interactive(
             });
             flush_audit_entry(settings, &entry);
         }
+    }
+
+    // Update status bar with latest state after query completes.
+    let duration_ms = settings.last_query_duration_ms.unwrap_or(0);
+    let tokens_used = settings.tokens_used;
+    let token_budget = settings.config.ai.max_tokens;
+    let input_mode = settings.input_mode;
+    let exec_mode = settings.exec_mode;
+    let tx_state = *tx;
+    if let Some(ref mut sl) = settings.statusline {
+        sl.update(
+            tx_state,
+            duration_ms,
+            tokens_used,
+            token_budget,
+            input_mode,
+            exec_mode,
+        );
     }
 
     ok
@@ -3336,6 +3422,7 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
 /// - `\set name value` — assign.
 ///
 /// Special case: when `ECHO_HIDDEN` is set to `on`, update `settings.echo_hidden`.
+#[allow(clippy::too_many_lines)]
 fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name.is_empty() {
         // List all variables.
@@ -3449,6 +3536,25 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             println!("Vi mode enabled. Takes effect on next session.");
         } else {
             println!("Emacs mode (default). Takes effect on next session.");
+        }
+    }
+    // Mirror STATUSLINE into the status bar enabled flag.
+    if name == "STATUSLINE" {
+        let on = matches!(value, "on" | "true" | "1");
+        settings.config.display.statusline_enabled = on;
+        if let Some(ref mut sl) = settings.statusline {
+            sl.enabled = on;
+            if on {
+                sl.setup_scroll_region();
+                sl.render();
+            } else {
+                sl.teardown_scroll_region();
+            }
+        }
+        if on {
+            println!("Status bar enabled.");
+        } else {
+            println!("Status bar disabled.");
         }
     }
 }
@@ -5232,11 +5338,31 @@ pub async fn run_repl(
     // Build rustyline editor (skip if --no-readline).
     let use_readline = !no_readline && io::stdin().is_terminal();
 
-    if use_readline {
+    // Initialise the status bar for interactive sessions.
+    // Enabled when: readline mode AND stderr is a terminal AND config allows it.
+    if use_readline
+        && crate::statusline::StatusLine::is_interactive()
+        && settings.config.display.statusline_enabled
+    {
+        let mut sl = crate::statusline::StatusLine::new(true);
+        sl.set_connection(&params.host, params.port, &params.dbname);
+        sl.setup_scroll_region();
+        sl.render();
+        settings.statusline = Some(sl);
+    }
+
+    let exit_code = if use_readline {
         run_readline_loop(&mut client, &mut params, &mut settings, &mut tx).await
     } else {
         run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
+    };
+
+    // Tear down the status bar on exit.
+    if let Some(ref sl) = settings.statusline {
+        sl.teardown_scroll_region();
     }
+
+    exit_code
 }
 
 // ---------------------------------------------------------------------------
@@ -5381,6 +5507,12 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
+        // Re-render the status bar before each prompt so it stays fresh
+        // (handles resize events and mode changes from previous commands).
+        if let Some(ref mut sl) = settings.statusline {
+            sl.on_resize();
+        }
+
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
 
         match rl.readline(&prompt) {
@@ -5452,6 +5584,11 @@ async fn run_readline_loop(
                         // Update audit connection context for the new connection.
                         settings.audit_dbname.clone_from(&params.dbname);
                         settings.audit_user.clone_from(&params.user);
+                        // Update status bar with new connection label.
+                        if let Some(ref mut sl) = settings.statusline {
+                            sl.set_connection(&params.host, params.port, &params.dbname);
+                            sl.render();
+                        }
                     }
                     HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                 }
