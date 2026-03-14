@@ -149,6 +149,8 @@ pub fn check_existing_pid(path: &Path) -> Option<u32> {
 pub enum NotificationChannel {
     /// Slack incoming webhook URL.
     Slack { webhook_url: String },
+    /// Generic webhook URL (POSTs JSON with message, source, timestamp).
+    Webhook { url: String },
     /// Email (placeholder — not implemented in v1).
     #[allow(dead_code)]
     Email { to: String },
@@ -162,12 +164,45 @@ pub async fn notify(channel: &NotificationChannel, message: &str) {
         NotificationChannel::Slack { webhook_url } => {
             send_slack_notification(webhook_url, message).await;
         }
+        NotificationChannel::Webhook { url } => {
+            send_webhook_notification(url, message).await;
+        }
         NotificationChannel::Email { to } => {
             eprintln!("[daemon] Email notification to {to}: {message}");
             // Email sending not implemented in v1.
         }
         NotificationChannel::Stderr => {
             eprintln!("[daemon] {message}");
+        }
+    }
+}
+
+async fn send_webhook_notification(url: &str, message: &str) {
+    let payload = serde_json::to_string(&serde_json::json!({
+        "message": message,
+        "source": "rpg",
+        "timestamp": chrono_now(),
+    }))
+    .unwrap_or_else(|_| r#"{"message":"(encoding error)"}"#.to_owned());
+
+    match reqwest::Client::new()
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            crate::logging::debug("daemon", "Webhook notification sent");
+        }
+        Ok(resp) => {
+            crate::logging::warn(
+                "daemon",
+                &format!("Webhook notification failed: HTTP {}", resp.status()),
+            );
+        }
+        Err(e) => {
+            crate::logging::warn("daemon", &format!("Webhook notification error: {e}"));
         }
     }
 }
@@ -918,6 +953,34 @@ mod tests {
         if let NotificationChannel::Slack { webhook_url } = ch {
             assert!(webhook_url.starts_with("https://"));
         }
+    }
+
+    #[test]
+    fn notification_channel_webhook_has_url() {
+        let ch = NotificationChannel::Webhook {
+            url: "https://example.com/hook".to_owned(),
+        };
+        if let NotificationChannel::Webhook { url } = ch {
+            assert!(url.starts_with("https://"));
+        }
+    }
+
+    #[test]
+    fn webhook_payload_has_required_fields() {
+        let message = "test alert";
+        let payload = serde_json::to_string(&serde_json::json!({
+            "message": message,
+            "source": "rpg",
+            "timestamp": chrono_now(),
+        }))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["message"], "test alert");
+        assert_eq!(v["source"], "rpg");
+        // timestamp should be a non-empty ISO 8601 string
+        let ts = v["timestamp"].as_str().unwrap();
+        assert_eq!(ts.len(), 20);
+        assert!(ts.ends_with('Z'));
     }
 
     #[test]
