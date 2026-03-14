@@ -14,6 +14,37 @@
 use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
+// Serde helper: SystemTime ↔ Unix seconds (u64)
+// ---------------------------------------------------------------------------
+
+/// Serde module that serializes [`SystemTime`] as seconds since the Unix
+/// epoch (`u64`).  Sub-second precision is discarded on serialization;
+/// deserialization always produces a whole-second value.
+pub mod serde_system_time {
+    use serde::Deserialize as _;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    pub fn serialize<S>(t: &SystemTime, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let secs = t
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        ser.serialize_u64(secs)
+    }
+
+    pub fn deserialize<'de, D>(de: D) -> Result<SystemTime, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let secs = u64::deserialize(de)?;
+        Ok(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Feature areas
 // ---------------------------------------------------------------------------
 
@@ -148,7 +179,7 @@ impl AutonomyLevel {
 // ---------------------------------------------------------------------------
 
 /// Evidence quality classification for findings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EvidenceClass {
     /// Deterministic, directly observable from `pg_catalog`/`pg_stat_*`.
@@ -175,7 +206,9 @@ impl EvidenceClass {
 // ---------------------------------------------------------------------------
 
 /// Severity level for findings and proposals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Informational — no action needed.
@@ -211,6 +244,7 @@ pub struct ActionProposal {
     /// Risk assessment.
     pub risk: String,
     /// Timestamp when the proposal was created.
+    #[serde(with = "serde_system_time")]
     pub created_at: SystemTime,
 }
 
@@ -219,7 +253,7 @@ pub struct ActionProposal {
 // ---------------------------------------------------------------------------
 
 /// Outcome of an executed action.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ActionOutcome {
     /// Action completed successfully.
     Success {
@@ -248,11 +282,12 @@ pub enum ActionOutcome {
 ///
 /// Every action — proposed, executed, vetoed, or skipped — is logged
 /// here for accountability and learning.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuditLogEntry {
     /// Monotonic sequence number within this session.
     pub seq: u64,
-    /// When this entry was recorded.
+    /// When this entry was recorded (Unix seconds).
+    #[serde(with = "serde_system_time")]
     pub timestamp: SystemTime,
     /// Feature area.
     pub feature: FeatureArea,

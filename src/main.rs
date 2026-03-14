@@ -48,6 +48,7 @@ mod vars;
 mod aaa_commands;
 mod alert_delivery;
 mod anomaly;
+mod audit_persistence;
 mod backup_monitoring;
 mod bloat;
 mod check;
