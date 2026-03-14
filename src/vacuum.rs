@@ -146,6 +146,77 @@ impl VacuumReport {
         }
         out
     }
+
+    /// Convert all actionable findings into proposals for Supervised mode.
+    #[allow(dead_code)]
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(VacuumFinding::to_proposal)
+            .collect()
+    }
+}
+
+impl VacuumFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`].
+    ///
+    /// Returns `None` for informational findings without a concrete action
+    /// (e.g., `AutovacuumWorkerCount` is observational only).
+    #[allow(dead_code)]
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        let action = self.suggested_action.as_ref()?;
+
+        let risk = match self.kind {
+            VacuumFindingKind::HighDeadTuples => {
+                "VACUUM ANALYZE acquires a ShareUpdateExclusiveLock, which \
+                 does not block reads or writes but may briefly delay other \
+                 vacuum operations. Schedule during low-traffic windows for \
+                 large tables."
+            }
+            VacuumFindingKind::XidWraparoundRisk => {
+                "VACUUM FREEZE acquires a ShareUpdateExclusiveLock. On large \
+                 tables this can be I/O-intensive and long-running. Failure to \
+                 freeze risks transaction ID wraparound, which causes a \
+                 database-wide outage."
+            }
+            VacuumFindingKind::StaleTable => {
+                "VACUUM ANALYZE acquires a ShareUpdateExclusiveLock. Stale \
+                 statistics may cause poor query plans; running ANALYZE also \
+                 updates planner statistics."
+            }
+            VacuumFindingKind::AutovacuumWorkerCount => return None,
+        };
+
+        let expected = match self.kind {
+            VacuumFindingKind::HighDeadTuples => format!(
+                "Reclaim dead tuples in {}.{}, reducing table bloat \
+                 and improving query performance",
+                self.schema, self.table
+            ),
+            VacuumFindingKind::XidWraparoundRisk => format!(
+                "Advance relfrozenxid for {}.{}, reducing wraparound \
+                 risk and preventing forced autovacuum",
+                self.schema, self.table
+            ),
+            VacuumFindingKind::StaleTable => format!(
+                "Update dead-tuple state and planner statistics for \
+                 {}.{}, improving query plan quality",
+                self.schema, self.table
+            ),
+            VacuumFindingKind::AutovacuumWorkerCount => return None,
+        };
+
+        Some(crate::governance::ActionProposal {
+            feature: crate::governance::FeatureArea::Vacuum,
+            severity: self.severity,
+            evidence_class: self.evidence_class,
+            finding: self.description.clone(),
+            proposed_action: action.clone(),
+            expected_outcome: expected,
+            risk: risk.to_owned(),
+            created_at: std::time::SystemTime::now(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -621,5 +692,161 @@ mod tests {
             Severity::Warning
         };
         assert_eq!(severity, Severity::Warning);
+    }
+
+    // -----------------------------------------------------------------------
+    // to_proposal / to_proposals tests
+    // -----------------------------------------------------------------------
+
+    fn make_finding(
+        kind: VacuumFindingKind,
+        schema: &str,
+        table: &str,
+        severity: Severity,
+        suggested_action: Option<&str>,
+    ) -> VacuumFinding {
+        VacuumFinding {
+            kind,
+            schema: schema.to_owned(),
+            table: table.to_owned(),
+            description: "test description".to_owned(),
+            severity,
+            evidence_class: kind.evidence_class(),
+            suggested_action: suggested_action.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn high_dead_tuples_produces_vacuum_analyze_proposal() {
+        let f = make_finding(
+            VacuumFindingKind::HighDeadTuples,
+            "public",
+            "orders",
+            Severity::Warning,
+            Some("VACUUM ANALYZE public.orders"),
+        );
+        let p = f.to_proposal().expect("should produce a proposal");
+        assert_eq!(p.feature, crate::governance::FeatureArea::Vacuum);
+        assert_eq!(p.proposed_action, "VACUUM ANALYZE public.orders");
+        assert!(p.expected_outcome.contains("public.orders"));
+        assert!(p.risk.contains("ShareUpdateExclusiveLock"));
+    }
+
+    #[test]
+    fn xid_wraparound_risk_produces_vacuum_freeze_proposal() {
+        let f = make_finding(
+            VacuumFindingKind::XidWraparoundRisk,
+            "public",
+            "accounts",
+            Severity::Critical,
+            Some("VACUUM FREEZE public.accounts -- or lower vacuum_freeze_min_age on this table"),
+        );
+        let p = f.to_proposal().expect("should produce a proposal");
+        assert_eq!(p.feature, crate::governance::FeatureArea::Vacuum);
+        assert!(p.proposed_action.contains("VACUUM FREEZE"));
+        assert!(p.expected_outcome.contains("relfrozenxid"));
+        assert!(p.risk.contains("wraparound"));
+    }
+
+    #[test]
+    fn stale_table_produces_vacuum_analyze_proposal() {
+        let f = make_finding(
+            VacuumFindingKind::StaleTable,
+            "analytics",
+            "events",
+            Severity::Warning,
+            Some("VACUUM ANALYZE analytics.events"),
+        );
+        let p = f.to_proposal().expect("should produce a proposal");
+        assert_eq!(p.feature, crate::governance::FeatureArea::Vacuum);
+        assert_eq!(p.proposed_action, "VACUUM ANALYZE analytics.events");
+        assert!(p.expected_outcome.contains("analytics.events"));
+        assert!(p.risk.contains("statistics"));
+    }
+
+    #[test]
+    fn autovacuum_worker_count_returns_none() {
+        let f = make_finding(
+            VacuumFindingKind::AutovacuumWorkerCount,
+            "",
+            "",
+            Severity::Info,
+            None,
+        );
+        assert!(f.to_proposal().is_none());
+    }
+
+    #[test]
+    fn autovacuum_worker_count_with_action_still_returns_none() {
+        // Even if a suggested_action is provided, the kind overrides to None.
+        let f = make_finding(
+            VacuumFindingKind::AutovacuumWorkerCount,
+            "",
+            "",
+            Severity::Info,
+            Some("some action"),
+        );
+        assert!(f.to_proposal().is_none());
+    }
+
+    #[test]
+    fn finding_without_suggested_action_returns_none() {
+        let f = make_finding(
+            VacuumFindingKind::HighDeadTuples,
+            "public",
+            "orders",
+            Severity::Warning,
+            None,
+        );
+        assert!(f.to_proposal().is_none());
+    }
+
+    #[test]
+    fn report_to_proposals_filters_informational_findings() {
+        let report = VacuumReport {
+            findings: vec![
+                make_finding(
+                    VacuumFindingKind::HighDeadTuples,
+                    "public",
+                    "orders",
+                    Severity::Warning,
+                    Some("VACUUM ANALYZE public.orders"),
+                ),
+                make_finding(
+                    VacuumFindingKind::AutovacuumWorkerCount,
+                    "",
+                    "",
+                    Severity::Info,
+                    None,
+                ),
+                make_finding(
+                    VacuumFindingKind::StaleTable,
+                    "public",
+                    "users",
+                    Severity::Warning,
+                    Some("VACUUM ANALYZE public.users"),
+                ),
+            ],
+        };
+        let proposals = report.to_proposals();
+        // AutovacuumWorkerCount should be filtered out.
+        assert_eq!(proposals.len(), 2);
+        assert!(proposals
+            .iter()
+            .all(|p| p.feature == crate::governance::FeatureArea::Vacuum));
+    }
+
+    #[test]
+    fn report_to_proposals_empty_when_no_actionable_findings() {
+        let report = VacuumReport {
+            findings: vec![make_finding(
+                VacuumFindingKind::AutovacuumWorkerCount,
+                "",
+                "",
+                Severity::Info,
+                None,
+            )],
+        };
+        assert!(report.to_proposals().is_empty());
     }
 }
