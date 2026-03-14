@@ -11,7 +11,10 @@ use async_trait::async_trait;
 
 use crate::governance::Severity;
 
+pub mod cloudwatch;
 pub mod datadog;
+pub mod pganalyze;
+pub mod postgresai;
 
 // ---------------------------------------------------------------------------
 // Identifiers
