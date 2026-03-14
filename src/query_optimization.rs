@@ -89,6 +89,91 @@ pub struct QueryOptimizationReport {
     pub findings: Vec<QueryFinding>,
 }
 
+impl QueryFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`] for
+    /// Supervised mode.
+    ///
+    /// Returns `None` for informational findings without a concrete SQL action
+    /// (e.g. `HighSessionCount`).
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        let (proposed_action, risk, expected_outcome) = match self.kind {
+            QueryFindingKind::LongRunningQuery => {
+                let action = format!("select pg_cancel_backend({})", self.pid);
+                let risk = "pg_cancel_backend sends a cancellation signal to the \
+                            backend. The query is rolled back; the connection \
+                            remains open. Safe for most workloads, but confirm \
+                            the query is not part of a critical batch job.";
+                let expected = if self.pid == 0 {
+                    "Cancel long-running query".to_owned()
+                } else {
+                    format!(
+                        "Cancel long-running query on pid {} (db={} user={})",
+                        self.pid, self.datname, self.usename,
+                    )
+                };
+                (action, risk, expected)
+            }
+            QueryFindingKind::IdleInTransaction => {
+                let action = format!("select pg_terminate_backend({})", self.pid);
+                let risk = "pg_terminate_backend forcibly closes the connection. \
+                            Any open transaction is rolled back. Use when \
+                            pg_cancel_backend is insufficient or when the session \
+                            is holding locks that block other work.";
+                let expected = if self.pid == 0 {
+                    "Terminate idle-in-transaction session".to_owned()
+                } else {
+                    format!(
+                        "Terminate idle-in-transaction session \
+                         pid {} (db={} user={}), releasing held locks",
+                        self.pid, self.datname, self.usename,
+                    )
+                };
+                (action, risk, expected)
+            }
+            QueryFindingKind::BlockingChain => {
+                // The suggested_action contains the blocker PID embedded in SQL;
+                // extract just the first statement (before any comment).
+                let raw = self.suggested_action.as_ref()?;
+                let action = raw
+                    .split("--")
+                    .next()
+                    .map_or_else(|| raw.clone(), |s| s.trim().to_owned());
+                let risk = "Cancelling the blocker unblocks all waiting sessions \
+                            immediately. The blocker's transaction is rolled back. \
+                            If cancel is insufficient, use pg_terminate_backend. \
+                            Verify the blocker is not a critical long-running job.";
+                let expected = format!(
+                    "Unblock pid {} ({}) by cancelling the blocking session",
+                    self.pid, self.usename,
+                );
+                (action, risk, expected)
+            }
+            QueryFindingKind::HighSessionCount => return None,
+        };
+
+        Some(crate::governance::ActionProposal {
+            feature: crate::governance::FeatureArea::QueryOptimization,
+            severity: self.severity,
+            evidence_class: self.evidence_class,
+            finding: self.description.clone(),
+            proposed_action,
+            expected_outcome,
+            risk: risk.to_owned(),
+            created_at: std::time::SystemTime::now(),
+        })
+    }
+}
+
+impl QueryOptimizationReport {
+    /// Convert all actionable findings into proposals for Supervised mode.
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(QueryFinding::to_proposal)
+            .collect()
+    }
+}
+
 impl QueryOptimizationReport {
     /// Display the report to the terminal.
     pub fn display(&self) {
@@ -743,5 +828,183 @@ mod tests {
             suggested_action: None,
         };
         assert_eq!(finding.severity, Severity::Critical);
+    }
+
+    // -----------------------------------------------------------------------
+    // to_proposal / to_proposals tests
+    // -----------------------------------------------------------------------
+
+    fn make_long_running(pid: i32) -> QueryFinding {
+        QueryFinding {
+            kind: QueryFindingKind::LongRunningQuery,
+            pid,
+            datname: "testdb".to_owned(),
+            usename: "alice".to_owned(),
+            description: format!("Query running for 00:02:30: select 1"),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Factual,
+            suggested_action: Some(format!("SELECT pg_cancel_backend({pid})")),
+        }
+    }
+
+    fn make_idle_in_txn(pid: i32) -> QueryFinding {
+        QueryFinding {
+            kind: QueryFindingKind::IdleInTransaction,
+            pid,
+            datname: "testdb".to_owned(),
+            usename: "bob".to_owned(),
+            description: format!("Session idle in transaction for 00:10:00"),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Factual,
+            suggested_action: Some(format!("SELECT pg_terminate_backend({pid})")),
+        }
+    }
+
+    fn make_blocking_chain(blocked_pid: i32, blocking_pid: i32) -> QueryFinding {
+        QueryFinding {
+            kind: QueryFindingKind::BlockingChain,
+            pid: blocked_pid,
+            datname: String::new(),
+            usename: "carol".to_owned(),
+            description: format!("pid {blocked_pid} (carol) blocked by pid {blocking_pid} (dave)"),
+            severity: Severity::Critical,
+            evidence_class: EvidenceClass::Factual,
+            suggested_action: Some(format!(
+                "SELECT pg_cancel_backend({blocking_pid}) \
+                 -- or pg_terminate_backend({blocking_pid}) if cancel is not enough"
+            )),
+        }
+    }
+
+    fn make_high_session_count() -> QueryFinding {
+        QueryFinding {
+            kind: QueryFindingKind::HighSessionCount,
+            pid: 0,
+            datname: String::new(),
+            usename: String::new(),
+            description: "250 client backend session(s) total".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: Some(
+                "Review pg_stat_activity; consider connection pooling".to_owned(),
+            ),
+        }
+    }
+
+    #[test]
+    fn long_running_query_proposal_contains_cancel_backend() {
+        let finding = make_long_running(5555);
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        assert!(
+            proposal.proposed_action.contains("pg_cancel_backend"),
+            "proposed_action should call pg_cancel_backend"
+        );
+        assert!(
+            proposal.proposed_action.contains("5555"),
+            "proposed_action should include the pid"
+        );
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::QueryOptimization
+        );
+        assert_eq!(proposal.severity, Severity::Warning);
+        assert_eq!(proposal.evidence_class, EvidenceClass::Factual);
+    }
+
+    #[test]
+    fn idle_in_transaction_proposal_contains_terminate_backend() {
+        let finding = make_idle_in_txn(7777);
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        assert!(
+            proposal.proposed_action.contains("pg_terminate_backend"),
+            "proposed_action should call pg_terminate_backend"
+        );
+        assert!(
+            proposal.proposed_action.contains("7777"),
+            "proposed_action should include the pid"
+        );
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::QueryOptimization
+        );
+        assert_eq!(proposal.evidence_class, EvidenceClass::Factual);
+    }
+
+    #[test]
+    fn blocking_chain_proposal_cancels_blocker_not_blocked() {
+        let finding = make_blocking_chain(100, 200);
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        // The proposed action should target the blocker (200), not the blocked (100).
+        assert!(
+            proposal.proposed_action.contains("200"),
+            "proposed_action should reference the blocking pid"
+        );
+        assert!(
+            proposal.proposed_action.contains("pg_cancel_backend"),
+            "proposed_action should call pg_cancel_backend"
+        );
+        // The comment suffix should be stripped.
+        assert!(
+            !proposal.proposed_action.contains("--"),
+            "proposed_action should not contain a SQL comment"
+        );
+        assert_eq!(proposal.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn high_session_count_produces_no_proposal() {
+        let finding = make_high_session_count();
+        assert!(
+            finding.to_proposal().is_none(),
+            "HighSessionCount should not produce an ActionProposal"
+        );
+    }
+
+    #[test]
+    fn to_proposals_filters_informational_findings() {
+        let report = QueryOptimizationReport {
+            findings: vec![
+                make_long_running(1),
+                make_idle_in_txn(2),
+                make_blocking_chain(3, 4),
+                make_high_session_count(),
+            ],
+        };
+        let proposals = report.to_proposals();
+        // HighSessionCount is filtered; the other 3 produce proposals.
+        assert_eq!(
+            proposals.len(),
+            3,
+            "expected 3 proposals (HighSessionCount excluded)"
+        );
+        assert!(proposals
+            .iter()
+            .all(|p| p.feature == crate::governance::FeatureArea::QueryOptimization));
+    }
+
+    #[test]
+    fn to_proposals_empty_report_yields_empty_vec() {
+        let report = QueryOptimizationReport {
+            findings: Vec::new(),
+        };
+        assert!(report.to_proposals().is_empty());
+    }
+
+    #[test]
+    fn blocking_chain_no_suggested_action_yields_none() {
+        let finding = QueryFinding {
+            kind: QueryFindingKind::BlockingChain,
+            pid: 10,
+            datname: String::new(),
+            usename: "user".to_owned(),
+            description: "blocked".to_owned(),
+            severity: Severity::Critical,
+            evidence_class: EvidenceClass::Factual,
+            suggested_action: None,
+        };
+        assert!(
+            finding.to_proposal().is_none(),
+            "BlockingChain without suggested_action should yield None"
+        );
     }
 }
