@@ -469,9 +469,9 @@ mod tests {
     #[test]
     fn extract_deeply_nested() {
         let json = serde_json::json!({
-            "a": { "b": { "c": 3.14 } }
+            "a": { "b": { "c": 3.15 } }
         });
-        assert_eq!(extract_json_value(&json, "a.b.c"), Some(3.14));
+        assert_eq!(extract_json_value(&json, "a.b.c"), Some(3.15));
     }
 
     #[test]
