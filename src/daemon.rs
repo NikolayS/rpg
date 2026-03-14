@@ -549,6 +549,196 @@ pub async fn run(
             }
         }
 
+        // Run vacuum health check every 30 iterations (~5 minutes).
+        if iteration % 30 == 0 {
+            let vacuum_report = crate::vacuum::analyze(client).await;
+            if !vacuum_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Vacuum health: {} finding(s) detected",
+                    vacuum_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &vacuum_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Vacuum: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "vacuum".to_owned()],
+                                source: "vacuum".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe vacuum proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Vacuum);
+                let effective = circuit_breaker
+                    .effective_autonomy(crate::governance::FeatureArea::Vacuum, configured);
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = vacuum_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg =
+                                format!("[{dbname}] Auto-executed {executed} vacuum action(s)");
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run bloat check every 60 iterations (~10 minutes).
+        if iteration % 60 == 0 {
+            let bloat_report = crate::bloat::BloatAnalyzer::analyze(client).await;
+            if !bloat_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Bloat analysis: {} finding(s) detected",
+                    bloat_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &bloat_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!("[Rpg] Bloat: {} on {dbname}", finding.kind.label()),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "bloat".to_owned()],
+                                source: "bloat".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe bloat proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Bloat);
+                let effective = circuit_breaker
+                    .effective_autonomy(crate::governance::FeatureArea::Bloat, configured);
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = bloat_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg =
+                                format!("[{dbname}] Auto-executed {executed} bloat action(s)");
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run config tuning check every 180 iterations (~30 minutes).
+        // Config changes are sensitive — notify only, no auto-execution.
+        if iteration % 180 == 0 {
+            let config_report = crate::config_tuning::analyze(client).await;
+            if !config_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Config tuning: {} finding(s) detected",
+                    config_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &config_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Config tuning: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "config-tuning".to_owned()],
+                                source: "config-tuning".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Auto-RCA on severe anomalies.
         if crate::anomaly::AnomalyDetector::should_trigger_rca(&anomalies) {
             let configured_autonomy = config
