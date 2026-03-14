@@ -97,22 +97,130 @@ pub fn version_string() -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Autonomy levels (rpg-specific)
+// Autonomy flag parsing (rpg-specific)
 // ---------------------------------------------------------------------------
 
-/// Autonomy level for the agent subsystem.
+/// Parsed result of the `--autonomy` CLI flag.
 ///
-// TODO: Support per-feature granular syntax like `vacuum:auto,index_health:auto`
-// (SPEC section 8.6). The current `ValueEnum` handles global level only.
-#[derive(Clone, Debug, Default, clap::ValueEnum)]
-enum Autonomy {
-    /// Read-only: observe, diagnose, report. Zero writes.
-    #[default]
-    Observe,
-    /// Propose actions, human confirms before execution.
-    Supervised,
-    /// Act autonomously within policy and DB permissions.
-    Auto,
+/// Two syntaxes are accepted:
+/// - Global level: `observe` / `supervised` / `auto` — applies to all features.
+/// - Per-feature: `vacuum:auto,index_health:supervised` — comma-separated
+///   `feature:level` pairs; unspecified features keep their config default.
+#[derive(Debug, Clone)]
+enum AutonomyArg {
+    /// Single level applied to all feature areas.
+    Global(governance::AutonomyLevel),
+    /// Per-feature overrides; unspecified features are left at their default.
+    PerFeature(Vec<(governance::FeatureArea, governance::AutonomyLevel)>),
+}
+
+/// Valid feature names (for error messages).
+const VALID_FEATURES: &[&str] = &[
+    "vacuum",
+    "bloat",
+    "index_health",
+    "query_optimization",
+    "config_tuning",
+    "connection_management",
+    "replication",
+    "backup_monitoring",
+    "security",
+    "rca",
+];
+
+/// Valid level names (for error messages).
+const VALID_LEVELS: &[&str] = &["observe", "supervised", "auto"];
+
+/// Parse the `--autonomy` flag value.
+///
+/// Accepts two syntaxes:
+/// - A single level (`observe`, `supervised`, `auto`) — sets all features.
+/// - Comma-separated `feature:level` pairs — sets individual features.
+///
+/// Feature names and level names are case-insensitive.
+///
+/// Returns `Ok(AutonomyArg)` on success, `Err(message)` with a clear
+/// human-readable error on failure.
+fn parse_autonomy(s: &str) -> Result<AutonomyArg, String> {
+    let s = s.trim();
+
+    // If the value contains no colon it must be a plain global level.
+    if !s.contains(':') {
+        return governance::AutonomyLevel::from_str(s)
+            .map(AutonomyArg::Global)
+            .ok_or_else(|| {
+                format!(
+                    "invalid autonomy level \"{s}\"; \
+                     valid levels: {}",
+                    VALID_LEVELS.join(", ")
+                )
+            });
+    }
+
+    // Per-feature syntax: comma-separated `feature:level` pairs.
+    let mut pairs = Vec::new();
+    for token in s.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (feat_str, level_str) = token.split_once(':').ok_or_else(|| {
+            format!(
+                "invalid autonomy token \"{token}\"; \
+                 expected `feature:level` (e.g. `vacuum:auto`)"
+            )
+        })?;
+        let feat_str = feat_str.trim();
+        let level_str = level_str.trim();
+
+        let feature = governance::FeatureArea::from_str(feat_str).ok_or_else(|| {
+            format!(
+                "unknown feature area \"{feat_str}\"; \
+                 valid features: {}",
+                VALID_FEATURES.join(", ")
+            )
+        })?;
+
+        let level = governance::AutonomyLevel::from_str(level_str).ok_or_else(|| {
+            format!(
+                "invalid autonomy level \"{level_str}\" for feature \"{feat_str}\"; \
+                 valid levels: {}",
+                VALID_LEVELS.join(", ")
+            )
+        })?;
+
+        pairs.push((feature, level));
+    }
+
+    if pairs.is_empty() {
+        return Err(format!(
+            "empty autonomy specification \"{s}\"; \
+             expected a level (e.g. `auto`) or feature:level pairs \
+             (e.g. `vacuum:auto,index_health:supervised`)"
+        ));
+    }
+
+    Ok(AutonomyArg::PerFeature(pairs))
+}
+
+/// Apply a parsed [`AutonomyArg`] to a [`config::GovernanceConfig`].
+///
+/// For `Global`, every feature area is set to the given level.
+/// For `PerFeature`, only the listed features are updated; the rest
+/// retain whatever value they already have (from the config file).
+fn apply_autonomy(governance: &mut config::GovernanceConfig, arg: &AutonomyArg) {
+    match arg {
+        AutonomyArg::Global(level) => {
+            for feature in governance::FeatureArea::all() {
+                governance.set_autonomy(*feature, *level);
+            }
+        }
+        AutonomyArg::PerFeature(pairs) => {
+            for (feature, level) in pairs {
+                governance.set_autonomy(*feature, *level);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,8 +449,17 @@ struct Cli {
     observe: Option<String>,
 
     /// Set agent autonomy level.
-    #[arg(long, value_enum, default_value_t = Autonomy::Observe)]
-    autonomy: Autonomy,
+    ///
+    /// Accepts a single global level (`observe`, `supervised`, `auto`) or
+    /// comma-separated per-feature overrides (`vacuum:auto,index_health:supervised`).
+    /// Per-feature syntax sets only the listed features; others keep their
+    /// config-file defaults.  Level names are case-insensitive.
+    #[arg(
+        long,
+        value_name = "LEVEL|FEATURE:LEVEL,...",
+        default_value = "observe"
+    )]
+    autonomy: String,
 
     /// Run health check, exit with code reflecting severity (FR-13).
     #[arg(long)]
@@ -748,7 +865,20 @@ async fn main() {
 
     // Load project config (.rpg.toml) and merge it on top of user config.
     let project_result = config::load_project_config();
-    let cfg = config::merge_project_config(base_cfg, &project_result.config);
+    let mut cfg = config::merge_project_config(base_cfg, &project_result.config);
+
+    // --autonomy: parse and apply to the governance config.
+    // CLI always overrides the config file, so we apply after merging.
+    {
+        let autonomy_str = cli.autonomy.as_str();
+        match parse_autonomy(autonomy_str) {
+            Ok(arg) => apply_autonomy(&mut cfg.governance, &arg),
+            Err(e) => {
+                eprintln!("rpg: --autonomy: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
 
     // Print project config startup messages (suppressed by --quiet).
     if !cli.quiet {
@@ -1046,6 +1176,199 @@ async fn main() {
         Err(e) => {
             eprintln!("rpg: {e}");
             std::process::exit(2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use governance::{AutonomyLevel, FeatureArea};
+
+    // -- parse_autonomy -------------------------------------------------------
+
+    #[test]
+    fn parse_global_observe() {
+        let result = parse_autonomy("observe").unwrap();
+        assert!(matches!(
+            result,
+            AutonomyArg::Global(AutonomyLevel::Observe)
+        ));
+    }
+
+    #[test]
+    fn parse_global_supervised() {
+        let result = parse_autonomy("supervised").unwrap();
+        assert!(matches!(
+            result,
+            AutonomyArg::Global(AutonomyLevel::Supervised)
+        ));
+    }
+
+    #[test]
+    fn parse_global_auto() {
+        let result = parse_autonomy("auto").unwrap();
+        assert!(matches!(result, AutonomyArg::Global(AutonomyLevel::Auto)));
+    }
+
+    #[test]
+    fn parse_global_case_insensitive() {
+        let result = parse_autonomy("AUTO").unwrap();
+        assert!(matches!(result, AutonomyArg::Global(AutonomyLevel::Auto)));
+        let result = parse_autonomy("Supervised").unwrap();
+        assert!(matches!(
+            result,
+            AutonomyArg::Global(AutonomyLevel::Supervised)
+        ));
+    }
+
+    #[test]
+    fn parse_global_invalid_level() {
+        let err = parse_autonomy("turbo").unwrap_err();
+        assert!(err.contains("invalid autonomy level"));
+        assert!(err.contains("turbo"));
+        assert!(err.contains("observe"));
+    }
+
+    #[test]
+    fn parse_per_feature_single() {
+        let result = parse_autonomy("vacuum:auto").unwrap();
+        let AutonomyArg::PerFeature(pairs) = result else {
+            panic!("expected PerFeature");
+        };
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, FeatureArea::Vacuum);
+        assert_eq!(pairs[0].1, AutonomyLevel::Auto);
+    }
+
+    #[test]
+    fn parse_per_feature_multiple() {
+        let result = parse_autonomy("vacuum:auto,index_health:supervised,bloat:observe").unwrap();
+        let AutonomyArg::PerFeature(pairs) = result else {
+            panic!("expected PerFeature");
+        };
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0], (FeatureArea::Vacuum, AutonomyLevel::Auto));
+        assert_eq!(
+            pairs[1],
+            (FeatureArea::IndexHealth, AutonomyLevel::Supervised)
+        );
+        assert_eq!(pairs[2], (FeatureArea::Bloat, AutonomyLevel::Observe));
+    }
+
+    #[test]
+    fn parse_per_feature_case_insensitive() {
+        let result = parse_autonomy("VACUUM:AUTO").unwrap();
+        let AutonomyArg::PerFeature(pairs) = result else {
+            panic!("expected PerFeature");
+        };
+        assert_eq!(pairs[0], (FeatureArea::Vacuum, AutonomyLevel::Auto));
+    }
+
+    #[test]
+    fn parse_per_feature_whitespace_tolerant() {
+        let result = parse_autonomy(" vacuum : auto , index_health : supervised ").unwrap();
+        let AutonomyArg::PerFeature(pairs) = result else {
+            panic!("expected PerFeature");
+        };
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], (FeatureArea::Vacuum, AutonomyLevel::Auto));
+        assert_eq!(
+            pairs[1],
+            (FeatureArea::IndexHealth, AutonomyLevel::Supervised)
+        );
+    }
+
+    #[test]
+    fn parse_per_feature_all_valid_features() {
+        let all_features = "vacuum:auto,bloat:auto,index_health:auto,\
+            query_optimization:auto,config_tuning:auto,\
+            connection_management:auto,replication:auto,\
+            backup_monitoring:auto,security:auto,rca:auto";
+        let result = parse_autonomy(all_features).unwrap();
+        let AutonomyArg::PerFeature(pairs) = result else {
+            panic!("expected PerFeature");
+        };
+        assert_eq!(pairs.len(), 10);
+    }
+
+    #[test]
+    fn parse_per_feature_invalid_feature_name() {
+        let err = parse_autonomy("frobnicator:auto").unwrap_err();
+        assert!(err.contains("unknown feature area"));
+        assert!(err.contains("frobnicator"));
+        assert!(err.contains("vacuum"));
+    }
+
+    #[test]
+    fn parse_per_feature_invalid_level() {
+        let err = parse_autonomy("vacuum:turbo").unwrap_err();
+        assert!(err.contains("invalid autonomy level"));
+        assert!(err.contains("turbo"));
+        assert!(err.contains("vacuum"));
+        assert!(err.contains("observe"));
+    }
+
+    #[test]
+    fn parse_per_feature_missing_level() {
+        // "vacuum:" has a colon but empty level string.
+        let err = parse_autonomy("vacuum:").unwrap_err();
+        assert!(err.contains("invalid autonomy level"));
+    }
+
+    // -- apply_autonomy -------------------------------------------------------
+
+    #[test]
+    fn apply_global_sets_all_features() {
+        let mut gov = config::GovernanceConfig::default();
+        // Confirm the default is Observe.
+        assert_eq!(gov.vacuum, AutonomyLevel::Observe);
+
+        apply_autonomy(&mut gov, &AutonomyArg::Global(AutonomyLevel::Auto));
+
+        for &feature in governance::FeatureArea::all() {
+            assert_eq!(
+                gov.autonomy_for(feature),
+                AutonomyLevel::Auto,
+                "feature {:?} not set to Auto",
+                feature
+            );
+        }
+    }
+
+    #[test]
+    fn apply_per_feature_only_updates_listed() {
+        let mut gov = config::GovernanceConfig::default();
+        let pairs = vec![
+            (FeatureArea::Vacuum, AutonomyLevel::Auto),
+            (FeatureArea::IndexHealth, AutonomyLevel::Supervised),
+        ];
+        apply_autonomy(&mut gov, &AutonomyArg::PerFeature(pairs));
+
+        assert_eq!(gov.autonomy_for(FeatureArea::Vacuum), AutonomyLevel::Auto);
+        assert_eq!(
+            gov.autonomy_for(FeatureArea::IndexHealth),
+            AutonomyLevel::Supervised
+        );
+        // Unlisted features remain at Observe.
+        assert_eq!(gov.autonomy_for(FeatureArea::Bloat), AutonomyLevel::Observe);
+        assert_eq!(
+            gov.autonomy_for(FeatureArea::Security),
+            AutonomyLevel::Observe
+        );
+    }
+
+    #[test]
+    fn apply_global_observe_is_idempotent() {
+        let mut gov = config::GovernanceConfig::default();
+        apply_autonomy(&mut gov, &AutonomyArg::Global(AutonomyLevel::Observe));
+        // Should still all be Observe.
+        for &feature in governance::FeatureArea::all() {
+            assert_eq!(gov.autonomy_for(feature), AutonomyLevel::Observe);
         }
     }
 }
