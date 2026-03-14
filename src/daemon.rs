@@ -156,6 +156,8 @@ pub enum NotificationChannel {
     Email { to: String },
     /// `PagerDuty` Events API v2 routing key.
     PagerDuty { routing_key: String },
+    /// Telegram bot token and chat ID.
+    Telegram { bot_token: String, chat_id: String },
     /// Log to stderr (always active).
     Stderr,
 }
@@ -171,6 +173,9 @@ pub async fn notify(channel: &NotificationChannel, message: &str) {
         }
         NotificationChannel::PagerDuty { routing_key } => {
             send_pagerduty_notification(routing_key, message).await;
+        }
+        NotificationChannel::Telegram { bot_token, chat_id } => {
+            send_telegram_notification(bot_token, chat_id, message).await;
         }
         NotificationChannel::Email { to } => {
             eprintln!("[daemon] Email notification to {to}: {message}");
@@ -269,6 +274,39 @@ async fn send_pagerduty_notification(routing_key: &str, message: &str) {
         }
         Err(e) => {
             crate::logging::warn("daemon", &format!("PagerDuty notification error: {e}"));
+        }
+    }
+}
+
+async fn send_telegram_notification(bot_token: &str, chat_id: &str, message: &str) {
+    let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
+    let payload = serde_json::to_string(&serde_json::json!({
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown",
+    }))
+    .unwrap_or_else(|_| {
+        r#"{"chat_id":"","text":"(encoding error)","parse_mode":"Markdown"}"#.to_owned()
+    });
+
+    match reqwest::Client::new()
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            crate::logging::debug("daemon", "Telegram notification sent");
+        }
+        Ok(resp) => {
+            crate::logging::warn(
+                "daemon",
+                &format!("Telegram notification failed: HTTP {}", resp.status()),
+            );
+        }
+        Err(e) => {
+            crate::logging::warn("daemon", &format!("Telegram notification error: {e}"));
         }
     }
 }
@@ -1397,6 +1435,34 @@ mod tests {
         if let NotificationChannel::PagerDuty { routing_key } = ch {
             assert!(!routing_key.is_empty());
         }
+    }
+
+    #[test]
+    fn notification_channel_telegram_has_fields() {
+        let ch = NotificationChannel::Telegram {
+            bot_token: "123456:ABCdef".to_owned(),
+            chat_id: "-1001234567890".to_owned(),
+        };
+        if let NotificationChannel::Telegram { bot_token, chat_id } = ch {
+            assert!(!bot_token.is_empty());
+            assert!(!chat_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn telegram_payload_has_required_fields() {
+        let chat_id = "-1001234567890";
+        let message = "test pg alert";
+        let payload = serde_json::to_string(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown",
+        }))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["chat_id"], chat_id);
+        assert_eq!(v["text"], message);
+        assert_eq!(v["parse_mode"], "Markdown");
     }
 
     #[test]

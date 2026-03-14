@@ -374,6 +374,14 @@ struct Cli {
     #[arg(long, value_name = "KEY")]
     pagerduty_key: Option<String>,
 
+    /// Telegram bot token for daemon notifications.
+    #[arg(long, value_name = "TOKEN")]
+    telegram_bot_token: Option<String>,
+
+    /// Telegram chat ID for daemon notifications.
+    #[arg(long, value_name = "ID")]
+    telegram_chat_id: Option<String>,
+
     /// Path to PID file for daemon mode.
     #[arg(long, value_name = "PATH")]
     pid_file: Option<String>,
@@ -905,6 +913,14 @@ async fn main() {
                 if let Some(ref key) = cli.pagerduty_key {
                     channels.push(daemon::NotificationChannel::PagerDuty {
                         routing_key: key.clone(),
+                    });
+                }
+                if let (Some(ref token), Some(ref chat_id)) =
+                    (&cli.telegram_bot_token, &cli.telegram_chat_id)
+                {
+                    channels.push(daemon::NotificationChannel::Telegram {
+                        bot_token: token.clone(),
+                        chat_id: chat_id.clone(),
                     });
                 }
 
