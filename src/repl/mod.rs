@@ -2356,7 +2356,7 @@ pub enum MetaResult {
     /// Exit the REPL loop (`\q`).
     Quit,
     /// The connection was replaced: caller must swap client and params.
-    Reconnected(Box<tokio_postgres::Client>, ConnParams),
+    Reconnected(Box<tokio_postgres::Client>, Box<ConnParams>),
     /// Clear the query buffer (`\r`).
     ClearBuffer,
     /// Print the query buffer (`\p`).
@@ -2957,7 +2957,7 @@ async fn dispatch_meta(
                         &new_params,
                     );
                     println!("{msg}");
-                    return MetaResult::Reconnected(Box::new(new_client), new_params);
+                    return MetaResult::Reconnected(Box::new(new_client), Box::new(new_params));
                 }
                 Err(e) => eprintln!("\\c: {e}"),
             }
@@ -3359,7 +3359,10 @@ async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
                 &new_params,
             );
             println!("{msg}");
-            Some(MetaResult::Reconnected(Box::new(new_client), new_params))
+            Some(MetaResult::Reconnected(
+                Box::new(new_client),
+                Box::new(new_params),
+            ))
         }
         Err(e) => {
             eprintln!("\\session resume: {e}");

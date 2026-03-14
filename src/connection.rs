@@ -50,6 +50,9 @@ pub enum ConnectionError {
 
     #[error("cannot load SSL root certificate: {0}")]
     SslRootCertError(String),
+
+    #[error("cannot load SSL client certificate or key: {0}")]
+    SslClientCertError(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +109,16 @@ pub struct ConnParams {
     /// Used by `sslmode=verify-ca` and `sslmode=verify-full`.  When `None`
     /// the built-in Mozilla/webpki root bundle is used.
     pub ssl_root_cert: Option<String>,
+    /// Path to the client certificate PEM file (`PGSSLCERT` / `sslcert`).
+    ///
+    /// Used together with `ssl_key` for mutual TLS (client certificate auth).
+    /// Only effective with `sslmode=verify-ca` or `sslmode=verify-full`.
+    pub ssl_cert: Option<String>,
+    /// Path to the client private key PEM file (`PGSSLKEY` / `sslkey`).
+    ///
+    /// Must be provided alongside `ssl_cert`.  If only one of `ssl_cert` /
+    /// `ssl_key` is set a warning is emitted and no client cert is used.
+    pub ssl_key: Option<String>,
     pub application_name: String,
     pub connect_timeout: Option<u64>,
     /// Server-side GUC options sent at connection startup via the `options`
@@ -136,6 +149,8 @@ impl fmt::Debug for ConnParams {
             .field("password", &self.password.as_ref().map(|_| "***"))
             .field("sslmode", &self.sslmode)
             .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("ssl_cert", &self.ssl_cert)
+            .field("ssl_key", &self.ssl_key)
             .field("application_name", &self.application_name)
             .field("connect_timeout", &self.connect_timeout)
             .field("options", &self.options)
@@ -155,6 +170,8 @@ impl Default for ConnParams {
             password: None,
             sslmode: SslMode::default(),
             ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
             application_name: "rpg".to_owned(),
             connect_timeout: None,
             options: None,
@@ -269,6 +286,8 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
 
     resolve_sslmode(&mut params, opts, uri_ref, ci_ref);
     resolve_ssl_root_cert(&mut params, uri_ref, ci_ref);
+    resolve_ssl_cert(&mut params, uri_ref, ci_ref);
+    resolve_ssl_key(&mut params, uri_ref, ci_ref);
     resolve_app_name(&mut params, uri_ref, ci_ref);
     resolve_options(&mut params, uri_ref, ci_ref);
 
@@ -428,6 +447,28 @@ fn resolve_ssl_root_cert(
         .or_else(|| env::var("PGSSLROOTCERT").ok());
 }
 
+fn resolve_ssl_cert(
+    params: &mut ConnParams,
+    uri: Option<&UriParams>,
+    conninfo: Option<&HashMap<String, String>>,
+) {
+    params.ssl_cert = uri
+        .and_then(|u| u.ssl_cert.clone())
+        .or_else(|| conninfo.and_then(|c| c.get("sslcert").cloned()))
+        .or_else(|| env::var("PGSSLCERT").ok());
+}
+
+fn resolve_ssl_key(
+    params: &mut ConnParams,
+    uri: Option<&UriParams>,
+    conninfo: Option<&HashMap<String, String>>,
+) {
+    params.ssl_key = uri
+        .and_then(|u| u.ssl_key.clone())
+        .or_else(|| conninfo.and_then(|c| c.get("sslkey").cloned()))
+        .or_else(|| env::var("PGSSLKEY").ok());
+}
+
 fn resolve_options(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
@@ -453,6 +494,8 @@ struct UriParams {
     dbname: Option<String>,
     sslmode: Option<SslMode>,
     ssl_root_cert: Option<String>,
+    ssl_cert: Option<String>,
+    ssl_key: Option<String>,
     application_name: Option<String>,
     connect_timeout: Option<u64>,
     options: Option<String>,
@@ -547,6 +590,8 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                 match key {
                     "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
                     "sslrootcert" => params.ssl_root_cert = Some(val),
+                    "sslcert" => params.ssl_cert = Some(val),
+                    "sslkey" => params.ssl_key = Some(val),
                     "application_name" => params.application_name = Some(val),
                     "connect_timeout" => params.connect_timeout = val.parse().ok(),
                     "options" => params.options = Some(val),
@@ -865,6 +910,44 @@ fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionE
     Ok(store)
 }
 
+/// Load a client certificate and private key from PEM files.
+///
+/// Returns `(cert_chain, private_key)` suitable for passing to
+/// `ClientConfig::with_client_auth_cert()`.
+fn load_client_cert_and_key(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<
+    (
+        Vec<CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    ConnectionError,
+> {
+    let cert_err = |e: String| ConnectionError::SslClientCertError(e);
+    let key_err = |e: String| ConnectionError::SslClientCertError(e);
+
+    let cert_pem = std::fs::read(cert_path)
+        .map_err(|e| cert_err(format!("cannot read cert {cert_path}: {e}")))?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .filter_map(Result::ok)
+        .map(CertificateDer::into_owned)
+        .collect();
+    if certs.is_empty() {
+        return Err(cert_err(format!(
+            "no PEM certificates found in {cert_path}"
+        )));
+    }
+
+    let key_pem =
+        std::fs::read(key_path).map_err(|e| key_err(format!("cannot read key {key_path}: {e}")))?;
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .map_err(|e| key_err(format!("cannot parse key {key_path}: {e}")))?
+        .ok_or_else(|| key_err(format!("no private key found in {key_path}")))?;
+
+    Ok((certs, key))
+}
+
 /// Build a `ClientConfig` for `sslmode=verify-ca`.
 ///
 /// The certificate chain is verified against the CA bundle but the server
@@ -878,10 +961,28 @@ fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, Connec
     // Use a custom verifier that checks the certificate chain against our CA
     // store but does NOT verify the server hostname.
     let verifier = Arc::new(NoCnVerifier::new(root_store));
-    Ok(ClientConfig::builder()
+    let builder = ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth())
+        .with_custom_certificate_verifier(verifier);
+
+    match (&params.ssl_cert, &params.ssl_key) {
+        (Some(cert), Some(key)) => {
+            let (certs, private_key) = load_client_cert_and_key(cert, key)?;
+            Ok(builder
+                .with_client_auth_cert(certs, private_key)
+                .map_err(|e| {
+                    ConnectionError::SslClientCertError(format!("invalid client cert/key: {e}"))
+                })?)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            eprintln!(
+                "WARNING: both sslcert and sslkey must be set for \
+                 client certificate authentication; ignoring"
+            );
+            Ok(builder.with_no_client_auth())
+        }
+        (None, None) => Ok(builder.with_no_client_auth()),
+    }
 }
 
 /// Build a `ClientConfig` for `sslmode=verify-full`.
@@ -894,9 +995,26 @@ fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, Conn
         None => webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
     };
 
-    Ok(ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth())
+    let builder = ClientConfig::builder().with_root_certificates(root_store);
+
+    match (&params.ssl_cert, &params.ssl_key) {
+        (Some(cert), Some(key)) => {
+            let (certs, private_key) = load_client_cert_and_key(cert, key)?;
+            Ok(builder
+                .with_client_auth_cert(certs, private_key)
+                .map_err(|e| {
+                    ConnectionError::SslClientCertError(format!("invalid client cert/key: {e}"))
+                })?)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            eprintln!(
+                "WARNING: both sslcert and sslkey must be set for \
+                 client certificate authentication; ignoring"
+            );
+            Ok(builder.with_no_client_auth())
+        }
+        (None, None) => Ok(builder.with_no_client_auth()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2008,6 +2126,95 @@ mod tests {
              on host \"other.example.com\" at port \"5432\".\n\
              SSL connection (protocol: TLS, compression: off)",
         );
+    }
+
+    // -- PGSSLCERT / PGSSLKEY env var resolution ----------------------------
+
+    #[test]
+    #[serial]
+    fn test_pgsslcert_pgsslkey_env_vars() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSSLMODE",
+            "PGSSLCERT",
+            "PGSSLKEY",
+        ]);
+
+        env::set_var("PGSSLCERT", "/etc/ssl/client.crt");
+        env::set_var("PGSSLKEY", "/etc/ssl/client.key");
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.ssl_cert, Some("/etc/ssl/client.crt".into()));
+        assert_eq!(params.ssl_key, Some("/etc/ssl/client.key".into()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_pgsslcert_pgsslkey_not_set_by_default() {
+        let _guard = EnvGuard::new(&["PGSSLCERT", "PGSSLKEY"]);
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert!(params.ssl_cert.is_none());
+        assert!(params.ssl_key.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_sslcert_sslkey_uri_query_params() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSSLMODE",
+            "PGSSLCERT",
+            "PGSSLKEY",
+        ]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some(
+                "postgresql://localhost/db?\
+                 sslmode=verify-full\
+                 &sslcert=/tmp/client.crt\
+                 &sslkey=/tmp/client.key"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.ssl_cert, Some("/tmp/client.crt".into()));
+        assert_eq!(params.ssl_key, Some("/tmp/client.key".into()));
+        assert_eq!(params.sslmode, SslMode::VerifyFull);
+    }
+
+    #[test]
+    #[serial]
+    fn test_sslcert_sslkey_conninfo_keys() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSSLMODE",
+            "PGSSLCERT",
+            "PGSSLKEY",
+        ]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some(
+                "host=h sslmode=verify-ca \
+                 sslcert=/tmp/c.crt sslkey=/tmp/c.key"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.ssl_cert, Some("/tmp/c.crt".into()));
+        assert_eq!(params.ssl_key, Some("/tmp/c.key".into()));
+        assert_eq!(params.sslmode, SslMode::VerifyCa);
     }
 
     // -- PGOPTIONS / options resolution -------------------------------------
