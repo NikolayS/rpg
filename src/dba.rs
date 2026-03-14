@@ -72,6 +72,10 @@ pub async fn execute(
             dba_replication(client, verbose).await;
             None
         }
+        "replication-analyze" | "ra" => {
+            dba_replication_analyze(client).await;
+            None
+        }
         "config" | "conf" => {
             dba_config(client, verbose).await;
             None
@@ -264,14 +268,18 @@ fn print_dba_help() {
     println!("  \\dba unused-idx  Unused indexes (simple view)");
     println!("  \\dba seq-scans   Tables with high sequential scan ratio");
     println!("  \\dba cache-hit   Buffer cache hit ratios");
-    println!("  \\dba replication Replication slot status");
+    println!("  \\dba replication Replication slot status (+ for analyzer)");
+    println!(
+        "  \\dba replication-analyze  Structured replication health findings \
+         (slot lag, inactive slots, replica lag)"
+    );
     println!("  \\dba config      Non-default configuration parameters");
     println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
     println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
     println!();
     println!(
         "Aliases: act, lock, wait, vac, va, ts, conn, idx, \
-         unused, seq, cache, repl, conf, prog"
+         unused, seq, cache, repl, ra, conf, prog"
     );
     println!();
     println!("Progress sub-commands:");
@@ -1002,7 +1010,7 @@ async fn dba_cache_hit(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_replication(client: &Client, _verbose: bool) {
+async fn dba_replication(client: &Client, verbose: bool) {
     let sql = "select \
         slot_name, \
         slot_type, \
@@ -1014,6 +1022,20 @@ async fn dba_replication(client: &Client, _verbose: bool) {
     from pg_replication_slots \
     order by slot_name";
     run_and_print(client, sql).await;
+
+    // Structured analysis via ReplicationAnalyzer when verbose (`\dba+ replication`).
+    if verbose {
+        dba_replication_analyze(client).await;
+    }
+}
+
+/// Run the `ReplicationAnalyzer` and display structured findings.
+///
+/// Called directly from `\dba replication-analyze` / `\dba ra`, or
+/// automatically when `\dba+ replication` (verbose) is used.
+async fn dba_replication_analyze(client: &Client) {
+    let report = crate::replication::ReplicationAnalyzer::analyze(client).await;
+    report.display();
 }
 
 /// Returns AI context text when `verbose` is true.
