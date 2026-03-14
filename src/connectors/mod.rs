@@ -185,6 +185,60 @@ impl Default for BackoffConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Normalized metric types (Appendix C.5)
+// ---------------------------------------------------------------------------
+
+/// Normalized metric category — source-agnostic classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetricCategory {
+    CpuUsage,
+    MemoryUsage,
+    DiskReadIops,
+    DiskWriteIops,
+    NetworkIn,
+    NetworkOut,
+    ConnectionCount,
+    ReplicationLag,
+    StorageUsed,
+    QueryLatencyP99,
+    QueryLatencyP95,
+    ErrorRate,
+    Custom(String),
+}
+
+impl MetricCategory {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::CpuUsage => "cpu_usage",
+            Self::MemoryUsage => "memory_usage",
+            Self::DiskReadIops => "disk_read_iops",
+            Self::DiskWriteIops => "disk_write_iops",
+            Self::NetworkIn => "network_in",
+            Self::NetworkOut => "network_out",
+            Self::ConnectionCount => "connection_count",
+            Self::ReplicationLag => "replication_lag",
+            Self::StorageUsed => "storage_used",
+            Self::QueryLatencyP99 => "query_latency_p99",
+            Self::QueryLatencyP95 => "query_latency_p95",
+            Self::ErrorRate => "error_rate",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+/// Internal normalized metric — regardless of source connector.
+#[derive(Debug, Clone)]
+pub struct NormalizedMetric {
+    pub category: MetricCategory,
+    pub value: f64,
+    pub unit: String,
+    pub timestamp: std::time::SystemTime,
+    pub database: Option<DatabaseId>,
+    pub source: ConnectorId,
+    pub raw_name: String,
+}
+
+// ---------------------------------------------------------------------------
 // Connector trait
 // ---------------------------------------------------------------------------
 
@@ -235,6 +289,28 @@ pub trait Connector: Send + Sync {
     async fn update_issue(&self, id: &IssueId, update: &IssueUpdate) -> Result<(), ConnectorError> {
         let _ = (id, update);
         Err(ConnectorError::NotSupported("update_issue"))
+    }
+
+    /// Normalize raw metrics into source-agnostic categories.
+    /// Default implementation returns metrics as Custom category.
+    async fn normalize_metrics(
+        &self,
+        database: &DatabaseId,
+        window: &TimeWindow,
+    ) -> Result<Vec<NormalizedMetric>, ConnectorError> {
+        let metrics = self.fetch_metrics(database, window).await?;
+        Ok(metrics
+            .into_iter()
+            .map(|m| NormalizedMetric {
+                category: MetricCategory::Custom(m.name.clone()),
+                value: m.value,
+                unit: m.unit.unwrap_or_default(),
+                timestamp: m.timestamp,
+                database: Some(database.clone()),
+                source: m.source,
+                raw_name: m.name,
+            })
+            .collect())
     }
 }
 
@@ -489,5 +565,248 @@ mod tests {
             result,
             Err(ConnectorError::NotSupported("update_issue"))
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // MetricCategory tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn metric_category_labels() {
+        assert_eq!(MetricCategory::CpuUsage.label(), "cpu_usage");
+        assert_eq!(MetricCategory::MemoryUsage.label(), "memory_usage");
+        assert_eq!(MetricCategory::DiskReadIops.label(), "disk_read_iops");
+        assert_eq!(MetricCategory::DiskWriteIops.label(), "disk_write_iops");
+        assert_eq!(MetricCategory::NetworkIn.label(), "network_in");
+        assert_eq!(MetricCategory::NetworkOut.label(), "network_out");
+        assert_eq!(MetricCategory::ConnectionCount.label(), "connection_count");
+        assert_eq!(MetricCategory::ReplicationLag.label(), "replication_lag");
+        assert_eq!(MetricCategory::StorageUsed.label(), "storage_used");
+        assert_eq!(MetricCategory::QueryLatencyP99.label(), "query_latency_p99");
+        assert_eq!(MetricCategory::QueryLatencyP95.label(), "query_latency_p95");
+        assert_eq!(MetricCategory::ErrorRate.label(), "error_rate");
+    }
+
+    #[test]
+    fn metric_category_custom_label() {
+        let cat = MetricCategory::Custom("my_custom_metric".to_string());
+        assert_eq!(cat.label(), "my_custom_metric");
+    }
+
+    #[test]
+    fn metric_category_custom_empty_string() {
+        let cat = MetricCategory::Custom(String::new());
+        assert_eq!(cat.label(), "");
+    }
+
+    #[test]
+    fn metric_category_equality() {
+        assert_eq!(MetricCategory::CpuUsage, MetricCategory::CpuUsage);
+        assert_ne!(MetricCategory::CpuUsage, MetricCategory::MemoryUsage);
+        assert_eq!(
+            MetricCategory::Custom("x".to_string()),
+            MetricCategory::Custom("x".to_string())
+        );
+        assert_ne!(
+            MetricCategory::Custom("x".to_string()),
+            MetricCategory::Custom("y".to_string())
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // NormalizedMetric construction test
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn normalized_metric_construction() {
+        let now = std::time::SystemTime::now();
+        let m = NormalizedMetric {
+            category: MetricCategory::CpuUsage,
+            value: 42.5,
+            unit: "percent".to_string(),
+            timestamp: now,
+            database: Some("mydb".to_string()),
+            source: "datadog".to_string(),
+            raw_name: "system.cpu.user".to_string(),
+        };
+        assert_eq!(m.category, MetricCategory::CpuUsage);
+        assert_eq!(m.value, 42.5);
+        assert_eq!(m.unit, "percent");
+        assert_eq!(m.database.as_deref(), Some("mydb"));
+        assert_eq!(m.source, "datadog");
+        assert_eq!(m.raw_name, "system.cpu.user");
+    }
+
+    // ------------------------------------------------------------------
+    // normalize_metrics default implementation test
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn normalize_metrics_default_wraps_fetch() {
+        struct MetricStub;
+
+        #[async_trait]
+        impl Connector for MetricStub {
+            fn id(&self) -> &str {
+                "metric-stub"
+            }
+
+            fn name(&self) -> &str {
+                "Metric Stub"
+            }
+
+            fn capabilities(&self) -> ConnectorCapabilities {
+                ConnectorCapabilities {
+                    can_fetch_metrics: true,
+                    can_fetch_alerts: false,
+                    can_create_issues: false,
+                    can_update_issues: false,
+                    can_receive_webhooks: false,
+                    supports_pagination: false,
+                }
+            }
+
+            fn rate_limit_config(&self) -> RateLimitConfig {
+                RateLimitConfig {
+                    requests_per_second: 1.0,
+                    requests_per_minute: None,
+                    max_concurrent: 1,
+                    backoff: BackoffConfig::default(),
+                    respect_retry_after: false,
+                }
+            }
+
+            async fn health_check(&self) -> Result<ConnectorHealth, ConnectorError> {
+                Ok(ConnectorHealth {
+                    connected: true,
+                    message: None,
+                    latency_ms: None,
+                })
+            }
+
+            async fn fetch_metrics(
+                &self,
+                _database: &DatabaseId,
+                _window: &TimeWindow,
+            ) -> Result<Vec<Metric>, ConnectorError> {
+                Ok(vec![Metric {
+                    name: "pg.connections".to_string(),
+                    value: 17.0,
+                    unit: Some("count".to_string()),
+                    timestamp: std::time::SystemTime::UNIX_EPOCH,
+                    tags: HashMap::new(),
+                    source: "metric-stub".to_string(),
+                }])
+            }
+
+            async fn fetch_alerts(
+                &self,
+                _database: &DatabaseId,
+            ) -> Result<Vec<Alert>, ConnectorError> {
+                Ok(vec![])
+            }
+        }
+
+        let connector = MetricStub;
+        let window = TimeWindow {
+            start: std::time::SystemTime::UNIX_EPOCH,
+            end: std::time::SystemTime::now(),
+        };
+        let result = connector
+            .normalize_metrics(&"testdb".to_string(), &window)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        let nm = &result[0];
+        assert_eq!(
+            nm.category,
+            MetricCategory::Custom("pg.connections".to_string())
+        );
+        assert_eq!(nm.value, 17.0);
+        assert_eq!(nm.unit, "count");
+        assert_eq!(nm.database.as_deref(), Some("testdb"));
+        assert_eq!(nm.source, "metric-stub");
+        assert_eq!(nm.raw_name, "pg.connections");
+    }
+
+    #[tokio::test]
+    async fn normalize_metrics_unit_defaults_to_empty_when_none() {
+        struct NoUnitStub;
+
+        #[async_trait]
+        impl Connector for NoUnitStub {
+            fn id(&self) -> &str {
+                "no-unit-stub"
+            }
+
+            fn name(&self) -> &str {
+                "No Unit Stub"
+            }
+
+            fn capabilities(&self) -> ConnectorCapabilities {
+                ConnectorCapabilities {
+                    can_fetch_metrics: true,
+                    can_fetch_alerts: false,
+                    can_create_issues: false,
+                    can_update_issues: false,
+                    can_receive_webhooks: false,
+                    supports_pagination: false,
+                }
+            }
+
+            fn rate_limit_config(&self) -> RateLimitConfig {
+                RateLimitConfig {
+                    requests_per_second: 1.0,
+                    requests_per_minute: None,
+                    max_concurrent: 1,
+                    backoff: BackoffConfig::default(),
+                    respect_retry_after: false,
+                }
+            }
+
+            async fn health_check(&self) -> Result<ConnectorHealth, ConnectorError> {
+                Ok(ConnectorHealth {
+                    connected: true,
+                    message: None,
+                    latency_ms: None,
+                })
+            }
+
+            async fn fetch_metrics(
+                &self,
+                _database: &DatabaseId,
+                _window: &TimeWindow,
+            ) -> Result<Vec<Metric>, ConnectorError> {
+                Ok(vec![Metric {
+                    name: "raw.metric".to_string(),
+                    value: 1.0,
+                    unit: None,
+                    timestamp: std::time::SystemTime::UNIX_EPOCH,
+                    tags: HashMap::new(),
+                    source: "no-unit-stub".to_string(),
+                }])
+            }
+
+            async fn fetch_alerts(
+                &self,
+                _database: &DatabaseId,
+            ) -> Result<Vec<Alert>, ConnectorError> {
+                Ok(vec![])
+            }
+        }
+
+        let connector = NoUnitStub;
+        let window = TimeWindow {
+            start: std::time::SystemTime::UNIX_EPOCH,
+            end: std::time::SystemTime::now(),
+        };
+        let result = connector
+            .normalize_metrics(&"db".to_string(), &window)
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].unit, "");
     }
 }
