@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Launchd plist for Rpg daemon mode (macOS).
+
+Installation:
+  1. Copy binary to /usr/local/bin/rpg
+  2. Copy config to ~/.config/rpg/config.toml
+  3. Create log directory: mkdir -p ~/Library/Logs/rpg
+  4. Copy this file to ~/Library/LaunchAgents/com.rpg.daemon.plist
+  5. Load: launchctl load ~/Library/LaunchAgents/com.rpg.daemon.plist
+
+To unload:
+  launchctl unload ~/Library/LaunchAgents/com.rpg.daemon.plist
+
+Environment variables:
+  Set PGHOST, PGPORT, etc. in the EnvironmentVariables dict below,
+  or configure connection details in config.toml.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rpg.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/rpg</string>
+        <string>--daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>~/Library/Logs/rpg/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>~/Library/Logs/rpg/stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Uncomment and set as needed:
+        <key>PGHOST</key>
+        <string>localhost</string>
+        <key>PGPORT</key>
+        <string>5432</string>
+        <key>PGUSER</key>
+        <string>rpg</string>
+        <key>PGDATABASE</key>
+        <string>postgres</string>
+        -->
+    </dict>
+</dict>
+</plist>

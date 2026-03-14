@@ -1,0 +1,64 @@
+# Systemd unit file for Rpg daemon mode.
+#
+# Installation:
+#   1. Copy binary to /usr/local/bin/rpg
+#   2. Copy this file to /etc/systemd/system/rpg-daemon.service
+#   3. Create config: mkdir -p /etc/rpg && cp config.toml /etc/rpg/
+#   4. Create user:   useradd --system --no-create-home rpg
+#   5. Enable:        systemctl enable --now rpg-daemon
+#
+# Environment variables (set in /etc/rpg/env or override file):
+#   PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD (or .pgpass)
+#   ANTHROPIC_API_KEY (optional, for AI features)
+
+[Unit]
+Description=Rpg — self-driving Postgres agent
+Documentation=https://github.com/NikolayS/project-alpha
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rpg
+Group=rpg
+
+ExecStart=/usr/local/bin/rpg --daemon
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# Environment
+EnvironmentFile=-/etc/rpg/env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# Allow writing to config and log directories
+ReadWritePaths=%h/.config/rpg /var/log/rpg /run/rpg
+
+# Resource limits
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rpg
+
+[Install]
+WantedBy=multi-user.target
