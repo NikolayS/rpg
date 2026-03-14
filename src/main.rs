@@ -370,6 +370,10 @@ struct Cli {
     #[arg(long, value_name = "URL")]
     webhook_url: Option<String>,
 
+    /// `PagerDuty` Events API v2 routing key for daemon notifications.
+    #[arg(long, value_name = "KEY")]
+    pagerduty_key: Option<String>,
+
     /// Path to PID file for daemon mode.
     #[arg(long, value_name = "PATH")]
     pid_file: Option<String>,
@@ -897,6 +901,11 @@ async fn main() {
                 }
                 if let Some(ref url) = cli.webhook_url {
                     channels.push(daemon::NotificationChannel::Webhook { url: url.clone() });
+                }
+                if let Some(ref key) = cli.pagerduty_key {
+                    channels.push(daemon::NotificationChannel::PagerDuty {
+                        routing_key: key.clone(),
+                    });
                 }
 
                 daemon::run(
