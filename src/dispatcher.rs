@@ -11,9 +11,30 @@
 use std::collections::HashMap;
 
 use crate::governance::{
-    ActionOutcome, ActionProposal, AuditDecision, AuditLog, Auditor, AutonomyLevel, CircuitBreaker,
-    FeatureArea, VetoTracker,
+    ActionOutcome, ActionProposal, AuditDecision, AuditLog, Auditor, AutoPromotionTracker,
+    AutonomyLevel, CircuitBreaker, FeatureArea, VetoTracker,
 };
+
+// ---------------------------------------------------------------------------
+// Promotion status
+// ---------------------------------------------------------------------------
+
+/// Promotion eligibility snapshot for a single feature area.
+#[allow(dead_code)]
+pub struct PromotionStatus {
+    /// The feature's current autonomy level.
+    pub current_level: AutonomyLevel,
+    /// Whether the feature has met the threshold for Auto promotion.
+    pub eligible_for_next: bool,
+    /// Number of successful Supervised actions recorded.
+    pub successful_actions: u32,
+    /// Number required before promotion is considered.
+    pub required_actions: u32,
+    /// Fraction of proposals approved by the Auditor (0.0–1.0).
+    pub approval_rate: f64,
+    /// Human-readable summary, e.g. `"S (→A 25/30 actions, 92% approval)"`.
+    pub display: String,
+}
 
 // ---------------------------------------------------------------------------
 // Dispatcher
@@ -28,12 +49,14 @@ use crate::governance::{
 /// 4. Executes (Auto) or defers (Supervised) approved proposals.
 /// 5. Records every outcome in the audit log.
 /// 6. Sets post-action verification on successful Auto executions.
+/// 7. Tracks Supervised approvals for Auto promotion eligibility.
 #[derive(Debug)]
 pub struct Dispatcher {
     auditor: Auditor,
     circuit_breakers: HashMap<FeatureArea, CircuitBreaker>,
     audit_log: AuditLog,
     veto_tracker: VetoTracker,
+    promotion_tracker: AutoPromotionTracker,
 }
 
 impl Dispatcher {
@@ -44,6 +67,7 @@ impl Dispatcher {
             circuit_breakers: HashMap::new(),
             audit_log: AuditLog::new(),
             veto_tracker: VetoTracker::new(),
+            promotion_tracker: AutoPromotionTracker::new(),
         }
     }
 
@@ -58,6 +82,7 @@ impl Dispatcher {
     /// 5. `Auto` (after downgrade checks) → log success; set verification.
     /// 6. `Supervised` → [`ActionOutcome::Skipped`] (logged for human
     ///    review).
+    /// 7. Supervised approvals are recorded in the promotion tracker.
     ///
     /// Every path records an entry in the audit log.
     pub fn dispatch_proposal(
@@ -155,6 +180,15 @@ impl Dispatcher {
             self.audit_log.set_verification(seq, true);
         }
 
+        // Record Supervised approvals in the promotion tracker so the feature
+        // can accumulate enough evidence to be eligible for Auto promotion.
+        if effective == AutonomyLevel::Supervised {
+            // Auditor approved (we reached here past the rejection branch).
+            // Supervised actions are "pending human"; count them as successful
+            // supervised outcomes for promotion-tracking purposes.
+            self.promotion_tracker.record(proposal.feature, true, true);
+        }
+
         outcome
     }
 
@@ -171,6 +205,67 @@ impl Dispatcher {
     /// Borrow the veto tracker.
     pub fn veto_tracker(&self) -> &VetoTracker {
         &self.veto_tracker
+    }
+
+    /// Borrow the promotion tracker.
+    pub fn promotion_tracker(&self) -> &AutoPromotionTracker {
+        &self.promotion_tracker
+    }
+
+    /// Return a promotion status snapshot for every known feature area.
+    ///
+    /// Only features that have at least one recorded Supervised action are
+    /// included. The `current_level` parameter describes what autonomy level
+    /// the feature currently runs at (supplied by the caller because the
+    /// Dispatcher itself does not own per-feature configuration).
+    #[allow(clippy::cast_precision_loss)]
+    pub fn promotion_status(
+        &self,
+        current_levels: &HashMap<FeatureArea, AutonomyLevel>,
+    ) -> Vec<(FeatureArea, PromotionStatus)> {
+        let required = u32::try_from(self.promotion_tracker.min_actions).unwrap_or(u32::MAX);
+        let mut result = Vec::new();
+
+        for (&feature, &current_level) in current_levels {
+            let (total, approved, successful) = self.promotion_tracker.stats(feature);
+            if total == 0 {
+                continue;
+            }
+            // total > 0 is guaranteed by the check above.
+            let approval_rate = approved as f64 / total as f64;
+            let eligible_for_next = current_level == AutonomyLevel::Supervised
+                && self.promotion_tracker.is_eligible(feature);
+
+            // Format approval rate as a rounded integer percentage string to
+            // avoid any integer cast lints (approval_rate is in [0.0, 1.0]).
+            let pct = format!("{:.0}", approval_rate * 100.0);
+            let display = match current_level {
+                AutonomyLevel::Supervised => {
+                    format!("S (\u{2192}A {successful}/{required} actions, {pct}% approval)")
+                }
+                AutonomyLevel::Auto => {
+                    format!("A ({successful} successful actions, {pct}% approval)")
+                }
+                AutonomyLevel::Observe => {
+                    format!("O ({total} actions observed)")
+                }
+            };
+
+            let successful_actions = u32::try_from(successful).unwrap_or(u32::MAX);
+            result.push((
+                feature,
+                PromotionStatus {
+                    current_level,
+                    eligible_for_next,
+                    successful_actions,
+                    required_actions: required,
+                    approval_rate,
+                    display,
+                },
+            ));
+        }
+
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -694,5 +789,205 @@ mod tests {
     fn veto_tracker_accessor_works() {
         let d = Dispatcher::new();
         assert_eq!(d.veto_tracker().veto_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 22. New dispatcher has no promotion history
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_dispatcher_has_no_promotion_history() {
+        let d = Dispatcher::new();
+        let (total, approved, successful) = d.promotion_tracker().stats(FeatureArea::Vacuum);
+        assert_eq!(total, 0, "new dispatcher: total must be 0");
+        assert_eq!(approved, 0, "new dispatcher: approved must be 0");
+        assert_eq!(successful, 0, "new dispatcher: successful must be 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // 23. Supervised approval increments the promotion tracker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn supervised_success_increments_tracker() {
+        let mut d = Dispatcher::new();
+        let p = make_proposal(
+            FeatureArea::Vacuum,
+            EvidenceClass::Factual,
+            "VACUUM ANALYZE users",
+            "Dead tuple ratio high",
+        );
+        d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+        let (total, _approved, successful) = d.promotion_tracker().stats(FeatureArea::Vacuum);
+        assert_eq!(total, 1, "one Supervised action must be recorded");
+        assert_eq!(successful, 1, "approved Supervised counts as successful");
+    }
+
+    // -----------------------------------------------------------------------
+    // 24. Promotion eligible after threshold met
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn promotion_eligible_after_threshold_met() {
+        let mut d = Dispatcher::new();
+        // Default threshold is 30; use a tracker with a lower threshold to
+        // keep the test fast without bypassing the real code path.
+        d.promotion_tracker.min_actions = 3;
+        d.promotion_tracker.min_approval_rate = 0.5;
+
+        for _ in 0..3 {
+            let p = make_proposal(
+                FeatureArea::Vacuum,
+                EvidenceClass::Factual,
+                "VACUUM ANALYZE users",
+                "Dead tuple ratio high",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+        }
+        assert!(
+            d.promotion_tracker().is_eligible(FeatureArea::Vacuum),
+            "feature must be eligible after meeting the threshold"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 25. Not eligible before threshold
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn not_eligible_before_threshold() {
+        let mut d = Dispatcher::new();
+        // Record fewer actions than the default threshold (30).
+        for _ in 0..5 {
+            let p = make_proposal(
+                FeatureArea::Bloat,
+                EvidenceClass::Factual,
+                "REINDEX CONCURRENTLY idx",
+                "Bloat detected",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+        }
+        assert!(
+            !d.promotion_tracker().is_eligible(FeatureArea::Bloat),
+            "feature must not be eligible before threshold"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 26. Status display format is correct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_display_format_correct() {
+        let mut d = Dispatcher::new();
+        d.promotion_tracker.min_actions = 10;
+        d.promotion_tracker.min_approval_rate = 0.8;
+
+        for _ in 0..5 {
+            let p = make_proposal(
+                FeatureArea::IndexHealth,
+                EvidenceClass::Factual,
+                "REINDEX CONCURRENTLY idx_users_email",
+                "Unused index detected",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+        }
+
+        let mut levels = HashMap::new();
+        levels.insert(FeatureArea::IndexHealth, AutonomyLevel::Supervised);
+        let statuses = d.promotion_status(&levels);
+        assert_eq!(statuses.len(), 1);
+        let (_, status) = &statuses[0];
+        // Display must contain the arrow, counts, and approval percentage.
+        assert!(
+            status.display.contains("→A"),
+            "display must contain promotion arrow"
+        );
+        assert!(
+            status.display.contains("5/10"),
+            "display must show current/required counts"
+        );
+        assert!(
+            status.display.contains("100%"),
+            "display must show approval rate"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 27. Multiple features tracked independently
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_features_tracked_independently() {
+        let mut d = Dispatcher::new();
+        // Vacuum: 2 actions; Bloat: 5 actions.
+        for _ in 0..2 {
+            let p = make_proposal(
+                FeatureArea::Vacuum,
+                EvidenceClass::Factual,
+                "VACUUM ANALYZE users",
+                "Dead tuples",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+        }
+        for _ in 0..5 {
+            let p = make_proposal(
+                FeatureArea::Bloat,
+                EvidenceClass::Factual,
+                "REINDEX CONCURRENTLY idx",
+                "Bloat detected",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+        }
+        let (vacuum_total, _, _) = d.promotion_tracker().stats(FeatureArea::Vacuum);
+        let (bloat_total, _, _) = d.promotion_tracker().stats(FeatureArea::Bloat);
+        assert_eq!(vacuum_total, 2, "Vacuum must have 2 actions");
+        assert_eq!(bloat_total, 5, "Bloat must have 5 actions");
+    }
+
+    // -----------------------------------------------------------------------
+    // 28. Auto actions do not affect promotion tracking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_actions_do_not_affect_promotion_tracking() {
+        let mut d = Dispatcher::new();
+        for _ in 0..10 {
+            let p = make_proposal(
+                FeatureArea::Rca,
+                EvidenceClass::Factual,
+                "SELECT pg_cancel_backend(1)",
+                "Long-running query",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Auto);
+        }
+        let (total, _, _) = d.promotion_tracker().stats(FeatureArea::Rca);
+        assert_eq!(
+            total, 0,
+            "Auto actions must not contribute to promotion tracking"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 29. Observe actions do not affect promotion tracking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn observe_actions_do_not_affect_tracking() {
+        let mut d = Dispatcher::new();
+        for _ in 0..5 {
+            let p = make_proposal(
+                FeatureArea::Vacuum,
+                EvidenceClass::Factual,
+                "VACUUM ANALYZE users",
+                "Dead tuples",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Observe);
+        }
+        let (total, _, _) = d.promotion_tracker().stats(FeatureArea::Vacuum);
+        assert_eq!(
+            total, 0,
+            "Observe actions must not contribute to promotion tracking"
+        );
     }
 }
