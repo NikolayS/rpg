@@ -465,8 +465,7 @@ async fn collect_lock_edges(
 ) -> Vec<LockEdge> {
     // waitstart was added in PG 14. Since we target PG 14-18 it is always
     // available, but guard defensively in case the capabilities probe failed.
-    let has_waitstart = capabilities
-        .is_none_or(|c| c.pg_major_version().is_none_or(|v| v >= 14));
+    let has_waitstart = capabilities.is_none_or(|c| c.pg_major_version().is_none_or(|v| v >= 14));
 
     let sql = build_locks_sql(has_waitstart);
     crate::logging::trace("dba", &format!("locks diagnostic query: {}", sql.trim()));
@@ -561,9 +560,7 @@ fn build_locks_sql(has_waitstart: bool) -> String {
 }
 
 /// Parse `SimpleQueryMessage` rows into `LockEdge` values.
-fn parse_lock_edges(
-    messages: Vec<tokio_postgres::SimpleQueryMessage>,
-) -> Vec<LockEdge> {
+fn parse_lock_edges(messages: Vec<tokio_postgres::SimpleQueryMessage>) -> Vec<LockEdge> {
     let mut edges = Vec::new();
     for msg in messages {
         if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
