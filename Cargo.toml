@@ -20,6 +20,7 @@ name = "rpg"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = "0.1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
