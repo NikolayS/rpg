@@ -999,6 +999,12 @@ pub struct ReplSettings {
     /// by querying `current_setting('is_superuser')`.  Controls whether the
     /// prompt shows `#` (superuser) or `>` (regular user).
     pub is_superuser: bool,
+    /// Shared schema cache for tab completion.
+    ///
+    /// `None` in non-interactive paths (e.g. `-c`, `-f`, piped stdin).
+    /// Set to `Some(...)` by the readline loop so that `\refresh` can
+    /// update the same `Arc` that the completion helper holds.
+    pub schema_cache: Option<Arc<RwLock<SchemaCache>>>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1064,6 +1070,10 @@ impl std::fmt::Debug for ReplSettings {
             .field("session_id", &self.session_id)
             .field("query_count", &self.query_count)
             .field("is_superuser", &self.is_superuser)
+            .field(
+                "schema_cache",
+                &self.schema_cache.as_ref().map(|_| "<cache>"),
+            )
             .finish()
     }
 }
@@ -1111,6 +1121,7 @@ impl Default for ReplSettings {
             session_id: crate::session_store::new_session_id(),
             query_count: 0,
             is_superuser: false,
+            schema_cache: None,
         }
     }
 }
@@ -4207,6 +4218,20 @@ async fn dispatch_meta(
         MetaCmd::InteractiveMode => {
             return MetaResult::SetExecMode(ExecMode::Interactive);
         }
+        MetaCmd::RefreshSchema => match &settings.schema_cache {
+            None => {
+                eprintln!("\\refresh: no active connection or not in interactive mode");
+            }
+            Some(cache) => match load_schema_cache(client).await {
+                Ok(loaded) => {
+                    *cache.write().unwrap() = loaded;
+                    println!("Schema cache refreshed.");
+                }
+                Err(e) => {
+                    eprintln!("\\refresh: failed to reload schema cache: {e}");
+                }
+            },
+        },
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
@@ -4717,6 +4742,9 @@ async fn run_readline_loop(
             }
         }
     }
+    // Store the Arc in settings so `\refresh` can update the same cache
+    // that the completion helper holds.
+    settings.schema_cache = Some(Arc::clone(&cache));
     // Enable syntax highlighting unless the user opted out or $TERM is dumb.
     let highlight = !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb");
     let helper = SamoHelper::new(Arc::clone(&cache), highlight);
