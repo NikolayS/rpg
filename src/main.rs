@@ -37,6 +37,7 @@ mod session;
 mod session_store;
 mod setup;
 mod ssh_tunnel;
+mod statusline;
 mod vars;
 
 // Phase 2/3 infrastructure — compiled but not yet wired into the main
