@@ -154,6 +154,8 @@ pub enum NotificationChannel {
     /// Email (placeholder — not implemented in v1).
     #[allow(dead_code)]
     Email { to: String },
+    /// `PagerDuty` Events API v2 routing key.
+    PagerDuty { routing_key: String },
     /// Log to stderr (always active).
     Stderr,
 }
@@ -166,6 +168,9 @@ pub async fn notify(channel: &NotificationChannel, message: &str) {
         }
         NotificationChannel::Webhook { url } => {
             send_webhook_notification(url, message).await;
+        }
+        NotificationChannel::PagerDuty { routing_key } => {
+            send_pagerduty_notification(routing_key, message).await;
         }
         NotificationChannel::Email { to } => {
             eprintln!("[daemon] Email notification to {to}: {message}");
@@ -229,6 +234,41 @@ async fn send_slack_notification(webhook_url: &str, message: &str) {
         }
         Err(e) => {
             crate::logging::warn("daemon", &format!("Slack notification error: {e}"));
+        }
+    }
+}
+
+async fn send_pagerduty_notification(routing_key: &str, message: &str) {
+    let payload = serde_json::to_string(&serde_json::json!({
+        "routing_key": routing_key,
+        "event_action": "trigger",
+        "payload": {
+            "summary": message,
+            "source": "rpg",
+            "severity": "critical",
+            "timestamp": chrono_now(),
+        }
+    }))
+    .unwrap_or_else(|_| r#"{"routing_key":"","event_action":"trigger","payload":{"summary":"(encoding error)","source":"rpg","severity":"critical"}}"#.to_owned());
+
+    match reqwest::Client::new()
+        .post("https://events.pagerduty.com/v2/enqueue")
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            crate::logging::debug("daemon", "PagerDuty notification sent");
+        }
+        Ok(resp) => {
+            crate::logging::warn(
+                "daemon",
+                &format!("PagerDuty notification failed: HTTP {}", resp.status()),
+            );
+        }
+        Err(e) => {
+            crate::logging::warn("daemon", &format!("PagerDuty notification error: {e}"));
         }
     }
 }
@@ -1347,6 +1387,38 @@ mod tests {
         if let NotificationChannel::Webhook { url } = ch {
             assert!(url.starts_with("https://"));
         }
+    }
+
+    #[test]
+    fn notification_channel_pagerduty_has_key() {
+        let ch = NotificationChannel::PagerDuty {
+            routing_key: "r0utingk3y1234567890abcdef".to_owned(),
+        };
+        if let NotificationChannel::PagerDuty { routing_key } = ch {
+            assert!(!routing_key.is_empty());
+        }
+    }
+
+    #[test]
+    fn pagerduty_payload_has_required_fields() {
+        let message = "test pg alert";
+        let routing_key = "testkey123";
+        let payload = serde_json::to_string(&serde_json::json!({
+            "routing_key": routing_key,
+            "event_action": "trigger",
+            "payload": {
+                "summary": message,
+                "source": "rpg",
+                "severity": "critical",
+                "timestamp": chrono_now(),
+            }
+        }))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["routing_key"], routing_key);
+        assert_eq!(v["event_action"], "trigger");
+        assert_eq!(v["payload"]["summary"], message);
+        assert_eq!(v["payload"]["severity"], "critical");
     }
 
     #[test]
