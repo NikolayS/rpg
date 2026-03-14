@@ -51,7 +51,7 @@ const GIT_HASH: &str = env!("SAMO_GIT_HASH");
 /// Build-time date (UTC, `YYYY-MM-DD`) injected by `build.rs`.
 const BUILD_DATE: &str = env!("SAMO_BUILD_DATE");
 
-/// One-line version string: `samo 0.1.0 (abc1234, built 2026-03-13)`.
+/// One-line version string: `samo 0.2.0 (abc1234, built 2026-03-13)`.
 ///
 /// Exposed as `pub` so that meta-command handlers can print it without
 /// duplicating the formatting logic.

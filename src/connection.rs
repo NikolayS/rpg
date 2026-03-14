@@ -948,7 +948,7 @@ pub fn connection_info(params: &ConnParams) -> String {
 /// prepends a version banner — e.g.:
 ///
 /// ```text
-/// samo 0.1.0 (...) (server PostgreSQL 17.7)
+/// samo 0.2.0 (...) (server PostgreSQL 17.7)
 /// You are now connected to database "mydb" as user "alice" on host "other"
 /// at port "5432".
 /// ```
@@ -1466,7 +1466,7 @@ mod tests {
         };
         assert_eq!(
             reconnect_info(
-                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                "samo 0.2.0 (abc1234, built 2026-01-01)",
                 Some("17.2"),
                 &old,
                 &new
@@ -1495,12 +1495,12 @@ mod tests {
         };
         assert_eq!(
             reconnect_info(
-                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                "samo 0.2.0 (abc1234, built 2026-01-01)",
                 Some("16.3"),
                 &old,
                 &new
             ),
-            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
+            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".",
         );
@@ -1525,12 +1525,12 @@ mod tests {
         };
         assert_eq!(
             reconnect_info(
-                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                "samo 0.2.0 (abc1234, built 2026-01-01)",
                 Some("15.6"),
                 &old,
                 &new
             ),
-            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL 15.6)\n\
+            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 15.6)\n\
              You are now connected to database \"mydb\" as user \"postgres\" \
              on host \"localhost\" at port \"5433\".",
         );
@@ -1555,7 +1555,7 @@ mod tests {
         };
         assert_eq!(
             reconnect_info(
-                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                "samo 0.2.0 (abc1234, built 2026-01-01)",
                 Some("17.2"),
                 &old,
                 &new
@@ -1583,8 +1583,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.1.0 (abc1234, built 2026-01-01)", None, &old, &new),
-            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL unknown)\n\
+            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", None, &old, &new),
+            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL unknown)\n\
              You are now connected to database \"postgres\" as user \"postgres\" \
              on host \"other.host\" at port \"5432\".",
         );
@@ -1648,7 +1648,7 @@ mod tests {
         };
         assert_eq!(
             reconnect_info(
-                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                "samo 0.2.0 (abc1234, built 2026-01-01)",
                 Some("17.2"),
                 &old,
                 &new
@@ -1679,12 +1679,12 @@ mod tests {
         };
         assert_eq!(
             reconnect_info(
-                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                "samo 0.2.0 (abc1234, built 2026-01-01)",
                 Some("16.3"),
                 &old,
                 &new
             ),
-            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
+            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".\n\
              SSL connection (protocol: TLS, compression: off)",
