@@ -45,6 +45,7 @@ mod vars;
 // Phase 2/3 infrastructure — compiled but not yet wired into the main
 // dispatch loop. Each module suppresses dead_code at the item level.
 mod anomaly;
+mod bloat;
 mod index_health;
 mod issues;
 mod rca_actions;
