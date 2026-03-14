@@ -2579,7 +2579,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// psql always shows "List of relations" for \dt, \di, \dv, \ds, \dm and
-    /// their + variants.  Verify that relation_title() matches this for all
+    /// their + variants.  Verify that `relation_title()` matches this for all
     /// relkind combinations.
     #[test]
     fn relation_title_tables() {
