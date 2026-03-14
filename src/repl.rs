@@ -6396,6 +6396,19 @@ async fn handle_ai_ask(
         wait = wait_section,
     );
 
+    // In text2sql mode, strengthen the system prompt so the LLM outputs
+    // only SQL and no surrounding commentary.
+    let system_content = if settings.input_mode == InputMode::Text2Sql {
+        format!(
+            "{system_content}\n\n\
+             IMPORTANT: You are in text2sql mode. Output ONLY the SQL query \
+             inside a ```sql code fence. Do NOT include any explanatory text, \
+             commentary, or description. Just the SQL."
+        )
+    } else {
+        system_content
+    };
+
     // Build messages: system + conversation history + current prompt.
     let mut messages = vec![crate::ai::Message {
         role: crate::ai::Role::System,
@@ -6448,6 +6461,12 @@ async fn handle_ai_ask(
     for segment in &segments {
         match segment {
             AiResponseSegment::Text(text) => {
+                // In text2sql mode, suppress LLM commentary — only show SQL
+                // results. The system prompt already discourages the LLM from
+                // emitting text, but this guard handles any residual output.
+                if settings.input_mode == InputMode::Text2Sql {
+                    continue;
+                }
                 let text = text.trim();
                 if !text.is_empty() {
                     println!("{text}");
@@ -9705,6 +9724,38 @@ mod tests {
         assert!(!segs[0].0);
         assert!(segs[1].0);
         assert_eq!(segs[1].1, "SELECT 1;");
+    }
+
+    // -- text2sql commentary suppression ---------------------------------------
+
+    /// Verify that a mixed LLM response (text + SQL + text) parsed into
+    /// segments produces exactly one SQL segment and two text segments, so
+    /// the caller can skip the text segments when in text2sql mode.
+    ///
+    /// The actual suppression is done in `handle_ai_ask()` by checking
+    /// `settings.input_mode == InputMode::Text2Sql` before printing text
+    /// segments; this test confirms the segments are correctly identified for
+    /// that guard to act on.
+    #[test]
+    fn text2sql_response_contains_suppressible_text_segments() {
+        let response = "It looks like the query executed successfully.\n\
+                        ```sql\nselect count(*) from users;\n```\n\
+                        This will return the total number of rows in the \
+                        users table.";
+        let segs = collect_segments(response);
+
+        let text_segs: Vec<_> = segs.iter().filter(|(is_sql, _)| !is_sql).collect();
+        let sql_segs: Vec<_> = segs.iter().filter(|(is_sql, _)| *is_sql).collect();
+
+        // Both surrounding text segments are present and would be suppressed
+        // by the InputMode::Text2Sql guard in handle_ai_ask().
+        assert_eq!(
+            text_segs.len(),
+            2,
+            "expected two suppressible text segments"
+        );
+        assert_eq!(sql_segs.len(), 1, "expected one SQL segment");
+        assert_eq!(sql_segs[0].1, "select count(*) from users;");
     }
 
     // -- is_ddl_statement -----------------------------------------------------
