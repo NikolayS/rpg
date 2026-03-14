@@ -10039,8 +10039,10 @@ mod tests {
 
     #[test]
     fn fkey_text2sql_toggle_sql_to_text2sql() {
-        let mut s = ReplSettings::default();
-        s.input_mode = InputMode::Sql;
+        let mut s = ReplSettings {
+            input_mode: InputMode::Sql,
+            ..Default::default()
+        };
         apply_fkey_toggle(FKeyAction::Text2Sql, &mut s);
         assert_eq!(s.input_mode, InputMode::Text2Sql);
     }
@@ -10057,8 +10059,10 @@ mod tests {
 
     #[test]
     fn fkey_vi_emacs_toggle_on() {
-        let mut s = ReplSettings::default();
-        s.vi_mode = false;
+        let mut s = ReplSettings {
+            vi_mode: false,
+            ..Default::default()
+        };
         apply_fkey_toggle(FKeyAction::ViEmacs, &mut s);
         assert!(s.vi_mode);
         assert!(s.config.display.vi_mode);
