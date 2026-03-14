@@ -46,6 +46,7 @@ mod vars;
 // dispatch loop. Each module suppresses dead_code at the item level.
 mod anomaly;
 mod bloat;
+mod config_tuning;
 mod index_health;
 mod issues;
 mod rca_actions;
