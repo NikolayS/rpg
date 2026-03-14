@@ -8,9 +8,9 @@
 //! # Syntax
 //!
 //! ```text
-//! \copy table [(col, …)] FROM 'file'|stdin  [options]
-//! \copy table             TO   'file'|stdout [options]
-//! \copy (query)           TO   'file'|stdout [options]
+//! \copy table [(col, …)] FROM 'file'|stdin|PROGRAM 'cmd'  [options]
+//! \copy table             TO   'file'|stdout|PROGRAM 'cmd' [options]
+//! \copy (query)           TO   'file'|stdout|PROGRAM 'cmd' [options]
 //! ```
 //!
 //! Options: `CSV`, `TEXT`, `DELIMITER 'x'`, `HEADER`, `NULL 'str'`
@@ -46,6 +46,9 @@ pub enum CopySource {
     Stdin,
     /// Standard output.
     Stdout,
+    /// A shell command whose stdout (FROM) or stdin (TO) is used.
+    /// The command is executed via `sh -c`.
+    Program(String),
 }
 
 /// Wire format used for the copy data stream.
@@ -106,23 +109,39 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
     };
 
     // -----------------------------------------------------------------------
-    // Step 3 — file path / stdin / stdout
+    // Step 3 — file path / stdin / stdout / PROGRAM 'cmd'
     // -----------------------------------------------------------------------
     let src_tok = tokens
         .next()
-        .ok_or_else(|| "\\copy: missing file path or stdin/stdout".to_owned())?;
+        .ok_or_else(|| "\\copy: missing file path, stdin/stdout, or PROGRAM".to_owned())?;
 
-    let source = match src_tok.to_lowercase().as_str() {
-        "stdin" => CopySource::Stdin,
-        "stdout" => CopySource::Stdout,
-        _ => {
-            // Strip surrounding single quotes if present.
-            let path = src_tok
-                .strip_prefix('\'')
-                .and_then(|s| s.strip_suffix('\''))
-                .unwrap_or(&src_tok)
-                .to_owned();
-            CopySource::File(path)
+    let source = if src_tok.eq_ignore_ascii_case("program") {
+        // PROGRAM requires a quoted command string as the next token.
+        let cmd_tok = tokens
+            .next()
+            .ok_or_else(|| "\\copy: PROGRAM requires a command string".to_owned())?;
+        let cmd = cmd_tok
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .unwrap_or(&cmd_tok)
+            .to_owned();
+        if cmd.is_empty() {
+            return Err("\\copy: PROGRAM command must not be empty".to_owned());
+        }
+        CopySource::Program(cmd)
+    } else {
+        match src_tok.to_lowercase().as_str() {
+            "stdin" => CopySource::Stdin,
+            "stdout" => CopySource::Stdout,
+            _ => {
+                // Strip surrounding single quotes if present.
+                let path = src_tok
+                    .strip_prefix('\'')
+                    .and_then(|s| s.strip_suffix('\''))
+                    .unwrap_or(&src_tok)
+                    .to_owned();
+                CopySource::File(path)
+            }
         }
     };
 
@@ -351,6 +370,7 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
             // Validated earlier; this branch is unreachable in practice.
             return Err("\\copy: STDOUT is not valid for FROM direction".to_owned());
         }
+        CopySource::Program(cmd) => run_program_capture_stdout(cmd)?,
     };
 
     let sink = client
@@ -416,6 +436,43 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
             // Validated earlier; this branch is unreachable in practice.
             return Err("\\copy: STDIN is not valid for TO direction".to_owned());
         }
+        CopySource::Program(cmd) => {
+            // Collect all data from the server, pipe it to the program's stdin,
+            // then wait for the program to exit.
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("\\copy: could not spawn program '{cmd}': {e}"))?;
+
+            let mut child_stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "\\copy: could not open program stdin".to_owned())?;
+
+            let mut row_count = 0u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
+                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
+                child_stdin
+                    .write_all(&chunk)
+                    .map_err(|e| format!("\\copy: write to program failed: {e}"))?;
+            }
+            // Drop stdin to signal EOF to the child process.
+            drop(child_stdin);
+
+            let status = child
+                .wait()
+                .map_err(|e| format!("\\copy: waiting for program failed: {e}"))?;
+            if !status.success() {
+                let code = status
+                    .code()
+                    .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+                return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
+            }
+            println!("COPY {row_count}");
+        }
     }
 
     Ok(())
@@ -439,6 +496,28 @@ fn read_stdin_until_terminator() -> Result<Vec<u8>, String> {
         buf.push(b'\n');
     }
     Ok(buf)
+}
+
+/// Spawn `sh -c <cmd>`, wait for it to finish, and return its stdout bytes.
+/// Returns an error if the command exits with a non-zero status.
+fn run_program_capture_stdout(cmd: &str) -> Result<Vec<u8>, String> {
+    use std::process::Command;
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("\\copy: could not spawn program '{cmd}': {e}"))?;
+
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
+    }
+
+    Ok(output.stdout)
 }
 
 // ---------------------------------------------------------------------------
@@ -939,6 +1018,77 @@ mod tests {
         let spec = parse_copy_args("t FROM '/f' WITH (FORMAT text, DELIMITER ',')").unwrap();
         assert_eq!(spec.format, CopyFormat::Text);
         assert_eq!(spec.delimiter, Some(','));
+    }
+
+    // --- PROGRAM variant tests ---------------------------------------------
+
+    #[test]
+    fn test_parse_from_program() {
+        let spec = parse_copy_args("my_table FROM PROGRAM 'cat /tmp/data.txt'").unwrap();
+        assert_eq!(spec.direction, CopyDirection::From);
+        assert_eq!(
+            spec.source,
+            CopySource::Program("cat /tmp/data.txt".to_owned())
+        );
+        assert_eq!(
+            spec.target,
+            CopyTarget::Table {
+                name: "my_table".to_owned(),
+                columns: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_to_program() {
+        let spec = parse_copy_args("orders TO PROGRAM 'gzip > /tmp/out.csv.gz'").unwrap();
+        assert_eq!(spec.direction, CopyDirection::To);
+        assert_eq!(
+            spec.source,
+            CopySource::Program("gzip > /tmp/out.csv.gz".to_owned())
+        );
+        assert_eq!(
+            spec.target,
+            CopyTarget::Table {
+                name: "orders".to_owned(),
+                columns: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_from_program_with_options() {
+        let spec = parse_copy_args("t FROM PROGRAM 'echo hello' CSV HEADER").unwrap();
+        assert_eq!(spec.direction, CopyDirection::From);
+        assert_eq!(spec.source, CopySource::Program("echo hello".to_owned()));
+        assert_eq!(spec.format, CopyFormat::Csv);
+        assert!(spec.header);
+    }
+
+    #[test]
+    fn test_parse_to_program_case_insensitive() {
+        // The keyword PROGRAM should be case-insensitive.
+        let spec = parse_copy_args("t TO program 'sort'").unwrap();
+        assert_eq!(spec.direction, CopyDirection::To);
+        assert_eq!(spec.source, CopySource::Program("sort".to_owned()));
+    }
+
+    #[test]
+    fn test_parse_program_missing_command_is_error() {
+        assert!(parse_copy_args("t FROM PROGRAM").is_err());
+    }
+
+    #[test]
+    fn test_parse_program_empty_command_is_error() {
+        assert!(parse_copy_args("t FROM PROGRAM ''").is_err());
+    }
+
+    #[test]
+    fn test_parse_query_to_program() {
+        let spec = parse_copy_args("(select id from users) TO PROGRAM 'wc -l'").unwrap();
+        assert_eq!(spec.direction, CopyDirection::To);
+        assert!(matches!(spec.target, CopyTarget::Query(_)));
+        assert_eq!(spec.source, CopySource::Program("wc -l".to_owned()));
     }
 
     #[test]
