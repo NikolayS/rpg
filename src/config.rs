@@ -1762,9 +1762,9 @@ protected_tables = ["users", "payments", "audit_log"]
         let found = find_project_config(dir.path());
         // May find a real .samo.toml in parent dirs, so only assert None
         // when we are outside the home directory tree.
-        if found.is_some() {
+        if let Some(path) = found {
             // A .samo.toml exists somewhere above the temp dir — that is fine.
-            assert!(found.unwrap().file_name().unwrap() == ".samo.toml");
+            assert!(path.file_name().unwrap() == ".samo.toml");
         }
     }
 }
