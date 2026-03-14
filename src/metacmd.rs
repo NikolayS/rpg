@@ -149,15 +149,16 @@ pub enum MetaCmd {
     /// `\password [user]` — prompt for a new password for a user.
     Password,
 
-    // -- Conditional execution (#37) --------------------------------------
-    /// `\if expression` — begin a conditional block.
+    // -- Conditional execution (#393) -------------------------------------
+    /// `\if <expression>` — begin a conditional block.
     ///
-    /// The expression is stored in the `pattern` field after parsing.
-    If,
-    /// `\elif expression` — alternate branch of a conditional block.
+    /// The expression is variable-interpolated by the caller before parsing;
+    /// this variant carries the final string to be evaluated for truthiness.
+    If(String),
+    /// `\elif <expression>` — alternate branch of a conditional block.
     ///
-    /// The expression is stored in the `pattern` field after parsing.
-    Elif,
+    /// Like `If`, the expression has already been variable-interpolated.
+    Elif(String),
     /// `\else` — unconditional alternate branch of a conditional block.
     Else,
     /// `\endif` — end a conditional block.
@@ -1078,21 +1079,11 @@ fn parse_e_family(input: &str) -> ParsedMeta {
         }
     }
 
-    // `\elif <expression>` — expression captured in `pattern`.
+    // `\elif <expression>` — expression carried in the variant.
     if let Some(rest) = input.strip_prefix("elif") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let expr = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::Elif,
-                plus: false,
-                system: false,
-                pattern: if expr.is_empty() {
-                    None
-                } else {
-                    Some(expr.to_owned())
-                },
-                echo_hidden: false,
-            };
+            let expr = rest.trim().to_owned();
+            return ParsedMeta::simple(MetaCmd::Elif(expr));
         }
     }
 
@@ -1131,21 +1122,11 @@ fn parse_i_family(input: &str) -> ParsedMeta {
             return ParsedMeta::simple(MetaCmd::InteractiveMode);
         }
     }
-    // `\if <expression>` — expression captured in `pattern`.
+    // `\if <expression>` — expression carried in the variant.
     if let Some(rest) = input.strip_prefix("if") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let expr = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::If,
-                plus: false,
-                system: false,
-                pattern: if expr.is_empty() {
-                    None
-                } else {
-                    Some(expr.to_owned())
-                },
-                echo_hidden: false,
-            };
+            let expr = rest.trim().to_owned();
+            return ParsedMeta::simple(MetaCmd::If(expr));
         }
     }
 
@@ -2572,34 +2553,32 @@ mod tests {
         assert_eq!(parse("\\p").cmd, MetaCmd::PrintBuffer);
     }
 
-    // -- \if / \elif / \else / \endif (#37) ----------------------------------
+    // -- \if / \elif / \else / \endif (#393) ---------------------------------
 
     #[test]
     fn parse_if_with_expression() {
         let m = parse("\\if true");
-        assert_eq!(m.cmd, MetaCmd::If);
-        assert_eq!(m.pattern, Some("true".to_owned()));
+        assert_eq!(m.cmd, MetaCmd::If("true".to_owned()));
     }
 
     #[test]
     fn parse_if_bare_no_expression() {
+        // Bare `\if` without an expression results in an empty string payload.
         let m = parse("\\if");
-        assert_eq!(m.cmd, MetaCmd::If);
-        assert!(m.pattern.is_none());
+        assert_eq!(m.cmd, MetaCmd::If(String::new()));
     }
 
     #[test]
     fn parse_elif_with_expression() {
         let m = parse("\\elif false");
-        assert_eq!(m.cmd, MetaCmd::Elif);
-        assert_eq!(m.pattern, Some("false".to_owned()));
+        assert_eq!(m.cmd, MetaCmd::Elif("false".to_owned()));
     }
 
     #[test]
     fn parse_elif_bare() {
+        // Bare `\elif` — empty expression string.
         let m = parse("\\elif");
-        assert_eq!(m.cmd, MetaCmd::Elif);
-        assert!(m.pattern.is_none());
+        assert_eq!(m.cmd, MetaCmd::Elif(String::new()));
     }
 
     #[test]
@@ -2616,7 +2595,7 @@ mod tests {
     #[test]
     fn parse_if_not_confused_with_include() {
         // \if starts with 'i'; must not match \i or \ir
-        assert_eq!(parse("\\if true").cmd, MetaCmd::If);
+        assert!(matches!(parse("\\if true").cmd, MetaCmd::If(_)));
         assert_eq!(parse("\\i file.sql").cmd, MetaCmd::Include);
         assert_eq!(parse("\\ir file.sql").cmd, MetaCmd::IncludeRelative);
     }
@@ -2624,7 +2603,7 @@ mod tests {
     #[test]
     fn parse_elif_not_confused_with_echo_or_encoding() {
         // \elif, \else, \endif start with 'e'; must not match \echo, \encoding, \e
-        assert_eq!(parse("\\elif true").cmd, MetaCmd::Elif);
+        assert!(matches!(parse("\\elif true").cmd, MetaCmd::Elif(_)));
         assert_eq!(parse("\\else").cmd, MetaCmd::Else);
         assert_eq!(parse("\\endif").cmd, MetaCmd::Endif);
         assert_eq!(parse("\\echo hello").cmd, MetaCmd::Echo);
@@ -2635,10 +2614,9 @@ mod tests {
     #[test]
     fn parse_if_variable_expression() {
         // Variable interpolation has already occurred before parsing; the
-        // parser stores the resulting string verbatim in `pattern`.
+        // parser stores the resulting string in the variant payload.
         let m = parse("\\if on");
-        assert_eq!(m.cmd, MetaCmd::If);
-        assert_eq!(m.pattern, Some("on".to_owned()));
+        assert_eq!(m.cmd, MetaCmd::If("on".to_owned()));
     }
 
     // -- \g / \gx (issue #46) ------------------------------------------------
