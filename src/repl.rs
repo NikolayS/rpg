@@ -1307,8 +1307,15 @@ pub async fn execute_query(
     // WHERE, etc.  In non-interactive mode the check is skipped automatically
     // inside `confirm_destructive`.
     if settings.safety_enabled {
-        if let Some(reason) = crate::safety::is_destructive(sql_to_send) {
-            if !crate::safety::confirm_destructive(reason) {
+        let built_in = crate::safety::is_destructive(sql_to_send).map(str::to_owned);
+        let custom = crate::safety::matches_custom_pattern(
+            sql_to_send,
+            &settings.config.safety.protected_patterns,
+        )
+        .map(|s| format!("matches protected pattern: {s}"));
+        let reason = built_in.or(custom);
+        if let Some(ref r) = reason {
+            if !crate::safety::confirm_destructive(r) {
                 eprintln!("Statement cancelled.");
                 return true; // skipped — not an error
             }
@@ -1521,8 +1528,15 @@ pub async fn execute_query_extended(
 
     // Destructive statement guard.
     if settings.safety_enabled {
-        if let Some(reason) = crate::safety::is_destructive(sql_to_send) {
-            if !crate::safety::confirm_destructive(reason) {
+        let built_in = crate::safety::is_destructive(sql_to_send).map(str::to_owned);
+        let custom = crate::safety::matches_custom_pattern(
+            sql_to_send,
+            &settings.config.safety.protected_patterns,
+        )
+        .map(|s| format!("matches protected pattern: {s}"));
+        let reason = built_in.or(custom);
+        if let Some(ref r) = reason {
+            if !crate::safety::confirm_destructive(r) {
                 eprintln!("Statement cancelled.");
                 return true; // skipped — not an error
             }

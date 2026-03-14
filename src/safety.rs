@@ -30,6 +30,26 @@ pub fn is_destructive(sql: &str) -> Option<&'static str> {
     None
 }
 
+/// Check whether `sql` matches any of the user-supplied `protected_patterns`.
+///
+/// Each pattern is compared case-insensitively as a substring of the full SQL
+/// text (after collapsing runs of whitespace to single spaces).  Returns
+/// `Some(pattern)` for the first matching pattern, or `None` when no pattern
+/// matches or the list is empty.
+pub fn matches_custom_pattern<'a>(sql: &str, patterns: &'a [String]) -> Option<&'a str> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let normalised = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower_sql = normalised.to_lowercase();
+    for pattern in patterns {
+        if lower_sql.contains(pattern.to_lowercase().as_str()) {
+            return Some(pattern.as_str());
+        }
+    }
+    None
+}
+
 /// Check a single SQL statement (no semicolons) for destructive patterns.
 fn check_segment(sql: &str) -> Option<&'static str> {
     let trimmed = sql.trim();
@@ -331,5 +351,46 @@ mod tests {
     #[test]
     fn multi_statement_all_safe() {
         assert_eq!(is_destructive("select 1; select 2;"), None);
+    }
+
+    // -- matches_custom_pattern ----------------------------------------------
+
+    #[test]
+    fn custom_pattern_matches_substring() {
+        let patterns = vec!["DELETE FROM audit_log".to_owned()];
+        assert_eq!(
+            matches_custom_pattern("delete from audit_log where id = 1", &patterns),
+            Some("DELETE FROM audit_log"),
+        );
+    }
+
+    #[test]
+    fn custom_pattern_no_match_on_unrelated_sql() {
+        let patterns = vec!["DELETE FROM audit_log".to_owned()];
+        assert_eq!(
+            matches_custom_pattern("delete from orders where id = 1", &patterns),
+            None,
+        );
+    }
+
+    #[test]
+    fn custom_pattern_empty_list_has_no_effect() {
+        assert_eq!(matches_custom_pattern("delete from audit_log", &[]), None,);
+    }
+
+    #[test]
+    fn custom_pattern_case_insensitive() {
+        let patterns = vec!["delete from audit_log".to_owned()];
+        // All-uppercase SQL should still match a lowercase pattern.
+        assert_eq!(
+            matches_custom_pattern("DELETE FROM AUDIT_LOG WHERE id = 1", &patterns),
+            Some("delete from audit_log"),
+        );
+        // Mixed-case pattern against mixed-case SQL.
+        let patterns2 = vec!["Delete From Audit_Log".to_owned()];
+        assert_eq!(
+            matches_custom_pattern("delete from audit_log where id = 1", &patterns2),
+            Some("Delete From Audit_Log"),
+        );
     }
 }

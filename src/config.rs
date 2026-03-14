@@ -115,12 +115,26 @@ impl Default for DisplayConfig {
 pub struct SafetyConfig {
     /// Warn before executing destructive statements. Default: `true`.
     pub destructive_warning: bool,
+    /// Additional SQL patterns that should trigger a destructive-operation
+    /// warning, in addition to the built-in set.
+    ///
+    /// Each entry is a substring that is matched case-insensitively against
+    /// the full SQL text.  If the SQL contains the pattern, the user is
+    /// prompted for confirmation just like a built-in destructive statement.
+    ///
+    /// ```toml
+    /// [safety]
+    /// protected_patterns = ["DELETE FROM audit_log", "TRUNCATE events"]
+    /// ```
+    #[serde(default)]
+    pub protected_patterns: Vec<String>,
 }
 
 impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
             destructive_warning: true,
+            protected_patterns: Vec::new(),
         }
     }
 }
@@ -436,6 +450,15 @@ fn merge_config(base: Config, overlay: Config) -> Config {
         },
         safety: SafetyConfig {
             destructive_warning: overlay.safety.destructive_warning,
+            protected_patterns: {
+                let mut merged = base.safety.protected_patterns;
+                for p in overlay.safety.protected_patterns {
+                    if !merged.contains(&p) {
+                        merged.push(p);
+                    }
+                }
+                merged
+            },
         },
         ai: AiConfig {
             provider: overlay.ai.provider.or(base.ai.provider),
@@ -768,6 +791,7 @@ dbname = "testdb"
             },
             safety: SafetyConfig {
                 destructive_warning: true,
+                ..SafetyConfig::default()
             },
             ai: AiConfig::default(),
             governance: GovernanceConfig::default(),
@@ -784,6 +808,7 @@ dbname = "testdb"
             },
             safety: SafetyConfig {
                 destructive_warning: false,
+                ..SafetyConfig::default()
             },
             ai: AiConfig::default(),
             governance: GovernanceConfig::default(),
