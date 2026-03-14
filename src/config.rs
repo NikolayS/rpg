@@ -95,10 +95,12 @@ pub struct DisplayConfig {
     pub timing: bool,
     /// Expanded display mode (like `\x`). Default: `false`.
     pub expanded: bool,
-    /// Minimum output lines before the pager activates. Default: `0` (always).
-    pub pager_min_lines: usize,
-    /// Table border style (`0`, `1`, or `2`). Mirrors `\pset border`. Default: `1`.
-    pub border: u8,
+    /// Minimum output lines before the pager activates.
+    /// `None` means "not set in this config layer" (effective default: `0`).
+    pub pager_min_lines: Option<usize>,
+    /// Table border style (`0`, `1`, or `2`). Mirrors `\pset border`.
+    /// `None` means "not set in this config layer" (effective default: `1`).
+    pub border: Option<u8>,
     /// Use Vi keybinding mode in the REPL. Default: `false` (Emacs mode).
     ///
     /// When `true`, rustyline uses `EditMode::Vi` instead of the default
@@ -130,8 +132,8 @@ impl Default for DisplayConfig {
             highlight: true,
             timing: false,
             expanded: false,
-            pager_min_lines: 0,
-            border: 1,
+            pager_min_lines: None,
+            border: None,
             vi_mode: false,
             // Default ON — overridden to OFF in non-interactive sessions.
             statusline_enabled: true,
@@ -850,16 +852,11 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             highlight: overlay.display.highlight,
             timing: overlay.display.timing,
             expanded: overlay.display.expanded,
-            pager_min_lines: if overlay.display.pager_min_lines == 0 {
-                base.display.pager_min_lines
-            } else {
-                overlay.display.pager_min_lines
-            },
-            border: if overlay.display.border == 1 {
-                base.display.border
-            } else {
-                overlay.display.border
-            },
+            pager_min_lines: overlay
+                .display
+                .pager_min_lines
+                .or(base.display.pager_min_lines),
+            border: overlay.display.border.or(base.display.border),
             vi_mode: overlay.display.vi_mode || base.display.vi_mode,
             // Prefer explicit false from overlay over base default.
             statusline_enabled: overlay.display.statusline_enabled
@@ -981,8 +978,8 @@ mod tests {
         assert!(cfg.display.highlight); // default
         assert!(!cfg.display.timing);
         assert!(!cfg.display.expanded);
-        assert_eq!(cfg.display.pager_min_lines, 0);
-        assert_eq!(cfg.display.border, 1);
+        assert_eq!(cfg.display.pager_min_lines, None);
+        assert_eq!(cfg.display.border, None);
         assert!(!cfg.display.vi_mode); // default is Emacs
         assert!(cfg.safety.destructive_warning);
         assert!(cfg.connection.host.is_none());
@@ -1061,8 +1058,8 @@ pager_min_lines = 40
 border = 2
 ";
         let cfg: Config = toml::from_str(toml_str).expect("should parse");
-        assert_eq!(cfg.display.pager_min_lines, 40);
-        assert_eq!(cfg.display.border, 2);
+        assert_eq!(cfg.display.pager_min_lines, Some(40));
+        assert_eq!(cfg.display.border, Some(2));
     }
 
     #[test]
@@ -1133,38 +1130,38 @@ host = "localhost"
     fn merge_display_pager_min_lines_overlay_wins() {
         let base = Config {
             display: DisplayConfig {
-                pager_min_lines: 20,
-                border: 0,
+                pager_min_lines: Some(20),
+                border: Some(0),
                 ..DisplayConfig::default()
             },
             ..Default::default()
         };
         let overlay = Config {
             display: DisplayConfig {
-                pager_min_lines: 50,
-                border: 2,
+                pager_min_lines: Some(50),
+                border: Some(2),
                 ..DisplayConfig::default()
             },
             ..Default::default()
         };
         let merged = merge_config(base, overlay);
-        assert_eq!(merged.display.pager_min_lines, 50);
-        assert_eq!(merged.display.border, 2);
+        assert_eq!(merged.display.pager_min_lines, Some(50));
+        assert_eq!(merged.display.border, Some(2));
     }
 
     #[test]
-    fn merge_display_pager_min_lines_base_preserved_when_overlay_zero() {
+    fn merge_display_pager_min_lines_base_preserved_when_overlay_none() {
         let base = Config {
             display: DisplayConfig {
-                pager_min_lines: 30,
+                pager_min_lines: Some(30),
                 ..DisplayConfig::default()
             },
             ..Default::default()
         };
-        // Overlay has pager_min_lines = 0 (default), so base value is kept.
+        // Overlay has pager_min_lines = None (default), so base value is kept.
         let overlay = Config::default();
         let merged = merge_config(base, overlay);
-        assert_eq!(merged.display.pager_min_lines, 30);
+        assert_eq!(merged.display.pager_min_lines, Some(30));
     }
 
     #[test]
