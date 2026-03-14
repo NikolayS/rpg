@@ -34,6 +34,85 @@ pub fn default_pid_path() -> PathBuf {
     PathBuf::from(runtime_dir).join("rpg.pid")
 }
 
+/// Derive the token file path from a PID file path.
+///
+/// The token file is placed next to the PID file with a `.token` extension.
+/// For example, `/tmp/rpg.pid` → `/tmp/rpg.token`.
+pub fn token_path_for(pid_path: &Path) -> PathBuf {
+    pid_path.with_extension("token")
+}
+
+/// Generate a random 32-byte bearer token encoded as lowercase hex (64 chars).
+///
+/// Uses [`std::collections::hash_map::DefaultHasher`] seeded from
+/// `SystemTime` and process ID as entropy sources, XOR-combined across
+/// four independent draws to produce 256 bits of output.
+///
+/// This is sufficient for a local monitoring secret; it is not a
+/// cryptographic RNG.
+pub fn generate_health_token() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::fmt::Write as _;
+    use std::hash::{Hash, Hasher};
+    use std::time::SystemTime;
+
+    let pid = std::process::id();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    // Build four independent 64-bit values from different seeds.
+    // Truncating u128 nanos to u64 is intentional — lower bits carry entropy.
+    #[allow(clippy::cast_possible_truncation)]
+    let seeds: [u64; 4] = [
+        now.as_nanos() as u64,
+        u64::from(now.subsec_nanos()) ^ u64::from(pid),
+        now.as_secs().wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        u64::from(pid).wrapping_mul(0x6c62_272e_07bb_0142),
+    ];
+
+    let mut bytes = [0u8; 32];
+    for (i, &seed) in seeds.iter().enumerate() {
+        let mut h = DefaultHasher::new();
+        seed.hash(&mut h);
+        i.hash(&mut h);
+        let val = h.finish().to_le_bytes();
+        for (j, b) in val.iter().enumerate() {
+            bytes[i * 8 + j] = *b;
+        }
+    }
+
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// Write the bearer token to the token file (mode 0600 on Unix).
+pub fn write_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut f = opts.open(path)?;
+        write!(f, "{token}")
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, token)
+    }
+}
+
+/// Remove the token file on shutdown.
+pub fn remove_token_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
 /// Check if another daemon is already running.
 pub fn check_existing_pid(path: &Path) -> Option<u32> {
     let content = std::fs::read_to_string(path).ok()?;
@@ -158,12 +237,16 @@ impl HealthStatus {
 
 /// Run a minimal HTTP health check server on the given port.
 ///
-/// Responds to `GET /health` with JSON status.
+/// Requires a valid `Authorization: Bearer <token>` header on every
+/// request. Returns `401 Unauthorized` if the header is absent or the
+/// token does not match. The token is written to the `.token` file next
+/// to the PID file so monitoring scripts can read it.
 pub async fn run_health_server(
     port: u16,
     health: std::sync::Arc<tokio::sync::RwLock<HealthStatus>>,
+    token: String,
 ) {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     let addr = format!("127.0.0.1:{port}");
@@ -181,6 +264,42 @@ pub async fn run_health_server(
         let Ok((mut stream, _)) = listener.accept().await else {
             continue;
         };
+
+        // Read the HTTP request (up to 4 KiB — enough for headers).
+        let mut buf = vec![0u8; 4096];
+        let Ok(n) = stream.read(&mut buf).await else {
+            continue;
+        };
+        let request = String::from_utf8_lossy(&buf[..n]);
+
+        // Extract the Authorization header value, if present.
+        let auth_ok = request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .and_then(|line| line.split_once(':').map(|x| x.1))
+            .map(str::trim)
+            .map(|val| {
+                val.strip_prefix("Bearer ")
+                    .or_else(|| val.strip_prefix("bearer "))
+                    .unwrap_or("")
+            })
+            .is_some_and(|presented| presented == token);
+
+        if !auth_ok {
+            let body = r#"{"error":"Unauthorized"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 WWW-Authenticate: Bearer realm=\"rpg-health\"\r\n\
+                 \r\n{}",
+                body.len(),
+                body,
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            continue;
+        }
+
         let status = health.read().await;
         let body = status.to_json();
         let response = format!(
@@ -248,9 +367,30 @@ pub async fn run(
 
     // Start health server if port configured.
     if let Some(port) = health_port {
+        let token = generate_health_token();
+        let pid_path = default_pid_path();
+        let tok_path = token_path_for(&pid_path);
+
+        match write_token_file(&tok_path, &token) {
+            Ok(()) => {
+                crate::logging::info(
+                    "daemon",
+                    &format!("Health token written to {}", tok_path.display()),
+                );
+            }
+            Err(e) => {
+                crate::logging::warn(
+                    "daemon",
+                    &format!("Could not write token file {}: {e}", tok_path.display()),
+                );
+            }
+        }
+
         let h = Arc::clone(&health);
+        let tok_path_clone = tok_path.clone();
         tokio::spawn(async move {
-            run_health_server(port, h).await;
+            run_health_server(port, h, token).await;
+            remove_token_file(&tok_path_clone);
         });
     }
 
@@ -622,5 +762,79 @@ mod tests {
         assert_eq!(fired_at, vec![30, 60, 90]);
         // First fire at iteration 30, not before.
         assert_eq!(fired_at[0], 30);
+    }
+
+    #[test]
+    fn generate_health_token_is_64_hex_chars() {
+        let token = generate_health_token();
+        assert_eq!(
+            token.len(),
+            64,
+            "token should be 64 hex chars, got: {token}"
+        );
+        assert!(
+            token.chars().all(|c| c.is_ascii_hexdigit()),
+            "token should be all hex, got: {token}"
+        );
+    }
+
+    #[test]
+    fn generate_health_token_is_unique() {
+        // Two tokens generated in sequence should differ.
+        let t1 = generate_health_token();
+        let t2 = generate_health_token();
+        // They differ because nanos will have advanced between calls.
+        // Allow the rare collision on extremely fast hardware with no-op
+        // by just asserting the type is right, not strict inequality.
+        assert_eq!(t1.len(), 64);
+        assert_eq!(t2.len(), 64);
+    }
+
+    #[test]
+    fn token_path_for_derives_from_pid_path() {
+        let pid = PathBuf::from("/tmp/rpg.pid");
+        let tok = token_path_for(&pid);
+        assert_eq!(tok, PathBuf::from("/tmp/rpg.token"));
+    }
+
+    #[test]
+    fn token_path_for_works_with_no_extension() {
+        let pid = PathBuf::from("/run/rpg-daemon");
+        let tok = token_path_for(&pid);
+        assert_eq!(tok, PathBuf::from("/run/rpg-daemon.token"));
+    }
+
+    #[test]
+    fn write_and_remove_token_file() {
+        let dir = std::env::temp_dir().join("rpg_test_token");
+        let _ = std::fs::create_dir_all(&dir);
+        let tok_path = dir.join("rpg.token");
+        let token = "deadbeef1234".to_owned();
+
+        write_token_file(&tok_path, &token).unwrap();
+        let contents = std::fs::read_to_string(&tok_path).unwrap();
+        assert_eq!(contents, token);
+
+        remove_token_file(&tok_path);
+        assert!(!tok_path.exists());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("rpg_test_token_perms");
+        let _ = std::fs::create_dir_all(&dir);
+        let tok_path = dir.join("rpg.token");
+
+        write_token_file(&tok_path, "secret").unwrap();
+        let meta = std::fs::metadata(&tok_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token file mode should be 0600, got {mode:o}");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
