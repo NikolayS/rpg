@@ -51,6 +51,33 @@ pub enum SshTunnelError {
     #[error("SSH tunnel: could not open TCP forwarding channel: {0}")]
     ChannelOpenFailed(String),
 
+    /// The server presented a host key that differs from the recorded one.
+    ///
+    /// This is a strong indicator of a MITM attack or a server key rotation.
+    /// The user must manually remove the stale entry from `~/.ssh/known_hosts`
+    /// before reconnecting.
+    #[error(
+        "SSH tunnel: host key mismatch for {host}:{port} \
+         (recorded key at line {line} differs from server key — \
+         possible MITM attack or server key rotation; \
+         remove the stale entry from ~/.ssh/known_hosts to continue)"
+    )]
+    HostKeyMismatch {
+        host: String,
+        port: u16,
+        line: usize,
+    },
+
+    /// The server's host key is not in `~/.ssh/known_hosts` and strict mode
+    /// is enabled.
+    #[error(
+        "SSH tunnel: unknown host key for {host}:{port} \
+         (strict host key checking is enabled; \
+         add the host key to ~/.ssh/known_hosts or set \
+         strict_host_key_checking = false to allow TOFU)"
+    )]
+    UnknownHost { host: String, port: u16 },
+
     #[error("SSH tunnel: {0}")]
     Other(String),
 }
@@ -113,26 +140,128 @@ impl From<SshTunnelSpec> for SshTunnelConfig {
 }
 
 // ---------------------------------------------------------------------------
+// known_hosts verification
+// ---------------------------------------------------------------------------
+
+/// Outcome of checking the server key against `~/.ssh/known_hosts`.
+#[derive(Debug)]
+pub enum HostKeyStatus {
+    /// Key matched a recorded entry — connection is trusted.
+    Trusted,
+    /// Host was unknown; key has been recorded (TOFU).
+    RecordedNew,
+    /// Key does not match the recorded entry at `line`.
+    Mismatch { line: usize },
+    /// Host key verification could not be performed (I/O error or no home
+    /// directory); the tunnel proceeds with a warning.
+    Unavailable(String),
+}
+
+/// Verify `server_key` for `host`:`port` against `~/.ssh/known_hosts`.
+///
+/// - Returns [`HostKeyStatus::Trusted`] when a matching entry is found.
+/// - Returns [`HostKeyStatus::Mismatch`] when a conflicting entry is found.
+/// - Returns [`HostKeyStatus::RecordedNew`] when no entry exists and the key
+///   has been appended (TOFU).
+/// - Returns [`HostKeyStatus::Unavailable`] on I/O or environment errors.
+pub fn verify_or_learn_host_key(
+    host: &str,
+    port: u16,
+    server_key: &ssh_key::PublicKey,
+) -> HostKeyStatus {
+    use russh::keys::known_hosts as kh;
+
+    match kh::check_known_hosts(host, port, server_key) {
+        Ok(true) => HostKeyStatus::Trusted,
+        Ok(false) => {
+            // Host not found — record it (TOFU).
+            match kh::learn_known_hosts(host, port, server_key) {
+                Ok(()) => HostKeyStatus::RecordedNew,
+                Err(e) => HostKeyStatus::Unavailable(e.to_string()),
+            }
+        }
+        Err(russh::keys::Error::KeyChanged { line }) => HostKeyStatus::Mismatch { line },
+        Err(russh::keys::Error::NoHomeDir) => {
+            HostKeyStatus::Unavailable("no home directory found".to_owned())
+        }
+        Err(e) => HostKeyStatus::Unavailable(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Russh Handler implementation
 // ---------------------------------------------------------------------------
 
-/// Minimal russh `Handler` that accepts all server host keys.
+/// Russh `Handler` that verifies the server host key against
+/// `~/.ssh/known_hosts` during the SSH handshake.
 ///
-/// In production code the server key should be verified against
-/// `~/.ssh/known_hosts`.  That is tracked as a follow-up enhancement; for
-/// the initial implementation we accept all keys (same behaviour as
-/// `StrictHostKeyChecking=no` in OpenSSH) and log a warning.
-struct TunnelHandler;
+/// Behaviour is controlled by `strict`:
+///
+/// | strict | unknown host | key mismatch |
+/// |--------|-------------|--------------|
+/// | true   | reject      | reject       |
+/// | false  | TOFU + warn | reject       |
+struct TunnelHandler {
+    host: String,
+    port: u16,
+    strict: bool,
+}
 
 impl Handler for TunnelHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &ssh_key::PublicKey,
+        server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TODO(FR-22-followup): verify against ~/.ssh/known_hosts.
-        Ok(true)
+        match verify_or_learn_host_key(&self.host, self.port, server_public_key) {
+            HostKeyStatus::Trusted => Ok(true),
+
+            HostKeyStatus::RecordedNew => {
+                if self.strict {
+                    eprintln!(
+                        "WARNING: SSH host key for {}:{} is not in known_hosts \
+                         and strict_host_key_checking is enabled. \
+                         Refusing connection.",
+                        self.host, self.port
+                    );
+                    Ok(false)
+                } else {
+                    eprintln!(
+                        "WARNING: Permanently added {}:{} to the list of \
+                         known hosts (TOFU).",
+                        self.host, self.port
+                    );
+                    Ok(true)
+                }
+            }
+
+            HostKeyStatus::Mismatch { line } => {
+                eprintln!(
+                    "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n\
+                     SSH tunnel: host key for {}:{} differs from the \
+                     key recorded at line {} of ~/.ssh/known_hosts.\n\
+                     This may indicate a MITM attack or server key rotation.\n\
+                     Remove the offending entry from ~/.ssh/known_hosts \
+                     and reconnect.",
+                    self.host, self.port, line
+                );
+                // Always reject on mismatch regardless of strict mode.
+                Ok(false)
+            }
+
+            HostKeyStatus::Unavailable(reason) => {
+                eprintln!(
+                    "WARNING: SSH host key verification unavailable \
+                     for {}:{}: {}. Proceeding without verification.",
+                    self.host, self.port, reason
+                );
+                // Proceed: we cannot verify, but we shouldn't block on
+                // transient environment errors (e.g., missing ~/.ssh dir on
+                // first run).
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -225,7 +354,13 @@ pub async fn open_tunnel(
         ..Default::default()
     });
 
-    let mut handle = client::connect(ssh_config, ssh_addr.as_str(), TunnelHandler)
+    let handler = TunnelHandler {
+        host: cfg.host.clone(),
+        port: cfg.port,
+        strict: cfg.strict_host_key_checking,
+    };
+
+    let mut handle = client::connect(ssh_config, ssh_addr.as_str(), handler)
         .await
         .map_err(|e| SshTunnelError::Connect {
             host: cfg.host.clone(),
@@ -241,12 +376,6 @@ pub async fn open_tunnel(
             host: cfg.host.clone(),
         });
     }
-
-    // Warn once per tunnel that host key verification is disabled.
-    eprintln!(
-        "WARNING: SSH host key verification is disabled. \
-         This connection may be vulnerable to MITM attacks."
-    );
 
     // 3. Bind local listener on an OS-assigned port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -430,5 +559,227 @@ mod tests {
         assert_eq!(cfg.port, 22);
         assert!(cfg.key.is_none());
         assert!(cfg.password.is_none());
+    }
+
+    // -- known_hosts parsing -------------------------------------------------
+
+    /// Helper: write a known_hosts file in a temp dir and return the path.
+    fn write_known_hosts(dir: &tempfile::TempDir, content: &str) -> PathBuf {
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    /// A real Ed25519 public key in OpenSSH wire format (base64).
+    ///
+    /// Generated with: `ssh-keygen -t ed25519 -N "" -f /tmp/test_key`
+    /// and extracted from the resulting `.pub` file.
+    const TEST_KEY_B64: &str =
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+
+    fn test_pubkey() -> ssh_key::PublicKey {
+        russh::keys::parse_public_key_base64(TEST_KEY_B64).unwrap()
+    }
+
+    #[test]
+    fn known_hosts_match_plain_hostname() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(&dir, &format!("example.com ssh-ed25519 {TEST_KEY_B64}\n"));
+
+        let result =
+            russh::keys::check_known_hosts_path("example.com", 22, &test_pubkey(), &path).unwrap();
+        assert!(result, "key should match the plain hostname entry");
+    }
+
+    #[test]
+    fn known_hosts_match_non_standard_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(
+            &dir,
+            &format!("[example.com]:2222 ssh-ed25519 {TEST_KEY_B64}\n"),
+        );
+
+        let result =
+            russh::keys::check_known_hosts_path("example.com", 2222, &test_pubkey(), &path)
+                .unwrap();
+        assert!(result, "key should match the bracketed host:port entry");
+    }
+
+    #[test]
+    fn known_hosts_no_match_different_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(
+            &dir,
+            &format!("other.example.com ssh-ed25519 {TEST_KEY_B64}\n"),
+        );
+
+        let result =
+            russh::keys::check_known_hosts_path("example.com", 22, &test_pubkey(), &path).unwrap();
+        assert!(!result, "should not match a different hostname");
+    }
+
+    #[test]
+    fn known_hosts_key_mismatch_returns_error() {
+        // A different Ed25519 key (pijul.org's key from russh's own tests).
+        const OTHER_KEY_B64: &str =
+            "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X";
+
+        let dir = tempfile::tempdir().unwrap();
+        // File contains TEST_KEY_B64 but we'll check with OTHER_KEY_B64.
+        let path = write_known_hosts(&dir, &format!("example.com ssh-ed25519 {TEST_KEY_B64}\n"));
+
+        let other_key = russh::keys::parse_public_key_base64(OTHER_KEY_B64).unwrap();
+        let err =
+            russh::keys::check_known_hosts_path("example.com", 22, &other_key, &path).unwrap_err();
+
+        // Must be a KeyChanged error.
+        assert!(
+            matches!(err, russh::keys::Error::KeyChanged { line: 1 }),
+            "expected KeyChanged at line 1, got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn known_hosts_hashed_hostname_match() {
+        // This hashed entry encodes "example.com" with a known salt and hash
+        // taken from the russh known_hosts test suite.
+        // |1|O33ESRMWPVkMYIwJ1Uw+n877jTo=|... corresponds to "example.com".
+        const HASHED_ENTRY_KEY: &str =
+            "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF";
+        const HASHED_HOST: &str = "|1|O33ESRMWPVkMYIwJ1Uw+n877jTo=|nuuC5vEqXlEZ/8BXQR7m619W6Ak=";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(
+            &dir,
+            &format!("{HASHED_HOST} ssh-ed25519 {HASHED_ENTRY_KEY}\n"),
+        );
+
+        let key = russh::keys::parse_public_key_base64(HASHED_ENTRY_KEY).unwrap();
+        let result = russh::keys::check_known_hosts_path("example.com", 22, &key, &path).unwrap();
+        assert!(result, "hashed hostname should match 'example.com'");
+    }
+
+    #[test]
+    fn known_hosts_hashed_hostname_no_match_different_host() {
+        const HASHED_ENTRY_KEY: &str =
+            "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF";
+        const HASHED_HOST: &str = "|1|O33ESRMWPVkMYIwJ1Uw+n877jTo=|nuuC5vEqXlEZ/8BXQR7m619W6Ak=";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(
+            &dir,
+            &format!("{HASHED_HOST} ssh-ed25519 {HASHED_ENTRY_KEY}\n"),
+        );
+
+        let key = russh::keys::parse_public_key_base64(HASHED_ENTRY_KEY).unwrap();
+        // "other.example.com" should NOT match the hashed "example.com" entry.
+        let result =
+            russh::keys::check_known_hosts_path("other.example.com", 22, &key, &path).unwrap();
+        assert!(!result, "hashed hostname should not match a different host");
+    }
+
+    #[test]
+    fn known_hosts_empty_file_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(&dir, "");
+
+        let result =
+            russh::keys::check_known_hosts_path("example.com", 22, &test_pubkey(), &path).unwrap();
+        assert!(!result, "empty known_hosts should return false (unknown)");
+    }
+
+    #[test]
+    fn known_hosts_comment_lines_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        // The key is only in a comment — should NOT match.
+        let path = write_known_hosts(&dir, &format!("# example.com ssh-ed25519 {TEST_KEY_B64}\n"));
+
+        let result =
+            russh::keys::check_known_hosts_path("example.com", 22, &test_pubkey(), &path).unwrap();
+        assert!(!result, "commented-out entries must not match");
+    }
+
+    // -- verify_or_learn_host_key (unit-testable path variant) ---------------
+
+    /// A thin wrapper that accepts a custom path, mirroring
+    /// `verify_or_learn_host_key` but bypassing the real `~/.ssh/known_hosts`.
+    fn verify_or_learn_at_path(
+        host: &str,
+        port: u16,
+        server_key: &ssh_key::PublicKey,
+        path: &PathBuf,
+    ) -> HostKeyStatus {
+        use russh::keys::known_hosts as kh;
+
+        match kh::check_known_hosts_path(host, port, server_key, path) {
+            Ok(true) => HostKeyStatus::Trusted,
+            Ok(false) => match kh::learn_known_hosts_path(host, port, server_key, path) {
+                Ok(()) => HostKeyStatus::RecordedNew,
+                Err(e) => HostKeyStatus::Unavailable(e.to_string()),
+            },
+            Err(russh::keys::Error::KeyChanged { line }) => HostKeyStatus::Mismatch { line },
+            Err(russh::keys::Error::NoHomeDir) => {
+                HostKeyStatus::Unavailable("no home directory found".to_owned())
+            }
+            Err(e) => HostKeyStatus::Unavailable(e.to_string()),
+        }
+    }
+
+    #[test]
+    fn verify_trusted_when_key_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(&dir, &format!("example.com ssh-ed25519 {TEST_KEY_B64}\n"));
+        let status = verify_or_learn_at_path("example.com", 22, &test_pubkey(), &path);
+        assert!(matches!(status, HostKeyStatus::Trusted));
+    }
+
+    #[test]
+    fn verify_records_new_unknown_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(&dir, "");
+        let status = verify_or_learn_at_path("newhost.example.com", 22, &test_pubkey(), &path);
+        assert!(
+            matches!(status, HostKeyStatus::RecordedNew),
+            "unknown host should be recorded (TOFU)"
+        );
+
+        // Verify the key was actually written.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("newhost.example.com"),
+            "known_hosts file should contain the new hostname"
+        );
+    }
+
+    #[test]
+    fn verify_mismatch_on_changed_key() {
+        const OTHER_KEY_B64: &str =
+            "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_known_hosts(&dir, &format!("example.com ssh-ed25519 {TEST_KEY_B64}\n"));
+
+        let other_key = russh::keys::parse_public_key_base64(OTHER_KEY_B64).unwrap();
+        let status = verify_or_learn_at_path("example.com", 22, &other_key, &path);
+        assert!(
+            matches!(status, HostKeyStatus::Mismatch { line: 1 }),
+            "changed key should produce Mismatch, got: {status:?}"
+        );
+    }
+
+    // -- SshTunnelConfig defaults --------------------------------------------
+
+    #[test]
+    fn config_default_strict_host_key_checking_is_true() {
+        let cfg = SshTunnelConfig {
+            host: "bastion.example.com".into(),
+            port: 22,
+            user: "deploy".into(),
+            ..Default::default()
+        };
+        assert!(
+            cfg.strict_host_key_checking,
+            "strict_host_key_checking should default to true"
+        );
     }
 }

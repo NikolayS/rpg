@@ -506,14 +506,14 @@ impl GovernanceConfig {
 /// port = 22
 /// user = "deploy"
 /// key = "~/.ssh/id_ed25519"
+/// strict_host_key_checking = true
 /// ```
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SshTunnelConfig {
     /// SSH bastion host.
     pub host: String,
     /// SSH server port. Default: `22`.
-    #[serde(default = "default_ssh_port")]
     pub port: u16,
     /// SSH user name on the bastion.
     pub user: String,
@@ -523,10 +523,26 @@ pub struct SshTunnelConfig {
     pub key: Option<String>,
     /// SSH password (never logged).  Prefer key-based auth.
     pub password: Option<String>,
+    /// Enforce strict host key checking against `~/.ssh/known_hosts`.
+    ///
+    /// When `true` (default): unknown hosts are rejected; key mismatches
+    /// are hard errors.  When `false`: unknown hosts are accepted on first
+    /// use (TOFU) and recorded in `known_hosts`; key mismatches emit a
+    /// warning but still fail the connection.
+    pub strict_host_key_checking: bool,
 }
 
-fn default_ssh_port() -> u16 {
-    22
+impl Default for SshTunnelConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 22,
+            user: String::new(),
+            key: None,
+            password: None,
+            strict_host_key_checking: true,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
