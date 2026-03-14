@@ -1,8 +1,8 @@
 # Proposal: Plugin System for psql
 
-**Author:** Nikolay Samokhvalov (DBLab Inc.)
-**Status:** Draft
-**Target:** PostgreSQL hackers mailing list
+- **Author:** Nik Samokhvalov 
+- **Status:** Draft
+- **Target:** PostgreSQL hackers mailing list
 
 ---
 
