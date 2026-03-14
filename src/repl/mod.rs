@@ -576,8 +576,7 @@ pub enum AutoExplain {
 
 impl AutoExplain {
     /// Cycle to the next mode: Off → On → Analyze → Verbose → Off.
-    #[allow(dead_code)]
-    fn cycle(self) -> Self {
+    pub(crate) fn cycle(self) -> Self {
         match self {
             Self::Off => Self::On,
             Self::On => Self::Analyze,
@@ -597,7 +596,7 @@ impl AutoExplain {
     }
 
     /// Human-readable label.
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::On => "on",
@@ -1881,6 +1880,11 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         return;
     }
     if value.is_empty() {
+        // Synthetic settings: show current state rather than the vars store.
+        if name == "EXPLAIN" {
+            println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+            return;
+        }
         // Display one variable.
         match settings.vars.get(name) {
             Some(v) => println!("{name} = '{v}'"),
@@ -1938,7 +1942,7 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             "on" | "true" | "1" => AutoExplain::On,
             "analyze" => AutoExplain::Analyze,
             "verbose" => AutoExplain::Verbose,
-            "off" | "false" | "0" | "" => AutoExplain::Off,
+            "off" | "false" | "0" => AutoExplain::Off,
             other => {
                 eprintln!(
                     "\\set EXPLAIN: unknown value \"{other}\"\n\
@@ -2087,11 +2091,7 @@ fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
             }
         }
         FKeyAction::AutoExplain => {
-            settings.auto_explain = if settings.auto_explain == AutoExplain::Off {
-                AutoExplain::On
-            } else {
-                AutoExplain::Off
-            };
+            settings.auto_explain = settings.auto_explain.cycle();
             println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
         }
         FKeyAction::Text2Sql => {
@@ -3542,6 +3542,7 @@ async fn run_readline_loop(
         // Re-render the status bar before each prompt so it stays fresh
         // (handles resize events and mode changes from previous commands).
         if let Some(ref mut sl) = settings.statusline {
+            sl.set_auto_explain(settings.auto_explain);
             sl.on_resize();
         }
 
@@ -5431,6 +5432,30 @@ mod tests {
         let mut settings = ReplSettings::default();
         apply_set(&mut settings, "EXPLAIN", "on");
         apply_set(&mut settings, "EXPLAIN", "off");
+        assert_eq!(settings.auto_explain, AutoExplain::Off);
+    }
+
+    #[test]
+    fn set_explain_no_value_does_not_change_mode() {
+        // \set EXPLAIN (no value) should show current mode, not reset it.
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "EXPLAIN", "analyze");
+        // Calling with empty value must not change the mode.
+        apply_set(&mut settings, "EXPLAIN", "");
+        assert_eq!(settings.auto_explain, AutoExplain::Analyze);
+    }
+
+    #[test]
+    fn fkey_auto_explain_cycles_all_modes() {
+        let mut settings = ReplSettings::default();
+        assert_eq!(settings.auto_explain, AutoExplain::Off);
+        apply_fkey_toggle(FKeyAction::AutoExplain, &mut settings);
+        assert_eq!(settings.auto_explain, AutoExplain::On);
+        apply_fkey_toggle(FKeyAction::AutoExplain, &mut settings);
+        assert_eq!(settings.auto_explain, AutoExplain::Analyze);
+        apply_fkey_toggle(FKeyAction::AutoExplain, &mut settings);
+        assert_eq!(settings.auto_explain, AutoExplain::Verbose);
+        apply_fkey_toggle(FKeyAction::AutoExplain, &mut settings);
         assert_eq!(settings.auto_explain, AutoExplain::Off);
     }
 

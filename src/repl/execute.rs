@@ -129,6 +129,7 @@ pub async fn execute_query(
     // non-query statements (SET, BEGIN, COMMIT, etc.).
     let auto_explained;
     let mut auto_explain_active = false;
+    let auto_explain_label = settings.auto_explain.label();
     let sql_to_send = if settings.auto_explain == AutoExplain::Off {
         interpolated.as_str()
     } else {
@@ -252,10 +253,10 @@ pub async fn execute_query(
                         // Capture rendered output so we can mirror to log.
                         let mut out_buf = Vec::<u8>::new();
 
-                        // Print "--- EXPLAIN ---" header before the plan
-                        // output so users can distinguish plan from results.
+                        // Print "[auto-explain: <mode>]" header before the
+                        // plan output so users know EXPLAIN was prepended.
                         if auto_explain_active && result_set_index == 0 {
-                            let _ = writeln!(out_buf, "--- EXPLAIN ---");
+                            let _ = writeln!(out_buf, "[auto-explain: {auto_explain_label}]");
                         }
 
                         print_result_set_pset(
@@ -957,6 +958,7 @@ pub(super) async fn execute_query_interactive(
     let token_budget = u32::try_from(settings.config.ai.token_budget).unwrap_or(u32::MAX);
     let input_mode = settings.input_mode;
     let exec_mode = settings.exec_mode;
+    let auto_explain = settings.auto_explain;
     let tx_state = *tx;
     if let Some(ref mut sl) = settings.statusline {
         sl.update(
@@ -967,6 +969,7 @@ pub(super) async fn execute_query_interactive(
             input_mode,
             exec_mode,
         );
+        sl.set_auto_explain(auto_explain);
     }
 
     ok
@@ -1074,6 +1077,7 @@ pub(super) async fn execute_query_extended_interactive(
     let token_budget = u32::try_from(settings.config.ai.token_budget).unwrap_or(u32::MAX);
     let input_mode = settings.input_mode;
     let exec_mode = settings.exec_mode;
+    let auto_explain = settings.auto_explain;
     let tx_state = *tx;
     if let Some(ref mut sl) = settings.statusline {
         sl.update(
@@ -1084,6 +1088,7 @@ pub(super) async fn execute_query_extended_interactive(
             input_mode,
             exec_mode,
         );
+        sl.set_auto_explain(auto_explain);
     }
 
     ok

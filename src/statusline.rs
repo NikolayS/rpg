@@ -14,7 +14,7 @@
 
 use std::io::{self, IsTerminal, Write};
 
-use crate::repl::{ExecMode, InputMode, TxState};
+use crate::repl::{AutoExplain, ExecMode, InputMode, TxState};
 
 // ---------------------------------------------------------------------------
 // Status bar state
@@ -42,6 +42,8 @@ pub struct StatusLine {
     ai_tokens_used: u64,
     /// Configured AI token budget (0 = unlimited / no AI configured).
     ai_token_budget: u32,
+    /// Current auto-EXPLAIN level (shown when not Off).
+    auto_explain: AutoExplain,
 }
 
 impl StatusLine {
@@ -62,6 +64,7 @@ impl StatusLine {
             last_duration_ms: None,
             ai_tokens_used: 0,
             ai_token_budget: 0,
+            auto_explain: AutoExplain::Off,
         }
     }
 
@@ -91,6 +94,12 @@ impl StatusLine {
         self.ai_token_budget = token_budget;
         self.input_mode = input_mode;
         self.exec_mode = exec_mode;
+        self.render();
+    }
+
+    /// Set the current auto-EXPLAIN level and re-render.
+    pub fn set_auto_explain(&mut self, mode: AutoExplain) {
+        self.auto_explain = mode;
         self.render();
     }
 
@@ -185,13 +194,20 @@ impl StatusLine {
             String::new()
         };
 
+        // Auto-EXPLAIN indicator (only when active).
+        let explain = if self.auto_explain == AutoExplain::Off {
+            String::new()
+        } else {
+            format!(" │ explain:{}", self.auto_explain.label())
+        };
+
         // Assemble the status string.
         let conn = if self.conn_label.is_empty() {
             String::new()
         } else {
             format!(" {} │", self.conn_label)
         };
-        let inner = format!("{conn} {mode} │ tx:{tx}{duration}{ai} ");
+        let inner = format!("{conn} {mode} │ tx:{tx}{duration}{explain}{ai} ");
 
         // Pad or truncate to terminal width.
         let width = self.term_cols as usize;
