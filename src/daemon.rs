@@ -150,7 +150,10 @@ pub enum NotificationChannel {
     /// Slack incoming webhook URL.
     Slack { webhook_url: String },
     /// Generic webhook URL (POSTs JSON with message, source, timestamp).
-    Webhook { url: String },
+    ///
+    /// When `secret` is set, the payload is signed with HMAC-SHA256 and the
+    /// signature is sent in the `X-Rpg-Signature-256` header.
+    Webhook { url: String, secret: Option<String> },
     /// Email (placeholder — not implemented in v1).
     #[allow(dead_code)]
     Email { to: String },
@@ -168,8 +171,8 @@ pub async fn notify(channel: &NotificationChannel, message: &str) {
         NotificationChannel::Slack { webhook_url } => {
             send_slack_notification(webhook_url, message).await;
         }
-        NotificationChannel::Webhook { url } => {
-            send_webhook_notification(url, message).await;
+        NotificationChannel::Webhook { url, secret } => {
+            send_webhook_notification(url, message, secret.as_deref()).await;
         }
         NotificationChannel::PagerDuty { routing_key } => {
             send_pagerduty_notification(routing_key, message).await;
@@ -187,7 +190,7 @@ pub async fn notify(channel: &NotificationChannel, message: &str) {
     }
 }
 
-async fn send_webhook_notification(url: &str, message: &str) {
+async fn send_webhook_notification(url: &str, message: &str, secret: Option<&str>) {
     let payload = serde_json::to_string(&serde_json::json!({
         "message": message,
         "source": "rpg",
@@ -195,13 +198,18 @@ async fn send_webhook_notification(url: &str, message: &str) {
     }))
     .unwrap_or_else(|_| r#"{"message":"(encoding error)"}"#.to_owned());
 
-    match reqwest::Client::new()
+    let mut req = reqwest::Client::new()
         .post(url)
-        .header("Content-Type", "application/json")
-        .body(payload)
-        .send()
-        .await
-    {
+        .header("Content-Type", "application/json");
+
+    // HMAC-SHA256 sign the payload when a webhook secret is configured.
+    // The signature is hex-encoded and sent in `X-Rpg-Signature-256`.
+    if let Some(secret_key) = secret {
+        let sig = hmac_sha256_hex(secret_key.as_bytes(), payload.as_bytes());
+        req = req.header("X-Rpg-Signature-256", sig);
+    }
+
+    match req.body(payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             crate::logging::debug("daemon", "Webhook notification sent");
         }
@@ -215,6 +223,19 @@ async fn send_webhook_notification(url: &str, message: &str) {
             crate::logging::warn("daemon", &format!("Webhook notification error: {e}"));
         }
     }
+}
+
+/// Compute HMAC-SHA256 of `msg` under `key` and return lowercase hex.
+fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use ring::hmac;
+    use std::fmt::Write as _;
+
+    let k = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let tag = hmac::sign(&k, msg);
+    tag.as_ref().iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 async fn send_slack_notification(webhook_url: &str, message: &str) {
@@ -469,6 +490,7 @@ pub async fn run(
     let mut circuit_breaker = crate::governance::CircuitBreaker::new();
     let mut veto_tracker = crate::governance::VetoTracker::new();
     let mut audit_log = crate::governance::AuditLog::new();
+    let mut deduplicator = crate::alert_delivery::AlertDeduplicator::new();
     let interval = Duration::from_secs(10);
 
     let health = Arc::new(RwLock::new(HealthStatus {
@@ -609,6 +631,15 @@ pub async fn run(
                 kind = anomaly.kind.label(),
                 desc = anomaly.description,
             );
+            let fp = crate::alert_delivery::make_fingerprint(
+                &msg,
+                anomaly.kind.label(),
+                "anomaly-detector",
+            );
+            if !deduplicator.should_send(&fp) {
+                crate::logging::debug("daemon", &format!("Suppressing duplicate alert: {fp}"));
+                continue;
+            }
             for ch in channels {
                 notify(ch, &msg).await;
             }
@@ -1467,10 +1498,46 @@ mod tests {
     fn notification_channel_webhook_has_url() {
         let ch = NotificationChannel::Webhook {
             url: "https://example.com/hook".to_owned(),
+            secret: None,
         };
-        if let NotificationChannel::Webhook { url } = ch {
+        if let NotificationChannel::Webhook { url, secret } = ch {
             assert!(url.starts_with("https://"));
+            assert!(secret.is_none());
         }
+    }
+
+    #[test]
+    fn notification_channel_webhook_with_secret() {
+        let ch = NotificationChannel::Webhook {
+            url: "https://example.com/hook".to_owned(),
+            secret: Some("my-secret".to_owned()),
+        };
+        if let NotificationChannel::Webhook { url: _, secret } = ch {
+            assert_eq!(secret.as_deref(), Some("my-secret"));
+        }
+    }
+
+    #[test]
+    fn hmac_sha256_hex_is_deterministic() {
+        let sig1 = hmac_sha256_hex(b"secret", b"payload");
+        let sig2 = hmac_sha256_hex(b"secret", b"payload");
+        assert_eq!(sig1, sig2);
+        assert_eq!(sig1.len(), 64);
+        assert!(sig1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hmac_sha256_hex_differs_with_different_key() {
+        let sig1 = hmac_sha256_hex(b"key1", b"payload");
+        let sig2 = hmac_sha256_hex(b"key2", b"payload");
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn hmac_sha256_hex_differs_with_different_payload() {
+        let sig1 = hmac_sha256_hex(b"key", b"payload1");
+        let sig2 = hmac_sha256_hex(b"key", b"payload2");
+        assert_ne!(sig1, sig2);
     }
 
     #[test]
