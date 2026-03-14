@@ -9,6 +9,7 @@ use clap::Parser;
 mod actor;
 mod ai;
 mod capabilities;
+mod compat;
 mod complete;
 mod conditional;
 mod config;
@@ -271,6 +272,10 @@ struct Cli {
     debug: bool,
 
     // -- Samo-specific flags ------------------------------------------------
+    /// Show psql compatibility report and exit.
+    #[arg(long)]
+    compat: bool,
+
     /// Disable syntax highlighting in the interactive REPL.
     #[arg(long)]
     no_highlight: bool,
@@ -601,6 +606,12 @@ async fn main() {
     if let Some(ref pg_ver_str) = cli.generate_wrappers {
         let pg_version: u32 = pg_ver_str.parse().unwrap_or(16);
         print!("{}", setup::generate_setup_sql(pg_version));
+        return;
+    }
+
+    // --compat: print psql compatibility report and exit (no DB connection).
+    if cli.compat {
+        compat::print_compat_report();
         return;
     }
 
