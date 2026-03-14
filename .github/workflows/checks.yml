@@ -134,3 +134,48 @@ jobs:
         run: cargo build --release
       - name: Run compatibility tests
         run: bash tests/compat/test-compat.sh target/release/rpg
+
+  connection-tests:
+    name: Connection Tests
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d testdb"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 5s
+    env:
+      TEST_PGHOST: localhost
+      TEST_PGPORT: "15432"
+      TEST_PGUSER: testuser
+      TEST_PGPASSWORD: testpass
+      TEST_PGDATABASE: testdb
+      PGPASSWORD: testpass
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: connection-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            connection-${{ runner.os }}-cargo-
+      - name: Build rpg
+        run: cargo build --release
+      - name: Run connection tests
+        run: bash tests/compat/test-connections.sh target/release/rpg
