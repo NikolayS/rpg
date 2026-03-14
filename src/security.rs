@@ -150,6 +150,95 @@ impl SecurityReport {
     }
 }
 
+impl SecurityFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`].
+    ///
+    /// Returns `Some` for findings with a safe, well-defined SQL action;
+    /// `None` for findings that require manual intervention (password change,
+    /// `pg_hba.conf` file edit + server reload).
+    #[allow(dead_code)]
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        let role = &self.table;
+
+        let (proposed_action, expected_outcome, risk) = match self.kind {
+            SecurityFindingKind::SuperuserRole => {
+                let action = format!("alter role {role} nosuperuser;");
+                let outcome = format!(
+                    "Remove superuser from role '{role}'; \
+                     restrict to granted object privileges only"
+                );
+                let risk = "Revoking superuser may break applications that rely on \
+                            unrestricted access. Test in staging before applying."
+                    .to_owned();
+                (action, outcome, risk)
+            }
+            SecurityFindingKind::NoPasswordExpiry => {
+                // Use a fixed 90-day placeholder from a known reference date.
+                let action = format!("alter role {role} valid until '2026-06-12T00:00:00';");
+                let outcome = format!(
+                    "Set password expiry for role '{role}' to 90 days; \
+                     enforce regular credential rotation"
+                );
+                let risk = "After expiry the role cannot log in until the password \
+                            is reset. Coordinate with application teams."
+                    .to_owned();
+                (action, outcome, risk)
+            }
+            SecurityFindingKind::ElevatedPrivilege => {
+                // Determine which privilege(s) to revoke from the description.
+                let has_createdb = self.description.contains("CREATEDB");
+                let has_createrole = self.description.contains("CREATEROLE");
+
+                let action = match (has_createdb, has_createrole) {
+                    (true, true) => format!("alter role {role} nocreatedb nocreaterole;"),
+                    (true, false) => format!("alter role {role} nocreatedb;"),
+                    (false, true) => format!("alter role {role} nocreaterole;"),
+                    (false, false) => return None,
+                };
+                let outcome = format!(
+                    "Remove elevated privileges from role '{role}'; \
+                     limit to standard object-level permissions"
+                );
+                let risk = "If '{role}' is used by automation to create databases \
+                            or manage roles this will break those workflows. \
+                            Verify before applying."
+                    .to_owned();
+                (action, outcome, risk)
+            }
+            // WeakPasswordHash requires a new plaintext password (cannot be
+            // automated safely) and TrustAuthentication requires editing
+            // pg_hba.conf on disk + server reload — neither is a pure SQL action.
+            SecurityFindingKind::WeakPasswordHash | SecurityFindingKind::TrustAuthentication => {
+                return None
+            }
+        };
+
+        Some(crate::governance::ActionProposal {
+            feature: crate::governance::FeatureArea::Security,
+            severity: self.severity,
+            evidence_class: self.evidence_class,
+            finding: self.description.clone(),
+            proposed_action,
+            expected_outcome,
+            risk,
+            created_at: std::time::SystemTime::now(),
+        })
+    }
+}
+
+impl SecurityReport {
+    /// Collect all [`crate::governance::ActionProposal`]s from this report.
+    ///
+    /// Only findings with safe, automatable SQL actions produce proposals.
+    #[allow(dead_code)]
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(SecurityFinding::to_proposal)
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SQL queries
 // ---------------------------------------------------------------------------
@@ -772,5 +861,143 @@ mod tests {
         .flatten()
         .collect();
         assert_eq!(privileges, vec!["CREATEDB"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // to_proposal / to_proposals tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn superuser_role_to_proposal_contains_nosuperuser_sql() {
+        let finding = SecurityFinding {
+            kind: SecurityFindingKind::SuperuserRole,
+            schema: "roles".to_owned(),
+            table: "app_admin".to_owned(),
+            description: "Role 'app_admin' has superuser privileges".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: None,
+        };
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        assert!(proposal.proposed_action.contains("nosuperuser"));
+        assert!(proposal.proposed_action.contains("app_admin"));
+        assert_eq!(proposal.feature, crate::governance::FeatureArea::Security);
+    }
+
+    #[test]
+    fn no_password_expiry_to_proposal_contains_valid_until_sql() {
+        let finding = SecurityFinding {
+            kind: SecurityFindingKind::NoPasswordExpiry,
+            schema: "roles".to_owned(),
+            table: "alice".to_owned(),
+            description: "Login role 'alice' has no password expiry".to_owned(),
+            severity: Severity::Info,
+            evidence_class: EvidenceClass::Advisory,
+            suggested_action: None,
+        };
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        assert!(proposal.proposed_action.contains("valid until"));
+        assert!(proposal.proposed_action.contains("alice"));
+        assert_eq!(proposal.feature, crate::governance::FeatureArea::Security);
+    }
+
+    #[test]
+    fn elevated_privilege_createdb_to_proposal_contains_nocreatedb_sql() {
+        let finding = SecurityFinding {
+            kind: SecurityFindingKind::ElevatedPrivilege,
+            schema: "roles".to_owned(),
+            table: "appuser".to_owned(),
+            description: "Role 'appuser' has elevated privileges: CREATEDB".to_owned(),
+            severity: Severity::Info,
+            evidence_class: EvidenceClass::Advisory,
+            suggested_action: None,
+        };
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        assert!(proposal.proposed_action.contains("nocreatedb"));
+        assert!(proposal.proposed_action.contains("appuser"));
+    }
+
+    #[test]
+    fn elevated_privilege_createrole_to_proposal_contains_nocreaterole_sql() {
+        let finding = SecurityFinding {
+            kind: SecurityFindingKind::ElevatedPrivilege,
+            schema: "roles".to_owned(),
+            table: "dba".to_owned(),
+            description: "Role 'dba' has elevated privileges: CREATEROLE".to_owned(),
+            severity: Severity::Info,
+            evidence_class: EvidenceClass::Advisory,
+            suggested_action: None,
+        };
+        let proposal = finding.to_proposal().expect("should produce a proposal");
+        assert!(proposal.proposed_action.contains("nocreaterole"));
+        assert!(proposal.proposed_action.contains("dba"));
+    }
+
+    #[test]
+    fn weak_password_hash_to_proposal_returns_none() {
+        let finding = SecurityFinding {
+            kind: SecurityFindingKind::WeakPasswordHash,
+            schema: "roles".to_owned(),
+            table: "bob".to_owned(),
+            description: "Role 'bob' uses MD5 hash — upgrade to scram-sha-256".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: None,
+        };
+        assert!(finding.to_proposal().is_none());
+    }
+
+    #[test]
+    fn trust_authentication_to_proposal_returns_none() {
+        let finding = SecurityFinding {
+            kind: SecurityFindingKind::TrustAuthentication,
+            schema: "hba".to_owned(),
+            table: "line_5".to_owned(),
+            description: "pg_hba line 5: trust auth".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: None,
+        };
+        assert!(finding.to_proposal().is_none());
+    }
+
+    #[test]
+    fn report_to_proposals_filters_non_actionable_findings() {
+        let report = SecurityReport {
+            findings: vec![
+                SecurityFinding {
+                    kind: SecurityFindingKind::SuperuserRole,
+                    schema: "roles".to_owned(),
+                    table: "admin".to_owned(),
+                    description: "Role 'admin' has superuser".to_owned(),
+                    severity: Severity::Warning,
+                    evidence_class: EvidenceClass::Heuristic,
+                    suggested_action: None,
+                },
+                SecurityFinding {
+                    kind: SecurityFindingKind::WeakPasswordHash,
+                    schema: "roles".to_owned(),
+                    table: "carol".to_owned(),
+                    description: "Role 'carol' uses MD5".to_owned(),
+                    severity: Severity::Warning,
+                    evidence_class: EvidenceClass::Heuristic,
+                    suggested_action: None,
+                },
+                SecurityFinding {
+                    kind: SecurityFindingKind::TrustAuthentication,
+                    schema: "hba".to_owned(),
+                    table: "line_3".to_owned(),
+                    description: "trust on network".to_owned(),
+                    severity: Severity::Warning,
+                    evidence_class: EvidenceClass::Heuristic,
+                    suggested_action: None,
+                },
+            ],
+        };
+        let proposals = report.to_proposals();
+        // Only SuperuserRole produces a proposal; WeakPasswordHash and
+        // TrustAuthentication return None.
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].proposed_action.contains("nosuperuser"));
     }
 }

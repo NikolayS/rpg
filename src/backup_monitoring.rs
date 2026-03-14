@@ -93,6 +93,32 @@ pub struct BackupMonitoringReport {
     pub findings: Vec<BackupMonitoringFinding>,
 }
 
+impl BackupMonitoringFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`].
+    ///
+    /// Backup monitoring has no safe auto-actions (all remediation involves
+    /// external systems or configuration file changes), so this always returns
+    /// `None`. The method exists for API consistency with other analyzers.
+    #[allow(dead_code, clippy::unused_self)]
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        None
+    }
+}
+
+impl BackupMonitoringReport {
+    /// Collect all [`crate::governance::ActionProposal`]s from this report.
+    ///
+    /// Backup monitoring findings have no safe auto-actions, so this always
+    /// returns an empty `Vec`. The method exists for API consistency.
+    #[allow(dead_code)]
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(BackupMonitoringFinding::to_proposal)
+            .collect()
+    }
+}
+
 impl BackupMonitoringReport {
     /// Display the report to the terminal.
     pub fn display(&self) {
@@ -640,6 +666,71 @@ mod tests {
         assert_eq!(report.findings[0].severity, Severity::Critical);
         assert_eq!(report.findings[1].severity, Severity::Warning);
         assert_eq!(report.findings[2].severity, Severity::Info);
+    }
+
+    // ---- to_proposal / to_proposals tests --------------------------------
+
+    #[test]
+    fn finding_to_proposal_always_returns_none() {
+        let finding = BackupMonitoringFinding {
+            kind: BackupMonitoringFindingKind::WalArchiveFailure,
+            schema: String::new(),
+            table: String::new(),
+            description: "3 WAL archive failures".to_owned(),
+            severity: Severity::Critical,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: Some("Fix archive_command".to_owned()),
+        };
+        assert!(finding.to_proposal().is_none());
+    }
+
+    #[test]
+    fn finding_to_proposal_returns_none_for_archive_lag() {
+        let finding = BackupMonitoringFinding {
+            kind: BackupMonitoringFindingKind::ArchiveLag,
+            schema: String::new(),
+            table: String::new(),
+            description: "No WAL segment archived in 10 minute(s)".to_owned(),
+            severity: Severity::Warning,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: None,
+        };
+        assert!(finding.to_proposal().is_none());
+    }
+
+    #[test]
+    fn report_to_proposals_is_always_empty() {
+        let report = BackupMonitoringReport {
+            findings: vec![
+                BackupMonitoringFinding {
+                    kind: BackupMonitoringFindingKind::WalArchiveFailure,
+                    schema: String::new(),
+                    table: String::new(),
+                    description: "5 failures".to_owned(),
+                    severity: Severity::Critical,
+                    evidence_class: EvidenceClass::Heuristic,
+                    suggested_action: Some("Check logs".to_owned()),
+                },
+                BackupMonitoringFinding {
+                    kind: BackupMonitoringFindingKind::ArchivingDisabled,
+                    schema: String::new(),
+                    table: String::new(),
+                    description: "archive_mode = off".to_owned(),
+                    severity: Severity::Info,
+                    evidence_class: EvidenceClass::Advisory,
+                    suggested_action: Some("Enable archiving".to_owned()),
+                },
+            ],
+        };
+        assert!(report.to_proposals().is_empty());
+    }
+
+    #[test]
+    fn empty_report_to_proposals_is_empty() {
+        let report = BackupMonitoringReport {
+            findings: Vec::new(),
+        };
+        assert!(report.to_proposals().is_empty());
     }
 
     // ---- SQL constant tests ----------------------------------------------
