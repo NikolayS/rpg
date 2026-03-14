@@ -1,12 +1,8 @@
 //! Formatting helpers for `\aaa` governance status REPL commands.
 //!
 //! Each public function takes governance state and returns a `String`
-//! ready for display in the interactive REPL.  REPL wiring (dispatch,
-//! command parsing) will be added in a follow-up PR; the module is
-//! compiled but not yet wired into the main dispatch loop.
-
-// REPL wiring arrives in a follow-up PR; suppress dead_code for now.
-#![allow(dead_code)]
+//! ready for display in the interactive REPL.  REPL wiring lives in
+//! `src/repl/mod.rs` (`dispatch_aaa`).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;

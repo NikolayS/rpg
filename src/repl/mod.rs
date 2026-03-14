@@ -1045,9 +1045,16 @@ pub struct ReplSettings {
     /// Checks can be enabled or disabled at runtime via
     /// `\health enable <name>` / `\health disable <name>`.
     pub health_checks: crate::health_checks::HealthCheckRegistry,
+    /// Governance dispatcher for `\aaa` commands (#518).
+    ///
+    /// Owns the circuit breakers, veto tracker, promotion tracker, and
+    /// audit log used by the AAA governance subsystem.  Shared between
+    /// the REPL display commands and future action-execution paths.
+    pub dispatcher: crate::dispatcher::Dispatcher,
 }
 
 impl std::fmt::Debug for ReplSettings {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReplSettings")
             .field("timing", &self.timing)
@@ -1143,6 +1150,10 @@ impl std::fmt::Debug for ReplSettings {
                 "health_checks",
                 &format!("{} checks", self.health_checks.len()),
             )
+            .field(
+                "dispatcher",
+                &format!("{} audit entries", self.dispatcher.audit_log().len()),
+            )
             .finish()
     }
 }
@@ -1205,6 +1216,7 @@ impl Default for ReplSettings {
             auto_suggest_fix: true,
             last_was_fix: false,
             health_checks: crate::health_checks::HealthCheckRegistry::with_defaults(),
+            dispatcher: crate::dispatcher::Dispatcher::new(),
         }
     }
 }
@@ -1700,6 +1712,12 @@ AI commands:
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
+
+Governance:
+  \aaa [status]         show governance overview
+  \aaa audit [N]        show last N audit log entries
+  \aaa vetoes           show active veto patterns
+  \aaa breaker          show circuit breaker status
 
 Health checks:
   \health [list]        list all health checks
@@ -3153,6 +3171,10 @@ async fn dispatch_meta(
                 return result;
             }
         }
+        // AAA governance commands (#518).
+        MetaCmd::Aaa(ref sub) => {
+            dispatch_aaa(sub, &settings.dispatcher);
+        }
         // Health check commands (#514).
         MetaCmd::HealthCheck(ref args) => {
             dispatch_health(args, settings);
@@ -3185,6 +3207,64 @@ async fn dispatch_meta(
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// AAA governance commands (#518)
+// ---------------------------------------------------------------------------
+
+/// Handle `\aaa [status | audit [N] | vetoes | breaker]`.
+///
+/// - `\aaa` / `\aaa status` — governance overview (all feature areas).
+/// - `\aaa audit [N]` — show last N audit log entries (default 20).
+/// - `\aaa vetoes` — show active veto patterns.
+/// - `\aaa breaker` — show circuit breaker status per feature.
+fn dispatch_aaa(sub: &str, dispatcher: &crate::dispatcher::Dispatcher) {
+    use crate::governance::AutonomyLevel;
+    use std::collections::HashMap;
+
+    let mut parts = sub.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap_or("").trim();
+    let arg = parts.next().map_or("", str::trim);
+
+    match cmd {
+        "" | "status" => {
+            // Build a default all-Observe level map as a display baseline.
+            let levels: HashMap<crate::governance::FeatureArea, AutonomyLevel> =
+                crate::governance::FeatureArea::all()
+                    .iter()
+                    .map(|&f| (f, AutonomyLevel::Observe))
+                    .collect();
+            let output = crate::aaa_commands::format_aaa_status(dispatcher, &levels);
+            print!("{output}");
+        }
+        "audit" => {
+            let count: usize = if arg.is_empty() {
+                20
+            } else if let Ok(n) = arg.parse::<usize>() {
+                n
+            } else {
+                eprintln!("\\aaa audit: expected a number, got \"{arg}\"");
+                return;
+            };
+            let output = crate::aaa_commands::format_audit_log(dispatcher.audit_log(), count);
+            print!("{output}");
+        }
+        "vetoes" => {
+            let output = crate::aaa_commands::format_vetoes(dispatcher.veto_tracker(), None);
+            print!("{output}");
+        }
+        "breaker" => {
+            let output = crate::aaa_commands::format_breaker_status(dispatcher);
+            print!("{output}");
+        }
+        other => {
+            eprintln!(
+                "\\aaa: unknown subcommand \"{other}\". \
+                 Valid: status, audit [N], vetoes, breaker"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

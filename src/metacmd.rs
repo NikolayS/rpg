@@ -355,6 +355,18 @@ pub enum MetaCmd {
     /// (display mode).  `area` is `"all"` for the bulk-set variant.
     Autonomy(String, String),
 
+    // -- AAA governance commands (#518) ------------------------------------
+    /// `\aaa [status | audit [N] | vetoes | breaker]`
+    ///
+    /// - `\aaa` / `\aaa status` — governance overview.
+    /// - `\aaa audit [N]` — show last N audit log entries.
+    /// - `\aaa vetoes` — show active veto patterns.
+    /// - `\aaa breaker` — show circuit breaker status.
+    ///
+    /// The raw argument string (everything after `\aaa `) is stored here
+    /// for dispatch-time parsing.
+    Aaa(String),
+
     // -- Health check commands (#514) --------------------------------------
     /// `\health [list | show <name> | enable <name> | disable <name>]`
     ///
@@ -561,8 +573,16 @@ pub fn parse(input: &str) -> ParsedMeta {
 // Command-specific parsers
 // ---------------------------------------------------------------------------
 
-/// Parse `\a` (toggle align) or `\autonomy [area level]`.
+/// Parse `\a` (toggle align), `\aaa [sub]`, or `\autonomy [area level]`.
 fn parse_a_family(input: &str) -> ParsedMeta {
+    // `\aaa` — governance commands; must be checked before `\autonomy` and
+    // bare `\a` (longer prefix wins).
+    if let Some(rest) = input.strip_prefix("aaa") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::Aaa(rest.trim().to_owned()));
+        }
+    }
+
     // `\autonomy` — must be checked before bare `\a` (longer prefix).
     if let Some(rest) = input.strip_prefix("autonomy") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
