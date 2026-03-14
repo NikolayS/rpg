@@ -85,7 +85,63 @@ pub struct ConnectionManagementReport {
     pub findings: Vec<ConnectionManagementFinding>,
 }
 
+impl ConnectionManagementFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`] for
+    /// Supervised mode.
+    ///
+    /// Returns `None` for informational findings that have no concrete
+    /// suggested action (`IdleConnectionAccumulation`, `PerDatabaseDistribution`).
+    #[allow(dead_code)]
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        let (proposed_action, risk, expected) = match self.kind {
+            ConnectionManagementFindingKind::LongIdleConnection => {
+                let action = self.suggested_action.as_ref()?;
+                (
+                    action.clone(),
+                    "Terminating a backend closes the client connection immediately. \
+                     Verify the connection is not part of an active transaction \
+                     before proceeding.",
+                    format!("Terminate long-idle connection — {}", self.description),
+                )
+            }
+            ConnectionManagementFindingKind::ConnectionSaturation => (
+                "alter system set idle_session_timeout = '600000'; \
+                 select pg_reload_conf()"
+                    .to_owned(),
+                "Setting idle_session_timeout via ALTER SYSTEM requires a \
+                 pg_reload_conf() call to take effect. Existing sessions are \
+                 not affected until they next go idle. Test in staging first.",
+                "Reduce connection saturation by reclaiming idle sessions \
+                 via idle_session_timeout"
+                    .to_owned(),
+            ),
+            ConnectionManagementFindingKind::IdleConnectionAccumulation
+            | ConnectionManagementFindingKind::PerDatabaseDistribution => return None,
+        };
+
+        Some(crate::governance::ActionProposal {
+            feature: crate::governance::FeatureArea::ConnectionManagement,
+            severity: self.severity,
+            evidence_class: self.evidence_class,
+            finding: self.description.clone(),
+            proposed_action,
+            expected_outcome: expected,
+            risk: risk.to_owned(),
+            created_at: std::time::SystemTime::now(),
+        })
+    }
+}
+
 impl ConnectionManagementReport {
+    /// Convert all actionable findings into proposals for Supervised mode.
+    #[allow(dead_code)]
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(ConnectionManagementFinding::to_proposal)
+            .collect()
+    }
+
     /// Display the report to the terminal.
     pub fn display(&self) {
         if self.findings.is_empty() {
@@ -707,5 +763,104 @@ mod tests {
         assert!(DB_DISTRIBUTION_SQL.contains("datname"));
         assert!(DB_DISTRIBUTION_SQL.contains("group by"));
         assert!(DB_DISTRIBUTION_SQL.contains("pg_stat_activity"));
+    }
+
+    // --- to_proposal / to_proposals ---
+
+    #[test]
+    fn long_idle_finding_produces_proposal() {
+        let f = long_idle_finding(5678, "bob", "appdb", 4200);
+        let proposal = f
+            .to_proposal()
+            .expect("LongIdleConnection should produce a proposal");
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::ConnectionManagement
+        );
+        assert_eq!(proposal.severity, Severity::Warning);
+        assert_eq!(proposal.evidence_class, EvidenceClass::Heuristic);
+        assert!(proposal.proposed_action.contains("5678"));
+        assert!(proposal.finding.contains("bob@appdb"));
+        assert!(proposal.expected_outcome.contains("long-idle"));
+        assert!(proposal.risk.contains("Terminating"));
+    }
+
+    #[test]
+    fn saturation_finding_produces_proposal() {
+        let f = saturation_finding(90, 100).expect("90% saturation should produce a finding");
+        let proposal = f
+            .to_proposal()
+            .expect("ConnectionSaturation should produce a proposal");
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::ConnectionManagement
+        );
+        assert!(proposal.proposed_action.contains("idle_session_timeout"));
+        assert!(proposal.expected_outcome.contains("saturation"));
+        assert!(proposal.risk.contains("ALTER SYSTEM"));
+    }
+
+    #[test]
+    fn idle_accumulation_finding_produces_no_proposal() {
+        let f =
+            idle_accumulation_finding(20).expect("20 idle connections should produce a finding");
+        assert!(
+            f.to_proposal().is_none(),
+            "IdleConnectionAccumulation should not produce a proposal"
+        );
+    }
+
+    #[test]
+    fn per_database_distribution_produces_no_proposal() {
+        let f = ConnectionManagementFinding {
+            kind: ConnectionManagementFindingKind::PerDatabaseDistribution,
+            schema: String::new(),
+            table: String::new(),
+            description: "5 total client connection(s) across databases — appdb: 5".to_owned(),
+            severity: Severity::Info,
+            evidence_class: EvidenceClass::Factual,
+            suggested_action: None,
+        };
+        assert!(
+            f.to_proposal().is_none(),
+            "PerDatabaseDistribution should not produce a proposal"
+        );
+    }
+
+    #[test]
+    fn report_to_proposals_filters_non_actionable() {
+        let report = ConnectionManagementReport {
+            findings: vec![
+                long_idle_finding(111, "alice", "db1", 2000),
+                idle_accumulation_finding(15)
+                    .expect("15 idle connections should produce a finding"),
+                saturation_finding(85, 100).expect("85% saturation should produce a finding"),
+                ConnectionManagementFinding {
+                    kind: ConnectionManagementFindingKind::PerDatabaseDistribution,
+                    schema: String::new(),
+                    table: String::new(),
+                    description: "distribution info".to_owned(),
+                    severity: Severity::Info,
+                    evidence_class: EvidenceClass::Factual,
+                    suggested_action: None,
+                },
+            ],
+        };
+        let proposals = report.to_proposals();
+        // LongIdleConnection + ConnectionSaturation = 2 proposals;
+        // IdleConnectionAccumulation and PerDatabaseDistribution are filtered.
+        assert_eq!(proposals.len(), 2);
+        let features: Vec<_> = proposals.iter().map(|p| p.feature).collect();
+        assert!(features
+            .iter()
+            .all(|f| *f == crate::governance::FeatureArea::ConnectionManagement));
+    }
+
+    #[test]
+    fn report_to_proposals_empty_when_no_findings() {
+        let report = ConnectionManagementReport {
+            findings: Vec::new(),
+        };
+        assert!(report.to_proposals().is_empty());
     }
 }
