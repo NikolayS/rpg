@@ -1,27 +1,27 @@
-# Install Samo as a Windows service using NSSM (Non-Sucking Service Manager).
+# Install Rpg as a Windows service using NSSM (Non-Sucking Service Manager).
 #
 # Prerequisites:
 #   1. Download NSSM from https://nssm.cc/download
 #   2. Place nssm.exe in PATH or current directory
-#   3. Place samo.exe in C:\Program Files\Samo\
-#   4. Create config at C:\ProgramData\Samo\config.toml
+#   3. Place rpg.exe in C:\Program Files\Rpg\
+#   4. Create config at C:\ProgramData\Rpg\config.toml
 #
 # Usage (run as Administrator):
 #   .\install-windows-service.ps1
 #
 # To remove:
-#   nssm remove Samo confirm
+#   nssm remove rpg confirm
 
 $ErrorActionPreference = "Stop"
 
-$ServiceName = "Samo"
-$SamoBin = "C:\Program Files\Samo\samo.exe"
-$ConfigPath = "C:\ProgramData\Samo\config.toml"
-$LogDir = "C:\ProgramData\Samo\logs"
+$ServiceName = "rpg"
+$RpgBin = "C:\Program Files\Rpg\rpg.exe"
+$ConfigPath = "C:\ProgramData\Rpg\config.toml"
+$LogDir = "C:\ProgramData\Rpg\logs"
 
 # Verify prerequisites
-if (-not (Test-Path $SamoBin)) {
-    Write-Error "Samo binary not found at $SamoBin"
+if (-not (Test-Path $RpgBin)) {
+    Write-Error "Rpg binary not found at $RpgBin"
     exit 1
 }
 
@@ -38,9 +38,9 @@ if (-not $nssm) {
 }
 
 # Install service
-nssm install $ServiceName $SamoBin "daemon --config `"$ConfigPath`""
-nssm set $ServiceName AppDirectory "C:\ProgramData\Samo"
-nssm set $ServiceName DisplayName "Samo - Self-Driving Postgres Agent"
+nssm install $ServiceName $RpgBin "--daemon --config `"$ConfigPath`""
+nssm set $ServiceName AppDirectory "C:\ProgramData\Rpg"
+nssm set $ServiceName DisplayName "Rpg - Self-Driving Postgres Agent"
 nssm set $ServiceName Description "Autonomous Postgres monitoring and management daemon"
 nssm set $ServiceName Start SERVICE_AUTO_START
 nssm set $ServiceName AppStdout "$LogDir\stdout.log"
