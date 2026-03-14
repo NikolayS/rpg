@@ -377,14 +377,7 @@ pub(super) async fn dispatch_ai_command(
             );
         }
     } else if input == "/budget" {
-        let budget = settings.config.ai.token_budget;
-        let used = settings.tokens_used;
-        if budget == 0 {
-            eprintln!("Token budget: unlimited ({used} tokens used this session)");
-        } else {
-            let remaining = budget.saturating_sub(used);
-            eprintln!("Token budget: {used}/{budget} used, {remaining} remaining");
-        }
+        handle_ai_budget(settings);
     } else if input == "/rca" || input.starts_with("/rca ") {
         handle_ai_rca(client, settings, params).await;
     } else {
@@ -1691,6 +1684,48 @@ pub(super) async fn handle_ai_describe(
         Ok(result) => record_token_usage(settings, &result),
         Err(e) => eprintln!("AI error: {e}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// /budget — Token usage display
+// ---------------------------------------------------------------------------
+
+/// Handle the `/budget` command: display token usage for the current session.
+///
+/// Shows total tokens consumed and the configured budget limit.  When no
+/// budget is set (`token_budget == 0`) it prints an informational note about
+/// how to configure one.
+pub(super) fn handle_ai_budget(settings: &ReplSettings) {
+    let used = settings.tokens_used;
+    let budget = settings.config.ai.token_budget;
+
+    eprintln!("Token usage this session:");
+    eprintln!("  Total:  {:>10} tokens", format_tokens(used));
+    if budget == 0 {
+        eprintln!("  Budget: not set (use \\set TOKEN_BUDGET <N> to set)");
+    } else {
+        let remaining = budget.saturating_sub(used);
+        let pct = (used * 100).checked_div(budget).unwrap_or(100);
+        eprintln!(
+            "  Budget: {:>10} tokens ({}% used, {} remaining)",
+            format_tokens(budget),
+            pct,
+            format_tokens(remaining),
+        );
+    }
+}
+
+/// Format a token count with thousands separators.
+fn format_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 // ---------------------------------------------------------------------------
