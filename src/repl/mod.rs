@@ -3988,7 +3988,7 @@ async fn handle_backslash_dumb(
     parsed.echo_hidden = settings.echo_hidden;
     match dispatch_meta(parsed, client, params, settings, tx).await {
         MetaResult::Quit => HandleLineResult::Quit,
-        MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, Box::new(p)),
+        MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
         MetaResult::ClearBuffer => {
             buf.clear();
             println!("Query buffer reset (empty).");
@@ -4287,7 +4287,7 @@ async fn handle_line(
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
-            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, Box::new(p)),
+            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::ClearBuffer => {
                 buf.clear();
                 stmt_buf.clear();
@@ -4537,7 +4537,7 @@ async fn handle_line(
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
-            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, Box::new(p)),
+            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::ExecuteBuffer => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
