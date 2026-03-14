@@ -13,6 +13,7 @@ use crate::governance::Severity;
 
 pub mod cloudwatch;
 pub mod datadog;
+pub mod github;
 pub mod gitlab;
 pub mod jira;
 pub mod pganalyze;
