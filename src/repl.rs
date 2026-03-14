@@ -1399,6 +1399,13 @@ pub async fn execute_query(
                         // statement in a multi-statement query.
                         // Capture rendered output so we can mirror to log.
                         let mut out_buf = Vec::<u8>::new();
+
+                        // Print "--- EXPLAIN ---" header before the plan
+                        // output so users can distinguish plan from results.
+                        if auto_explain_active && result_set_index == 0 {
+                            let _ = writeln!(out_buf, "--- EXPLAIN ---");
+                        }
+
                         print_result_set_pset(
                             &mut out_buf,
                             &col_names,
@@ -8290,6 +8297,35 @@ mod tests {
         assert_eq!(AutoExplain::On.label(), "on");
         assert_eq!(AutoExplain::Analyze.label(), "analyze");
         assert_eq!(AutoExplain::Verbose.label(), "verbose");
+    }
+
+    #[test]
+    fn set_explain_on_updates_auto_explain() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "EXPLAIN", "on");
+        assert_eq!(settings.auto_explain, AutoExplain::On);
+    }
+
+    #[test]
+    fn set_explain_analyze_updates_auto_explain() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "EXPLAIN", "analyze");
+        assert_eq!(settings.auto_explain, AutoExplain::Analyze);
+    }
+
+    #[test]
+    fn set_explain_verbose_updates_auto_explain() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "EXPLAIN", "verbose");
+        assert_eq!(settings.auto_explain, AutoExplain::Verbose);
+    }
+
+    #[test]
+    fn set_explain_off_updates_auto_explain() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "EXPLAIN", "on");
+        apply_set(&mut settings, "EXPLAIN", "off");
+        assert_eq!(settings.auto_explain, AutoExplain::Off);
     }
 
     // -- \gexec parser ---------------------------------------------------------
