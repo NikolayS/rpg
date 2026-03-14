@@ -1357,15 +1357,16 @@ impl Helper for RpgHelper {}
 // Dropdown event handler
 // ---------------------------------------------------------------------------
 
-/// rustyline [`ConditionalEventHandler`] that intercepts Up / Down / Escape
-/// while the dropdown is visible, and falls through to the default action
-/// when it is not.
+/// rustyline [`ConditionalEventHandler`] that intercepts Up / Down / Escape /
+/// Enter while the dropdown is visible, and falls through to the default
+/// action when it is not.
 ///
 /// Bound in the REPL loop with:
 /// ```text
-/// rl.bind_sequence(KeyEvent(KeyCode::Down, Modifiers::NONE), …);
-/// rl.bind_sequence(KeyEvent(KeyCode::Up,   Modifiers::NONE), …);
-/// rl.bind_sequence(KeyEvent(KeyCode::Esc,  Modifiers::NONE), …);
+/// rl.bind_sequence(KeyEvent(KeyCode::Down,  Modifiers::NONE), …);
+/// rl.bind_sequence(KeyEvent(KeyCode::Up,    Modifiers::NONE), …);
+/// rl.bind_sequence(KeyEvent(KeyCode::Esc,   Modifiers::NONE), …);
+/// rl.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::NONE), …);
 /// ```
 #[derive(Clone)]
 pub struct DropdownEventHandler {
@@ -1384,6 +1385,8 @@ pub enum DropdownKey {
     Up,
     /// Escape — dismiss dropdown.
     Escape,
+    /// Enter — accept selected candidate when dropdown is open.
+    Enter,
 }
 
 impl rustyline::ConditionalEventHandler for DropdownEventHandler {
@@ -1392,7 +1395,7 @@ impl rustyline::ConditionalEventHandler for DropdownEventHandler {
         _evt: &rustyline::Event,
         _n: rustyline::RepeatCount,
         _positive: bool,
-        _ctx: &rustyline::EventContext,
+        ctx: &rustyline::EventContext,
     ) -> Option<rustyline::Cmd> {
         let Ok(mut dd) = self.dropdown.lock() else {
             return None; // fall through to default
@@ -1400,20 +1403,45 @@ impl rustyline::ConditionalEventHandler for DropdownEventHandler {
 
         if !dd.active {
             // Dropdown not open: fall through to the default behaviour
-            // (history navigation for Up/Down, nothing for Escape).
+            // (history navigation for Up/Down, AcceptLine for Enter, nothing
+            // for Escape).
             return None;
         }
 
         match self.key {
             DropdownKey::Down => {
                 dd.select_next();
-                // Repaint triggers a fresh call to `Hinter::hint` which
-                // re-renders the dropdown with the updated selection.
-                Some(rustyline::Cmd::Repaint)
+                let candidate = dd.candidates[dd.selected].clone();
+                // Replace the typed prefix with the newly selected candidate.
+                // BackwardChar covers the characters already in the buffer
+                // from word_start up to the current cursor position.
+                let typed_len = ctx.pos().saturating_sub(dd.word_start);
+                Some(rustyline::Cmd::Replace(
+                    rustyline::Movement::BackwardChar(typed_len),
+                    Some(candidate),
+                ))
             }
             DropdownKey::Up => {
                 dd.select_prev();
-                Some(rustyline::Cmd::Repaint)
+                let candidate = dd.candidates[dd.selected].clone();
+                let typed_len = ctx.pos().saturating_sub(dd.word_start);
+                Some(rustyline::Cmd::Replace(
+                    rustyline::Movement::BackwardChar(typed_len),
+                    Some(candidate),
+                ))
+            }
+            DropdownKey::Enter => {
+                // Accept the currently highlighted candidate, insert it into
+                // the line, and dismiss the dropdown.  Returning None here
+                // would fall through to AcceptLine (submit), which is wrong
+                // when the dropdown is open.
+                let candidate = dd.candidates[dd.selected].clone();
+                let typed_len = ctx.pos().saturating_sub(dd.word_start);
+                dd.dismiss();
+                Some(rustyline::Cmd::Replace(
+                    rustyline::Movement::BackwardChar(typed_len),
+                    Some(candidate),
+                ))
             }
             DropdownKey::Escape => {
                 dd.dismiss();
@@ -2508,5 +2536,125 @@ mod tests {
             dd.select_prev();
             assert_eq!(dd.selected, initial);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #552 regression tests
+    // -----------------------------------------------------------------------
+
+    /// Bug 1 — select_next/select_prev report the correct candidate so the
+    /// caller can replace the buffer text.
+    #[test]
+    fn test_dropdown_select_next_returns_correct_candidate() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec![
+                "users".to_owned(),
+                "user_roles".to_owned(),
+                "user_sessions".to_owned(),
+            ],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 14, // "SELECT * FROM " is 14 bytes
+            prefix: "user".to_owned(),
+        };
+        dd.select_next();
+        assert_eq!(
+            dd.candidates[dd.selected], "user_roles",
+            "after select_next the second candidate should be selected"
+        );
+    }
+
+    #[test]
+    fn test_dropdown_select_prev_returns_correct_candidate() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()],
+            selected: 2,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        dd.select_prev();
+        assert_eq!(
+            dd.candidates[dd.selected], "beta",
+            "after select_prev the previous candidate should be selected"
+        );
+    }
+
+    /// Bug 2 — dismiss() sets active to false so the next readline call does
+    /// not intercept Up-arrow for history navigation.
+    #[test]
+    fn test_dismiss_deactivates_dropdown() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["users".to_owned()],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: "u".to_owned(),
+        };
+        dd.dismiss();
+        assert!(
+            !dd.active,
+            "dropdown must be inactive after dismiss so Up/Down fall through to history"
+        );
+        assert!(
+            dd.candidates.is_empty(),
+            "candidates must be cleared by dismiss"
+        );
+    }
+
+    /// Bug 2 — a second dismiss() call (idempotent) must not panic.
+    #[test]
+    fn test_dismiss_is_idempotent() {
+        let mut dd = DropdownState::default();
+        dd.dismiss(); // already inactive — must be safe
+        assert!(!dd.active);
+    }
+
+    /// Bug 3 — DropdownKey::Enter variant must be defined and distinct.
+    #[test]
+    fn test_dropdown_key_enter_variant_exists() {
+        let key = DropdownKey::Enter;
+        assert_eq!(key, DropdownKey::Enter);
+        assert_ne!(key, DropdownKey::Down);
+        assert_ne!(key, DropdownKey::Up);
+        assert_ne!(key, DropdownKey::Escape);
+    }
+
+    /// Bug 3 — when the dropdown is active, the current() helper returns the
+    /// right candidate so Enter can use it.
+    #[test]
+    fn test_dropdown_current_after_navigation() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec![
+                "orders".to_owned(),
+                "order_items".to_owned(),
+                "order_notes".to_owned(),
+            ],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: "ord".to_owned(),
+        };
+        assert_eq!(dd.current(), Some("orders"));
+        dd.select_next();
+        assert_eq!(
+            dd.current(),
+            Some("order_items"),
+            "current() must reflect selection after navigation"
+        );
+        dd.select_next();
+        assert_eq!(dd.current(), Some("order_notes"));
+        // Simulate Enter: dismiss after reading current candidate.
+        let accepted = dd.current().map(str::to_owned);
+        dd.dismiss();
+        assert!(
+            !dd.active,
+            "dropdown must be inactive after Enter dismissal"
+        );
+        assert_eq!(accepted.as_deref(), Some("order_notes"));
     }
 }
