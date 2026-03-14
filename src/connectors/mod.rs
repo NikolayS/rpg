@@ -15,9 +15,11 @@ pub mod cloudwatch;
 pub mod datadog;
 pub mod github;
 pub mod gitlab;
+pub mod http_json;
 pub mod jira;
 pub mod pganalyze;
 pub mod postgresai;
+pub mod script;
 pub mod supabase;
 
 // ---------------------------------------------------------------------------
