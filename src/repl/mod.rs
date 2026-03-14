@@ -3138,12 +3138,68 @@ async fn dispatch_meta(
                 return result;
             }
         }
+        // Autonomy control (#386).
+        MetaCmd::Autonomy(ref area, ref level) => {
+            dispatch_autonomy(area, level, settings);
+        }
         ref stub => {
             eprintln!("{}: not yet implemented (see #27)", stub.label());
         }
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Autonomy control (#386)
+// ---------------------------------------------------------------------------
+
+/// Handle `\autonomy [area level | all level]`.
+///
+/// - No args: print a table of all feature areas and their current levels.
+/// - `area level`: set one feature area's autonomy level.
+/// - `all level`: set all feature areas to the given level.
+fn dispatch_autonomy(area: &str, level: &str, settings: &mut ReplSettings) {
+    use crate::governance::{AutonomyLevel, FeatureArea};
+
+    if area.is_empty() {
+        // Display table.
+        println!("{:<22}  Autonomy", "Feature area");
+        println!("{}  {}", "-".repeat(22), "-".repeat(10));
+        for &feature in FeatureArea::all() {
+            let current = settings.config.governance.autonomy_for(feature);
+            println!("{:<22}  {}", feature.label(), current.label());
+        }
+        return;
+    }
+
+    // Parse the level.
+    let Some(new_level) = AutonomyLevel::from_str(level) else {
+        eprintln!(
+            "\\autonomy: unknown level \"{level}\". \
+             Valid levels: observe, supervised, auto"
+        );
+        return;
+    };
+
+    if area == "all" {
+        for &feature in FeatureArea::all() {
+            settings.config.governance.set_autonomy(feature, new_level);
+        }
+        println!("all autonomy set to {}.", new_level.label());
+        return;
+    }
+
+    let Some(feature) = FeatureArea::from_str(area) else {
+        eprintln!(
+            "\\autonomy: unknown feature area \"{area}\". \
+             Use \\autonomy (no args) to list valid areas."
+        );
+        return;
+    };
+
+    settings.config.governance.set_autonomy(feature, new_level);
+    println!("{} autonomy set to {}.", feature.label(), new_level.label());
 }
 
 // ---------------------------------------------------------------------------

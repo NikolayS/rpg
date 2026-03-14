@@ -59,6 +59,39 @@ impl FeatureArea {
             Self::Security => "security",
         }
     }
+
+    /// Parse a feature area from its label string (case-insensitive).
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "vacuum" => Some(Self::Vacuum),
+            "bloat" => Some(Self::Bloat),
+            "index_health" => Some(Self::IndexHealth),
+            "config_tuning" => Some(Self::ConfigTuning),
+            "query_optimization" => Some(Self::QueryOptimization),
+            "connection_management" => Some(Self::ConnectionManagement),
+            "replication" => Some(Self::Replication),
+            "rca" => Some(Self::Rca),
+            "backup_monitoring" => Some(Self::BackupMonitoring),
+            "security" => Some(Self::Security),
+            _ => None,
+        }
+    }
+
+    /// All feature areas in display order.
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Vacuum,
+            Self::Bloat,
+            Self::IndexHealth,
+            Self::ConfigTuning,
+            Self::QueryOptimization,
+            Self::ConnectionManagement,
+            Self::Replication,
+            Self::Rca,
+            Self::BackupMonitoring,
+            Self::Security,
+        ]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +118,27 @@ impl AutonomyLevel {
             Self::Observe => "O",
             Self::Supervised => "S",
             Self::Auto => "A",
+        }
+    }
+
+    /// Human-readable label for display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Supervised => "supervised",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Parse from a string (case-insensitive).
+    ///
+    /// Accepts `"observe"` / `"o"`, `"supervised"` / `"s"`, `"auto"` / `"a"`.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "observe" | "o" => Some(Self::Observe),
+            "supervised" | "s" => Some(Self::Supervised),
+            "auto" | "a" => Some(Self::Auto),
+            _ => None,
         }
     }
 }

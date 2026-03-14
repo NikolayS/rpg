@@ -336,6 +336,20 @@ pub enum MetaCmd {
     /// ```
     LogFile(Option<String>),
 
+    // -- Autonomy control (#386) -------------------------------------------
+    /// `\autonomy [<area> <level> | all <level>]` — view or set per-feature
+    /// autonomy levels.
+    ///
+    /// - `\autonomy` — display a table of all feature areas and their levels.
+    /// - `\autonomy <area> <level>` — set one feature area's autonomy level.
+    /// - `\autonomy all <level>` — set all feature areas to the given level.
+    ///
+    /// Valid levels: `observe` (O), `supervised` (S), `auto` (A).
+    ///
+    /// Payload: `(area, level)` when both args are given; `("", "")` when bare
+    /// (display mode).  `area` is `"all"` for the bulk-set variant.
+    Autonomy(String, String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -477,7 +491,7 @@ pub fn parse(input: &str) -> ParsedMeta {
             parse_simple_or_unknown(input, "q", MetaCmd::Quit)
         }
         Some('?') => parse_simple_or_unknown(input, "?", MetaCmd::Help),
-        Some('a') => parse_simple_or_unknown(input, "a", MetaCmd::ToggleAlign),
+        Some('a') => parse_a_family(input),
         Some('c') => parse_c_family(input),
         Some('C') => parse_set_title(input),
         Some('e') => parse_e_family(input),
@@ -509,6 +523,27 @@ pub fn parse(input: &str) -> ParsedMeta {
 // ---------------------------------------------------------------------------
 // Command-specific parsers
 // ---------------------------------------------------------------------------
+
+/// Parse `\a` (toggle align) or `\autonomy [area level]`.
+fn parse_a_family(input: &str) -> ParsedMeta {
+    // `\autonomy` — must be checked before bare `\a` (longer prefix).
+    if let Some(rest) = input.strip_prefix("autonomy") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                // Bare `\autonomy` — display table.
+                return ParsedMeta::simple(MetaCmd::Autonomy(String::new(), String::new()));
+            }
+            // Parse `area level` or `all level`.
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let area = parts.next().unwrap_or("").to_owned();
+            let level = parts.next().map_or("", str::trim).to_owned();
+            return ParsedMeta::simple(MetaCmd::Autonomy(area, level));
+        }
+    }
+    // Bare `\a` — toggle aligned/unaligned output.
+    parse_simple_or_unknown(input, "a", MetaCmd::ToggleAlign)
+}
 
 /// Parse commands that must match a fixed token exactly (e.g. `\q`, `\?`).
 fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta {
