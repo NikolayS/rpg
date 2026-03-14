@@ -54,16 +54,15 @@ fn register_datadog(config: &ConnectorsConfig, registry: &mut ConnectorRegistry)
         crate::logging::info("connectors", "datadog: disabled");
         return;
     }
-    let api_key = match read_env(&cfg.api_key_env, "datadog") {
-        Some(v) => v,
-        None => return,
+    let Some(api_key) = read_env(&cfg.api_key_env, "datadog") else {
+        return;
     };
-    let app_key = match read_env(&cfg.app_key_env, "datadog") {
-        Some(v) => v,
-        None => return,
+    let Some(application_key) = read_env(&cfg.app_key_env, "datadog") else {
+        return;
     };
     registry.register(Box::new(crate::connectors::datadog::DatadogConnector::new(
-        api_key, app_key,
+        api_key,
+        application_key,
     )));
     crate::logging::info("connectors", "datadog: enabled");
 }
@@ -77,9 +76,8 @@ fn register_pganalyze(config: &ConnectorsConfig, registry: &mut ConnectorRegistr
         crate::logging::info("connectors", "pganalyze: disabled");
         return;
     }
-    let api_key = match read_env(&cfg.api_key_env, "pganalyze") {
-        Some(v) => v,
-        None => return,
+    let Some(api_key) = read_env(&cfg.api_key_env, "pganalyze") else {
+        return;
     };
     registry.register(Box::new(
         crate::connectors::pganalyze::PganalyzeConnector::new(api_key),
@@ -96,17 +94,14 @@ fn register_cloudwatch(config: &ConnectorsConfig, registry: &mut ConnectorRegist
         crate::logging::info("connectors", "cloudwatch: disabled");
         return;
     }
-    let region = match read_env(&cfg.region_env, "cloudwatch") {
-        Some(v) => v,
-        None => return,
+    let Some(region) = read_env(&cfg.region_env, "cloudwatch") else {
+        return;
     };
-    let access_key_id = match read_env(&cfg.access_key_id_env, "cloudwatch") {
-        Some(v) => v,
-        None => return,
+    let Some(access_key_id) = read_env(&cfg.access_key_id_env, "cloudwatch") else {
+        return;
     };
-    let secret_access_key = match read_env(&cfg.secret_access_key_env, "cloudwatch") {
-        Some(v) => v,
-        None => return,
+    let Some(secret_access_key) = read_env(&cfg.secret_access_key_env, "cloudwatch") else {
+        return;
     };
     registry.register(Box::new(
         crate::connectors::cloudwatch::CloudWatchConnector::new(
@@ -127,9 +122,8 @@ fn register_postgresai(config: &ConnectorsConfig, registry: &mut ConnectorRegist
         crate::logging::info("connectors", "postgresai: disabled");
         return;
     }
-    let api_key = match read_env(&cfg.api_key_env, "postgresai") {
-        Some(v) => v,
-        None => return,
+    let Some(api_key) = read_env(&cfg.api_key_env, "postgresai") else {
+        return;
     };
     registry.register(Box::new(
         crate::connectors::postgresai::PostgresAIConnector::new(api_key),
@@ -146,9 +140,8 @@ fn register_supabase(config: &ConnectorsConfig, registry: &mut ConnectorRegistry
         crate::logging::info("connectors", "supabase: disabled");
         return;
     }
-    let token = match read_env(&cfg.access_token_env, "supabase") {
-        Some(v) => v,
-        None => return,
+    let Some(token) = read_env(&cfg.access_token_env, "supabase") else {
+        return;
     };
     registry.register(Box::new(
         crate::connectors::supabase::SupabaseConnector::new(token),
@@ -165,30 +158,24 @@ fn register_github(config: &ConnectorsConfig, registry: &mut ConnectorRegistry) 
         crate::logging::info("connectors", "github: disabled");
         return;
     }
-    let token = match read_env(&cfg.token_env, "github") {
-        Some(v) => v,
-        None => return,
+    let Some(token) = read_env(&cfg.token_env, "github") else {
+        return;
     };
-    let repo = match &cfg.repo {
-        Some(r) => r.clone(),
-        None => {
-            crate::logging::warn(
-                "connectors",
-                "github: skipped — 'repo' not set in [connectors.github]",
-            );
-            return;
-        }
+    let Some(repo) = cfg.repo.as_deref() else {
+        crate::logging::warn(
+            "connectors",
+            "github: skipped — 'repo' not set in [connectors.github]",
+        );
+        return;
     };
-    let (owner, repo_name) = match repo.split_once('/') {
-        Some((o, r)) => (o.to_owned(), r.to_owned()),
-        None => {
-            crate::logging::warn(
-                "connectors",
-                "github: skipped — 'repo' must be in 'owner/repo' format",
-            );
-            return;
-        }
+    let Some((owner_str, repo_str)) = repo.split_once('/') else {
+        crate::logging::warn(
+            "connectors",
+            "github: skipped — 'repo' must be in 'owner/repo' format",
+        );
+        return;
     };
+    let (owner, repo_name) = (owner_str.to_owned(), repo_str.to_owned());
     registry.register(Box::new(crate::connectors::github::GitHubConnector::new(
         token, owner, repo_name,
     )));
@@ -204,19 +191,15 @@ fn register_gitlab(config: &ConnectorsConfig, registry: &mut ConnectorRegistry) 
         crate::logging::info("connectors", "gitlab: disabled");
         return;
     }
-    let token = match read_env(&cfg.token_env, "gitlab") {
-        Some(v) => v,
-        None => return,
+    let Some(token) = read_env(&cfg.token_env, "gitlab") else {
+        return;
     };
-    let project_id = match &cfg.project_id {
-        Some(p) => p.clone(),
-        None => {
-            crate::logging::warn(
-                "connectors",
-                "gitlab: skipped — 'project_id' not set in [connectors.gitlab]",
-            );
-            return;
-        }
+    let Some(project_id) = cfg.project_id.clone() else {
+        crate::logging::warn(
+            "connectors",
+            "gitlab: skipped — 'project_id' not set in [connectors.gitlab]",
+        );
+        return;
     };
     registry.register(Box::new(crate::connectors::gitlab::GitLabConnector::new(
         token, project_id,
@@ -233,13 +216,11 @@ fn register_jira(config: &ConnectorsConfig, registry: &mut ConnectorRegistry) {
         crate::logging::info("connectors", "jira: disabled");
         return;
     }
-    let email = match read_env(&cfg.email_env, "jira") {
-        Some(v) => v,
-        None => return,
+    let Some(email) = read_env(&cfg.email_env, "jira") else {
+        return;
     };
-    let api_token = match read_env(&cfg.api_token_env, "jira") {
-        Some(v) => v,
-        None => return,
+    let Some(api_token) = read_env(&cfg.api_token_env, "jira") else {
+        return;
     };
     let mut connector = crate::connectors::jira::JiraConnector::new(email, api_token);
     if let Some(ref url) = cfg.base_url {

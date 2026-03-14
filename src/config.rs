@@ -563,9 +563,9 @@ pub struct ConnectionProfile {
 pub struct ConnectorsConfig {
     /// Datadog monitoring connector.
     pub datadog: Option<DatadogConfig>,
-    /// pganalyze SaaS connector.
+    /// pganalyze `SaaS` connector.
     pub pganalyze: Option<PganalyzeConfig>,
-    /// AWS CloudWatch connector.
+    /// AWS `CloudWatch` connector.
     pub cloudwatch: Option<CloudWatchConfig>,
     /// postgres.ai Issues connector.
     pub postgresai: Option<PostgresAIConfig>,
@@ -612,7 +612,7 @@ impl Default for DatadogConfig {
     }
 }
 
-/// pganalyze SaaS connector configuration.
+/// pganalyze `SaaS` connector configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PganalyzeConfig {
@@ -637,7 +637,7 @@ impl Default for PganalyzeConfig {
     }
 }
 
-/// AWS CloudWatch connector configuration.
+/// AWS `CloudWatch` connector configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CloudWatchConfig {
