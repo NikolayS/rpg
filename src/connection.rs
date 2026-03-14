@@ -108,6 +108,9 @@ pub struct ConnParams {
     pub ssl_root_cert: Option<String>,
     pub application_name: String,
     pub connect_timeout: Option<u64>,
+    /// Server-side GUC options sent at connection startup via the `options`
+    /// startup parameter (equivalent to `PGOPTIONS` / `options` conninfo key).
+    pub options: Option<String>,
     /// Whether the connection was actually established over TLS.
     ///
     /// `false` when `sslmode=disable` or when `sslmode=prefer` fell back to
@@ -135,6 +138,7 @@ impl fmt::Debug for ConnParams {
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("application_name", &self.application_name)
             .field("connect_timeout", &self.connect_timeout)
+            .field("options", &self.options)
             .field("tls_in_use", &self.tls_in_use)
             .field("resolved_addr", &self.resolved_addr)
             .finish()
@@ -153,6 +157,7 @@ impl Default for ConnParams {
             ssl_root_cert: None,
             application_name: "rpg".to_owned(),
             connect_timeout: None,
+            options: None,
             tls_in_use: false,
             resolved_addr: None,
         }
@@ -265,6 +270,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
     resolve_sslmode(&mut params, opts, uri_ref, ci_ref);
     resolve_ssl_root_cert(&mut params, uri_ref, ci_ref);
     resolve_app_name(&mut params, uri_ref, ci_ref);
+    resolve_options(&mut params, uri_ref, ci_ref);
 
     // Connect timeout: URI query params, then conninfo, then env.
     params.connect_timeout = uri_ref
@@ -422,6 +428,17 @@ fn resolve_ssl_root_cert(
         .or_else(|| env::var("PGSSLROOTCERT").ok());
 }
 
+fn resolve_options(
+    params: &mut ConnParams,
+    uri: Option<&UriParams>,
+    conninfo: Option<&HashMap<String, String>>,
+) {
+    params.options = uri
+        .and_then(|u| u.options.clone())
+        .or_else(|| conninfo.and_then(|c| c.get("options").cloned()))
+        .or_else(|| env::var("PGOPTIONS").ok());
+}
+
 // ---------------------------------------------------------------------------
 // URI parsing
 // ---------------------------------------------------------------------------
@@ -438,6 +455,7 @@ struct UriParams {
     ssl_root_cert: Option<String>,
     application_name: Option<String>,
     connect_timeout: Option<u64>,
+    options: Option<String>,
 }
 
 /// Parse a `postgresql://` or `postgres://` URI into individual fields.
@@ -531,6 +549,7 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                     "sslrootcert" => params.ssl_root_cert = Some(val),
                     "application_name" => params.application_name = Some(val),
                     "connect_timeout" => params.connect_timeout = val.parse().ok(),
+                    "options" => params.options = Some(val),
                     // Ignore unknown query params rather than erroring.
                     _ => {}
                 }
@@ -1009,6 +1028,10 @@ pub async fn connect(
 
     if let Some(timeout) = params.connect_timeout {
         pg_config.connect_timeout(std::time::Duration::from_secs(timeout));
+    }
+
+    if let Some(ref opts_str) = params.options {
+        pg_config.options(opts_str);
     }
 
     let (client, tls_used) = match params.sslmode {
@@ -1985,5 +2008,71 @@ mod tests {
              on host \"other.example.com\" at port \"5432\".\n\
              SSL connection (protocol: TLS, compression: off)",
         );
+    }
+
+    // -- PGOPTIONS / options resolution -------------------------------------
+
+    #[test]
+    #[serial]
+    fn test_pgoptions_default_is_none() {
+        let _guard = EnvGuard::new(&["PGOPTIONS"]);
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert!(params.options.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_pgoptions_env_var() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGOPTIONS"]);
+
+        env::set_var("PGOPTIONS", "-c search_path=myschema");
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.options, Some("-c search_path=myschema".into()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_options_conninfo_key() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGOPTIONS"]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some("host=h options='-c search_path=myschema'".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.options, Some("-c search_path=myschema".into()),);
+    }
+
+    #[test]
+    #[serial]
+    fn test_options_uri_query_param() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGOPTIONS"]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some(
+                "postgresql://localhost/db?options=-c%20search_path%3Dmyschema".into(),
+            ),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.options, Some("-c search_path=myschema".into()),);
+    }
+
+    #[test]
+    #[serial]
+    fn test_options_uri_overrides_env() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGOPTIONS"]);
+
+        env::set_var("PGOPTIONS", "-c search_path=from_env");
+        let opts = CliConnOpts {
+            dbname_pos: Some(
+                "postgresql://localhost/db?options=-c%20search_path%3Dfrom_uri".into(),
+            ),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.options, Some("-c search_path=from_uri".into()),);
     }
 }
