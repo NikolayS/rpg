@@ -20,6 +20,7 @@ use tokio_postgres::Client;
 /// `capabilities` provides version-gated feature detection.
 ///
 /// Returns optional text for AI interpretation (e.g. `\dba waits+`).
+#[allow(clippy::too_many_lines)]
 pub async fn execute(
     client: &Client,
     subcommand: &str,
@@ -99,6 +100,12 @@ pub async fn execute(
         }
         "backup-analyze" | "ba" => {
             dba_backup_analyze(client).await;
+            None
+        }
+        "rca" => {
+            let pg_ash_available = capabilities.is_some_and(|c| c.pg_ash.is_available());
+            let snapshot = crate::rca::collect_snapshot(client, pg_ash_available).await;
+            eprintln!("{}", snapshot.to_prompt());
             None
         }
         "" | "help" => {
@@ -292,10 +299,14 @@ fn print_dba_help() {
         "  \\dba backup-analyze  Backup monitoring: WAL archiving failures, \
          archive lag, WAL file accumulation"
     );
+    println!(
+        "  \\dba rca          Root cause analysis snapshot \
+         (diagnostic data collection)"
+    );
     println!();
     println!(
         "Aliases: act, lock, wait, vac, va, ts, conn, ca, idx, \
-         unused, seq, cache, repl, ra, conf, prog, ba"
+         unused, seq, cache, repl, ra, conf, prog, ba, rca"
     );
     println!();
     println!("Progress sub-commands:");
