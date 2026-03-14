@@ -1,7 +1,8 @@
 //! Postgres wire-protocol connection and authentication.
 //!
 //! Resolves connection parameters from CLI flags, positional arguments,
-//! URI / conninfo strings, environment variables, `.pgpass`, and defaults.
+//! URI / conninfo strings, `pg_service.conf`, environment variables,
+//! `.pgpass`, and defaults.
 //! Then establishes a `tokio-postgres` connection with optional TLS.
 
 use std::collections::HashMap;
@@ -53,6 +54,9 @@ pub enum ConnectionError {
 
     #[error("cannot load SSL client certificate or key: {0}")]
     SslClientCertError(String),
+
+    #[error("service file error: {0}")]
+    ServiceFileError(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +256,9 @@ pub struct CliConnOpts {
 /// 2. Positional arguments
 /// 3. URI format (`postgresql://…`)
 /// 4. Key-value conninfo (`host=… port=…`)
-/// 5. Environment variables
-/// 6. Defaults
+/// 5. `pg_service.conf` service defaults
+/// 6. Environment variables
+/// 7. Defaults
 pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError> {
     let mut params = ConnParams::default();
 
@@ -271,27 +276,79 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
 
     let is_plain_positional = uri_params.is_none() && conninfo_params.is_none();
 
+    // Determine which service to look up.  The service name can come from:
+    //   - `service=<name>` inside a conninfo string
+    //   - `PGSERVICE` environment variable
+    let service_name = conninfo_params
+        .as_ref()
+        .and_then(|c| c.get("service").cloned())
+        .or_else(|| env::var("PGSERVICE").ok());
+
+    // Load service defaults (may be empty / None if no service is requested
+    // or the named service is not found).
+    let svc = if let Some(ref name) = service_name {
+        resolve_service(name)?
+    } else {
+        HashMap::new()
+    };
+    let svc_ref = if svc.is_empty() { None } else { Some(&svc) };
+
     let uri_ref = uri_params.as_ref();
     let ci_ref = conninfo_params.as_ref();
 
-    resolve_host(&mut params, opts, uri_ref, ci_ref, is_plain_positional);
-    resolve_port(&mut params, opts, uri_ref, ci_ref, is_plain_positional);
-    resolve_user(&mut params, opts, uri_ref, ci_ref, is_plain_positional);
-    resolve_dbname(&mut params, opts, uri_ref, ci_ref, is_plain_positional);
+    resolve_host(
+        &mut params,
+        opts,
+        uri_ref,
+        ci_ref,
+        svc_ref,
+        is_plain_positional,
+    );
+    resolve_port(
+        &mut params,
+        opts,
+        uri_ref,
+        ci_ref,
+        svc_ref,
+        is_plain_positional,
+    );
+    resolve_user(
+        &mut params,
+        opts,
+        uri_ref,
+        ci_ref,
+        svc_ref,
+        is_plain_positional,
+    );
+    resolve_dbname(
+        &mut params,
+        opts,
+        uri_ref,
+        ci_ref,
+        svc_ref,
+        is_plain_positional,
+    );
 
-    // Password (from URI / env only; pgpass + prompt happen later).
+    // Password (from URI / conninfo / service / env only;
+    // pgpass + prompt happen later).
     params.password = uri_ref
         .and_then(|u| u.password.clone())
+        .or_else(|| {
+            conninfo_params
+                .as_ref()
+                .and_then(|c| c.get("password").cloned())
+        })
+        .or_else(|| svc_ref.and_then(|s| s.get("password").cloned()))
         .or_else(|| env::var("PGPASSWORD").ok());
 
-    resolve_sslmode(&mut params, opts, uri_ref, ci_ref);
-    resolve_ssl_root_cert(&mut params, uri_ref, ci_ref);
-    resolve_ssl_cert(&mut params, uri_ref, ci_ref);
-    resolve_ssl_key(&mut params, uri_ref, ci_ref);
-    resolve_app_name(&mut params, uri_ref, ci_ref);
-    resolve_options(&mut params, uri_ref, ci_ref);
+    resolve_sslmode(&mut params, opts, uri_ref, ci_ref, svc_ref);
+    resolve_ssl_root_cert(&mut params, uri_ref, ci_ref, svc_ref);
+    resolve_ssl_cert(&mut params, uri_ref, ci_ref, svc_ref);
+    resolve_ssl_key(&mut params, uri_ref, ci_ref, svc_ref);
+    resolve_app_name(&mut params, uri_ref, ci_ref, svc_ref);
+    resolve_options(&mut params, uri_ref, ci_ref, svc_ref);
 
-    // Connect timeout: URI query params, then conninfo, then env.
+    // Connect timeout: URI query params, then conninfo, then service, then env.
     params.connect_timeout = uri_ref
         .and_then(|u| u.connect_timeout)
         .or_else(|| {
@@ -299,6 +356,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
                 .as_ref()
                 .and_then(|c| c.get("connect_timeout").and_then(|v| v.parse().ok()))
         })
+        .or_else(|| svc_ref.and_then(|s| s.get("connect_timeout").and_then(|v| v.parse().ok())))
         .or_else(|| {
             env::var("PGCONNECT_TIMEOUT")
                 .ok()
@@ -313,6 +371,7 @@ fn resolve_host(
     opts: &CliConnOpts,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
     is_plain: bool,
 ) {
     params.host = opts
@@ -327,6 +386,7 @@ fn resolve_host(
         })
         .or_else(|| uri.and_then(|u| u.host.clone()))
         .or_else(|| conninfo.and_then(|c| c.get("host").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("host").cloned()))
         .or_else(|| env::var("PGHOST").ok())
         .unwrap_or_else(default_host);
 }
@@ -336,6 +396,7 @@ fn resolve_port(
     opts: &CliConnOpts,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
     is_plain: bool,
 ) {
     params.port = opts
@@ -349,6 +410,7 @@ fn resolve_port(
         })
         .or_else(|| uri.and_then(|u| u.port))
         .or_else(|| conninfo.and_then(|c| c.get("port").and_then(|p| p.parse().ok())))
+        .or_else(|| svc.and_then(|s| s.get("port").and_then(|p| p.parse().ok())))
         .or_else(|| env::var("PGPORT").ok().and_then(|p| p.parse().ok()))
         .unwrap_or(5432);
 }
@@ -358,6 +420,7 @@ fn resolve_user(
     opts: &CliConnOpts,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
     is_plain: bool,
 ) {
     params.user = opts
@@ -372,6 +435,7 @@ fn resolve_user(
         })
         .or_else(|| uri.and_then(|u| u.user.clone()))
         .or_else(|| conninfo.and_then(|c| c.get("user").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("user").cloned()))
         .or_else(|| env::var("PGUSER").ok())
         .unwrap_or_else(default_user);
 }
@@ -381,6 +445,7 @@ fn resolve_dbname(
     opts: &CliConnOpts,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
     is_plain: bool,
 ) {
     params.dbname = opts
@@ -395,6 +460,7 @@ fn resolve_dbname(
         })
         .or_else(|| uri.and_then(|u| u.dbname.clone()))
         .or_else(|| conninfo.and_then(|c| c.get("dbname").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("dbname").cloned()))
         .or_else(|| env::var("PGDATABASE").ok())
         .unwrap_or_else(|| params.user.clone());
 }
@@ -404,6 +470,7 @@ fn resolve_sslmode(
     opts: &CliConnOpts,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
 ) {
     // CLI flag has highest priority.
     params.sslmode = opts
@@ -414,6 +481,10 @@ fn resolve_sslmode(
         .or_else(|| {
             conninfo
                 .and_then(|c| c.get("sslmode"))
+                .and_then(|s| SslMode::parse(s).ok())
+        })
+        .or_else(|| {
+            svc.and_then(|s| s.get("sslmode"))
                 .and_then(|s| SslMode::parse(s).ok())
         })
         .or_else(|| {
@@ -428,10 +499,12 @@ fn resolve_app_name(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
 ) {
     params.application_name = uri
         .and_then(|u| u.application_name.clone())
         .or_else(|| conninfo.and_then(|c| c.get("application_name").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("application_name").cloned()))
         .or_else(|| env::var("PGAPPNAME").ok())
         .unwrap_or_else(|| "rpg".to_owned());
 }
@@ -440,10 +513,12 @@ fn resolve_ssl_root_cert(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
 ) {
     params.ssl_root_cert = uri
         .and_then(|u| u.ssl_root_cert.clone())
         .or_else(|| conninfo.and_then(|c| c.get("sslrootcert").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("sslrootcert").cloned()))
         .or_else(|| env::var("PGSSLROOTCERT").ok());
 }
 
@@ -451,10 +526,12 @@ fn resolve_ssl_cert(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
 ) {
     params.ssl_cert = uri
         .and_then(|u| u.ssl_cert.clone())
         .or_else(|| conninfo.and_then(|c| c.get("sslcert").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("sslcert").cloned()))
         .or_else(|| env::var("PGSSLCERT").ok());
 }
 
@@ -462,10 +539,12 @@ fn resolve_ssl_key(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
 ) {
     params.ssl_key = uri
         .and_then(|u| u.ssl_key.clone())
         .or_else(|| conninfo.and_then(|c| c.get("sslkey").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("sslkey").cloned()))
         .or_else(|| env::var("PGSSLKEY").ok());
 }
 
@@ -473,10 +552,12 @@ fn resolve_options(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    svc: Option<&HashMap<String, String>>,
 ) {
     params.options = uri
         .and_then(|u| u.options.clone())
         .or_else(|| conninfo.and_then(|c| c.get("options").cloned()))
+        .or_else(|| svc.and_then(|s| s.get("options").cloned()))
         .or_else(|| env::var("PGOPTIONS").ok());
 }
 
@@ -683,6 +764,148 @@ fn parse_conninfo(s: &str) -> Result<HashMap<String, String>, ConnectionError> {
     }
 
     Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// pg_service.conf support
+// ---------------------------------------------------------------------------
+
+/// Valid parameter keys recognised in a `pg_service.conf` service section.
+///
+/// Any other key found in the file is silently ignored, matching psql behaviour.
+const SERVICE_VALID_KEYS: &[&str] = &[
+    "host",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "sslmode",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+    "application_name",
+    "connect_timeout",
+    "options",
+];
+
+/// Return the path to the service file that should be consulted, in priority
+/// order:
+///
+/// 1. `$PGSERVICEFILE` (explicit override)
+/// 2. `~/.pg_service.conf` (user file)
+/// 3. `$PGSYSCONFDIR/pg_service.conf`
+/// 4. `/etc/postgresql-common/pg_service.conf` (system default)
+///
+/// The first path that exists is returned.  Returns `None` if no file is
+/// found or if the home directory cannot be determined.
+fn service_file_path() -> Option<PathBuf> {
+    // 1. Explicit env override.
+    if let Ok(p) = env::var("PGSERVICEFILE") {
+        return Some(PathBuf::from(p));
+    }
+
+    // 2. User service file.
+    if let Some(home) = dirs::home_dir() {
+        let user_path = home.join(".pg_service.conf");
+        if user_path.exists() {
+            return Some(user_path);
+        }
+    }
+
+    // 3. $PGSYSCONFDIR.
+    if let Ok(dir) = env::var("PGSYSCONFDIR") {
+        let p = PathBuf::from(dir).join("pg_service.conf");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 4. Well-known system path.
+    let sys = PathBuf::from("/etc/postgresql-common/pg_service.conf");
+    if sys.exists() {
+        return Some(sys);
+    }
+
+    None
+}
+
+/// Parse a `pg_service.conf` file and return all sections as a map of
+/// `service_name → { key → value }`.
+///
+/// Format rules:
+/// - `[section_name]` starts a new service block.
+/// - `key=value` lines (optional whitespace around `=`) set parameters.
+/// - Lines starting with `#` are comments.
+/// - Blank lines are ignored.
+/// - Only keys listed in `SERVICE_VALID_KEYS` are returned; others are
+///   silently ignored.
+pub fn parse_service_file(contents: &str) -> HashMap<String, HashMap<String, String>> {
+    let mut result: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut current_section: Option<String> = None;
+
+    for line in contents.lines() {
+        let line = line.trim();
+
+        // Skip blank lines and comments.
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Section header.
+        if let Some(inner) = line.strip_prefix('[') {
+            if let Some(name) = inner.strip_suffix(']') {
+                let name = name.trim().to_owned();
+                result.entry(name.clone()).or_default();
+                current_section = Some(name);
+            }
+            continue;
+        }
+
+        // Key=value pair.
+        if let Some(ref section) = current_section {
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim();
+                let value = v.trim().to_owned();
+                if SERVICE_VALID_KEYS.contains(&key) {
+                    result
+                        .entry(section.clone())
+                        .or_default()
+                        .insert(key.to_owned(), value);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Look up a named service in the service file(s) and return its key-value
+/// parameters.
+///
+/// Returns an empty map if no service file is found, or if the named service
+/// does not exist in the file (matching psql behaviour — no error is raised
+/// for a missing service file, only for a service file that exists but does
+/// not contain the requested service).
+fn resolve_service(name: &str) -> Result<HashMap<String, String>, ConnectionError> {
+    let Some(path) = service_file_path() else {
+        return Ok(HashMap::new());
+    };
+
+    let contents = std::fs::read_to_string(&path).map_err(|e| {
+        ConnectionError::ServiceFileError(format!(
+            "cannot read service file \"{}\": {e}",
+            path.display()
+        ))
+    })?;
+
+    let all = parse_service_file(&contents);
+
+    match all.into_iter().find(|(k, _)| k == name) {
+        Some((_, params)) => Ok(params),
+        None => Err(ConnectionError::ServiceFileError(format!(
+            "definition of service \"{name}\" not found"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2281,5 +2504,317 @@ mod tests {
         };
         let params = resolve_params(&opts).unwrap();
         assert_eq!(params.options, Some("-c search_path=from_uri".into()),);
+    }
+
+    // -- pg_service.conf parsing --------------------------------------------
+
+    #[test]
+    fn test_parse_service_file_basic() {
+        let contents = "\
+[myservice]
+host=db.example.com
+port=5433
+dbname=mydb
+user=alice
+password=secret
+";
+        let all = parse_service_file(contents);
+        let svc = all.get("myservice").unwrap();
+        assert_eq!(svc.get("host").unwrap(), "db.example.com");
+        assert_eq!(svc.get("port").unwrap(), "5433");
+        assert_eq!(svc.get("dbname").unwrap(), "mydb");
+        assert_eq!(svc.get("user").unwrap(), "alice");
+        assert_eq!(svc.get("password").unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_parse_service_file_multiple_sections() {
+        let contents = "\
+[dev]
+host=devhost
+port=5432
+
+[prod]
+host=prodhost
+port=5433
+sslmode=verify-full
+";
+        let all = parse_service_file(contents);
+        assert_eq!(all.get("dev").unwrap().get("host").unwrap(), "devhost");
+        assert_eq!(all.get("prod").unwrap().get("host").unwrap(), "prodhost");
+        assert_eq!(
+            all.get("prod").unwrap().get("sslmode").unwrap(),
+            "verify-full"
+        );
+    }
+
+    #[test]
+    fn test_parse_service_file_comments_and_blanks() {
+        let contents = "\
+# This is a comment
+
+[myservice]
+# Another comment
+host=myhost
+
+port=5432
+";
+        let all = parse_service_file(contents);
+        let svc = all.get("myservice").unwrap();
+        assert_eq!(svc.get("host").unwrap(), "myhost");
+        assert_eq!(svc.get("port").unwrap(), "5432");
+    }
+
+    #[test]
+    fn test_parse_service_file_unknown_keys_ignored() {
+        let contents = "\
+[myservice]
+host=myhost
+unknown_key=somevalue
+another_unknown=foo
+";
+        let all = parse_service_file(contents);
+        let svc = all.get("myservice").unwrap();
+        assert_eq!(svc.get("host").unwrap(), "myhost");
+        // Unknown keys must not appear.
+        assert!(!svc.contains_key("unknown_key"));
+        assert!(!svc.contains_key("another_unknown"));
+    }
+
+    #[test]
+    fn test_parse_service_file_whitespace_around_equals() {
+        let contents = "\
+[svc]
+host = trimmed-host
+port = 5432
+";
+        let all = parse_service_file(contents);
+        let svc = all.get("svc").unwrap();
+        assert_eq!(svc.get("host").unwrap(), "trimmed-host");
+        assert_eq!(svc.get("port").unwrap(), "5432");
+    }
+
+    #[test]
+    fn test_parse_service_file_all_valid_keys() {
+        let contents = "\
+[full]
+host=h
+port=5432
+dbname=db
+user=u
+password=pw
+sslmode=require
+sslrootcert=/ca.pem
+sslcert=/c.pem
+sslkey=/k.pem
+application_name=myapp
+connect_timeout=30
+options=-c search_path=myschema
+";
+        let all = parse_service_file(contents);
+        let svc = all.get("full").unwrap();
+        assert_eq!(svc.len(), 12);
+        assert_eq!(svc.get("application_name").unwrap(), "myapp");
+        assert_eq!(svc.get("connect_timeout").unwrap(), "30");
+        assert_eq!(svc.get("options").unwrap(), "-c search_path=myschema");
+    }
+
+    #[test]
+    fn test_parse_service_file_empty_file() {
+        let all = parse_service_file("");
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_parse_service_file_no_key_before_section() {
+        // Lines before the first section header are ignored.
+        let contents = "\
+orphan_key=value
+[svc]
+host=myhost
+";
+        let all = parse_service_file(contents);
+        assert!(!all.contains_key(""));
+        assert_eq!(all.get("svc").unwrap().get("host").unwrap(), "myhost");
+    }
+
+    // -- PGSERVICE env var → service resolution -----------------------------
+
+    #[test]
+    #[serial]
+    fn test_pgservice_env_var_selects_service() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGPASSWORD",
+            "PGSSLMODE",
+            "PGSERVICE",
+            "PGSERVICEFILE",
+        ]);
+
+        // Write a temporary service file.
+        let tmp = std::env::temp_dir().join("rpg_test_service.conf");
+        std::fs::write(
+            &tmp,
+            "[testservice]\nhost=svchost\nport=5555\ndbname=svcdb\nuser=svcuser\n",
+        )
+        .unwrap();
+
+        env::set_var("PGSERVICEFILE", tmp.to_str().unwrap());
+        env::set_var("PGSERVICE", "testservice");
+
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+
+        assert_eq!(params.host, "svchost");
+        assert_eq!(params.port, 5555);
+        assert_eq!(params.dbname, "svcdb");
+        assert_eq!(params.user, "svcuser");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn test_conninfo_service_key_selects_service() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGPASSWORD",
+            "PGSSLMODE",
+            "PGSERVICE",
+            "PGSERVICEFILE",
+        ]);
+
+        let tmp = std::env::temp_dir().join("rpg_test_service2.conf");
+        std::fs::write(
+            &tmp,
+            "[ci]\nhost=cihost\nport=6543\ndbname=cidb\nuser=ciuser\n",
+        )
+        .unwrap();
+
+        env::set_var("PGSERVICEFILE", tmp.to_str().unwrap());
+
+        let opts = CliConnOpts {
+            dbname_pos: Some("service=ci".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+
+        assert_eq!(params.host, "cihost");
+        assert_eq!(params.port, 6543);
+        assert_eq!(params.dbname, "cidb");
+        assert_eq!(params.user, "ciuser");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn test_cli_flag_overrides_service() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGPASSWORD",
+            "PGSSLMODE",
+            "PGSERVICE",
+            "PGSERVICEFILE",
+        ]);
+
+        let tmp = std::env::temp_dir().join("rpg_test_service3.conf");
+        std::fs::write(
+            &tmp,
+            "[svc]\nhost=svchost\nport=5432\ndbname=svcdb\nuser=svcuser\n",
+        )
+        .unwrap();
+
+        env::set_var("PGSERVICEFILE", tmp.to_str().unwrap());
+        env::set_var("PGSERVICE", "svc");
+
+        let opts = CliConnOpts {
+            host: Some("override-host".into()),
+            dbname: Some("override-db".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+
+        // CLI flags win.
+        assert_eq!(params.host, "override-host");
+        assert_eq!(params.dbname, "override-db");
+        // Service provides the rest.
+        assert_eq!(params.user, "svcuser");
+        assert_eq!(params.port, 5432);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn test_service_overrides_env_var() {
+        // Service file params act at the conninfo level and therefore
+        // override env vars — matching libpq / psql behaviour.
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGPASSWORD",
+            "PGSSLMODE",
+            "PGSERVICE",
+            "PGSERVICEFILE",
+        ]);
+
+        let tmp = std::env::temp_dir().join("rpg_test_service4.conf");
+        std::fs::write(&tmp, "[svc]\nhost=svchost\nport=5432\n").unwrap();
+
+        env::set_var("PGSERVICEFILE", tmp.to_str().unwrap());
+        env::set_var("PGSERVICE", "svc");
+        // PGHOST is set but service file should take precedence.
+        env::set_var("PGHOST", "env-host");
+
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+
+        // Service file wins over PGHOST env var.
+        assert_eq!(params.host, "svchost");
+        assert_eq!(params.port, 5432);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn test_missing_service_name_returns_error() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSERVICE",
+            "PGSERVICEFILE",
+        ]);
+
+        let tmp = std::env::temp_dir().join("rpg_test_service5.conf");
+        std::fs::write(&tmp, "[other]\nhost=otherhost\n").unwrap();
+
+        env::set_var("PGSERVICEFILE", tmp.to_str().unwrap());
+        env::set_var("PGSERVICE", "nonexistent");
+
+        let opts = CliConnOpts::default();
+        let result = resolve_params(&opts);
+        assert!(result.is_err(), "expected error for missing service name");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent"),
+            "error should mention service name"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }
