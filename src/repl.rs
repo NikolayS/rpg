@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
-use rustyline::{Config, Editor};
+use rustyline::{Config, EditMode, Editor};
 use tokio_postgres::Client;
 
 use crate::complete::{load_schema_cache, SamoHelper, SchemaCache};
@@ -977,6 +977,13 @@ pub struct ReplSettings {
     /// When `true`, SQLSTATE codes are appended to error output.
     /// Defaults to `false` (psql default).
     pub verbose_errors: bool,
+    /// Use Vi keybinding mode in the REPL.
+    ///
+    /// Defaults to `false` (Emacs mode).  Set with `\set VI on`.
+    /// rustyline does not support changing `EditMode` on an existing editor
+    /// instance, so this preference is stored here and applied at the next
+    /// session start via [`run_readline_loop`].
+    pub vi_mode: bool,
     /// Path of the currently-executing script file, if any.
     ///
     /// Set whenever a file is being processed via `\i`, `\ir`, or `-f`.
@@ -1066,6 +1073,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("db_capabilities", &self.db_capabilities)
             .field("i_know_what_im_doing", &self.i_know_what_im_doing)
             .field("verbose_errors", &self.verbose_errors)
+            .field("vi_mode", &self.vi_mode)
             .field("current_file", &self.current_file)
             .field("session_id", &self.session_id)
             .field("query_count", &self.query_count)
@@ -1117,6 +1125,7 @@ impl Default for ReplSettings {
             db_capabilities: crate::capabilities::DbCapabilities::default(),
             i_know_what_im_doing: false,
             verbose_errors: false,
+            vi_mode: false,
             current_file: None,
             session_id: crate::session_store::new_session_id(),
             query_count: 0,
@@ -3134,6 +3143,21 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         settings.config.ai.model = Some(value.to_owned());
         println!("AI model set to: {value}");
     }
+    // Mirror VI into vi_mode.
+    //
+    // rustyline does not support changing EditMode at runtime on an existing
+    // Editor instance, so we store the preference and apply it on the next
+    // session start.
+    if name == "VI" {
+        let on = matches!(value, "on" | "true" | "1");
+        settings.vi_mode = on;
+        settings.config.display.vi_mode = on;
+        if on {
+            println!("Vi mode enabled. Takes effect on next session.");
+        } else {
+            println!("Emacs mode (default). Takes effect on next session.");
+        }
+    }
 }
 
 /// Apply an `\unset` command.
@@ -4785,10 +4809,16 @@ async fn run_readline_loop(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> i32 {
+    let edit_mode = if settings.vi_mode || settings.config.display.vi_mode {
+        EditMode::Vi
+    } else {
+        EditMode::Emacs
+    };
     let config = Config::builder()
         .max_history_size(HISTORY_SIZE)
         .expect("valid history size")
         .history_ignore_space(true)
+        .edit_mode(edit_mode)
         .build();
 
     // Build schema cache (best-effort — completion degrades gracefully on
@@ -8539,6 +8569,33 @@ mod tests {
         assert!(settings.config.ai.model.is_some());
         apply_unset(&mut settings, "AI_MODEL");
         assert!(settings.config.ai.model.is_none());
+    }
+
+    // -- \set VI ---------------------------------------------------------------
+
+    #[test]
+    fn set_vi_on_enables_vi_mode() {
+        let mut settings = ReplSettings::default();
+        assert!(!settings.vi_mode);
+        apply_set(&mut settings, "VI", "on");
+        assert!(settings.vi_mode);
+        assert!(settings.config.display.vi_mode);
+    }
+
+    #[test]
+    fn set_vi_off_disables_vi_mode() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "VI", "on");
+        assert!(settings.vi_mode);
+        apply_set(&mut settings, "VI", "off");
+        assert!(!settings.vi_mode);
+        assert!(!settings.config.display.vi_mode);
+    }
+
+    #[test]
+    fn set_vi_default_is_emacs() {
+        let settings = ReplSettings::default();
+        assert!(!settings.vi_mode);
     }
 
     // -- \gexec parser ---------------------------------------------------------

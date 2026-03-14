@@ -502,6 +502,7 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     let pager_enabled = cfg.display.pager;
     let timing = cfg.display.timing;
     let safety_enabled = cfg.safety.destructive_warning;
+    let vi_mode = cfg.display.vi_mode;
 
     // Apply config display.border default if it wasn't set via -P border=N.
     // The CLI -P args were already applied above via apply_cli_pset; if
@@ -545,6 +546,7 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
         pager_min_lines,
         timing,
         safety_enabled,
+        vi_mode,
         config: cfg.clone(),
         exec_mode: if cli.yolo {
             repl::ExecMode::Yolo

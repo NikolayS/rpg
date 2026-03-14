@@ -92,6 +92,16 @@ pub struct DisplayConfig {
     pub pager_min_lines: usize,
     /// Table border style (`0`, `1`, or `2`). Mirrors `\pset border`. Default: `1`.
     pub border: u8,
+    /// Use Vi keybinding mode in the REPL. Default: `false` (Emacs mode).
+    ///
+    /// When `true`, rustyline uses `EditMode::Vi` instead of the default
+    /// Emacs mode.  Takes effect on the next session start.
+    ///
+    /// ```toml
+    /// [display]
+    /// vi_mode = true
+    /// ```
+    pub vi_mode: bool,
 }
 
 impl Default for DisplayConfig {
@@ -103,6 +113,7 @@ impl Default for DisplayConfig {
             expanded: false,
             pager_min_lines: 0,
             border: 1,
+            vi_mode: false,
         }
     }
 }
@@ -485,6 +496,7 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             } else {
                 overlay.display.border
             },
+            vi_mode: overlay.display.vi_mode || base.display.vi_mode,
         },
         safety: SafetyConfig {
             destructive_warning: overlay.safety.destructive_warning,
@@ -596,6 +608,7 @@ mod tests {
         assert!(!cfg.display.expanded);
         assert_eq!(cfg.display.pager_min_lines, 0);
         assert_eq!(cfg.display.border, 1);
+        assert!(!cfg.display.vi_mode); // default is Emacs
         assert!(cfg.safety.destructive_warning);
         assert!(cfg.connection.host.is_none());
         assert!(cfg.connection.port.is_none());
@@ -618,6 +631,51 @@ expanded = true
         assert!(!cfg.display.highlight);
         assert!(cfg.display.timing);
         assert!(cfg.display.expanded);
+    }
+
+    #[test]
+    fn parse_display_vi_mode() {
+        let toml_str = r"
+[display]
+vi_mode = true
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.display.vi_mode);
+    }
+
+    #[test]
+    fn merge_display_vi_mode_overlay_wins() {
+        let base = Config {
+            display: DisplayConfig {
+                vi_mode: false,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            display: DisplayConfig {
+                vi_mode: true,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert!(merged.display.vi_mode);
+    }
+
+    #[test]
+    fn merge_display_vi_mode_base_preserved_when_overlay_false() {
+        let base = Config {
+            display: DisplayConfig {
+                vi_mode: true,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        // overlay has vi_mode = false (default) → OR-merge keeps base true.
+        let overlay = Config::default();
+        let merged = merge_config(base, overlay);
+        assert!(merged.display.vi_mode);
     }
 
     #[test]
