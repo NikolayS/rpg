@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use rustls::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use thiserror::Error;
 use tokio_postgres::config::SslMode as TokioSslMode;
 use tokio_postgres::Client;
@@ -44,6 +47,9 @@ pub enum ConnectionError {
 
     #[error("invalid connection string: {0}")]
     InvalidConnectionString(String),
+
+    #[error("cannot load SSL root certificate: {0}")]
+    SslRootCertError(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -54,9 +60,15 @@ pub enum ConnectionError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SslMode {
     Disable,
+    Allow,
     #[default]
     Prefer,
     Require,
+    /// TLS required; server certificate verified against CA but hostname
+    /// is NOT checked.
+    VerifyCa,
+    /// TLS required; server certificate verified and hostname matched.
+    VerifyFull,
 }
 
 impl SslMode {
@@ -64,8 +76,11 @@ impl SslMode {
     pub fn parse(s: &str) -> Result<Self, ConnectionError> {
         match s.to_lowercase().as_str() {
             "disable" => Ok(Self::Disable),
+            "allow" => Ok(Self::Allow),
             "prefer" => Ok(Self::Prefer),
             "require" => Ok(Self::Require),
+            "verify-ca" => Ok(Self::VerifyCa),
+            "verify-full" => Ok(Self::VerifyFull),
             other => Err(ConnectionError::InvalidConnectionString(format!(
                 "unknown sslmode: {other}"
             ))),
@@ -86,6 +101,11 @@ pub struct ConnParams {
     pub dbname: String,
     pub password: Option<String>,
     pub sslmode: SslMode,
+    /// Path to a PEM file containing trusted CA certificate(s).
+    ///
+    /// Used by `sslmode=verify-ca` and `sslmode=verify-full`.  When `None`
+    /// the built-in Mozilla/webpki root bundle is used.
+    pub ssl_root_cert: Option<String>,
     pub application_name: String,
     pub connect_timeout: Option<u64>,
     /// Whether the connection was actually established over TLS.
@@ -112,6 +132,7 @@ impl fmt::Debug for ConnParams {
             .field("dbname", &self.dbname)
             .field("password", &self.password.as_ref().map(|_| "***"))
             .field("sslmode", &self.sslmode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
             .field("application_name", &self.application_name)
             .field("connect_timeout", &self.connect_timeout)
             .field("tls_in_use", &self.tls_in_use)
@@ -129,6 +150,7 @@ impl Default for ConnParams {
             dbname: String::new(), // filled in by resolve — set to user
             password: None,
             sslmode: SslMode::default(),
+            ssl_root_cert: None,
             application_name: "rpg".to_owned(),
             connect_timeout: None,
             tls_in_use: false,
@@ -241,6 +263,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
         .or_else(|| env::var("PGPASSWORD").ok());
 
     resolve_sslmode(&mut params, opts, uri_ref, ci_ref);
+    resolve_ssl_root_cert(&mut params, uri_ref, ci_ref);
     resolve_app_name(&mut params, uri_ref, ci_ref);
 
     // Connect timeout: URI query params, then conninfo, then env.
@@ -388,6 +411,17 @@ fn resolve_app_name(
         .unwrap_or_else(|| "rpg".to_owned());
 }
 
+fn resolve_ssl_root_cert(
+    params: &mut ConnParams,
+    uri: Option<&UriParams>,
+    conninfo: Option<&HashMap<String, String>>,
+) {
+    params.ssl_root_cert = uri
+        .and_then(|u| u.ssl_root_cert.clone())
+        .or_else(|| conninfo.and_then(|c| c.get("sslrootcert").cloned()))
+        .or_else(|| env::var("PGSSLROOTCERT").ok());
+}
+
 // ---------------------------------------------------------------------------
 // URI parsing
 // ---------------------------------------------------------------------------
@@ -401,6 +435,7 @@ struct UriParams {
     password: Option<String>,
     dbname: Option<String>,
     sslmode: Option<SslMode>,
+    ssl_root_cert: Option<String>,
     application_name: Option<String>,
     connect_timeout: Option<u64>,
 }
@@ -493,6 +528,7 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                 let val = percent_decode(val);
                 match key {
                     "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
+                    "sslrootcert" => params.ssl_root_cert = Some(val),
                     "application_name" => params.application_name = Some(val),
                     "connect_timeout" => params.connect_timeout = val.parse().ok(),
                     // Ignore unknown query params rather than erroring.
@@ -771,14 +807,175 @@ pub fn resolve_password(
 // TLS configuration
 // ---------------------------------------------------------------------------
 
-/// Build a `rustls` `ClientConfig` using system/webpki root certificates.
-fn make_tls_config() -> ClientConfig {
+/// Build a default `rustls` `ClientConfig` using Mozilla/webpki root certs.
+///
+/// This is used for `sslmode=prefer`, `sslmode=require`, and as the basis
+/// for `sslmode=verify-ca` / `sslmode=verify-full` when no custom CA is set.
+fn make_tls_config_default() -> ClientConfig {
     let root_store: rustls::RootCertStore =
         webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
 
     ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth()
+}
+
+/// Load PEM certificates from `path` into a `RootCertStore`.
+fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionError> {
+    let pem = std::fs::read(path)
+        .map_err(|e| ConnectionError::SslRootCertError(format!("cannot read {path}: {e}")))?;
+
+    let mut store = rustls::RootCertStore::empty();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
+        .filter_map(Result::ok)
+        .map(CertificateDer::into_owned)
+        .collect();
+
+    if certs.is_empty() {
+        return Err(ConnectionError::SslRootCertError(format!(
+            "no PEM certificates found in {path}"
+        )));
+    }
+
+    for cert in certs {
+        store.add(cert).map_err(|e| {
+            ConnectionError::SslRootCertError(format!("invalid certificate in {path}: {e}"))
+        })?;
+    }
+
+    Ok(store)
+}
+
+/// Build a `ClientConfig` for `sslmode=verify-ca`.
+///
+/// The certificate chain is verified against the CA bundle but the server
+/// hostname is NOT checked — matching psql `sslmode=verify-ca` semantics.
+fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
+    let root_store = match &params.ssl_root_cert {
+        Some(path) => load_root_cert_store(path)?,
+        None => webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+    };
+
+    // Use a custom verifier that checks the certificate chain against our CA
+    // store but does NOT verify the server hostname.
+    let verifier = Arc::new(NoCnVerifier::new(root_store));
+    Ok(ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth())
+}
+
+/// Build a `ClientConfig` for `sslmode=verify-full`.
+///
+/// Uses standard rustls hostname verification (the default).  Only differs
+/// from the plain TLS config in that a custom CA file may be used.
+fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
+    let root_store = match &params.ssl_root_cert {
+        Some(path) => load_root_cert_store(path)?,
+        None => webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
+    };
+
+    Ok(ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
+}
+
+// ---------------------------------------------------------------------------
+// Custom certificate verifier: verify-ca (chain only, no hostname check)
+// ---------------------------------------------------------------------------
+
+/// A `ServerCertVerifier` that validates the certificate chain against a
+/// given CA store but does NOT verify the server hostname.
+///
+/// This implements `sslmode=verify-ca` semantics.
+#[derive(Debug)]
+struct NoCnVerifier {
+    roots: rustls::RootCertStore,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl NoCnVerifier {
+    fn new(roots: rustls::RootCertStore) -> Self {
+        Self {
+            roots,
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+}
+
+impl ServerCertVerifier for NoCnVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // Verify the certificate chain against our CA store, but pass a
+        // dummy server name so no hostname check is performed.
+        let dummy_name = ServerName::try_from("dummy.invalid")
+            .map_err(|_| RustlsError::General("invalid dummy hostname".into()))?;
+
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(self.roots.clone()),
+            Arc::clone(&self.provider),
+        )
+        .build()
+        .map_err(|e| RustlsError::General(format!("cannot build WebPkiServerVerifier: {e}")))?;
+
+        // verify_server_cert on WebPkiServerVerifier checks chain + hostname.
+        // We call it, then ignore InvalidCertificate(NotValidForName) which
+        // is the only error that would arise from the hostname mismatch on
+        // the dummy name.  Any real chain error propagates as-is.
+        match verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            &dummy_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(ok) => Ok(ok),
+            Err(RustlsError::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -816,7 +1013,18 @@ pub async fn connect(
 
     let (client, tls_used) = match params.sslmode {
         SslMode::Disable => (connect_plain(&pg_config, &params).await?, false),
-        SslMode::Prefer => match connect_tls(&pg_config, &params).await {
+
+        // sslmode=allow: try plain first; if the server rejects it and
+        // demands SSL, retry with TLS.
+        SslMode::Allow => match connect_plain(&pg_config, &params).await {
+            Ok(c) => (c, false),
+            Err(ConnectionError::SslRequired) => {
+                (connect_tls_default(&pg_config, &params).await?, true)
+            }
+            Err(e) => return Err(e),
+        },
+
+        SslMode::Prefer => match connect_tls_default(&pg_config, &params).await {
             Ok(c) => (c, true),
             Err(_) => {
                 // sslmode=prefer: silently fall back to a plain connection
@@ -825,9 +1033,28 @@ pub async fn connect(
                 (connect_plain(&pg_config, &params).await?, false)
             }
         },
+
         SslMode::Require => {
             pg_config.ssl_mode(TokioSslMode::Require);
-            (connect_tls(&pg_config, &params).await?, true)
+            (connect_tls_default(&pg_config, &params).await?, true)
+        }
+
+        SslMode::VerifyCa => {
+            pg_config.ssl_mode(TokioSslMode::Require);
+            let tls_cfg = make_tls_config_verify_ca(&params)?;
+            (
+                connect_tls_with_config(&pg_config, &params, tls_cfg).await?,
+                true,
+            )
+        }
+
+        SslMode::VerifyFull => {
+            pg_config.ssl_mode(TokioSslMode::Require);
+            let tls_cfg = make_tls_config_verify_full(&params)?;
+            (
+                connect_tls_with_config(&pg_config, &params, tls_cfg).await?,
+                true,
+            )
         }
     };
 
@@ -868,12 +1095,20 @@ async fn connect_plain(
     Ok(client)
 }
 
-/// Connect with TLS.
-async fn connect_tls(
+/// Connect with TLS using the default (webpki) root certificate store.
+async fn connect_tls_default(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
 ) -> Result<Client, ConnectionError> {
-    let tls_config = make_tls_config();
+    connect_tls_with_config(pg_config, params, make_tls_config_default()).await
+}
+
+/// Connect with TLS using a caller-supplied `ClientConfig`.
+async fn connect_tls_with_config(
+    pg_config: &tokio_postgres::Config,
+    params: &ConnParams,
+    tls_config: ClientConfig,
+) -> Result<Client, ConnectionError> {
     let tls = MakeRustlsConnect::new(tls_config);
 
     let (client, connection) = pg_config
@@ -1374,10 +1609,92 @@ mod tests {
     #[test]
     fn test_sslmode_parse() {
         assert_eq!(SslMode::parse("disable").unwrap(), SslMode::Disable);
+        assert_eq!(SslMode::parse("allow").unwrap(), SslMode::Allow);
         assert_eq!(SslMode::parse("prefer").unwrap(), SslMode::Prefer);
         assert_eq!(SslMode::parse("require").unwrap(), SslMode::Require);
+        assert_eq!(SslMode::parse("verify-ca").unwrap(), SslMode::VerifyCa);
+        assert_eq!(SslMode::parse("verify-full").unwrap(), SslMode::VerifyFull);
+        // Case-insensitive.
         assert_eq!(SslMode::parse("REQUIRE").unwrap(), SslMode::Require);
+        assert_eq!(SslMode::parse("Verify-Full").unwrap(), SslMode::VerifyFull);
+        assert_eq!(SslMode::parse("VERIFY-CA").unwrap(), SslMode::VerifyCa);
         assert!(SslMode::parse("invalid").is_err());
+    }
+
+    // -- PGSSLROOTCERT env var resolution -----------------------------------
+
+    #[test]
+    #[serial]
+    fn test_pgsslrootcert_env_var() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSSLMODE",
+            "PGSSLROOTCERT",
+        ]);
+
+        env::set_var("PGSSLROOTCERT", "/etc/ssl/certs/ca-certificates.crt");
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.ssl_root_cert,
+            Some("/etc/ssl/certs/ca-certificates.crt".into())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_pgsslrootcert_conninfo() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSSLMODE",
+            "PGSSLROOTCERT",
+        ]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some("host=h sslrootcert=/tmp/ca.pem sslmode=verify-ca".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.ssl_root_cert, Some("/tmp/ca.pem".into()));
+        assert_eq!(params.sslmode, SslMode::VerifyCa);
+    }
+
+    #[test]
+    #[serial]
+    fn test_pgsslrootcert_uri() {
+        let _guard = EnvGuard::new(&[
+            "PGHOST",
+            "PGPORT",
+            "PGDATABASE",
+            "PGUSER",
+            "PGSSLMODE",
+            "PGSSLROOTCERT",
+        ]);
+
+        let opts = CliConnOpts {
+            dbname_pos: Some(
+                "postgresql://localhost/db?sslmode=verify-full&sslrootcert=/tmp/ca.pem".into(),
+            ),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.ssl_root_cert, Some("/tmp/ca.pem".into()));
+        assert_eq!(params.sslmode, SslMode::VerifyFull);
+    }
+
+    #[test]
+    #[serial]
+    fn test_pgsslrootcert_not_set_by_default() {
+        let _guard = EnvGuard::new(&["PGSSLROOTCERT"]);
+        let opts = CliConnOpts::default();
+        let params = resolve_params(&opts).unwrap();
+        assert!(params.ssl_root_cert.is_none());
     }
 
     // -- application_name default -------------------------------------------
