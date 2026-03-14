@@ -450,7 +450,11 @@ fn open_log_file(path: &str) -> Box<dyn std::io::Write> {
 ///
 /// Config values set defaults; CLI flags take precedence and override them.
 /// Exits the process (code 2) if file-opening operations fail.
-fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
+fn build_settings(
+    cli: &Cli,
+    cfg: &config::Config,
+    project: &config::ProjectConfigResult,
+) -> repl::ReplSettings {
     // Build PsetConfig from CLI flags.
     let mut pset = output::PsetConfig::default();
     if cli.csv {
@@ -567,6 +571,8 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
             repl::ExecMode::default()
         },
         i_know_what_im_doing: cli.i_know_what_im_doing,
+        project_context: project.postgres_md.clone(),
+        ai_context_files: cfg.ai.project_context_files.clone(),
         ..Default::default()
     }
 }
@@ -632,10 +638,24 @@ async fn main() {
 
     // Load config hierarchy (system then user); non-fatal warnings are
     // printed to stderr unless --quiet suppresses them.
-    let (cfg, config_warnings) = config::load_config();
+    let (base_cfg, config_warnings) = config::load_config();
     for w in &config_warnings {
         if !cli.quiet {
             eprintln!("samo: warning: {w}");
+        }
+    }
+
+    // Load project config (.samo.toml) and merge it on top of user config.
+    let project_result = config::load_project_config();
+    let cfg = config::merge_project_config(base_cfg, &project_result.config);
+
+    // Print project config startup messages (suppressed by --quiet).
+    if !cli.quiet {
+        if let Some(ref p) = project_result.config_path {
+            eprintln!("Using project config: {}", p.display());
+        }
+        if let Some(ref p) = project_result.postgres_md_path {
+            eprintln!("Loaded project context: {}", p.display());
         }
     }
 
@@ -767,7 +787,7 @@ async fn main() {
             let is_scripting = !cli.command.is_empty() || cli.file.is_some();
             let is_interactive = !is_scripting && !is_piped;
 
-            let mut settings = build_settings(&cli, &cfg);
+            let mut settings = build_settings(&cli, &cfg, &project_result);
 
             // Detect database capabilities (pg_ash, server version, etc.).
             // Run before the banner so we can include the server version.

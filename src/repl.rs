@@ -1046,6 +1046,17 @@ pub struct ReplSettings {
     /// `CommandComplete` message; `None` when no query has completed yet
     /// or the query produced no `CommandComplete` (e.g. error).
     pub last_row_count: Option<u64>,
+    /// Contents of `POSTGRES.md` found alongside `.samo.toml`, if any.
+    ///
+    /// When present, this text is injected into the AI system prompt for
+    /// `/ask`, `/fix`, and `/explain` commands to provide project-specific
+    /// Postgres context (schema notes, conventions, etc.).
+    pub project_context: Option<String>,
+    /// Paths from `[ai] context_files` in `.samo.toml`.
+    ///
+    /// These files are read at AI-call time and appended to the system
+    /// prompt so the LLM has project-specific schema and query context.
+    pub ai_context_files: Vec<String>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1131,6 +1142,11 @@ impl std::fmt::Debug for ReplSettings {
             .field("audit_dbname", &self.audit_dbname)
             .field("audit_user", &self.audit_user)
             .field("last_row_count", &self.last_row_count)
+            .field(
+                "project_context",
+                &self.project_context.as_deref().map(|_| "<text>"),
+            )
+            .field("ai_context_files", &self.ai_context_files.len())
             .finish()
     }
 }
@@ -1186,6 +1202,8 @@ impl Default for ReplSettings {
             audit_dbname: String::new(),
             audit_user: String::new(),
             last_row_count: None,
+            project_context: None,
+            ai_context_files: Vec::new(),
         }
     }
 }
