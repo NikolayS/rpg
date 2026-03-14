@@ -4371,14 +4371,13 @@ async fn dispatch_meta(
                             new_params.password.clone_from(&p.password);
                         }
                     }
-                    // Detect server version so we can show it when the
-                    // server endpoint changed (matches psql behaviour).
+                    // Detect server version to include in the reconnect
+                    // banner (always shown, matching psql behaviour).
                     let server_ver =
                         crate::capabilities::detect_server_version_pub(&new_client).await;
                     let msg = crate::connection::reconnect_info(
                         crate::version_string(),
                         server_ver.as_deref(),
-                        params,
                         &new_params,
                     );
                     println!("{msg}");
@@ -4725,7 +4724,6 @@ async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
             let msg = crate::connection::reconnect_info(
                 crate::version_string(),
                 server_ver.as_deref(),
-                &dummy,
                 &new_params,
             );
             println!("{msg}");
