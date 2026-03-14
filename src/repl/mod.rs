@@ -3760,13 +3760,15 @@ async fn run_readline_loop(
     // action here and returns Cmd::Interrupt; the loop reads and clears it.
     let fkey_pending: Arc<Mutex<Option<FKeyAction>>> = Arc::new(Mutex::new(None));
 
-    // Bind Down / Up / Escape to the dropdown navigation handler.
+    // Bind Down / Up / Escape / Enter to the dropdown navigation handler.
     // When the dropdown is inactive these fall through to the default
-    // behaviour (history navigation for Up/Down, nothing for Escape).
+    // behaviour (history navigation for Up/Down, AcceptLine for Enter,
+    // nothing for Escape).
     for (code, key) in [
         (KeyCode::Down, DropdownKey::Down),
         (KeyCode::Up, DropdownKey::Up),
         (KeyCode::Esc, DropdownKey::Escape),
+        (KeyCode::Enter, DropdownKey::Enter),
     ] {
         let handler = DropdownEventHandler {
             key,
@@ -3835,6 +3837,12 @@ async fn run_readline_loop(
 
         match rl.readline(&prompt) {
             Ok(line) => {
+                // Dismiss the dropdown so it does not intercept the next
+                // prompt's Up-arrow history navigation (fix for #552 bug 2).
+                if let Ok(mut dd) = dropdown_handle.lock() {
+                    dd.dismiss();
+                }
+
                 // Obtain a cancel token *before* the query executes so that
                 // a concurrent Ctrl-C handler can send a CancelRequest to the
                 // server mid-query.
