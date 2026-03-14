@@ -51,6 +51,7 @@ mod bloat;
 mod check;
 mod config_tuning;
 mod connection_management;
+mod connectors;
 mod index_health;
 mod issues;
 mod query_optimization;
