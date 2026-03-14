@@ -11,6 +11,8 @@ use tokio_postgres::Client;
 
 use crate::anomaly::{AnomalyDetector, MetricSnapshot};
 use crate::config::Config;
+use crate::dispatcher::Dispatcher;
+use crate::governance::{ActionProposal, EvidenceClass, FeatureArea, Severity};
 
 // ---------------------------------------------------------------------------
 // PID file management
@@ -495,6 +497,74 @@ pub async fn run_health_server(
 // Daemon main loop
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Proposal construction
+// ---------------------------------------------------------------------------
+
+/// Convert an analyzer finding into a structured [`ActionProposal`].
+///
+/// Used to bridge analyzer output into the Dispatcher governance pipeline.
+/// The `proposed_action` is left as a human-readable description; actual
+/// SQL execution happens in `rca_actions::run_auto_flow`.
+fn finding_to_proposal(
+    feature: FeatureArea,
+    finding: &str,
+    proposed_action: &str,
+    severity: Severity,
+) -> ActionProposal {
+    ActionProposal {
+        feature,
+        severity,
+        evidence_class: EvidenceClass::Factual,
+        finding: finding.to_owned(),
+        proposed_action: proposed_action.to_owned(),
+        expected_outcome: "Improved database health".to_owned(),
+        risk: "Low".to_owned(),
+        created_at: std::time::SystemTime::now(),
+    }
+}
+
+/// Log the outcome of a Dispatcher dispatch to the daemon log.
+fn log_dispatch_outcome(
+    feature: FeatureArea,
+    finding: &str,
+    outcome: &crate::governance::ActionOutcome,
+) {
+    match outcome {
+        crate::governance::ActionOutcome::Success { detail } => {
+            crate::logging::info(
+                "dispatcher",
+                &format!("[{}] auto-executed: {detail}", feature.label()),
+            );
+        }
+        crate::governance::ActionOutcome::Skipped => {
+            crate::logging::info(
+                "dispatcher",
+                &format!(
+                    "[{}] proposal queued for review: {finding}",
+                    feature.label()
+                ),
+            );
+        }
+        crate::governance::ActionOutcome::Vetoed { reason } => {
+            crate::logging::info(
+                "dispatcher",
+                &format!("[{}] proposal vetoed: {reason}", feature.label()),
+            );
+        }
+        crate::governance::ActionOutcome::Failure { error } => {
+            crate::logging::warn(
+                "dispatcher",
+                &format!("[{}] action failed: {error}", feature.label()),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon main loop
+// ---------------------------------------------------------------------------
+
 /// Observe query for the daemon monitoring loop.
 const DAEMON_OBSERVE_SQL: &str = "\
     SELECT \
@@ -534,6 +604,7 @@ pub async fn run(
     use tokio::sync::RwLock;
 
     let mut detector = AnomalyDetector::new();
+    let mut dispatcher = Dispatcher::new();
     let mut circuit_breaker = crate::governance::CircuitBreaker::new();
     let mut veto_tracker = crate::governance::VetoTracker::new();
     let mut audit_log = crate::governance::AuditLog::new();
@@ -692,6 +763,18 @@ pub async fn run(
                 notify(ch, &msg).await;
             }
 
+            // Dispatch anomaly through governance pipeline.
+            let proposal = finding_to_proposal(
+                FeatureArea::Rca,
+                &anomaly.description,
+                &format!("investigate anomaly: {}", anomaly.kind.label()),
+                Severity::Warning,
+            );
+            let autonomy = config.governance.autonomy_for(FeatureArea::Rca);
+            #[allow(unused_variables)]
+            let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+            log_dispatch_outcome(FeatureArea::Rca, &anomaly.description, &outcome);
+
             // Create GitHub issue if configured.
             if let Some(repo) = github_repo {
                 let template = crate::issues::issue_from_anomaly(
@@ -755,6 +838,22 @@ pub async fn run(
                             }
                         }
                     }
+                }
+
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::IndexHealth);
+                for finding in &ih_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::IndexHealth,
+                        &finding.description,
+                        &format!("remediate index issue: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(FeatureArea::IndexHealth, &finding.description, &outcome);
                 }
 
                 // In Auto mode, execute safe proposals.
@@ -831,6 +930,22 @@ pub async fn run(
                     }
                 }
 
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Vacuum);
+                for finding in &vacuum_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::Vacuum,
+                        &finding.description,
+                        &format!("remediate vacuum issue: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(FeatureArea::Vacuum, &finding.description, &outcome);
+                }
+
                 // In Auto mode, execute safe vacuum proposals.
                 let configured = config
                     .governance
@@ -899,6 +1014,22 @@ pub async fn run(
                             }
                         }
                     }
+                }
+
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Bloat);
+                for finding in &bloat_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::Bloat,
+                        &finding.description,
+                        &format!("remediate bloat issue: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(FeatureArea::Bloat, &finding.description, &outcome);
                 }
 
                 // In Auto mode, execute safe bloat proposals.
@@ -974,6 +1105,22 @@ pub async fn run(
                         }
                     }
                 }
+
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::ConfigTuning);
+                for finding in &config_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::ConfigTuning,
+                        &finding.description,
+                        &format!("tune config: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(FeatureArea::ConfigTuning, &finding.description, &outcome);
+                }
             }
         }
 
@@ -1019,6 +1166,26 @@ pub async fn run(
                             }
                         }
                     }
+                }
+
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::QueryOptimization);
+                for finding in &qo_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::QueryOptimization,
+                        &finding.description,
+                        &format!("optimize query: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(
+                        FeatureArea::QueryOptimization,
+                        &finding.description,
+                        &outcome,
+                    );
                 }
 
                 // In Auto mode, execute safe proposals.
@@ -1099,6 +1266,26 @@ pub async fn run(
                     }
                 }
 
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::ConnectionManagement);
+                for finding in &cm_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::ConnectionManagement,
+                        &finding.description,
+                        &format!("manage connections: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(
+                        FeatureArea::ConnectionManagement,
+                        &finding.description,
+                        &outcome,
+                    );
+                }
+
                 // In Auto mode, execute safe proposals.
                 let configured = config
                     .governance
@@ -1176,6 +1363,22 @@ pub async fn run(
                     }
                 }
 
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Replication);
+                for finding in &repl_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::Replication,
+                        &finding.description,
+                        &format!("remediate replication issue: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(FeatureArea::Replication, &finding.description, &outcome);
+                }
+
                 // In Auto mode, execute safe proposals.
                 let configured = config
                     .governance
@@ -1250,6 +1453,26 @@ pub async fn run(
                             }
                         }
                     }
+                }
+
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::BackupMonitoring);
+                for finding in &bm_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::BackupMonitoring,
+                        &finding.description,
+                        &format!("investigate backup issue: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(
+                        FeatureArea::BackupMonitoring,
+                        &finding.description,
+                        &outcome,
+                    );
                 }
 
                 // In Auto mode, execute safe proposals.
@@ -1332,6 +1555,22 @@ pub async fn run(
                     }
                 }
 
+                // Dispatch each finding through the governance pipeline.
+                let autonomy = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Security);
+                for finding in &sec_report.findings {
+                    let proposal = finding_to_proposal(
+                        FeatureArea::Security,
+                        &finding.description,
+                        &format!("remediate security issue: {}", finding.kind.label()),
+                        finding.severity,
+                    );
+                    #[allow(unused_variables)]
+                    let outcome = dispatcher.dispatch_proposal(&proposal, autonomy);
+                    log_dispatch_outcome(FeatureArea::Security, &finding.description, &outcome);
+                }
+
                 // In Auto mode, execute safe proposals.
                 let configured = config
                     .governance
@@ -1379,24 +1618,30 @@ pub async fn run(
                 notify(ch, &rca_msg).await;
             }
 
+            // Dispatch each RCA mitigation proposal through the governance pipeline.
+            let rca_proposals = crate::rca_actions::propose_mitigations(client).await;
+            for proposal in &rca_proposals {
+                #[allow(unused_variables)]
+                let outcome = dispatcher.dispatch_proposal(proposal, configured_autonomy);
+                log_dispatch_outcome(FeatureArea::Rca, &proposal.finding, &outcome);
+            }
+
             // In Auto mode, propose and execute mitigations automatically.
-            if effective_autonomy == crate::governance::AutonomyLevel::Auto {
-                let proposals = crate::rca_actions::propose_mitigations(client).await;
-                if !proposals.is_empty() {
-                    let executed = crate::rca_actions::run_auto_flow(
-                        client,
-                        &proposals,
-                        &mut audit_log,
-                        &mut circuit_breaker,
-                        &mut veto_tracker,
-                    )
-                    .await;
-                    if executed > 0 {
-                        let msg =
-                            format!("[{dbname}] Auto-executed {executed} mitigation action(s)");
-                        for ch in channels_for_severity(channels, "critical", routing) {
-                            notify(ch, &msg).await;
-                        }
+            if effective_autonomy == crate::governance::AutonomyLevel::Auto
+                && !rca_proposals.is_empty()
+            {
+                let executed = crate::rca_actions::run_auto_flow(
+                    client,
+                    &rca_proposals,
+                    &mut audit_log,
+                    &mut circuit_breaker,
+                    &mut veto_tracker,
+                )
+                .await;
+                if executed > 0 {
+                    let msg = format!("[{dbname}] Auto-executed {executed} mitigation action(s)");
+                    for ch in channels_for_severity(channels, "critical", routing) {
+                        notify(ch, &msg).await;
                     }
                 }
             }
