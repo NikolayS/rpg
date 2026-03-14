@@ -928,11 +928,8 @@ pub struct ReplSettings {
     pub pager_min_lines: usize,
     /// Warn before executing destructive statements (DROP, TRUNCATE, etc.).
     ///
-    /// Defaults to `true`. Disable with `\set DESTRUCTIVE_WARNING off`.
-    pub destructive_warning: bool,
-    /// Whether destructive-statement confirmation prompts are enabled.
-    ///
-    /// Mirrors `destructive_warning`. Disable with `\set SAFETY off`.
+    /// Defaults to `true`. Disable with `\set SAFETY off` or
+    /// `\set DESTRUCTIVE_WARNING off`.
     pub safety_enabled: bool,
     /// Loaded TOML configuration (profiles, display defaults, etc.).
     ///
@@ -1041,7 +1038,6 @@ impl std::fmt::Debug for ReplSettings {
             .field("pager_enabled", &self.pager_enabled)
             .field("pager_command", &self.pager_command)
             .field("pager_min_lines", &self.pager_min_lines)
-            .field("destructive_warning", &self.destructive_warning)
             .field("safety_enabled", &self.safety_enabled)
             .field("config_profiles", &self.config.connections.len())
             .field("input_mode", &self.input_mode)
@@ -1099,8 +1095,6 @@ impl Default for ReplSettings {
             pager_command: None,
             pager_min_lines: 0,
             // Warn before destructive statements by default.
-            destructive_warning: true,
-            // Safety prompts enabled by default.
             safety_enabled: true,
             config: crate::config::Config::default(),
             input_mode: InputMode::default(),
@@ -1312,9 +1306,9 @@ pub async fn execute_query(
     // Destructive statement guard: warn before DROP, TRUNCATE, DELETE without
     // WHERE, etc.  In non-interactive mode the check is skipped automatically
     // inside `confirm_destructive`.
-    if settings.destructive_warning || settings.safety_enabled {
-        if let Some(desc) = crate::safety::is_destructive(sql_to_send) {
-            if !crate::safety::confirm_destructive(desc) {
+    if settings.safety_enabled {
+        if let Some(reason) = crate::safety::is_destructive(sql_to_send) {
+            if !crate::safety::confirm_destructive(reason) {
                 eprintln!("Statement cancelled.");
                 return true; // skipped — not an error
             }
@@ -1526,9 +1520,9 @@ pub async fn execute_query_extended(
     }
 
     // Destructive statement guard.
-    if settings.destructive_warning {
-        if let Some(desc) = crate::safety::check_destructive(sql_to_send) {
-            if !crate::safety::confirm_destructive(desc) {
+    if settings.safety_enabled {
+        if let Some(reason) = crate::safety::is_destructive(sql_to_send) {
+            if !crate::safety::confirm_destructive(reason) {
                 eprintln!("Statement cancelled.");
                 return true; // skipped — not an error
             }
@@ -3030,14 +3024,9 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             }
         }
     }
-    // Mirror DESTRUCTIVE_WARNING on/off into the destructive_warning flag.
-    if name == "DESTRUCTIVE_WARNING" {
-        settings.destructive_warning = matches!(value, "on" | "true" | "1");
-    }
-    // Mirror SAFETY on/off into both safety_enabled and destructive_warning.
-    if name == "SAFETY" {
-        settings.safety_enabled = value != "off";
-        settings.destructive_warning = value != "off";
+    // DESTRUCTIVE_WARNING and SAFETY both toggle the safety_enabled flag.
+    if name == "DESTRUCTIVE_WARNING" || name == "SAFETY" {
+        settings.safety_enabled = value != "off" && value != "false" && value != "0";
     }
     // Mirror VERBOSITY into verbose_errors (psql: verbose shows SQLSTATE).
     if name == "VERBOSITY" {

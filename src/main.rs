@@ -496,6 +496,7 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     let no_highlight = cli.no_highlight || !cfg.display.highlight;
     let pager_enabled = cfg.display.pager;
     let timing = cfg.display.timing;
+    let safety_enabled = cfg.safety.destructive_warning;
 
     // Initialise pager_command from the PAGER environment variable.
     // A non-empty PAGER that is not "on"/"off" sets an external pager.
@@ -526,6 +527,7 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
         pager_enabled,
         pager_command,
         timing,
+        safety_enabled,
         config: cfg.clone(),
         exec_mode: if cli.yolo {
             repl::ExecMode::Yolo
