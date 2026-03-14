@@ -266,6 +266,11 @@ pub struct AuditLogEntry {
     pub outcome: ActionOutcome,
     /// Auditor's assessment (if any).
     pub auditor_note: Option<String>,
+    /// Post-action verification result.
+    ///
+    /// `Some(true)` = verified resolved, `Some(false)` = problem persists,
+    /// `None` = verification not performed or not applicable.
+    pub verified: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +315,7 @@ impl AuditLog {
             justification,
             outcome,
             auditor_note,
+            verified: None,
         });
         seq
     }
@@ -335,6 +341,16 @@ impl AuditLog {
             .iter()
             .filter(|e| e.feature == feature)
             .collect()
+    }
+
+    /// Set the verification result for an entry identified by sequence number.
+    ///
+    /// Used by the post-action verification step to update an entry after
+    /// the action has been executed and checked.
+    pub fn set_verification(&mut self, seq: u64, verified: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.seq == seq) {
+            entry.verified = Some(verified);
+        }
     }
 
     /// Serialize the log to JSON (for export/persistence).
