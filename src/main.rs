@@ -48,6 +48,7 @@ mod vars;
 mod anomaly;
 mod backup_monitoring;
 mod bloat;
+mod check;
 mod config_tuning;
 mod connection_management;
 mod index_health;
@@ -851,6 +852,13 @@ async fn main() {
             } else {
                 false
             };
+
+            // --check: run all analyzers once, print summary, exit with
+            // severity code (0=healthy, 1=warning, 2=critical).
+            if cli.check {
+                let exit_code = check::run_health_check(&client).await;
+                std::process::exit(exit_code);
+            }
 
             let exit_code = if cli.daemon {
                 // Daemon mode: headless continuous monitoring.
