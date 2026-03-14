@@ -14,9 +14,6 @@
 //! | Missing index | Heuristic | High seq_scan count on large tables |
 //! | Redundant index | Heuristic | Column prefix match |
 
-// Phase 3 infrastructure — consumers arrive in subsequent PRs.
-#![allow(dead_code)]
-
 use crate::governance::{EvidenceClass, Severity};
 
 use std::fmt::Write as _;
@@ -42,6 +39,7 @@ pub enum FindingKind {
 
 impl FindingKind {
     /// Evidence class for this finding kind.
+    #[allow(dead_code)]
     pub fn evidence_class(self) -> EvidenceClass {
         match self {
             Self::Invalid => EvidenceClass::Factual,
@@ -132,6 +130,7 @@ impl IndexHealthReport {
     }
 
     /// Build a text summary for LLM consumption.
+    #[allow(dead_code)]
     pub fn to_prompt(&self) -> String {
         if self.findings.is_empty() {
             return "No index health issues found.".to_owned();
