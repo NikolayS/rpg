@@ -3078,6 +3078,23 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "AI_SHOW_SQL" {
         settings.config.ai.show_sql = matches!(value, "on" | "true" | "1");
     }
+    // Mirror AI_PROVIDER into config.ai.provider.
+    if name == "AI_PROVIDER" {
+        const KNOWN_PROVIDERS: &[&str] = &["anthropic", "claude", "openai", "ollama"];
+        if !KNOWN_PROVIDERS.contains(&value) {
+            eprintln!(
+                "warning: unknown AI provider \"{value}\"; \
+                 known providers: anthropic, openai, ollama"
+            );
+        }
+        settings.config.ai.provider = Some(value.to_owned());
+        println!("AI provider set to: {value}");
+    }
+    // Mirror AI_MODEL into config.ai.model.
+    if name == "AI_MODEL" {
+        settings.config.ai.model = Some(value.to_owned());
+        println!("AI model set to: {value}");
+    }
 }
 
 /// Apply an `\unset` command.
@@ -3090,6 +3107,14 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
         // Mirror AI_SHOW_SQL.
         if name == "AI_SHOW_SQL" {
             settings.config.ai.show_sql = false;
+        }
+        // Mirror AI_PROVIDER.
+        if name == "AI_PROVIDER" {
+            settings.config.ai.provider = None;
+        }
+        // Mirror AI_MODEL.
+        if name == "AI_MODEL" {
+            settings.config.ai.model = None;
         }
     } else {
         eprintln!("\\unset: variable {name} was not set");
@@ -8357,6 +8382,94 @@ mod tests {
         apply_set(&mut settings, "EXPLAIN", "on");
         apply_set(&mut settings, "EXPLAIN", "off");
         assert_eq!(settings.auto_explain, AutoExplain::Off);
+    }
+
+    // -- \set AI_PROVIDER / AI_MODEL -------------------------------------------
+
+    #[test]
+    fn set_ai_provider_known_updates_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "anthropic");
+        assert_eq!(settings.config.ai.provider.as_deref(), Some("anthropic"));
+        // Also stored in the vars map.
+        assert_eq!(settings.vars.get("AI_PROVIDER"), Some("anthropic"));
+    }
+
+    #[test]
+    fn set_ai_provider_openai_updates_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "openai");
+        assert_eq!(settings.config.ai.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn set_ai_provider_ollama_updates_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "ollama");
+        assert_eq!(settings.config.ai.provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn set_ai_provider_claude_alias_updates_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "claude");
+        assert_eq!(settings.config.ai.provider.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn set_ai_provider_unknown_still_updates_config() {
+        // Unknown providers are allowed (custom endpoints) but emit a warning.
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "my-custom-provider");
+        assert_eq!(
+            settings.config.ai.provider.as_deref(),
+            Some("my-custom-provider")
+        );
+    }
+
+    #[test]
+    fn set_ai_provider_overwrites_previous() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "openai");
+        apply_set(&mut settings, "AI_PROVIDER", "anthropic");
+        assert_eq!(settings.config.ai.provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn unset_ai_provider_clears_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_PROVIDER", "openai");
+        assert!(settings.config.ai.provider.is_some());
+        apply_unset(&mut settings, "AI_PROVIDER");
+        assert!(settings.config.ai.provider.is_none());
+    }
+
+    #[test]
+    fn set_ai_model_updates_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_MODEL", "gpt-4o");
+        assert_eq!(settings.config.ai.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(settings.vars.get("AI_MODEL"), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn set_ai_model_overwrites_previous() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_MODEL", "gpt-4o");
+        apply_set(&mut settings, "AI_MODEL", "claude-sonnet-4-6");
+        assert_eq!(
+            settings.config.ai.model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn unset_ai_model_clears_config() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "AI_MODEL", "claude-sonnet-4-6");
+        assert!(settings.config.ai.model.is_some());
+        apply_unset(&mut settings, "AI_MODEL");
+        assert!(settings.config.ai.model.is_none());
     }
 
     // -- \gexec parser ---------------------------------------------------------
