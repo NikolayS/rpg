@@ -459,6 +459,7 @@ pub async fn run(
     channels: &[NotificationChannel],
     health_port: Option<u16>,
     github_repo: Option<&str>,
+    registry: &crate::connectors::ConnectorRegistry,
 ) {
     use std::sync::Arc;
     use std::time::Duration;
@@ -508,6 +509,20 @@ pub async fn run(
 
     crate::logging::info("daemon", &format!("Monitoring {dbname} (interval: 10s)"));
 
+    // Log connector status on startup.
+    {
+        let connectors = registry.list();
+        if connectors.is_empty() {
+            crate::logging::info("daemon", "Connectors: none configured");
+        } else {
+            let status: Vec<String> = connectors
+                .iter()
+                .map(|c| format!("{} (enabled)", c.id()))
+                .collect();
+            crate::logging::info("daemon", &format!("Connectors: {}", status.join(", ")));
+        }
+    }
+
     // Notify startup.
     for ch in channels {
         notify(ch, &format!("Rpg daemon started — monitoring {dbname}")).await;
@@ -518,6 +533,37 @@ pub async fn run(
     loop {
         let mut snap = MetricSnapshot::default();
         let now = chrono_now();
+
+        // Fetch metrics from enabled connectors (every iteration).
+        // Errors are logged and skipped — connector failures must not
+        // interrupt the main monitoring loop.
+        if !registry.list().is_empty() {
+            let db_id = dbname.to_owned();
+            let window = crate::connectors::TimeWindow {
+                start: std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+                end: std::time::SystemTime::now(),
+            };
+            for connector in registry.list() {
+                match connector.fetch_metrics(&db_id, &window).await {
+                    Ok(metrics) => {
+                        crate::logging::info(
+                            "daemon",
+                            &format!(
+                                "connector {}: fetched {} metric(s)",
+                                connector.id(),
+                                metrics.len()
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        crate::logging::warn(
+                            "daemon",
+                            &format!("connector {}: fetch_metrics failed: {e}", connector.id()),
+                        );
+                    }
+                }
+            }
+        }
 
         // Collect metrics.
         if let Ok(messages) = client.simple_query(DAEMON_OBSERVE_SQL).await {

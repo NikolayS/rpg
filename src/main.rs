@@ -51,6 +51,7 @@ mod bloat;
 mod check;
 mod config_tuning;
 mod connection_management;
+mod connector_setup;
 mod connectors;
 mod index_health;
 mod issues;
@@ -924,6 +925,11 @@ async fn main() {
                     });
                 }
 
+                let connector_registry = {
+                    let connectors_cfg = cfg.connectors.clone().unwrap_or_default();
+                    connector_setup::build_connector_registry(&connectors_cfg)
+                };
+
                 daemon::run(
                     &client,
                     &cfg,
@@ -931,6 +937,7 @@ async fn main() {
                     &channels,
                     cli.health_port,
                     cli.github_repo.as_deref(),
+                    &connector_registry,
                 )
                 .await;
 

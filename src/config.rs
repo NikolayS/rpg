@@ -44,6 +44,9 @@ pub struct Config {
     /// [`merge_project_config`] after project config is loaded.
     #[serde(skip)]
     pub project_named_queries: HashMap<String, String>,
+    /// External connector configuration (Datadog, pganalyze, etc.).
+    #[serde(default)]
+    pub connectors: Option<ConnectorsConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +542,285 @@ pub struct ConnectionProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Connector configuration
+// ---------------------------------------------------------------------------
+
+/// Per-connector configuration from the config file.
+///
+/// Each connector is optional. When absent the connector is disabled.
+///
+/// ```toml
+/// [connectors.datadog]
+/// enabled = true
+/// api_key_env = "DD_API_KEY"
+/// app_key_env = "DD_APP_KEY"
+///
+/// [connectors.pganalyze]
+/// api_key_env = "PGANALYZE_API_KEY"
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ConnectorsConfig {
+    /// Datadog monitoring connector.
+    pub datadog: Option<DatadogConfig>,
+    /// pganalyze SaaS connector.
+    pub pganalyze: Option<PganalyzeConfig>,
+    /// AWS CloudWatch connector.
+    pub cloudwatch: Option<CloudWatchConfig>,
+    /// postgres.ai Issues connector.
+    pub postgresai: Option<PostgresAIConfig>,
+    /// Supabase Management API connector.
+    pub supabase: Option<SupabaseConfig>,
+    /// GitHub Issues connector.
+    pub github: Option<GitHubConfig>,
+    /// GitLab Issues connector.
+    pub gitlab: Option<GitLabConfig>,
+    /// Jira Issues connector.
+    pub jira: Option<JiraConfig>,
+}
+
+/// Datadog connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DatadogConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the Datadog API key.
+    #[serde(default = "dd_api_key_env")]
+    pub api_key_env: String,
+    /// Name of the env var holding the Datadog application key.
+    #[serde(default = "dd_app_key_env")]
+    pub app_key_env: String,
+}
+
+fn dd_api_key_env() -> String {
+    "DD_API_KEY".to_owned()
+}
+
+fn dd_app_key_env() -> String {
+    "DD_APP_KEY".to_owned()
+}
+
+impl Default for DatadogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            api_key_env: dd_api_key_env(),
+            app_key_env: dd_app_key_env(),
+        }
+    }
+}
+
+/// pganalyze SaaS connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PganalyzeConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the pganalyze API key.
+    #[serde(default = "pganalyze_api_key_env")]
+    pub api_key_env: String,
+}
+
+fn pganalyze_api_key_env() -> String {
+    "PGANALYZE_API_KEY".to_owned()
+}
+
+impl Default for PganalyzeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            api_key_env: pganalyze_api_key_env(),
+        }
+    }
+}
+
+/// AWS CloudWatch connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CloudWatchConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the AWS region.
+    #[serde(default = "cw_region_env")]
+    pub region_env: String,
+    /// Name of the env var holding the AWS access key ID.
+    #[serde(default = "cw_access_key_id_env")]
+    pub access_key_id_env: String,
+    /// Name of the env var holding the AWS secret access key.
+    #[serde(default = "cw_secret_access_key_env")]
+    pub secret_access_key_env: String,
+}
+
+fn cw_region_env() -> String {
+    "AWS_DEFAULT_REGION".to_owned()
+}
+
+fn cw_access_key_id_env() -> String {
+    "AWS_ACCESS_KEY_ID".to_owned()
+}
+
+fn cw_secret_access_key_env() -> String {
+    "AWS_SECRET_ACCESS_KEY".to_owned()
+}
+
+impl Default for CloudWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            region_env: cw_region_env(),
+            access_key_id_env: cw_access_key_id_env(),
+            secret_access_key_env: cw_secret_access_key_env(),
+        }
+    }
+}
+
+/// postgres.ai Issues connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PostgresAIConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the postgres.ai API key.
+    #[serde(default = "postgresai_api_key_env")]
+    pub api_key_env: String,
+}
+
+fn postgresai_api_key_env() -> String {
+    "POSTGRESAI_API_KEY".to_owned()
+}
+
+impl Default for PostgresAIConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            api_key_env: postgresai_api_key_env(),
+        }
+    }
+}
+
+/// Supabase Management API connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SupabaseConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the Supabase access token.
+    #[serde(default = "supabase_token_env")]
+    pub access_token_env: String,
+}
+
+fn supabase_token_env() -> String {
+    "SUPABASE_ACCESS_TOKEN".to_owned()
+}
+
+impl Default for SupabaseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            access_token_env: supabase_token_env(),
+        }
+    }
+}
+
+/// GitHub Issues connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GitHubConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the GitHub personal access token.
+    #[serde(default = "github_token_env")]
+    pub token_env: String,
+    /// GitHub repository in `owner/repo` format.
+    pub repo: Option<String>,
+}
+
+fn github_token_env() -> String {
+    "GITHUB_TOKEN".to_owned()
+}
+
+impl Default for GitHubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token_env: github_token_env(),
+            repo: None,
+        }
+    }
+}
+
+/// GitLab Issues connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GitLabConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the GitLab personal access token.
+    #[serde(default = "gitlab_token_env")]
+    pub token_env: String,
+    /// GitLab project ID or path (e.g. `"mygroup/myproject"`).
+    pub project_id: Option<String>,
+}
+
+fn gitlab_token_env() -> String {
+    "GITLAB_TOKEN".to_owned()
+}
+
+impl Default for GitLabConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token_env: gitlab_token_env(),
+            project_id: None,
+        }
+    }
+}
+
+/// Jira Issues connector configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct JiraConfig {
+    /// Enable this connector. Default: `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Name of the env var holding the Jira user e-mail address.
+    #[serde(default = "jira_email_env")]
+    pub email_env: String,
+    /// Name of the env var holding the Jira API token.
+    #[serde(default = "jira_api_token_env")]
+    pub api_token_env: String,
+    /// Jira instance base URL (e.g. `"https://mycompany.atlassian.net"`).
+    pub base_url: Option<String>,
+}
+
+fn jira_email_env() -> String {
+    "JIRA_EMAIL".to_owned()
+}
+
+fn jira_api_token_env() -> String {
+    "JIRA_API_TOKEN".to_owned()
+}
+
+impl Default for JiraConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            email_env: jira_email_env(),
+            api_token_env: jira_api_token_env(),
+            base_url: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Project config (.rpg.toml)
 // ---------------------------------------------------------------------------
 
@@ -923,6 +1205,8 @@ fn merge_config(base: Config, overlay: Config) -> Config {
         // project_named_queries is not set during file-layer merging;
         // it is populated by merge_project_config.
         project_named_queries: base.project_named_queries,
+        // Overlay connector config wins when present; base is used otherwise.
+        connectors: overlay.connectors.or(base.connectors),
     }
 }
 
