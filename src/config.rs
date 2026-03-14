@@ -22,6 +22,8 @@ use crate::governance::{AutonomyLevel, FeatureArea};
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Default connection settings (host, port, user, dbname, sslmode).
+    pub connection: ConnectionConfig,
     /// Display/output preferences.
     pub display: DisplayConfig,
     /// Safety and destructive-operation settings.
@@ -33,6 +35,38 @@ pub struct Config {
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
+}
+
+// ---------------------------------------------------------------------------
+// Connection settings
+// ---------------------------------------------------------------------------
+
+/// Default connection settings applied before CLI flags.
+///
+/// These provide a fallback when neither the corresponding CLI flag nor
+/// an environment variable (PGHOST, PGPORT, …) is set.
+///
+/// ```toml
+/// [connection]
+/// host = "db.example.com"
+/// port = "5432"
+/// user = "app"
+/// dbname = "app_prod"
+/// sslmode = "require"
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct ConnectionConfig {
+    /// Default server hostname or socket directory.
+    pub host: Option<String>,
+    /// Default server port (stored as a string to mirror `PGPORT`).
+    pub port: Option<String>,
+    /// Default database user name.
+    pub user: Option<String>,
+    /// Default database name.
+    pub dbname: Option<String>,
+    /// Default SSL mode (`disable`, `prefer`, `require`).
+    pub sslmode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +86,10 @@ pub struct DisplayConfig {
     pub timing: bool,
     /// Expanded display mode (like `\x`). Default: `false`.
     pub expanded: bool,
+    /// Minimum output lines before the pager activates. Default: `0` (always).
+    pub pager_min_lines: usize,
+    /// Table border style (`0`, `1`, or `2`). Mirrors `\pset border`. Default: `1`.
+    pub border: u8,
 }
 
 impl Default for DisplayConfig {
@@ -61,6 +99,8 @@ impl Default for DisplayConfig {
             highlight: true,
             timing: false,
             expanded: false,
+            pager_min_lines: 0,
+            border: 1,
         }
     }
 }
@@ -371,11 +411,28 @@ fn load_file(path: &Path) -> Result<Config, String> {
 /// the user config can override individual profiles without losing the rest.
 fn merge_config(base: Config, overlay: Config) -> Config {
     Config {
+        connection: ConnectionConfig {
+            host: overlay.connection.host.or(base.connection.host),
+            port: overlay.connection.port.or(base.connection.port),
+            user: overlay.connection.user.or(base.connection.user),
+            dbname: overlay.connection.dbname.or(base.connection.dbname),
+            sslmode: overlay.connection.sslmode.or(base.connection.sslmode),
+        },
         display: DisplayConfig {
             pager: overlay.display.pager,
             highlight: overlay.display.highlight,
             timing: overlay.display.timing,
             expanded: overlay.display.expanded,
+            pager_min_lines: if overlay.display.pager_min_lines == 0 {
+                base.display.pager_min_lines
+            } else {
+                overlay.display.pager_min_lines
+            },
+            border: if overlay.display.border == 1 {
+                base.display.border
+            } else {
+                overlay.display.border
+            },
         },
         safety: SafetyConfig {
             destructive_warning: overlay.safety.destructive_warning,
@@ -462,7 +519,14 @@ mod tests {
         assert!(cfg.display.highlight); // default
         assert!(!cfg.display.timing);
         assert!(!cfg.display.expanded);
+        assert_eq!(cfg.display.pager_min_lines, 0);
+        assert_eq!(cfg.display.border, 1);
         assert!(cfg.safety.destructive_warning);
+        assert!(cfg.connection.host.is_none());
+        assert!(cfg.connection.port.is_none());
+        assert!(cfg.connection.user.is_none());
+        assert!(cfg.connection.dbname.is_none());
+        assert!(cfg.connection.sslmode.is_none());
     }
 
     #[test]
@@ -479,6 +543,120 @@ expanded = true
         assert!(!cfg.display.highlight);
         assert!(cfg.display.timing);
         assert!(cfg.display.expanded);
+    }
+
+    #[test]
+    fn parse_display_pager_min_lines_and_border() {
+        let toml_str = r"
+[display]
+pager_min_lines = 40
+border = 2
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.display.pager_min_lines, 40);
+        assert_eq!(cfg.display.border, 2);
+    }
+
+    #[test]
+    fn parse_connection_section() {
+        let toml_str = r#"
+[connection]
+host = "db.internal"
+port = "5433"
+user = "readonly"
+dbname = "analytics"
+sslmode = "require"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.connection.host.as_deref(), Some("db.internal"));
+        assert_eq!(cfg.connection.port.as_deref(), Some("5433"));
+        assert_eq!(cfg.connection.user.as_deref(), Some("readonly"));
+        assert_eq!(cfg.connection.dbname.as_deref(), Some("analytics"));
+        assert_eq!(cfg.connection.sslmode.as_deref(), Some("require"));
+    }
+
+    #[test]
+    fn parse_connection_section_partial() {
+        let toml_str = r#"
+[connection]
+host = "localhost"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.connection.host.as_deref(), Some("localhost"));
+        assert!(cfg.connection.port.is_none());
+        assert!(cfg.connection.user.is_none());
+        assert!(cfg.connection.dbname.is_none());
+        assert!(cfg.connection.sslmode.is_none());
+    }
+
+    #[test]
+    fn merge_connection_overlay_wins() {
+        let base = Config {
+            connection: ConnectionConfig {
+                host: Some("base-host".to_owned()),
+                port: Some("5432".to_owned()),
+                user: Some("base-user".to_owned()),
+                dbname: Some("base-db".to_owned()),
+                sslmode: Some("prefer".to_owned()),
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            connection: ConnectionConfig {
+                host: Some("overlay-host".to_owned()),
+                port: None,
+                user: None,
+                dbname: Some("overlay-db".to_owned()),
+                sslmode: None,
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        // Overlay wins when set.
+        assert_eq!(merged.connection.host.as_deref(), Some("overlay-host"));
+        assert_eq!(merged.connection.dbname.as_deref(), Some("overlay-db"));
+        // Base values preserved when overlay is None.
+        assert_eq!(merged.connection.port.as_deref(), Some("5432"));
+        assert_eq!(merged.connection.user.as_deref(), Some("base-user"));
+        assert_eq!(merged.connection.sslmode.as_deref(), Some("prefer"));
+    }
+
+    #[test]
+    fn merge_display_pager_min_lines_overlay_wins() {
+        let base = Config {
+            display: DisplayConfig {
+                pager_min_lines: 20,
+                border: 0,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            display: DisplayConfig {
+                pager_min_lines: 50,
+                border: 2,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.display.pager_min_lines, 50);
+        assert_eq!(merged.display.border, 2);
+    }
+
+    #[test]
+    fn merge_display_pager_min_lines_base_preserved_when_overlay_zero() {
+        let base = Config {
+            display: DisplayConfig {
+                pager_min_lines: 30,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        // Overlay has pager_min_lines = 0 (default), so base value is kept.
+        let overlay = Config::default();
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.display.pager_min_lines, 30);
     }
 
     #[test]
@@ -586,6 +764,7 @@ dbname = "testdb"
                 highlight: true,
                 timing: false,
                 expanded: false,
+                ..DisplayConfig::default()
             },
             safety: SafetyConfig {
                 destructive_warning: true,
@@ -593,6 +772,7 @@ dbname = "testdb"
             ai: AiConfig::default(),
             governance: GovernanceConfig::default(),
             connections: HashMap::new(),
+            connection: ConnectionConfig::default(),
         };
         let overlay = Config {
             display: DisplayConfig {
@@ -600,6 +780,7 @@ dbname = "testdb"
                 highlight: false,
                 timing: true,
                 expanded: true,
+                ..DisplayConfig::default()
             },
             safety: SafetyConfig {
                 destructive_warning: false,
@@ -607,6 +788,7 @@ dbname = "testdb"
             ai: AiConfig::default(),
             governance: GovernanceConfig::default(),
             connections: HashMap::new(),
+            connection: ConnectionConfig::default(),
         };
         let merged = merge_config(base, overlay);
         assert!(!merged.display.pager);
