@@ -1,60 +1,59 @@
 # rpg — self-driving Postgres agent
 
-A psql-compatible terminal with built-in DBA diagnostics and AI assistant. Single binary, no dependencies, cross-platform.
+A psql-compatible terminal with built-in DBA diagnostics, AI assistant, and
+autonomous operations. Single binary, no dependencies, cross-platform.
 
 ## Installation
 
-No pre-built binaries yet — install from source.
-
-### 1. Install Rust
+### Homebrew (macOS / Linux)
 
 ```bash
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Windows — download and run rustup-init.exe from https://rustup.rs
+brew tap NikolayS/rpg
+brew install rpg
 ```
 
-Requires Rust 1.85+. After installing, restart your shell or run `source ~/.cargo/env`.
+### Install script (macOS / Linux)
 
-### 2. Build rpg
+```bash
+curl -fsSL https://raw.githubusercontent.com/NikolayS/project-alpha/main/scripts/install.sh | bash
+```
+
+### Build from source
+
+Requires Rust 1.85+.
 
 ```bash
 git clone https://github.com/NikolayS/project-alpha.git
 cd project-alpha
 cargo build --release
-```
-
-The binary is at `./target/release/rpg`. Copy it to your PATH:
-
-```bash
-# macOS / Linux
 cp ./target/release/rpg /usr/local/bin/
-
-# Or add to PATH
-export PATH="$PWD/target/release:$PATH"
 ```
 
-### 3. Connect
+### Self-update
 
 ```bash
-# Connect like psql
+rpg --update
+```
+
+## Connect
+
+```bash
+# Same flags as psql
 rpg -h localhost -p 5432 -U postgres -d mydb
 
-# Or use a connection string
+# Connection string
 rpg "postgresql://user@localhost/mydb"
 
-# Run a query non-interactively
+# Non-interactive
 rpg -d postgres -c "select version()"
 ```
 
 ## DBA diagnostics
 
-rpg ships 15+ diagnostic commands accessible via `\dba`:
+15+ diagnostic commands accessible via `\dba`:
 
 ```
 postgres=# \dba
-\dba diagnostic commands:
   \dba activity    pg_stat_activity: grouped by state, duration, wait events
   \dba locks       Lock tree (blocked/blocking)
   \dba waits       Wait event breakdown (+ for AI interpretation)
@@ -62,115 +61,134 @@ postgres=# \dba
   \dba vacuum      Vacuum status and dead tuples
   \dba tablesize   Largest tables
   \dba connections Connection counts by state
-  \dba indexes     Index health report (unused, redundant, invalid, bloated)
-  \dba unused-idx  Unused indexes (simple view)
+  \dba indexes     Index health (unused, redundant, invalid, bloated)
   \dba seq-scans   Tables with high sequential scan ratio
   \dba cache-hit   Buffer cache hit ratios
   \dba replication Replication slot status
   \dba config      Non-default configuration parameters
   \dba progress    Long-running operation progress (pg_stat_progress_*)
-  \dba io          I/O statistics by backend type (PG 16+, verbose: \dba+ io)
+  \dba io          I/O statistics by backend type (PG 16+)
 ```
 
-### Index health
-
-Scans for unused, redundant, invalid, and bloated indexes with actionable suggestions:
+Index health example:
 
 ```
 postgres=# \dba indexes
-Index health: 4 issues found.
+Index health: 2 issues found.
 
 !  [unused] public.orders
-   index: orders_status_idx
-   Index orders_status_idx has 0 scans since stats reset (unknown)
+   index: orders_status_idx  (0 scans since stats reset, 16 KiB)
    suggestion: DROP INDEX CONCURRENTLY public.orders_status_idx
-   size: 16.0 KB
-
-!  [unused] public.orders
-   index: orders_created_at_idx
-   Index orders_created_at_idx has 0 scans since stats reset (unknown)
-   suggestion: DROP INDEX CONCURRENTLY public.orders_created_at_idx
-   size: 16.0 KB
-```
-
-### Activity overview
-
-```
-postgres=# \dba activity
-  pid  | user |  database  | state | wait_event_type |   wait_event   |   backend_type   | duration |           query
--------+------+------------+-------+-----------------+----------------+------------------+----------+----------------------------
- 47936 | nik  | postgres   | idle  | Client          | ClientRead     | client backend   |    8617s | select count(*) from users;
-  1070 |      |            |       | Activity        | AutovacuumMain | autovacuum launcher |       |
-(...)
-0 active, 0 idle in transaction, 2 idle, 8 total
-```
-
-### Cache hit ratios
-
-```
-postgres=# \dba cache-hit
- schemaname |    relname    | heap_blks_hit | heap_blks_read | hit_pct
-------------+---------------+---------------+----------------+---------
- public     | bloat_test_50 | 339229        | 774            | 99.77
- public     | users         | 110           | 0              | 100.00
- public     | orders        | 74            | 0              | 100.00
- public     | products      | 39            | 0              | 100.00
-(4 rows)
-```
-
-### Vacuum status
-
-```
-postgres=# \dba vacuum
- schemaname |    relname    | n_live_tup | n_dead_tup | last_autovacuum               | vacuum_count | autovacuum_count | xid_age
-------------+---------------+------------+------------+-------------------------------+--------------+------------------+---------
- public     | bloat_test_50 | 75000      | 0          | 2026-03-13 20:46:08.983068-07 | 0            | 1                | 1
- public     | users         | 10         | 0          |                               | 0            | 0                | 65
- public     | orders        | 24         | 0          |                               | 0            | 0                | 53
-(...)
 ```
 
 ## AI assistant
 
-rpg integrates with OpenAI, Anthropic, and Ollama for AI-powered Postgres assistance:
+Integrates with OpenAI, Anthropic, and Ollama:
 
-```
+```sql
 -- Ask questions about your database
-postgres=# /ask What indexes should I add for my orders table?
+/ask What indexes should I add for my orders table?
 
--- Get explanations of query plans
-postgres=# explain select * from orders where status = 'pending';
-postgres=# /explain
+-- Interpret EXPLAIN ANALYZE output
+explain select * from orders where status = 'pending';
+/explain
 
--- Fix errors automatically
-postgres=# /fix
-
--- Optimize slow queries
-postgres=# /optimize
+-- Fix errors and optimize queries
+/fix
+/optimize
 ```
-
-Configure with environment variables or in-session:
 
 ```
 postgres=# \set AI_PROVIDER anthropic
 postgres=# \set AI_MODEL claude-sonnet-4-20250514
 ```
 
+## Daemon mode
+
+Run as a background monitor with anomaly detection:
+
+```bash
+rpg --daemon --config ~/.config/rpg/config.toml
+```
+
+Continuously observes `pg_stat_activity`, wait events, bloat, and replication
+lag. Fires alerts when thresholds are breached.
+
+## Notifications
+
+Alert on Slack, PagerDuty, Telegram, webhook, or email:
+
+```toml
+[notifications]
+slack_webhook = "https://hooks.slack.com/..."
+pagerduty_key = "..."
+telegram_bot_token = "..."
+email_to = "dba@example.com"
+```
+
+## Connectors
+
+Pull context from external systems: Datadog, CloudWatch, Supabase, pganalyze,
+GitHub, GitLab, Jira, and PostgresAI. A plugin system lets you add your own.
+
+```toml
+[connectors.cloudwatch]
+region = "us-east-1"
+log_group = "/aws/rds/instance/mydb/postgresql"
+
+[connectors.pganalyze]
+api_key = "..."
+```
+
+## Governance (AAA Architecture)
+
+rpg uses a three-component governance model for all autonomous operations:
+
+- **Analyzer** — reads all database state, diagnoses issues, proposes actions
+- **Actor** — executes only approved actions within defined boundaries
+- **Auditor** — independently reviews both proposals and outcomes; can veto
+
+Autonomy is configured **per feature**, not globally:
+
+```toml
+[autonomy]
+vacuum           = "observe"     # O/S/A: observe / supervised / auto
+index_health     = "supervised"
+query_optimization = "auto"
+```
+
+```bash
+rpg --autonomy vacuum:auto,bloat:supervised
+```
+
+## Health checks and reports
+
+```bash
+rpg --check    # run all health checks and exit
+rpg --report   # generate a full diagnostic report
+```
+
+## SSH tunnel
+
+Connect through an SSH bastion with no extra tooling:
+
+```bash
+rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
+```
+
 ## Features
 
-- **psql-compatible** — drop-in replacement for daily psql usage (`\d`, `\dt`, `\di`, `\l`, `\du`, `\sf`, `\sv`, `\copy`, ...)
-- **DBA diagnostics** — 15+ `\dba` commands for activity, locks, bloat, vacuum, indexes, cache, replication, I/O
-- **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize` with OpenAI, Anthropic, or Ollama
-- **Syntax highlighting** — SQL keywords, strings, numbers, and schema objects
-- **Schema-aware completion** — tab completion for tables, columns, functions, keywords
-- **TUI pager** — built-in scrollable pager (like `less`) for large result sets
-- **Named queries** — save and recall frequently used queries
-- **SSH tunneling** — built-in SSH tunnel support for remote databases
-- **Session persistence** — query history and settings preserved across sessions
-- **Config profiles** — per-project configuration via `.rpg.toml`
-- **Daemon mode** — background monitoring with anomaly detection and Slack alerts
-- **Status bar** — persistent bottom bar showing connection info, transaction state, timing
-- **Cross-platform** — single static binary for Linux, macOS, Windows (x86_64 + aarch64)
+- **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
+- **DBA diagnostics** — 15+ `\dba` commands for activity, locks, bloat, indexes
+- **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
+- **pgcli-style completion** — dropdown with arrow navigation, schema-aware
+- **TUI pager** — scrollable pager for large result sets
+- **Syntax highlighting** — SQL keywords, strings, schema objects
+- **Named queries** — save and recall frequent queries
+- **Session persistence** — history and settings preserved across sessions
+- **Config profiles** — per-project `.rpg.toml`
+- **Status bar** — connection info, transaction state, timing
+- **Cross-platform** — single static binary: Linux, macOS, Windows (x86_64 + aarch64)
 
 ## PostgreSQL compatibility
 
