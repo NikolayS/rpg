@@ -1625,7 +1625,7 @@ Backslash commands:
   help            show this help overview (interactive mode only)
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
-  \conninfo       show connection information
+  \conninfo[+]    show connection information (+ for verbose pooler/provider details)
   \copyright      show PostgreSQL usage and distribution terms
   \version        show rpg version and build information
   \?              show this help
@@ -2723,37 +2723,41 @@ async fn dispatch_meta(
         MetaCmd::Timing(mode) => apply_timing(settings, mode),
         MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
         MetaCmd::ConnInfo => {
+            // `\conninfo`   — psql-compatible single line (always shown).
+            // `\conninfo+`  — additionally show pooler / provider details.
             println!("{}", crate::connection::connection_info(params));
-            let caps = &settings.db_capabilities;
-            match &caps.pooler {
-                crate::capabilities::PoolerType::None => {}
-                crate::capabilities::PoolerType::PgBouncer { pool_mode } => {
-                    println!("Pooler: PgBouncer (pool_mode={pool_mode})");
+            if parsed.plus {
+                let caps = &settings.db_capabilities;
+                match &caps.pooler {
+                    crate::capabilities::PoolerType::None => {}
+                    crate::capabilities::PoolerType::PgBouncer { pool_mode } => {
+                        println!("Pooler: PgBouncer (pool_mode={pool_mode})");
+                    }
+                    crate::capabilities::PoolerType::Supavisor => {
+                        println!("Pooler: Supavisor");
+                    }
+                    crate::capabilities::PoolerType::PgCat => {
+                        println!("Pooler: PgCat");
+                    }
                 }
-                crate::capabilities::PoolerType::Supavisor => {
-                    println!("Pooler: Supavisor");
+                match caps.managed_provider {
+                    crate::capabilities::ManagedProvider::None => {}
+                    crate::capabilities::ManagedProvider::Rds => {
+                        println!("Provider: Amazon RDS");
+                    }
+                    crate::capabilities::ManagedProvider::CloudSql => {
+                        println!("Provider: Google Cloud SQL");
+                    }
+                    crate::capabilities::ManagedProvider::Supabase => {
+                        println!("Provider: Supabase");
+                    }
+                    crate::capabilities::ManagedProvider::Neon => {
+                        println!("Provider: Neon");
+                    }
                 }
-                crate::capabilities::PoolerType::PgCat => {
-                    println!("Pooler: PgCat");
+                if let Some(warning) = caps.pooler_warning() {
+                    eprintln!("WARNING: {warning}");
                 }
-            }
-            match caps.managed_provider {
-                crate::capabilities::ManagedProvider::None => {}
-                crate::capabilities::ManagedProvider::Rds => {
-                    println!("Provider: Amazon RDS");
-                }
-                crate::capabilities::ManagedProvider::CloudSql => {
-                    println!("Provider: Google Cloud SQL");
-                }
-                crate::capabilities::ManagedProvider::Supabase => {
-                    println!("Provider: Supabase");
-                }
-                crate::capabilities::ManagedProvider::Neon => {
-                    println!("Provider: Neon");
-                }
-            }
-            if let Some(warning) = caps.pooler_warning() {
-                eprintln!("WARNING: {warning}");
             }
         }
         MetaCmd::ListProfiles => {
@@ -4627,6 +4631,17 @@ mod tests {
             crate::metacmd::parse("\\conninfo").cmd,
             crate::metacmd::MetaCmd::ConnInfo
         );
+        assert!(
+            !crate::metacmd::parse("\\conninfo").plus,
+            "bare \\conninfo must not set plus"
+        );
+    }
+
+    #[test]
+    fn parse_conninfo_plus() {
+        let m = crate::metacmd::parse("\\conninfo+");
+        assert_eq!(m.cmd, crate::metacmd::MetaCmd::ConnInfo);
+        assert!(m.plus, "\\conninfo+ must set plus=true");
     }
 
     #[test]

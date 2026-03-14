@@ -93,6 +93,13 @@ pub struct ConnParams {
     /// `false` when `sslmode=disable` or when `sslmode=prefer` fell back to
     /// a plain connection.  `true` when TLS handshake completed successfully.
     pub tls_in_use: bool,
+    /// The numeric IP address that the TCP connection was made to, if known.
+    ///
+    /// `None` for Unix-socket connections or when DNS resolution was not
+    /// attempted.  When `host` is already a numeric IP this stays `None`
+    /// (there is nothing extra to show).  psql shows this as
+    /// `(address "127.0.0.1")` after the hostname in `\conninfo` output.
+    pub resolved_addr: Option<String>,
 }
 
 /// Custom `Debug` implementation that masks the password field.
@@ -108,6 +115,7 @@ impl fmt::Debug for ConnParams {
             .field("application_name", &self.application_name)
             .field("connect_timeout", &self.connect_timeout)
             .field("tls_in_use", &self.tls_in_use)
+            .field("resolved_addr", &self.resolved_addr)
             .finish()
     }
 }
@@ -124,6 +132,7 @@ impl Default for ConnParams {
             application_name: "rpg".to_owned(),
             connect_timeout: None,
             tls_in_use: false,
+            resolved_addr: None,
         }
     }
 }
@@ -148,6 +157,16 @@ fn default_user() -> String {
     env::var("USER")
         .or_else(|_| env::var("USERNAME"))
         .unwrap_or_else(|_| "postgres".to_owned())
+}
+
+/// Return `true` when `host` is already a numeric IP address (IPv4 or IPv6).
+///
+/// When the host is already an IP we skip DNS resolution in [`connect`]
+/// because there is no hostname to resolve — `\conninfo` would have nothing
+/// extra to display in the `(address "...")` clause.
+fn is_numeric_addr(host: &str) -> bool {
+    use std::net::IpAddr;
+    host.parse::<IpAddr>().is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -814,9 +833,18 @@ pub async fn connect(
 
     params.tls_in_use = tls_used;
 
-    // Auth retry: if the initial connect failed with an auth error and the
-    // server is requesting a password, prompt and retry once (psql behaviour).
-    // (The retry path is reached via the caller; here we return on success.)
+    // Resolve the hostname to a numeric IP so \conninfo can display it like
+    // psql does: `on host "localhost" (address "127.0.0.1") at port "5432".`
+    // Only attempt this for TCP connections (not Unix sockets) and only when
+    // the host is not already a numeric address.
+    if !params.host.starts_with('/') && !is_numeric_addr(&params.host) {
+        let addr_str = format!("{}:{}", params.host, params.port);
+        if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str()) {
+            if let Some(addr) = addrs.next() {
+                params.resolved_addr = Some(addr.ip().to_string());
+            }
+        }
+    }
 
     Ok((client, params))
 }
@@ -931,11 +959,20 @@ pub fn connection_info(params: &ConnParams) -> String {
             params.dbname, params.user, params.host, params.port,
         )
     } else {
-        format!(
-            "You are connected to database \"{}\" as user \"{}\" \
-             on host \"{}\" at port \"{}\".",
-            params.dbname, params.user, params.host, params.port,
-        )
+        // For TCP connections, include the resolved IP address when it differs
+        // from the host string — matching psql's `PQhostaddr()` behaviour.
+        match &params.resolved_addr {
+            Some(addr) => format!(
+                "You are connected to database \"{}\" as user \"{}\" \
+                 on host \"{}\" (address \"{}\") at port \"{}\".",
+                params.dbname, params.user, params.host, addr, params.port,
+            ),
+            None => format!(
+                "You are connected to database \"{}\" as user \"{}\" \
+                 on host \"{}\" at port \"{}\".",
+                params.dbname, params.user, params.host, params.port,
+            ),
+        }
     };
     if params.tls_in_use {
         format!("{connected_line}\n{SSL_LINE}")
@@ -1427,6 +1464,24 @@ mod tests {
             connection_info(&params),
             "You are connected to database \"postgres\" as user \"postgres\" \
              on host \"localhost\" at port \"5432\".",
+        );
+    }
+
+    #[test]
+    fn test_connection_info_tcp_with_resolved_addr() {
+        // When resolved_addr is set, psql-style (address "...") clause appears.
+        let params = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "nik".into(),
+            dbname: "postgres".into(),
+            resolved_addr: Some("127.0.0.1".into()),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            connection_info(&params),
+            "You are connected to database \"postgres\" as user \"nik\" \
+             on host \"localhost\" (address \"127.0.0.1\") at port \"5432\".",
         );
     }
 

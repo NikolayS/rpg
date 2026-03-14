@@ -832,6 +832,18 @@ fn parse_c_family(input: &str) -> ParsedMeta {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::ConnInfo);
         }
+        // `\conninfo+` — verbose variant: shows psql line plus pooler/provider.
+        if let Some(after_plus) = rest.strip_prefix('+') {
+            if after_plus.is_empty() || after_plus.starts_with(char::is_whitespace) {
+                return ParsedMeta {
+                    cmd: MetaCmd::ConnInfo,
+                    plus: true,
+                    system: false,
+                    pattern: None,
+                    echo_hidden: false,
+                };
+            }
+        }
     }
     // `\crosstabview [args]` — must be checked before `\copy` and `\c` (longest match).
     if let Some(rest) = input.strip_prefix("crosstabview") {
@@ -1730,6 +1742,17 @@ mod tests {
     #[test]
     fn parse_conninfo() {
         assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+        assert!(
+            !parse("\\conninfo").plus,
+            "bare \\conninfo must not set plus"
+        );
+    }
+
+    #[test]
+    fn parse_conninfo_plus() {
+        let m = parse("\\conninfo+");
+        assert_eq!(m.cmd, MetaCmd::ConnInfo);
+        assert!(m.plus, "\\conninfo+ must set plus=true");
     }
 
     #[test]
