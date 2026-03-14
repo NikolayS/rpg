@@ -764,11 +764,16 @@ fn build_settings(
 // Entry point
 // ---------------------------------------------------------------------------
 
-// TODO: Replace #[tokio::main] with explicit runtime construction
-// to optimize thread count per operating mode (issue #2, finding #9).
-#[tokio::main]
+fn main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(async_main());
+}
+
 #[allow(clippy::too_many_lines)]
-async fn main() {
+async fn async_main() {
     // Install the default rustls CryptoProvider before any TLS operations.
     // Required because multiple dependencies (tokio-postgres-rustls, reqwest)
     // pull in different crypto backends, preventing auto-selection.
