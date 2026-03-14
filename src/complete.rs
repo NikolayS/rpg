@@ -878,6 +878,12 @@ pub struct DropdownState {
     pub prefix: String,
     /// Scroll offset: index of the first visible candidate.
     pub scroll_offset: usize,
+    /// Display-column width of the prompt (e.g. `"mydb=> "` is 7).
+    ///
+    /// Combined with `word_start`, this determines how many spaces to
+    /// prepend to each dropdown row so the menu aligns under the word
+    /// being completed rather than rendering flush-left.
+    pub prompt_width: usize,
 }
 
 impl DropdownState {
@@ -887,6 +893,7 @@ impl DropdownState {
         self.candidates.clear();
         self.selected = 0;
         self.scroll_offset = 0;
+        self.prompt_width = 0;
     }
 
     /// Move selection down by one, wrapping around.
@@ -951,6 +958,10 @@ impl DropdownState {
             .unwrap_or(0)
             .clamp(1, 60);
 
+        // Number of spaces to prepend to each row so the dropdown aligns
+        // under the word being completed rather than rendering flush-left.
+        let indent = " ".repeat(self.prompt_width + self.word_start);
+
         let mut out = String::new();
         for (display_row, cand_idx) in (self.scroll_offset..end).enumerate() {
             let cand = &self.candidates[cand_idx];
@@ -967,12 +978,14 @@ impl DropdownState {
             if cand_idx == self.selected {
                 // Highlighted row: reverse video.
                 out.push('\n');
+                out.push_str(&indent);
                 out.push_str(ansi::REVERSE);
                 out.push_str(&padded);
                 out.push_str(ansi::RESET);
             } else {
                 // Normal row: dim.
                 out.push('\n');
+                out.push_str(&indent);
                 out.push_str(ansi::DIM);
                 out.push_str(&padded);
                 out.push_str(ansi::RESET);
@@ -983,7 +996,7 @@ impl DropdownState {
                 let more = self.candidates.len() - end;
                 let _ = write!(
                     out,
-                    "\n{DIM} ({more} more\u{2026}) {RESET}",
+                    "\n{indent}{DIM} ({more} more\u{2026}) {RESET}",
                     DIM = ansi::DIM,
                     RESET = ansi::RESET
                 );
@@ -1015,6 +1028,10 @@ pub struct RpgHelper {
     /// Shared dropdown state.  Written by `Completer::complete` and by
     /// [`DropdownEventHandler`]; read by `Hinter::hint`.
     pub dropdown: Arc<Mutex<DropdownState>>,
+    /// Display-column width of the current prompt string (e.g. `"mydb=> "`
+    /// is 7).  Set before each `readline()` call via [`set_prompt_width`]
+    /// so the dropdown can indent correctly.
+    prompt_width: usize,
 }
 
 impl RpgHelper {
@@ -1028,6 +1045,7 @@ impl RpgHelper {
             highlight,
             completion_enabled: true,
             dropdown: Arc::new(Mutex::new(DropdownState::default())),
+            prompt_width: 0,
         }
     }
 
@@ -1052,6 +1070,16 @@ impl RpgHelper {
     /// Enable or disable schema-aware tab completion at runtime.
     pub fn set_completion(&mut self, enabled: bool) {
         self.completion_enabled = enabled;
+    }
+
+    /// Record the display-column width of the current prompt.
+    ///
+    /// Call this before each `readline()` invocation so that the dropdown
+    /// aligns under the word being completed rather than rendering at
+    /// column 0.  The width should be the number of terminal columns
+    /// occupied by the rendered prompt string (excluding any ANSI escapes).
+    pub fn set_prompt_width(&mut self, width: usize) {
+        self.prompt_width = width;
     }
 }
 
@@ -1197,6 +1225,7 @@ impl Completer for RpgHelper {
                 dd.scroll_offset = 0;
                 dd.word_start = completion_start;
                 dd.prefix.clone_from(&completion_prefix);
+                dd.prompt_width = self.prompt_width;
             }
         }
 
@@ -2201,6 +2230,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 5,
             prefix: "al".to_owned(),
+            prompt_width: 0,
         };
         dd.dismiss();
         assert!(!dd.active);
@@ -2217,6 +2247,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         dd.select_next();
         assert_eq!(dd.selected, 0, "should wrap to 0 after last item");
@@ -2231,6 +2262,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         dd.select_prev();
         assert_eq!(dd.selected, 2, "should wrap to last item");
@@ -2245,6 +2277,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         dd.select_next();
         assert_eq!(dd.selected, 1);
@@ -2261,6 +2294,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         dd.select_prev();
         assert_eq!(dd.selected, 1);
@@ -2275,6 +2309,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         assert_eq!(dd.current(), Some("banana"));
     }
@@ -2300,6 +2335,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         let rendered = dd.render();
         assert!(!rendered.is_empty(), "render should produce output");
@@ -2322,6 +2358,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         let rendered = dd.render();
         // The selected row uses reverse video escape; unselected uses dim.
@@ -2349,10 +2386,36 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         // Move past the 10th visible slot.
         dd.select_next(); // selected = 10
         assert_eq!(dd.scroll_offset, 1, "scroll offset should advance to 1");
+    }
+
+    #[test]
+    fn test_dropdown_render_indent_aligns_with_cursor() {
+        // prompt "mydb=> " is 7 columns wide; word starts at byte offset 14
+        // ("SELECT * FROM ").  Every row must start with 21 spaces.
+        let dd = DropdownState {
+            active: true,
+            candidates: vec!["users".to_owned(), "orders".to_owned()],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 14,
+            prefix: "".to_owned(),
+            prompt_width: 7,
+        };
+        let rendered = dd.render();
+        // Each line in the rendered output (after the leading '\n') should
+        // start with exactly 21 spaces before any ANSI escape or text.
+        let indent = " ".repeat(21);
+        for line in rendered.split('\n').filter(|l| !l.is_empty()) {
+            assert!(
+                line.starts_with(&indent),
+                "expected line to start with 21 spaces, got: {line:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

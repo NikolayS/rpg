@@ -3827,6 +3827,12 @@ async fn run_readline_loop(
 
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
 
+        // Keep the completion helper in sync with the current prompt width
+        // so the dropdown aligns under the word being completed.
+        if let Some(helper) = rl.helper_mut() {
+            helper.set_prompt_width(prompt.chars().count());
+        }
+
         match rl.readline(&prompt) {
             Ok(line) => {
                 // Obtain a cancel token *before* the query executes so that
