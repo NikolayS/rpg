@@ -16,6 +16,7 @@ pub mod datadog;
 pub mod github;
 pub mod gitlab;
 pub mod http_json;
+pub mod issue_sync;
 pub mod jira;
 pub mod pganalyze;
 pub mod postgresai;
