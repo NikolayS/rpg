@@ -99,6 +99,9 @@ pub async fn reconnect(
         force_password: false,
         no_password: false,
         sslmode: None,
+        // SSH tunnel is not re-established on \c; the outer tunnel (if any)
+        // remains live for the session.
+        ssh_tunnel: None,
     };
 
     let mut new_params = connection::resolve_params(&opts).map_err(|e| e.to_string())?;

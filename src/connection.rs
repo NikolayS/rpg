@@ -172,6 +172,10 @@ pub struct CliConnOpts {
     pub no_password: bool,
     /// SSL mode override from `--sslmode` CLI flag (highest priority).
     pub sslmode: Option<String>,
+    /// SSH tunnel configuration, if any.
+    ///
+    /// When present, the connection is established through an SSH tunnel.
+    pub ssh_tunnel: Option<crate::config::SshTunnelConfig>,
 }
 
 // ---------------------------------------------------------------------------

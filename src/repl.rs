@@ -9674,6 +9674,7 @@ mod tests {
                 dbname: Some("mydb".to_owned()),
                 sslmode: Some("require".to_owned()),
                 password: None,
+                ssh_tunnel: None,
             },
         );
         connections.insert(
@@ -9685,6 +9686,7 @@ mod tests {
                 dbname: Some("mydb".to_owned()),
                 sslmode: None,
                 password: None,
+                ssh_tunnel: None,
             },
         );
         let config = crate::config::Config {
