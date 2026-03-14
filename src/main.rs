@@ -498,6 +498,14 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     let timing = cfg.display.timing;
     let safety_enabled = cfg.safety.destructive_warning;
 
+    // Apply config display.border default if it wasn't set via -P border=N.
+    // The CLI -P args were already applied above via apply_cli_pset; if
+    // border is still at the struct default (1) and the config overrides
+    // it, apply the config value here.
+    if pset.border == 1 && cfg.display.border != 1 {
+        pset.border = cfg.display.border.min(2);
+    }
+
     // Initialise pager_command from the PAGER environment variable.
     // A non-empty PAGER that is not "on"/"off" sets an external pager.
     // An empty or absent PAGER leaves the built-in pager as default.
@@ -508,6 +516,9 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
     // Keep ReplSettings.expanded in sync with pset.expanded so that both the
     // REPL path and the -c path see a consistent expanded mode.
     let expanded = pset.expanded;
+
+    // Pager min-lines threshold from config; 0 means always page (default).
+    let pager_min_lines = cfg.display.pager_min_lines;
 
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
@@ -526,6 +537,7 @@ fn build_settings(cli: &Cli, cfg: &config::Config) -> repl::ReplSettings {
         no_highlight,
         pager_enabled,
         pager_command,
+        pager_min_lines,
         timing,
         safety_enabled,
         config: cfg.clone(),
@@ -639,6 +651,29 @@ async fn main() {
             );
             std::process::exit(2);
         }
+    }
+
+    // Apply [connection] config defaults for any fields not already set by
+    // a CLI flag or named profile.  Config values are a last resort before
+    // environment variables (PGHOST etc.) and libpq defaults.
+    if cli.host.is_none() && cli.host_pos.is_none() {
+        cli.host.clone_from(&cfg.connection.host);
+    }
+    if cli.port.is_none() && cli.port_pos.is_none() {
+        cli.port = cfg
+            .connection
+            .port
+            .as_deref()
+            .and_then(|p| p.parse::<u16>().ok());
+    }
+    if cli.username.is_none() && cli.user_pos.is_none() {
+        cli.username.clone_from(&cfg.connection.user);
+    }
+    if cli.dbname.is_none() && cli.dbname_pos.is_none() {
+        cli.dbname.clone_from(&cfg.connection.dbname);
+    }
+    if cli.sslmode.is_none() {
+        cli.sslmode.clone_from(&cfg.connection.sslmode);
     }
 
     let opts = cli.conn_opts();
