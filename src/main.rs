@@ -21,6 +21,7 @@ mod dba;
 mod describe;
 mod governance;
 mod highlight;
+mod init;
 mod io;
 mod logging;
 mod markdown;

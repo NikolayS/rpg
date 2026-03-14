@@ -1682,6 +1682,7 @@ AI commands:
   /optimize <query> suggest query optimizations
   /describe <table> AI-generated table description
   /rca              root cause analysis of current database state
+  /init             generate .rpg.toml and POSTGRES.md in current directory
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget

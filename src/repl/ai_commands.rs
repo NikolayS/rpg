@@ -332,9 +332,11 @@ pub(super) async fn dispatch_ai_command(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) {
-    // Budget gate — skip for /clear and /compact (they don't use tokens).
-    let is_budget_exempt =
-        input == "/clear" || input.starts_with("/compact") || input.starts_with("/budget");
+    // Budget gate — skip for /clear, /compact, /budget, and /init (no tokens).
+    let is_budget_exempt = input == "/clear"
+        || input.starts_with("/compact")
+        || input.starts_with("/budget")
+        || input == "/init";
     if !is_budget_exempt && check_token_budget(settings) {
         return;
     }
@@ -380,10 +382,13 @@ pub(super) async fn dispatch_ai_command(
         handle_ai_budget(settings);
     } else if input == "/rca" || input.starts_with("/rca ") {
         handle_ai_rca(client, settings, params).await;
+    } else if input == "/init" {
+        handle_init(client, settings, params).await;
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize, /describe, /rca, /clear, /compact, /budget"
+             Available: /ask, /fix, /explain, /optimize, /describe, /rca, \
+             /init, /clear, /compact, /budget"
         );
     }
 }
@@ -1834,6 +1839,51 @@ pub(super) async fn handle_ai_rca(
         if !proposals.is_empty() {
             let mut audit_log = crate::governance::AuditLog::new();
             crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /init — generate starter files
+// ---------------------------------------------------------------------------
+
+/// Handle the `/init` command.
+///
+/// Generates `.rpg.toml` and `POSTGRES.md` in the current working directory.
+/// Skips a file (with a warning) if it already exists.
+pub(super) async fn handle_init(client: &Client, settings: &ReplSettings, params: &ConnParams) {
+    use std::fs;
+    use std::path::Path;
+
+    // Generate .rpg.toml -------------------------------------------------------
+    let toml_path = Path::new(".rpg.toml");
+    if toml_path.exists() {
+        eprintln!(
+            "WARNING: .rpg.toml already exists — skipping. \
+             Remove it first if you want to regenerate."
+        );
+    } else {
+        let toml_content = crate::init::generate_rpg_toml(&settings.config, params);
+        match fs::write(toml_path, toml_content) {
+            Ok(()) => println!("Created .rpg.toml"),
+            Err(e) => eprintln!("Error writing .rpg.toml: {e}"),
+        }
+    }
+
+    // Generate POSTGRES.md -----------------------------------------------------
+    let md_path = Path::new("POSTGRES.md");
+    if md_path.exists() {
+        eprintln!(
+            "WARNING: POSTGRES.md already exists — skipping. \
+             Remove it first if you want to regenerate."
+        );
+    } else {
+        match crate::init::generate_postgres_md(client).await {
+            Ok(md_content) => match fs::write(md_path, md_content) {
+                Ok(()) => println!("Created POSTGRES.md"),
+                Err(e) => eprintln!("Error writing POSTGRES.md: {e}"),
+            },
+            Err(e) => eprintln!("Error querying database for POSTGRES.md: {e}"),
         }
     }
 }
