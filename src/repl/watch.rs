@@ -183,7 +183,12 @@ pub(super) fn parse_duration(s: &str) -> Option<std::time::Duration> {
 /// Polls key diagnostic views every 10 seconds and prints a timestamped
 /// summary.  Exits on Ctrl-C or when `duration_arg` elapses.  After
 /// exiting, offers an AI-generated summary of the observation period.
+///
+/// Superseded by `crate::observe::run_observe` (issue #441) which adds
+/// full analyzer runs on exit.  Kept here for the AI-summary path until
+/// that feature is migrated.
 #[allow(clippy::too_many_lines)]
+#[allow(dead_code)]
 pub(super) async fn observe_loop(
     client: &Client,
     settings: &mut ReplSettings,

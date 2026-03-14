@@ -2836,8 +2836,8 @@ async fn dispatch_meta(
         MetaCmd::YoloMode => {
             return MetaResult::SetExecMode(ExecMode::Yolo);
         }
-        MetaCmd::ObserveMode => {
-            observe_loop(client, settings, params, parsed.pattern.as_deref()).await;
+        MetaCmd::Observe(duration_secs) => {
+            crate::observe::run_observe(client, duration_secs).await;
             return MetaResult::Continue;
         }
         MetaCmd::InteractiveMode => {

@@ -289,8 +289,12 @@ pub enum MetaCmd {
     PlanMode,
     /// `\yolo` — enter YOLO mode.
     YoloMode,
-    /// `\observe` — enter observe mode (optional duration argument).
-    ObserveMode,
+    /// `\observe [duration]` — run analyzers and print a summary.
+    ///
+    /// The optional duration argument is parsed from strings like `"30s"`,
+    /// `"5m"`, `"1h"` and stored here as seconds.  `None` means observe
+    /// indefinitely until the user presses Ctrl-C.
+    Observe(Option<u64>),
     /// `\interactive` — return to interactive mode.
     InteractiveMode,
 
@@ -1277,24 +1281,40 @@ fn parse_i_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
+/// Parse a duration string like `"30s"`, `"5m"`, `"1h"` into seconds.
+///
+/// A bare number (no suffix) is treated as seconds.  Returns `None` when
+/// the string is empty or cannot be parsed.
+fn parse_observe_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('s') {
+        (n, 1u64)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60u64)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3600u64)
+    } else {
+        (s, 1u64)
+    };
+    let num: u64 = num_str.parse().ok()?;
+    Some(num.saturating_mul(multiplier))
+}
+
 /// Parse `\o [file]` and `\observe [duration]`.
 fn parse_o(input: &str) -> ParsedMeta {
     // `\observe [duration]` — enter observe execution mode.
     if let Some(rest) = input.strip_prefix("observe") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let arg = rest.trim();
-            let pattern = if arg.is_empty() {
+            let duration_secs = if arg.is_empty() {
                 None
             } else {
-                Some(arg.to_owned())
+                parse_observe_duration(arg)
             };
-            return ParsedMeta {
-                cmd: MetaCmd::ObserveMode,
-                pattern,
-                plus: false,
-                system: false,
-                echo_hidden: false,
-            };
+            return ParsedMeta::simple(MetaCmd::Observe(duration_secs));
         }
     }
     let Some(rest) = input.strip_prefix('o') else {
@@ -3373,22 +3393,32 @@ mod tests {
 
     #[test]
     fn parse_observe_mode() {
-        assert_eq!(parse("\\observe").cmd, MetaCmd::ObserveMode);
+        assert_eq!(parse("\\observe").cmd, MetaCmd::Observe(None));
         assert!(parse("\\observe").pattern.is_none());
     }
 
     #[test]
     fn parse_observe_mode_with_duration() {
         let parsed = parse("\\observe 30s");
-        assert_eq!(parsed.cmd, MetaCmd::ObserveMode);
-        assert_eq!(parsed.pattern.as_deref(), Some("30s"));
+        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(30)));
     }
 
     #[test]
     fn parse_observe_mode_with_minutes() {
         let parsed = parse("\\observe 5m");
-        assert_eq!(parsed.cmd, MetaCmd::ObserveMode);
-        assert_eq!(parsed.pattern.as_deref(), Some("5m"));
+        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(300)));
+    }
+
+    #[test]
+    fn parse_observe_duration_hours() {
+        let parsed = parse("\\observe 1h");
+        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(3600)));
+    }
+
+    #[test]
+    fn parse_observe_bare_number() {
+        let parsed = parse("\\observe 60");
+        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(60)));
     }
 
     #[test]

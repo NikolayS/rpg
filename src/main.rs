@@ -28,6 +28,7 @@ mod logging;
 mod markdown;
 mod metacmd;
 mod named;
+mod observe;
 mod output;
 mod pager;
 mod pattern;
