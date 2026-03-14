@@ -911,6 +911,58 @@ pub fn connection_info(params: &ConnParams) -> String {
     }
 }
 
+/// Format the `\c` reconnect message, matching psql's output.
+///
+/// psql always says "You are **now** connected" (with "now") after `\c`.
+///
+/// When the server endpoint changed (different host or port), psql also
+/// prepends a version banner — e.g.:
+///
+/// ```text
+/// samo 0.1.0 (...) (server PostgreSQL 17.7)
+/// You are now connected to database "mydb" as user "alice" on host "other"
+/// at port "5432".
+/// ```
+///
+/// `client_version` is samo's own version string (from [`crate::version_string`]).
+/// `server_version` is the server's version string from `SHOW server_version`.
+/// `old_params` is the previous connection (used to detect endpoint change).
+/// `new_params` is the newly established connection.
+///
+/// Returns one or two lines joined by `\n` when a version banner is needed,
+/// or just the "You are now connected" line otherwise.
+pub fn reconnect_info(
+    client_version: &str,
+    server_version: Option<&str>,
+    old_params: &ConnParams,
+    new_params: &ConnParams,
+) -> String {
+    let server_changed = new_params.host != old_params.host || new_params.port != old_params.port;
+
+    let is_socket = new_params.host.starts_with('/');
+    let connected_line = if is_socket {
+        format!(
+            "You are now connected to database \"{}\" as user \"{}\" \
+             via socket in \"{}\" at port \"{}\".",
+            new_params.dbname, new_params.user, new_params.host, new_params.port,
+        )
+    } else {
+        format!(
+            "You are now connected to database \"{}\" as user \"{}\" \
+             on host \"{}\" at port \"{}\".",
+            new_params.dbname, new_params.user, new_params.host, new_params.port,
+        )
+    };
+
+    if server_changed {
+        let ver = server_version.unwrap_or("unknown");
+        let banner = format!("{client_version} (server PostgreSQL {ver})");
+        format!("{banner}\n{connected_line}")
+    } else {
+        connected_line
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1346,6 +1398,151 @@ mod tests {
             connection_info(&params),
             "You are connected to database \"mydb\" as user \"alice\" \
              via socket in \"/var/run/postgresql\" at port \"5432\".",
+        );
+    }
+
+    // -- reconnect_info format matches psql ----------------------------------
+
+    #[test]
+    fn test_reconnect_info_same_server_tcp() {
+        // Same host/port → no version banner, "now connected" message only.
+        let old = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info(
+                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                Some("17.2"),
+                &old,
+                &new
+            ),
+            "You are now connected to database \"mydb\" as user \"alice\" \
+             on host \"localhost\" at port \"5432\".",
+        );
+    }
+
+    #[test]
+    fn test_reconnect_info_different_host_shows_version() {
+        // Different host → version banner prepended.
+        let old = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "other.example.com".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info(
+                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                Some("16.3"),
+                &old,
+                &new
+            ),
+            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
+             You are now connected to database \"mydb\" as user \"alice\" \
+             on host \"other.example.com\" at port \"5432\".",
+        );
+    }
+
+    #[test]
+    fn test_reconnect_info_different_port_shows_version() {
+        // Different port → version banner prepended.
+        let old = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "localhost".into(),
+            port: 5433,
+            user: "postgres".into(),
+            dbname: "mydb".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info(
+                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                Some("15.6"),
+                &old,
+                &new
+            ),
+            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL 15.6)\n\
+             You are now connected to database \"mydb\" as user \"postgres\" \
+             on host \"localhost\" at port \"5433\".",
+        );
+    }
+
+    #[test]
+    fn test_reconnect_info_socket_same_server() {
+        // Socket path — same host → no version banner.
+        let old = ConnParams {
+            host: "/var/run/postgresql".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "/var/run/postgresql".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info(
+                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                Some("17.2"),
+                &old,
+                &new
+            ),
+            "You are now connected to database \"mydb\" as user \"alice\" \
+             via socket in \"/var/run/postgresql\" at port \"5432\".",
+        );
+    }
+
+    #[test]
+    fn test_reconnect_info_unknown_version() {
+        // Server version unavailable → shows "unknown" in banner.
+        let old = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "other.host".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info("samo 0.1.0 (abc1234, built 2026-01-01)", None, &old, &new),
+            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL unknown)\n\
+             You are now connected to database \"postgres\" as user \"postgres\" \
+             on host \"other.host\" at port \"5432\".",
         );
     }
 }

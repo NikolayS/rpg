@@ -218,6 +218,14 @@ async fn detect_pg_ash(client: &tokio_postgres::Client) -> PgAshStatus {
 
 /// Read the `PostgreSQL` server version.
 async fn detect_server_version(client: &tokio_postgres::Client) -> Option<String> {
+    detect_server_version_pub(client).await
+}
+
+/// Read the `PostgreSQL` server version.
+///
+/// Exposed as `pub` so that the REPL can re-query the version after a `\c`
+/// reconnect without running the full [`detect`] capability scan.
+pub async fn detect_server_version_pub(client: &tokio_postgres::Client) -> Option<String> {
     match client.simple_query("SHOW server_version").await {
         Ok(msgs) => msgs.iter().find_map(|m| {
             if let tokio_postgres::SimpleQueryMessage::Row(row) = m {
