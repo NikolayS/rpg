@@ -456,8 +456,17 @@ fn build_settings(
     cfg: &config::Config,
     project: &config::ProjectConfigResult,
 ) -> repl::ReplSettings {
-    // Build PsetConfig from CLI flags.
+    // Build PsetConfig: start with struct default, apply config-file values,
+    // then let CLI flags override.  This ordering means explicit CLI flags
+    // always win without needing sentinel-value comparisons.
     let mut pset = output::PsetConfig::default();
+
+    // Apply config-file display.border before CLI args so that CLI takes
+    // precedence.
+    if let Some(b) = cfg.display.border {
+        pset.border = b.min(2);
+    }
+
     if cli.csv {
         pset.format = output::OutputFormat::Csv;
     } else if cli.json {
@@ -522,14 +531,6 @@ fn build_settings(
     let safety_enabled = cfg.safety.destructive_warning;
     let vi_mode = cfg.display.vi_mode;
 
-    // Apply config display.border default if it wasn't set via -P border=N.
-    // The CLI -P args were already applied above via apply_cli_pset; if
-    // border is still at the struct default (1) and the config overrides
-    // it, apply the config value here.
-    if pset.border == 1 && cfg.display.border != 1 {
-        pset.border = cfg.display.border.min(2);
-    }
-
     // Initialise pager_command from the PAGER environment variable.
     // A non-empty PAGER that is not "on"/"off" sets an external pager.
     // An empty or absent PAGER leaves the built-in pager as default.
@@ -542,7 +543,7 @@ fn build_settings(
     let expanded = pset.expanded;
 
     // Pager min-lines threshold from config; 0 means always page (default).
-    let pager_min_lines = cfg.display.pager_min_lines;
+    let pager_min_lines = cfg.display.pager_min_lines.unwrap_or(0);
 
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
