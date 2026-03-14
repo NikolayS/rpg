@@ -52,8 +52,6 @@ mod bloat;
 mod check;
 mod config_tuning;
 mod connection_management;
-mod connector_health;
-mod connector_setup;
 mod connectors;
 mod dispatcher;
 mod health_check_commands;
@@ -1092,7 +1090,7 @@ async fn async_main() {
             if let Some(ref format) = cli.report {
                 let report_registry = {
                     let connectors_cfg = cfg.connectors.clone().unwrap_or_default();
-                    connector_setup::build_connector_registry(&connectors_cfg)
+                    connectors::build_connector_registry(&connectors_cfg)
                 };
                 let exit_code = report::run_report(&client, format, &report_registry).await;
                 std::process::exit(exit_code);
@@ -1142,7 +1140,7 @@ async fn async_main() {
 
                 let connector_registry = {
                     let connectors_cfg = cfg.connectors.clone().unwrap_or_default();
-                    connector_setup::build_connector_registry(&connectors_cfg)
+                    connectors::build_connector_registry(&connectors_cfg)
                 };
 
                 daemon::run(

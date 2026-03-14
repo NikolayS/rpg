@@ -8,7 +8,7 @@
 
 use tokio_postgres::Client;
 
-use crate::connector_health;
+use crate::connectors;
 use crate::connectors::ConnectorRegistry;
 use crate::governance::Severity;
 
@@ -240,7 +240,7 @@ async fn collect_results(client: &Client) -> Vec<AnalyzerResult> {
 
 async fn run_report_text(client: &Client, registry: &ConnectorRegistry) -> i32 {
     let results = collect_results(client).await;
-    let connector_results = connector_health::check_all_connectors(registry).await;
+    let connector_results = connectors::check_all_connectors(registry).await;
 
     let total_warnings: usize = results.iter().map(|r| r.warnings).sum();
     let total_criticals: usize = results.iter().map(|r| r.criticals).sum();
@@ -275,7 +275,7 @@ async fn run_report_text(client: &Client, registry: &ConnectorRegistry) -> i32 {
         println!("  (none configured)");
     } else {
         for cr in &connector_results {
-            println!("  {}", connector_health::format_text_line(cr));
+            println!("  {}", connectors::format_text_line(cr));
         }
     }
 
@@ -295,7 +295,7 @@ async fn run_report_text(client: &Client, registry: &ConnectorRegistry) -> i32 {
 
 async fn run_report_json(client: &Client, registry: &ConnectorRegistry) -> i32 {
     let results = collect_results(client).await;
-    let connector_results = connector_health::check_all_connectors(registry).await;
+    let connector_results = connectors::check_all_connectors(registry).await;
 
     let total_warnings: usize = results.iter().map(|r| r.warnings).sum();
     let total_criticals: usize = results.iter().map(|r| r.criticals).sum();
@@ -336,7 +336,7 @@ async fn run_report_json(client: &Client, registry: &ConnectorRegistry) -> i32 {
 
     let connectors_json: Vec<serde_json::Value> = connector_results
         .iter()
-        .map(connector_health::format_json_entry)
+        .map(connectors::format_json_entry)
         .collect();
 
     let output = serde_json::json!({
