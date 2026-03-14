@@ -5595,11 +5595,11 @@ mod tests {
 
     // -- history stmt_buf construction for inline terminators (#360) ----------
 
-    /// Helper: simulate the stmt_buf construction for an inline backslash line.
+    /// Helper: simulate the `stmt_buf` construction for an inline backslash line.
     ///
     /// Mirrors the logic in `handle_line` (lines beginning
     /// "Check for inline backslash command"): find the split point, push
-    /// sql_part then " " + meta_part into stmt_buf.
+    /// `sql_part` then " " + `meta_part` into `stmt_buf`.
     fn build_stmt_buf_for_inline(line: &str) -> Option<String> {
         let pos = find_inline_backslash(line)?;
         let sql_part = &line[..pos];
