@@ -47,6 +47,7 @@ mod vars;
 mod anomaly;
 mod bloat;
 mod config_tuning;
+mod connection_management;
 mod index_health;
 mod issues;
 mod query_optimization;

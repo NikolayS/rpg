@@ -56,6 +56,10 @@ pub async fn execute(
             dba_connections(client, verbose).await;
             None
         }
+        "connection-analyze" | "ca" => {
+            dba_connection_analyze(client).await;
+            None
+        }
         "unused-idx" | "unused" => {
             dba_unused_indexes(client, verbose).await;
             None
@@ -263,7 +267,11 @@ fn print_dba_help() {
          (dead tuples, XID age, stale tables)"
     );
     println!("  \\dba tablesize   Largest tables");
-    println!("  \\dba connections Connection counts by state");
+    println!("  \\dba connections Connection counts by state (+ for analyzer)");
+    println!(
+        "  \\dba connection-analyze  Structured connection health findings \
+         (saturation, idle, long-idle, distribution)"
+    );
     println!("  \\dba indexes     Index health report (unused, redundant, invalid, bloated)");
     println!("  \\dba unused-idx  Unused indexes (simple view)");
     println!("  \\dba seq-scans   Tables with high sequential scan ratio");
@@ -278,7 +286,7 @@ fn print_dba_help() {
     println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
     println!();
     println!(
-        "Aliases: act, lock, wait, vac, va, ts, conn, idx, \
+        "Aliases: act, lock, wait, vac, va, ts, conn, ca, idx, \
          unused, seq, cache, repl, ra, conf, prog"
     );
     println!();
@@ -945,7 +953,7 @@ async fn dba_tablesize(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_connections(client: &Client, _verbose: bool) {
+async fn dba_connections(client: &Client, verbose: bool) {
     let sql = "select \
         state, \
         usename, \
@@ -957,6 +965,21 @@ async fn dba_connections(client: &Client, _verbose: bool) {
     group by state, usename, datname, application_name \
     order by count desc";
     run_and_print(client, sql).await;
+
+    // Structured analysis via ConnectionManagementAnalyzer when verbose
+    // (`\dba+ connections`).
+    if verbose {
+        dba_connection_analyze(client).await;
+    }
+}
+
+/// Run the `ConnectionManagementAnalyzer` and display structured findings.
+///
+/// Called directly from `\dba connection-analyze` / `\dba ca`, or
+/// automatically when `\dba+ connections` (verbose) is used.
+async fn dba_connection_analyze(client: &Client) {
+    let report = crate::connection_management::ConnectionManagementAnalyzer::analyze(client).await;
+    report.display();
 }
 
 async fn dba_unused_indexes(client: &Client, _verbose: bool) {
