@@ -1715,7 +1715,7 @@ AI commands:
 
 Governance:
   \aaa [status]         show governance overview
-  \aaa audit [N]        show last N audit log entries
+  \aaa audit [N]        show last N audit log entries (alias: \aaa log)
   \aaa vetoes           show active veto patterns
   \aaa breaker          show circuit breaker status
 
@@ -3238,7 +3238,7 @@ fn dispatch_aaa(sub: &str, dispatcher: &crate::dispatcher::Dispatcher) {
             let output = crate::aaa_commands::format_aaa_status(dispatcher, &levels);
             print!("{output}");
         }
-        "audit" => {
+        "audit" | "log" => {
             let count: usize = if arg.is_empty() {
                 20
             } else if let Ok(n) = arg.parse::<usize>() {
@@ -3247,6 +3247,11 @@ fn dispatch_aaa(sub: &str, dispatcher: &crate::dispatcher::Dispatcher) {
                 eprintln!("\\aaa audit: expected a number, got \"{arg}\"");
                 return;
             };
+            // Show persistence path when configured so users know entries
+            // are being written to (and loaded from) a file.
+            if let Some(path) = dispatcher.audit_log_path() {
+                println!("Persisting to: {}", path.display());
+            }
             let output = crate::aaa_commands::format_audit_log(dispatcher.audit_log(), count);
             print!("{output}");
         }

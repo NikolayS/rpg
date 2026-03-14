@@ -9,7 +9,9 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
+use crate::audit_persistence::{self, DEFAULT_MAX_BYTES};
 use crate::governance::{
     ActionOutcome, ActionProposal, AuditDecision, AuditLog, Auditor, AutoPromotionTracker,
     AutonomyLevel, CircuitBreaker, FeatureArea, VetoTracker,
@@ -50,6 +52,7 @@ pub struct PromotionStatus {
 /// 5. Records every outcome in the audit log.
 /// 6. Sets post-action verification on successful Auto executions.
 /// 7. Tracks Supervised approvals for Auto promotion eligibility.
+/// 8. Optionally persists each entry to a JSONL file for restart recovery.
 #[derive(Debug)]
 pub struct Dispatcher {
     auditor: Auditor,
@@ -57,10 +60,12 @@ pub struct Dispatcher {
     audit_log: AuditLog,
     veto_tracker: VetoTracker,
     promotion_tracker: AutoPromotionTracker,
+    /// Path to the JSONL audit persistence file, if configured.
+    audit_log_path: Option<PathBuf>,
 }
 
 impl Dispatcher {
-    /// Create a new Dispatcher with default configuration.
+    /// Create a new Dispatcher with default configuration (no persistence).
     pub fn new() -> Self {
         Self {
             auditor: Auditor,
@@ -68,7 +73,38 @@ impl Dispatcher {
             audit_log: AuditLog::new(),
             veto_tracker: VetoTracker::new(),
             promotion_tracker: AutoPromotionTracker::new(),
+            audit_log_path: None,
         }
+    }
+
+    /// Create a new Dispatcher that persists entries to `path`.
+    ///
+    /// Prior entries are loaded from `path` on construction so that the
+    /// in-memory audit log reflects history from previous runs.  If the
+    /// file does not exist, an empty log is used — no error is raised.
+    pub fn new_with_path(path: PathBuf) -> Self {
+        let mut log = AuditLog::new();
+
+        // Load prior entries; silently ignore read errors (e.g. first run).
+        if let Ok(entries) = audit_persistence::load_entries(&path, 0) {
+            for entry in entries {
+                log.restore(entry);
+            }
+        }
+
+        Self {
+            auditor: Auditor,
+            circuit_breakers: HashMap::new(),
+            audit_log: log,
+            veto_tracker: VetoTracker::new(),
+            promotion_tracker: AutoPromotionTracker::new(),
+            audit_log_path: Some(path),
+        }
+    }
+
+    /// Return the configured persistence path, if any.
+    pub fn audit_log_path(&self) -> Option<&PathBuf> {
+        self.audit_log_path.as_ref()
     }
 
     /// Dispatch a proposal through the governance pipeline.
@@ -84,7 +120,9 @@ impl Dispatcher {
     ///    review).
     /// 7. Supervised approvals are recorded in the promotion tracker.
     ///
-    /// Every path records an entry in the audit log.
+    /// Every path records an entry in the audit log.  When an
+    /// `audit_log_path` is configured the entry is also persisted to the
+    /// JSONL file immediately after being added to the in-memory log.
     pub fn dispatch_proposal(
         &mut self,
         proposal: &ActionProposal,
@@ -93,7 +131,7 @@ impl Dispatcher {
         // Step 1: Observe mode — never act.
         if autonomy == AutonomyLevel::Observe {
             let outcome = ActionOutcome::Skipped;
-            self.audit_log.record(
+            let seq = self.audit_log.record(
                 proposal.feature,
                 autonomy,
                 proposal.proposed_action.clone(),
@@ -101,6 +139,7 @@ impl Dispatcher {
                 outcome.clone(),
                 Some("Observe mode: no action taken".to_owned()),
             );
+            self.try_persist(seq);
             return outcome;
         }
 
@@ -128,7 +167,7 @@ impl Dispatcher {
                 let outcome = ActionOutcome::Vetoed {
                     reason: reason.clone(),
                 };
-                self.audit_log.record(
+                let seq = self.audit_log.record(
                     proposal.feature,
                     autonomy,
                     proposal.proposed_action.clone(),
@@ -136,6 +175,7 @@ impl Dispatcher {
                     outcome.clone(),
                     Some(format!("Auditor rejected: {reason}")),
                 );
+                self.try_persist(seq);
                 return outcome;
             }
         };
@@ -179,6 +219,9 @@ impl Dispatcher {
         if success && effective == AutonomyLevel::Auto {
             self.audit_log.set_verification(seq, true);
         }
+
+        // Persist the entry (including any verification flag update).
+        self.try_persist(seq);
 
         // Record Supervised approvals in the promotion tracker so the feature
         // can accumulate enough evidence to be eligible for Auto promotion.
@@ -290,6 +333,31 @@ impl Dispatcher {
             }
         }
         configured
+    }
+
+    /// Persist the entry identified by `seq` to the JSONL file, if a path
+    /// is configured.
+    ///
+    /// Rotation is attempted before each write.  I/O errors are logged to
+    /// stderr and silently ignored so that persistence failures never
+    /// interrupt the governance pipeline.
+    fn try_persist(&self, seq: u64) {
+        let Some(path) = self.audit_log_path.as_ref() else {
+            return;
+        };
+
+        let Some(entry) = self.audit_log.entries().iter().find(|e| e.seq == seq) else {
+            return;
+        };
+
+        // Rotate before writing; ignore errors.
+        if let Err(e) = audit_persistence::rotate_if_needed(path, DEFAULT_MAX_BYTES) {
+            eprintln!("rpg: audit log rotation failed: {e}");
+        }
+
+        if let Err(e) = audit_persistence::persist_entry(path, entry) {
+            eprintln!("rpg: audit log write failed: {e}");
+        }
     }
 }
 
@@ -997,6 +1065,183 @@ mod tests {
         assert_eq!(
             total, 0,
             "Observe actions must not contribute to promotion tracking"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Persistence integration tests
+    // -----------------------------------------------------------------------
+
+    // 30. new_with_path writes entries to the JSONL file.
+    #[test]
+    fn persistence_writes_entries_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+
+        let mut d = Dispatcher::new_with_path(path.clone());
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "SELECT pg_cancel_backend(1)",
+            "Long-running query",
+        );
+        d.dispatch_proposal(&p, AutonomyLevel::Auto);
+
+        assert!(path.exists(), "JSONL file must be created after dispatch");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(!contents.is_empty(), "JSONL file must not be empty");
+        // Should have exactly one line.
+        assert_eq!(contents.lines().count(), 1, "one dispatch → one line");
+    }
+
+    // 31. Entries survive a restart (new_with_path loads prior entries).
+    #[test]
+    fn persistence_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+
+        // First "run": dispatch two proposals.
+        {
+            let mut d = Dispatcher::new_with_path(path.clone());
+            for i in 0..2u32 {
+                let action = format!("VACUUM ANALYZE t{i}");
+                let p = make_proposal(
+                    FeatureArea::Vacuum,
+                    EvidenceClass::Factual,
+                    &action,
+                    "Dead tuples",
+                );
+                d.dispatch_proposal(&p, AutonomyLevel::Auto);
+            }
+            assert_eq!(d.audit_log().len(), 2);
+        }
+
+        // Second "run": load from file and verify entries are present.
+        let d2 = Dispatcher::new_with_path(path.clone());
+        assert_eq!(
+            d2.audit_log().len(),
+            2,
+            "prior entries must be loaded on restart"
+        );
+    }
+
+    // 32. Seq counter continues from loaded entries after restart.
+    #[test]
+    fn persistence_seq_continues_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+
+        // First run: one entry (seq = 0).
+        {
+            let mut d = Dispatcher::new_with_path(path.clone());
+            let p = make_proposal(
+                FeatureArea::Rca,
+                EvidenceClass::Factual,
+                "pg_cancel_backend(1)",
+                "Long query",
+            );
+            d.dispatch_proposal(&p, AutonomyLevel::Auto);
+        }
+
+        // Second run: new entry must get seq = 1, not 0.
+        {
+            let mut d2 = Dispatcher::new_with_path(path.clone());
+            let p = make_proposal(
+                FeatureArea::Rca,
+                EvidenceClass::Factual,
+                "pg_cancel_backend(2)",
+                "Long query",
+            );
+            d2.dispatch_proposal(&p, AutonomyLevel::Auto);
+
+            let entries = d2.audit_log().entries();
+            assert_eq!(entries.len(), 2, "loaded entry + new entry");
+            // The newly added entry must have seq 1.
+            assert_eq!(
+                entries[1].seq, 1,
+                "new entry seq must follow loaded entries"
+            );
+        }
+    }
+
+    // 33. Without a path, no file is created.
+    #[test]
+    fn no_persistence_without_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+
+        let mut d = Dispatcher::new(); // no path
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "pg_cancel_backend(1)",
+            "Long query",
+        );
+        d.dispatch_proposal(&p, AutonomyLevel::Auto);
+
+        assert!(
+            !path.exists(),
+            "no file must be created when path is not configured"
+        );
+    }
+
+    // 34. audit_log_path accessor returns the configured path.
+    #[test]
+    fn audit_log_path_accessor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+
+        let d = Dispatcher::new_with_path(path.clone());
+        assert_eq!(
+            d.audit_log_path(),
+            Some(&path),
+            "accessor must return the configured path"
+        );
+
+        let d2 = Dispatcher::new();
+        assert!(d2.audit_log_path().is_none(), "no path returns None");
+    }
+
+    // 35. All outcomes (Vetoed, Skipped, Success) are persisted.
+    #[test]
+    fn persistence_all_outcomes_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+
+        let mut d = Dispatcher::new_with_path(path.clone());
+
+        // Observe → Skipped.
+        let p1 = make_proposal(
+            FeatureArea::Vacuum,
+            EvidenceClass::Factual,
+            "VACUUM ANALYZE users",
+            "Dead tuples",
+        );
+        d.dispatch_proposal(&p1, AutonomyLevel::Observe);
+
+        // Auto + Advisory → Vetoed.
+        let p2 = make_proposal(
+            FeatureArea::ConfigTuning,
+            EvidenceClass::Advisory,
+            "ALTER SYSTEM SET work_mem = '1GB'",
+            "Advisory finding",
+        );
+        d.dispatch_proposal(&p2, AutonomyLevel::Auto);
+
+        // Auto + Factual → Success.
+        let p3 = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "pg_cancel_backend(42)",
+            "Long query",
+        );
+        d.dispatch_proposal(&p3, AutonomyLevel::Auto);
+
+        let lines = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            lines.lines().count(),
+            3,
+            "all three outcomes must be persisted"
         );
     }
 }
