@@ -333,17 +333,9 @@ pub async fn execute_query(
         // as_millis() returns u128; truncate to u64 (safe for any realistic duration).
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = elapsed.as_millis() as u64;
-        // Timing output is written through the active output target so that
-        // it appears after the result set (matching psql behaviour).  When a
-        // pager-capture buffer is active the timing line ends up in the same
-        // buffer as the results and is displayed in the correct order.
+        // Timing output always goes to stdout regardless of output redirection.
         if settings.timing {
-            let line = format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
-            if let Some(ref mut w) = settings.output_target {
-                let _ = w.write_all(line.as_bytes());
-            } else {
-                let _ = io::stdout().write_all(line.as_bytes());
-            }
+            println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
         }
         // Store duration for the status bar.
         settings.last_query_duration_ms = Some(elapsed_ms);
@@ -552,15 +544,8 @@ pub async fn execute_query_extended(
         let elapsed = t.elapsed();
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = elapsed.as_millis() as u64;
-        // Timing output is written through the active output target so that
-        // it appears after the result set (matching psql behaviour).
         if settings.timing {
-            let line = format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
-            if let Some(ref mut w) = settings.output_target {
-                let _ = w.write_all(line.as_bytes());
-            } else {
-                let _ = io::stdout().write_all(line.as_bytes());
-            }
+            println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
         }
         settings.last_query_duration_ms = Some(elapsed_ms);
     }
@@ -685,14 +670,7 @@ pub(super) async fn execute_named_stmt(
 
     if let Some(t) = start {
         let elapsed = t.elapsed();
-        // Timing output is written through the active output target so that
-        // it appears after the result set (matching psql behaviour).
-        let line = format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
-        if let Some(ref mut w) = settings.output_target {
-            let _ = w.write_all(line.as_bytes());
-        } else {
-            let _ = io::stdout().write_all(line.as_bytes());
-        }
+        println!("Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
     }
 
     if success {
