@@ -1,4 +1,4 @@
-# rpg — self-driving Postgres agent
+# rpg — a modern Postgres terminal
 
 A psql-compatible terminal with built-in DBA diagnostics and AI assistant. Single binary, no dependencies, cross-platform.
 
