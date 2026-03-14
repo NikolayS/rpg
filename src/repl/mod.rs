@@ -3140,6 +3140,24 @@ async fn dispatch_meta(
         MetaCmd::Autonomy(ref area, ref level) => {
             dispatch_autonomy(area, level, settings);
         }
+        // Large object commands (#400).
+        MetaCmd::LoImport(ref filename, ref comment) => {
+            let filename = filename.clone();
+            let comment = comment.clone();
+            crate::large_object::lo_import(client, &filename, &comment).await;
+        }
+        MetaCmd::LoExport(ref loid, ref filename) => {
+            let loid = loid.clone();
+            let filename = filename.clone();
+            crate::large_object::lo_export(client, &loid, &filename).await;
+        }
+        MetaCmd::LoList => {
+            crate::large_object::lo_list(client).await;
+        }
+        MetaCmd::LoUnlink(ref loid) => {
+            let loid = loid.clone();
+            crate::large_object::lo_unlink(client, &loid).await;
+        }
         ref stub => {
             eprintln!("{}: not yet implemented (see #27)", stub.label());
         }

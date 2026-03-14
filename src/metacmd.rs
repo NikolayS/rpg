@@ -351,6 +351,26 @@ pub enum MetaCmd {
     /// (display mode).  `area` is `"all"` for the bulk-set variant.
     Autonomy(String, String),
 
+    // -- Large object commands (#400) --------------------------------------
+    /// `\lo_import <filename> [<comment>]` — import a file as a large object.
+    ///
+    /// `filename` is the local path to read from.  The optional `comment`
+    /// string is stored as an object comment in the catalog.
+    ///
+    /// Payload: `(filename, comment)`.  `comment` is empty when omitted.
+    LoImport(String, String),
+    /// `\lo_export <loid> <filename>` — export a large object to a local file.
+    ///
+    /// Payload: `(loid, filename)`.
+    LoExport(String, String),
+    /// `\lo_list` / `\dl` — list all large objects with their OIDs and
+    /// descriptions.
+    LoList,
+    /// `\lo_unlink <loid>` — delete a large object by OID.
+    ///
+    /// Payload: the OID as a string.
+    LoUnlink(String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -997,11 +1017,23 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\l [pattern]`, `\log-file [path]` — list databases or manage audit log.
+/// Parse `\l [pattern]`, `\log-file [path]`, and `\lo_*` large object commands.
 ///
 /// `\log-file <path>` starts appending an audit log to `path`.
 /// `\log-file` (no argument) stops the current audit log.
+///
+/// Large object commands (#400):
+///   `\lo_import <filename> [<comment>]`
+///   `\lo_export <loid> <filename>`
+///   `\lo_list`
+///   `\lo_unlink <loid>`
 fn parse_l(input: &str) -> ParsedMeta {
+    // `\lo_import`, `\lo_export`, `\lo_list`, `\lo_unlink` — checked before
+    // `\log-file` and bare `\l` (longest prefix first).
+    if let Some(rest) = input.strip_prefix("lo_") {
+        return parse_lo_family(rest);
+    }
+
     // `\log-file [path]` — must be checked before bare `\l` (longer prefix).
     if let Some(rest) = input.strip_prefix("log-file") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -1025,6 +1057,85 @@ fn parse_l(input: &str) -> ParsedMeta {
         pattern,
         echo_hidden: false,
     }
+}
+
+/// Parse `\lo_import`, `\lo_export`, `\lo_list`, `\lo_unlink`.
+///
+/// `input` is the string after the `lo_` prefix, e.g. `"import /tmp/file.bin"`.
+fn parse_lo_family(input: &str) -> ParsedMeta {
+    // `\lo_import <filename> [<comment>]`
+    if let Some(rest) = input.strip_prefix("import") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown("lo_import".to_owned()));
+            }
+            // Split into filename and optional comment.
+            let (filename, comment) = split_lo_args(rest);
+            return ParsedMeta::simple(MetaCmd::LoImport(filename, comment));
+        }
+    }
+
+    // `\lo_export <loid> <filename>`
+    if let Some(rest) = input.strip_prefix("export") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown("lo_export".to_owned()));
+            }
+            let (loid, filename) = split_lo_args(rest);
+            if filename.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown("lo_export".to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::LoExport(loid, filename));
+        }
+    }
+
+    // `\lo_list`
+    if let Some(rest) = input.strip_prefix("list") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::LoList);
+        }
+    }
+
+    // `\lo_unlink <loid>`
+    if let Some(rest) = input.strip_prefix("unlink") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let loid = rest.trim().to_owned();
+            if loid.is_empty() {
+                return ParsedMeta::simple(MetaCmd::Unknown("lo_unlink".to_owned()));
+            }
+            return ParsedMeta::simple(MetaCmd::LoUnlink(loid));
+        }
+    }
+
+    ParsedMeta::simple(MetaCmd::Unknown(format!("lo_{input}")))
+}
+
+/// Split a two-token argument string into `(first, rest)`.
+///
+/// The first token is whitespace-delimited.  Everything after the first token
+/// (trimmed) is returned as the second element.  When only one token is
+/// present the second element is an empty string.
+///
+/// Quoted first arguments (single-quoted) are supported to allow filenames
+/// with spaces, matching psql behaviour.
+fn split_lo_args(s: &str) -> (String, String) {
+    let s = s.trim();
+    if let Some(after_open) = s.strip_prefix('\'') {
+        // Quoted first argument.
+        if let Some(close) = after_open.find('\'') {
+            let first = after_open[..close].to_owned();
+            let rest = after_open[close + 1..].trim().to_owned();
+            return (first, rest);
+        }
+        // Unterminated quote — treat whole string as first arg.
+        return (s.to_owned(), String::new());
+    }
+    let mut parts = s.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("").to_owned();
+    let rest = parts.next().map_or("", str::trim).to_owned();
+    (first, rest)
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,6 +1732,7 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("det", MetaCmd::ListForeignTablesViaFdw),
     ("deu", MetaCmd::ListUserMappings),
     // 2-character sub-commands — case-sensitive where needed
+    ("dl", MetaCmd::LoList),
     ("dT", MetaCmd::ListTypes),
     ("dE", MetaCmd::ListForeignTables),
     ("dD", MetaCmd::ListDomains),
@@ -3405,5 +3517,99 @@ mod tests {
         assert_eq!(parse("\\l+").cmd, MetaCmd::ListDatabases);
         let m = parse("\\l+");
         assert!(m.plus);
+    }
+
+    // -- \lo_* large object commands (#400) ---------------------------------
+
+    #[test]
+    fn parse_lo_import_basic() {
+        let m = parse("\\lo_import /tmp/file.bin");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::LoImport("/tmp/file.bin".to_owned(), String::new())
+        );
+    }
+
+    #[test]
+    fn parse_lo_import_with_comment() {
+        let m = parse("\\lo_import /tmp/file.bin my comment");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::LoImport("/tmp/file.bin".to_owned(), "my comment".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_lo_import_quoted_filename() {
+        let m = parse("\\lo_import '/path/with spaces/file.bin' a comment");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::LoImport(
+                "/path/with spaces/file.bin".to_owned(),
+                "a comment".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_lo_import_no_args_is_unknown() {
+        let m = parse("\\lo_import");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_lo_export_basic() {
+        let m = parse("\\lo_export 12345 /tmp/out.bin");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::LoExport("12345".to_owned(), "/tmp/out.bin".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_lo_export_no_args_is_unknown() {
+        let m = parse("\\lo_export");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_lo_export_one_arg_is_unknown() {
+        let m = parse("\\lo_export 12345");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_lo_list() {
+        assert_eq!(parse("\\lo_list").cmd, MetaCmd::LoList);
+    }
+
+    #[test]
+    fn parse_dl_alias_for_lo_list() {
+        assert_eq!(parse("\\dl").cmd, MetaCmd::LoList);
+    }
+
+    #[test]
+    fn parse_lo_unlink_basic() {
+        let m = parse("\\lo_unlink 12345");
+        assert_eq!(m.cmd, MetaCmd::LoUnlink("12345".to_owned()));
+    }
+
+    #[test]
+    fn parse_lo_unlink_no_args_is_unknown() {
+        let m = parse("\\lo_unlink");
+        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_lo_commands_not_confused_with_log_file() {
+        // `\log-file` must still work after `\lo_*` is added.
+        let m = parse("\\log-file /tmp/q.log");
+        assert_eq!(m.cmd, MetaCmd::LogFile(Some("/tmp/q.log".to_owned())));
+    }
+
+    #[test]
+    fn parse_lo_commands_not_confused_with_list_databases() {
+        // `\l` must still work after `\lo_*` is added.
+        assert_eq!(parse("\\l").cmd, MetaCmd::ListDatabases);
     }
 }
