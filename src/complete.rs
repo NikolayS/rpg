@@ -1025,6 +1025,19 @@ pub struct RpgHelper {
     ///
     /// When `false`, `complete()` returns no candidates (toggled by F2).
     completion_enabled: bool,
+    /// Whether the pgcli-style visual dropdown overlay is enabled.
+    ///
+    /// **Experimental** — `false` by default.  When `false`, Tab completion
+    /// still inserts the longest-common-prefix / cycles through candidates
+    /// as rustyline's built-in `CompletionType::List` behaviour, but the
+    /// visual dropdown menu is never shown.  Set to `true` via:
+    /// - `[display] dropdown_completion = true` in the config file, or
+    /// - `RPG_DROPDOWN_COMPLETION=1` environment variable.
+    ///
+    /// This is orthogonal to `completion_enabled` (the F2 toggle): F2
+    /// disables schema-aware completion entirely; this flag only controls
+    /// whether the dropdown overlay is rendered.
+    dropdown_completion_enabled: bool,
     /// Shared dropdown state.  Written by `Completer::complete` and by
     /// [`DropdownEventHandler`]; read by `Hinter::hint`.
     pub dropdown: Arc<Mutex<DropdownState>>,
@@ -1044,6 +1057,7 @@ impl RpgHelper {
             cache,
             highlight,
             completion_enabled: true,
+            dropdown_completion_enabled: false,
             dropdown: Arc::new(Mutex::new(DropdownState::default())),
             prompt_width: 0,
         }
@@ -1070,6 +1084,14 @@ impl RpgHelper {
     /// Enable or disable schema-aware tab completion at runtime.
     pub fn set_completion(&mut self, enabled: bool) {
         self.completion_enabled = enabled;
+    }
+
+    /// Enable or disable the experimental dropdown completion overlay.
+    ///
+    /// This is orthogonal to [`set_completion`]: disabling completion via F2
+    /// suppresses all candidates; this flag only controls the visual overlay.
+    pub fn set_dropdown_completion(&mut self, enabled: bool) {
+        self.dropdown_completion_enabled = enabled;
     }
 
     /// Record the display-column width of the current prompt.
@@ -1104,8 +1126,9 @@ impl Completer for RpgHelper {
         // ------------------------------------------------------------------
         // Check whether the dropdown is already active for this same prefix.
         // If so, advance the selection rather than recomputing candidates.
+        // Only applies when the dropdown overlay is enabled.
         // ------------------------------------------------------------------
-        {
+        if self.dropdown_completion_enabled {
             let Ok(mut dd) = self.dropdown.lock() else {
                 return Ok((pos, vec![]));
             };
@@ -1213,10 +1236,16 @@ impl Completer for RpgHelper {
         let names: Vec<String> = candidates.into_iter().map(|(n, _)| n).collect();
 
         // ------------------------------------------------------------------
-        // Activate dropdown with the fresh candidates.
+        // Activate dropdown with the fresh candidates (experimental).
+        //
+        // The dropdown is only populated when `dropdown_completion_enabled`
+        // is `true`.  When disabled, `DropdownState` stays inactive so the
+        // Hinter produces no overlay and the event handler falls through to
+        // rustyline's default key behaviour.  Tab completion itself (LCP
+        // insertion / candidate cycling via rustyline) is unaffected.
         // ------------------------------------------------------------------
         if let Ok(mut dd) = self.dropdown.lock() {
-            if names.is_empty() {
+            if !self.dropdown_completion_enabled || names.is_empty() {
                 dd.dismiss();
             } else {
                 dd.active = true;
@@ -2467,7 +2496,9 @@ mod tests {
         });
 
         let cache = Arc::new(RwLock::new(cache));
-        let helper = RpgHelper::new(cache, false);
+        let mut helper = RpgHelper::new(cache, false);
+        // Enable the experimental dropdown so the activation path is tested.
+        helper.set_dropdown_completion(true);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -2505,6 +2536,44 @@ mod tests {
     }
 
     #[test]
+    fn test_dropdown_disabled_by_default() {
+        // When `dropdown_completion_enabled` is false (the default), the
+        // dropdown should never become active even when candidates are found.
+        use rustyline::history::DefaultHistory;
+
+        let mut cache = SchemaCache::default();
+        cache.tables.push(TableInfo {
+            schema: "public".to_owned(),
+            name: "users".to_owned(),
+            kind: 'r',
+        });
+        cache.tables.push(TableInfo {
+            schema: "public".to_owned(),
+            name: "user_roles".to_owned(),
+            kind: 'r',
+        });
+
+        let cache = Arc::new(RwLock::new(cache));
+        // Default helper: dropdown_completion_enabled = false.
+        let helper = RpgHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "SELECT * FROM ";
+        let (_, pairs) = helper.complete(line, line.len(), &ctx).unwrap();
+
+        // Candidates should still be returned for rustyline's LCP logic.
+        assert!(!pairs.is_empty(), "candidates should still be returned");
+
+        // But the dropdown overlay must stay inactive.
+        let dd = helper.dropdown.lock().unwrap();
+        assert!(
+            !dd.active,
+            "dropdown must not activate when dropdown_completion is disabled"
+        );
+    }
+
+    #[test]
     fn test_dropdown_navigation_via_helper() {
         // Directly exercise DropdownState select_next / select_prev in the
         // context of RpgHelper's shared state.
@@ -2520,7 +2589,9 @@ mod tests {
         }
 
         let cache = Arc::new(RwLock::new(cache));
-        let helper = RpgHelper::new(cache, false);
+        let mut helper = RpgHelper::new(cache, false);
+        // Enable the experimental dropdown so the activation path is tested.
+        helper.set_dropdown_completion(true);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 

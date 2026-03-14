@@ -133,6 +133,20 @@ pub struct DisplayConfig {
     /// statusline_enabled = false
     /// ```
     pub statusline_enabled: bool,
+    /// Enable the pgcli-style visual dropdown completion menu.
+    ///
+    /// **Experimental** — disabled by default.  When `false` (the default),
+    /// Tab completion still works (longest-common-prefix / cycling via
+    /// rustyline) but no visual overlay is shown.  Set to `true` to opt in:
+    ///
+    /// ```toml
+    /// [display]
+    /// dropdown_completion = true
+    /// ```
+    ///
+    /// Can also be enabled via the `RPG_DROPDOWN_COMPLETION=1` environment
+    /// variable.
+    pub dropdown_completion: bool,
 }
 
 impl Default for DisplayConfig {
@@ -147,6 +161,8 @@ impl Default for DisplayConfig {
             vi_mode: false,
             // Default ON — overridden to OFF in non-interactive sessions.
             statusline_enabled: true,
+            // Experimental — disabled by default.
+            dropdown_completion: false,
         }
     }
 }
@@ -1034,6 +1050,12 @@ pub fn load_config() -> (Config, Vec<String>) {
     // Post-load fixup: infer provider from api_key_env when not explicit.
     config.ai.infer_provider();
 
+    // Apply RPG_* environment variable overrides.
+    // RPG_DROPDOWN_COMPLETION=1 enables the experimental dropdown menu.
+    if std::env::var("RPG_DROPDOWN_COMPLETION").as_deref() == Ok("1") {
+        config.display.dropdown_completion = true;
+    }
+
     (config, warnings)
 }
 
@@ -1235,6 +1257,9 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             // Prefer explicit false from overlay over base default.
             statusline_enabled: overlay.display.statusline_enabled
                 && base.display.statusline_enabled,
+            // Opt-in: either layer enabling it is sufficient.
+            dropdown_completion: overlay.display.dropdown_completion
+                || base.display.dropdown_completion,
         },
         safety: SafetyConfig {
             destructive_warning: overlay.safety.destructive_warning,
@@ -1385,12 +1410,63 @@ mod tests {
         assert_eq!(cfg.display.pager_min_lines, None);
         assert_eq!(cfg.display.border, None);
         assert!(!cfg.display.vi_mode); // default is Emacs
+                                       // Dropdown is experimental — off by default.
+        assert!(!cfg.display.dropdown_completion);
         assert!(cfg.safety.destructive_warning);
         assert!(cfg.connection.host.is_none());
         assert!(cfg.connection.port.is_none());
         assert!(cfg.connection.user.is_none());
         assert!(cfg.connection.dbname.is_none());
         assert!(cfg.connection.sslmode.is_none());
+    }
+
+    #[test]
+    fn parse_display_dropdown_completion() {
+        let toml_str = r"
+[display]
+dropdown_completion = true
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.display.dropdown_completion);
+    }
+
+    #[test]
+    fn merge_display_dropdown_completion_either_layer_wins() {
+        // Overlay enabling it wins.
+        let base = Config {
+            display: DisplayConfig {
+                dropdown_completion: false,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            display: DisplayConfig {
+                dropdown_completion: true,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert!(merged.display.dropdown_completion);
+
+        // Base enabling it also wins (OR semantics).
+        let base2 = Config {
+            display: DisplayConfig {
+                dropdown_completion: true,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay2 = Config {
+            display: DisplayConfig {
+                dropdown_completion: false,
+                ..DisplayConfig::default()
+            },
+            ..Default::default()
+        };
+        let merged2 = merge_config(base2, overlay2);
+        assert!(merged2.display.dropdown_completion);
     }
 
     #[test]

@@ -3747,7 +3747,9 @@ async fn run_readline_loop(
     settings.schema_cache = Some(Arc::clone(&cache));
     // Enable syntax highlighting unless the user opted out or $TERM is dumb.
     let highlight = !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb");
-    let helper = RpgHelper::new(Arc::clone(&cache), highlight);
+    let mut helper = RpgHelper::new(Arc::clone(&cache), highlight);
+    // Apply the experimental dropdown flag from config (disabled by default).
+    helper.set_dropdown_completion(settings.config.display.dropdown_completion);
 
     // Obtain a handle to the dropdown state *before* moving the helper into
     // the editor so we can share it with the event handlers below.
