@@ -1,33 +1,21 @@
-//! SQLite-backed session persistence for Samo.
+//! JSON file-backed session persistence for Samo.
 //!
 //! Stores connection parameters and usage statistics across REPL sessions.
-//! The database is kept at `~/.local/share/samo/sessions.db` (XDG data home).
+//! The file is kept at `~/.local/share/samo/sessions.json` (XDG data home).
 //!
-//! Schema (DDL uses lowercase keywords per style guide):
-//!
-//! ```sql
-//! create table if not exists sessions (
-//!     id text primary key,
-//!     host text,
-//!     port integer,
-//!     username text,
-//!     dbname text,
-//!     created_at text not null,
-//!     last_used text not null,
-//!     query_count integer default 0,
-//!     name text
-//! )
-//! ```
+//! The store is a JSON array of [`SessionRecord`] objects. Every mutating
+//! operation reads the current file, applies the change in memory, then writes
+//! atomically via a temp file + rename so a crash never leaves a corrupt file.
 
-use rusqlite::{params, Connection};
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Session record
 // ---------------------------------------------------------------------------
 
 /// A persisted session record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
     /// Unique session identifier (UUID-like hex string generated at save time).
     pub id: String,
@@ -53,9 +41,9 @@ pub struct SessionRecord {
 // Store
 // ---------------------------------------------------------------------------
 
-/// SQLite-backed store for session records.
+/// JSON file-backed store for session records.
 pub struct SessionStore {
-    conn: Connection,
+    path: PathBuf,
 }
 
 impl SessionStore {
@@ -64,57 +52,63 @@ impl SessionStore {
     /// Creates all intermediate directories as needed.
     ///
     /// # Errors
-    /// Returns an error string if the data directory cannot be resolved,
-    /// the directory cannot be created, or the `SQLite` database cannot be
-    /// opened or migrated.
+    /// Returns an error string if the data directory cannot be resolved or
+    /// the directory cannot be created.
     pub fn open() -> Result<Self, String> {
-        let path = db_path().ok_or_else(|| "cannot resolve data directory".to_owned())?;
+        let path = store_path().ok_or_else(|| "cannot resolve data directory".to_owned())?;
         Self::open_at(&path)
     }
 
     /// Open (or create) the session store at an explicit path.
     ///
-    /// Used by unit tests to open an in-memory or temp-file database.
-    pub fn open_at(path: &PathBuf) -> Result<Self, String> {
+    /// Used by unit tests to open a temp-file store.
+    pub fn open_at(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create data directory: {e}"))?;
         }
-
-        let conn =
-            Connection::open(path).map_err(|e| format!("cannot open session database: {e}"))?;
-
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
+        Ok(Self { path: path.to_path_buf() })
     }
 
-    /// Open an in-memory `SQLite` database (for tests).
-    #[cfg(test)]
-    pub fn open_in_memory() -> Result<Self, String> {
-        let conn = Connection::open_in_memory().map_err(|e| format!("in-memory db error: {e}"))?;
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    /// Load all records from the JSON file.
+    ///
+    /// Returns an empty `Vec` if the file does not yet exist.
+    fn load(&self) -> Result<Vec<SessionRecord>, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => serde_json::from_str::<Vec<SessionRecord>>(&text)
+                .map_err(|e| format!("cannot parse sessions file: {e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("cannot read sessions file: {e}")),
+        }
     }
 
-    /// Apply the schema migration (idempotent — `create table if not exists`).
-    fn migrate(&self) -> Result<(), String> {
-        self.conn
-            .execute_batch(
-                "create table if not exists sessions (
-                    id text primary key,
-                    host text,
-                    port integer,
-                    username text,
-                    dbname text,
-                    created_at text not null,
-                    last_used text not null,
-                    query_count integer default 0,
-                    name text
-                );",
-            )
-            .map_err(|e| format!("schema migration failed: {e}"))
+    /// Persist `records` to the JSON file atomically.
+    ///
+    /// Writes to `<path>.tmp` then renames into place so a crash during
+    /// the write never leaves a corrupt primary file.
+    fn save(&self, records: &[SessionRecord]) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(records)
+            .map_err(|e| format!("cannot serialise sessions: {e}"))?;
+
+        // Build a sibling temp-file path.
+        let mut tmp = self.path.clone();
+        let file_name = tmp
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("sessions.json")
+            .to_owned();
+        tmp.set_file_name(format!("{file_name}.tmp"));
+
+        std::fs::write(&tmp, &json).map_err(|e| format!("cannot write sessions tmp file: {e}"))?;
+
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| format!("cannot rename sessions tmp file: {e}"))?;
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -123,29 +117,15 @@ impl SessionStore {
 
     /// Insert or replace a session record.
     ///
-    /// Uses `insert or replace` so that re-connecting to the same `id`
-    /// (e.g. after a `\session resume`) updates the existing row.
+    /// If a record with the same `id` already exists it is replaced in-place;
+    /// otherwise the new record is appended.
     pub fn upsert(&self, rec: &SessionRecord) -> Result<(), String> {
-        self.conn
-            .execute(
-                "insert or replace into sessions
-                    (id, host, port, username, dbname,
-                     created_at, last_used, query_count, name)
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    rec.id,
-                    rec.host,
-                    rec.port.map(u32::from),
-                    rec.username,
-                    rec.dbname,
-                    rec.created_at,
-                    rec.last_used,
-                    rec.query_count,
-                    rec.name,
-                ],
-            )
-            .map(|_| ())
-            .map_err(|e| format!("upsert failed: {e}"))
+        let mut records = self.load()?;
+        match records.iter().position(|r| r.id == rec.id) {
+            Some(idx) => records[idx] = rec.clone(),
+            None => records.push(rec.clone()),
+        }
+        self.save(&records)
     }
 
     /// Update `last_used` and `query_count` for an existing session.
@@ -153,38 +133,38 @@ impl SessionStore {
     /// A no-op (not an error) when `id` does not exist.
     #[allow(dead_code)]
     pub fn touch(&self, id: &str, last_used: &str, query_count: u32) -> Result<(), String> {
-        self.conn
-            .execute(
-                "update sessions
-                 set last_used = ?1, query_count = ?2
-                 where id = ?3",
-                params![last_used, query_count, id],
-            )
-            .map(|_| ())
-            .map_err(|e| format!("touch failed: {e}"))
+        let mut records = self.load()?;
+        if let Some(rec) = records.iter_mut().find(|r| r.id == id) {
+            last_used.clone_into(&mut rec.last_used);
+            rec.query_count = query_count;
+            self.save(&records)?;
+        }
+        Ok(())
     }
 
     /// Set the friendly name for a session (used by `\session save [name]`).
     #[allow(dead_code)]
     pub fn set_name(&self, id: &str, name: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "update sessions set name = ?1 where id = ?2",
-                params![name, id],
-            )
-            .map(|_| ())
-            .map_err(|e| format!("set_name failed: {e}"))
+        let mut records = self.load()?;
+        if let Some(rec) = records.iter_mut().find(|r| r.id == id) {
+            rec.name = Some(name.to_owned());
+            self.save(&records)?;
+        }
+        Ok(())
     }
 
     /// Delete a session by id.
     ///
-    /// Returns `true` if a row was deleted, `false` if `id` was not found.
+    /// Returns `true` if a record was deleted, `false` if `id` was not found.
     pub fn delete(&self, id: &str) -> Result<bool, String> {
-        let n = self
-            .conn
-            .execute("delete from sessions where id = ?1", params![id])
-            .map_err(|e| format!("delete failed: {e}"))?;
-        Ok(n > 0)
+        let mut records = self.load()?;
+        let before = records.len();
+        records.retain(|r| r.id != id);
+        let deleted = records.len() < before;
+        if deleted {
+            self.save(&records)?;
+        }
+        Ok(deleted)
     }
 
     // -----------------------------------------------------------------------
@@ -193,75 +173,17 @@ impl SessionStore {
 
     /// Return all sessions ordered by `last_used` descending (most recent first).
     pub fn list(&self) -> Result<Vec<SessionRecord>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "select id, host, port, username, dbname,
-                        created_at, last_used, query_count, name
-                 from sessions
-                 order by last_used desc",
-            )
-            .map_err(|e| format!("prepare failed: {e}"))?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(SessionRecord {
-                    id: row.get(0)?,
-                    host: row.get(1)?,
-                    port: row
-                        .get::<_, Option<u32>>(2)?
-                        .map(|p| u16::try_from(p).unwrap_or(5432)),
-                    username: row.get(3)?,
-                    dbname: row.get(4)?,
-                    created_at: row.get(5)?,
-                    last_used: row.get(6)?,
-                    query_count: row.get::<_, u32>(7).unwrap_or(0),
-                    name: row.get(8)?,
-                })
-            })
-            .map_err(|e| format!("query failed: {e}"))?;
-
-        rows.map(|r| r.map_err(|e| format!("row error: {e}")))
-            .collect()
+        let mut records = self.load()?;
+        records.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+        Ok(records)
     }
 
     /// Look up a single session by id.
     ///
     /// Returns `Ok(None)` when not found.
     pub fn get(&self, id: &str) -> Result<Option<SessionRecord>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "select id, host, port, username, dbname,
-                        created_at, last_used, query_count, name
-                 from sessions
-                 where id = ?1",
-            )
-            .map_err(|e| format!("prepare failed: {e}"))?;
-
-        let mut rows = stmt
-            .query_map(params![id], |row| {
-                Ok(SessionRecord {
-                    id: row.get(0)?,
-                    host: row.get(1)?,
-                    port: row
-                        .get::<_, Option<u32>>(2)?
-                        .map(|p| u16::try_from(p).unwrap_or(5432)),
-                    username: row.get(3)?,
-                    dbname: row.get(4)?,
-                    created_at: row.get(5)?,
-                    last_used: row.get(6)?,
-                    query_count: row.get::<_, u32>(7).unwrap_or(0),
-                    name: row.get(8)?,
-                })
-            })
-            .map_err(|e| format!("query failed: {e}"))?;
-
-        match rows.next() {
-            Some(Ok(rec)) => Ok(Some(rec)),
-            Some(Err(e)) => Err(format!("row error: {e}")),
-            None => Ok(None),
-        }
+        let records = self.load()?;
+        Ok(records.into_iter().find(|r| r.id == id))
     }
 }
 
@@ -269,14 +191,14 @@ impl SessionStore {
 // Path helper
 // ---------------------------------------------------------------------------
 
-/// Return the path to `~/.local/share/samo/sessions.db`.
+/// Return the path to `~/.local/share/samo/sessions.json`.
 ///
 /// Uses `dirs::data_dir()` which respects `$XDG_DATA_HOME` on Linux and
 /// returns the appropriate platform path on macOS and Windows.
-pub fn db_path() -> Option<PathBuf> {
+pub fn store_path() -> Option<PathBuf> {
     let mut p = dirs::data_dir()?;
     p.push("samo");
-    p.push("sessions.db");
+    p.push("sessions.json");
     Some(p)
 }
 
@@ -345,6 +267,20 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn tmp_store() -> (SessionStore, PathBuf) {
+        // Use a unique temp path per test (process-id + thread-id style).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "samo_test_sessions_{n}_{}.json",
+            std::process::id()
+        ));
+        let store = SessionStore::open_at(&path).unwrap();
+        (store, path)
+    }
 
     fn make_record(id: &str, host: &str, dbname: &str) -> SessionRecord {
         SessionRecord {
@@ -362,7 +298,7 @@ mod tests {
 
     #[test]
     fn create_and_list() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let rec = make_record("aaa", "localhost", "mydb");
         store.upsert(&rec).unwrap();
 
@@ -370,18 +306,20 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "aaa");
         assert_eq!(list[0].dbname, Some("mydb".to_owned()));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn list_empty() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let list = store.list().unwrap();
         assert!(list.is_empty());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn delete_existing() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let rec = make_record("bbb", "localhost", "testdb");
         store.upsert(&rec).unwrap();
 
@@ -390,36 +328,40 @@ mod tests {
 
         let list = store.list().unwrap();
         assert!(list.is_empty());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn delete_nonexistent_returns_false() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let deleted = store.delete("doesnotexist").unwrap();
         assert!(!deleted);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn save_with_name() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let rec = make_record("ccc", "db.example.com", "prod");
         store.upsert(&rec).unwrap();
         store.set_name("ccc", "production").unwrap();
 
         let found = store.get("ccc").unwrap().unwrap();
         assert_eq!(found.name, Some("production".to_owned()));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn get_not_found() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let result = store.get("missing").unwrap();
         assert!(result.is_none());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn upsert_updates_existing() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let rec = make_record("ddd", "localhost", "db1");
         store.upsert(&rec).unwrap();
 
@@ -435,11 +377,12 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].dbname, Some("db2".to_owned()));
         assert_eq!(list[0].query_count, 5);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn touch_updates_fields() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let rec = make_record("eee", "localhost", "mydb");
         store.upsert(&rec).unwrap();
         store.touch("eee", "2026-03-14T10:00:00Z", 42).unwrap();
@@ -447,11 +390,12 @@ mod tests {
         let found = store.get("eee").unwrap().unwrap();
         assert_eq!(found.last_used, "2026-03-14T10:00:00Z");
         assert_eq!(found.query_count, 42);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn list_ordered_by_last_used_desc() {
-        let store = SessionStore::open_in_memory().unwrap();
+        let (store, path) = tmp_store();
         let mut r1 = make_record("r1", "host1", "db1");
         r1.last_used = "2026-01-01T00:00:00Z".to_owned();
         let mut r2 = make_record("r2", "host2", "db2");
@@ -463,6 +407,7 @@ mod tests {
         // Most recently used should be first.
         assert_eq!(list[0].id, "r2");
         assert_eq!(list[1].id, "r1");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
