@@ -58,15 +58,17 @@ impl Default for CompletionOptions {
 pub struct CompletionResult {
     /// The generated text content.
     pub content: String,
-    /// Number of tokens in the prompt.
+    /// Number of tokens in the prompt (input side).
     ///
-    /// Reserved for future token-usage tracking (issue #75).
-    #[allow(dead_code)]
+    /// Populated by all providers that return usage metadata.
+    /// Used by [`crate::repl::ai_commands::record_token_usage`] to track
+    /// cumulative session token consumption against the configured budget.
     pub input_tokens: u32,
-    /// Number of tokens in the completion.
+    /// Number of tokens in the completion (output side).
     ///
-    /// Reserved for future token-usage tracking (issue #75).
-    #[allow(dead_code)]
+    /// Populated by all providers that return usage metadata.
+    /// Used by [`crate::repl::ai_commands::record_token_usage`] to track
+    /// cumulative session token consumption against the configured budget.
     pub output_tokens: u32,
 }
 

@@ -1957,6 +1957,27 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         settings.config.ai.model = Some(value.to_owned());
         println!("AI model set to: {value}");
     }
+    // Mirror TOKEN_BUDGET into config.ai.token_budget.
+    //
+    // Accepts a non-negative integer; 0 means unlimited.
+    if name == "TOKEN_BUDGET" {
+        match value.parse::<u64>() {
+            Ok(n) => {
+                settings.config.ai.token_budget = n;
+                if n == 0 {
+                    println!("AI token budget: unlimited");
+                } else {
+                    println!("AI token budget set to: {n} tokens");
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "\\set TOKEN_BUDGET: invalid value \"{value}\"\n\
+                     Expected a non-negative integer (0 = unlimited)."
+                );
+            }
+        }
+    }
     // Mirror VI into vi_mode.
     //
     // rustyline does not support changing EditMode at runtime on an existing
@@ -5476,6 +5497,42 @@ mod tests {
         assert!(settings.config.ai.model.is_some());
         apply_unset(&mut settings, "AI_MODEL");
         assert!(settings.config.ai.model.is_none());
+    }
+
+    // -- \set TOKEN_BUDGET -----------------------------------------------------
+
+    #[test]
+    fn set_token_budget_numeric_updates_config() {
+        let mut settings = ReplSettings::default();
+        assert_eq!(settings.config.ai.token_budget, 0);
+        apply_set(&mut settings, "TOKEN_BUDGET", "50000");
+        assert_eq!(settings.config.ai.token_budget, 50_000);
+        assert_eq!(settings.vars.get("TOKEN_BUDGET"), Some("50000"));
+    }
+
+    #[test]
+    fn set_token_budget_zero_means_unlimited() {
+        let mut settings = ReplSettings::default();
+        settings.config.ai.token_budget = 10_000;
+        apply_set(&mut settings, "TOKEN_BUDGET", "0");
+        assert_eq!(settings.config.ai.token_budget, 0);
+    }
+
+    #[test]
+    fn set_token_budget_invalid_value_leaves_config_unchanged() {
+        let mut settings = ReplSettings::default();
+        settings.config.ai.token_budget = 5_000;
+        apply_set(&mut settings, "TOKEN_BUDGET", "not_a_number");
+        // Budget is unchanged because the value was rejected.
+        assert_eq!(settings.config.ai.token_budget, 5_000);
+    }
+
+    #[test]
+    fn set_token_budget_overwrites_previous() {
+        let mut settings = ReplSettings::default();
+        apply_set(&mut settings, "TOKEN_BUDGET", "10000");
+        apply_set(&mut settings, "TOKEN_BUDGET", "20000");
+        assert_eq!(settings.config.ai.token_budget, 20_000);
     }
 
     // -- \set VI ---------------------------------------------------------------

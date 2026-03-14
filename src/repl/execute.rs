@@ -897,7 +897,7 @@ pub(super) async fn execute_query_interactive(
     // Update status bar with latest state after query completes.
     let duration_ms = settings.last_query_duration_ms.unwrap_or(0);
     let tokens_used = settings.tokens_used;
-    let token_budget = settings.config.ai.max_tokens;
+    let token_budget = u32::try_from(settings.config.ai.token_budget).unwrap_or(u32::MAX);
     let input_mode = settings.input_mode;
     let exec_mode = settings.exec_mode;
     let tx_state = *tx;
@@ -1014,7 +1014,7 @@ pub(super) async fn execute_query_extended_interactive(
     // Update status bar with latest state after query completes.
     let duration_ms = settings.last_query_duration_ms.unwrap_or(0);
     let tokens_used = settings.tokens_used;
-    let token_budget = settings.config.ai.max_tokens;
+    let token_budget = u32::try_from(settings.config.ai.token_budget).unwrap_or(u32::MAX);
     let input_mode = settings.input_mode;
     let exec_mode = settings.exec_mode;
     let tx_state = *tx;

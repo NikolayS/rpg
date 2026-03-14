@@ -847,7 +847,7 @@ pub(super) fn parse_ai_response_segments(response: &str) -> Vec<AiResponseSegmen
 pub(super) async fn handle_ai_plan(
     client: &Client,
     prompt: &str,
-    settings: &ReplSettings,
+    settings: &mut ReplSettings,
     params: &ConnParams,
 ) {
     if settings
@@ -941,6 +941,7 @@ pub(super) async fn handle_ai_plan(
             return;
         }
     };
+    record_token_usage(settings, &result);
 
     // Offer to save the plan.
     if ask_yn_prompt("Save this plan? [y/N] ", false) {
