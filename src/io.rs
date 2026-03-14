@@ -136,7 +136,9 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
                 .truncate(true)
                 .open(p)
                 .map_err(|e| format!("\\o: could not open \"{p}\": {e}"))?;
-            Ok(Some(Box::new(file)))
+            // Wrap in BufWriter so that large result sets are written in
+            // batches rather than one syscall per write_all call.
+            Ok(Some(Box::new(std::io::BufWriter::new(file))))
         }
     }
 }

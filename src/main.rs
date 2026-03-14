@@ -609,13 +609,14 @@ async fn main() {
             .unwrap_or(logging::Level::Warn)
     };
 
-    // Load config early so we can read [logging] rotation settings.
-    // We load it again below after profile/flag resolution, but the
-    // logging config is stable (not affected by connection flags).
-    let (early_cfg, _) = config::load_config();
+    // Load config once up front: needed for logging rotation settings and
+    // then reused below for the full startup path.  Previously this was
+    // called twice (once for logging, once after early-exit guards), which
+    // doubled the TOML parsing overhead on every invocation.
+    let (base_cfg, config_warnings) = config::load_config();
     let rotation = logging::RotationConfig::from_mb(
-        early_cfg.logging.max_file_size_mb,
-        early_cfg.logging.max_files,
+        base_cfg.logging.max_file_size_mb,
+        base_cfg.logging.max_files,
     );
 
     if let Some(path) = cli.log_file.as_deref() {
@@ -637,9 +638,8 @@ async fn main() {
         return;
     }
 
-    // Load config hierarchy (system then user); non-fatal warnings are
-    // printed to stderr unless --quiet suppresses them.
-    let (base_cfg, config_warnings) = config::load_config();
+    // Print config warnings now that logging is initialised.  Suppressed
+    // by --quiet as before.
     for w in &config_warnings {
         if !cli.quiet {
             eprintln!("samo: warning: {w}");
@@ -790,9 +790,23 @@ async fn main() {
 
             let mut settings = build_settings(&cli, &cfg, &project_result);
 
-            // Detect database capabilities (pg_ash, server version, etc.).
-            // Run before the banner so we can include the server version.
-            settings.db_capabilities = capabilities::detect(&client).await;
+            // Capability detection: in non-interactive mode (-c, -f, piped
+            // input) we skip the pg_ash / pooler / managed-provider probes
+            // since those results are only used for the interactive banner,
+            // the statusline, and governance decisions.  We still fetch the
+            // server version so that logging and daemon mode have it.
+            //
+            // In interactive mode we run the full detect() so the banner,
+            // pg_ash statusline, and governance framework all work.
+            settings.db_capabilities = if is_interactive || cli.daemon {
+                capabilities::detect(&client).await
+            } else {
+                // Lightweight path: only the server version query.
+                capabilities::DbCapabilities {
+                    server_version: capabilities::detect_server_version_pub(&client).await,
+                    ..Default::default()
+                }
+            };
 
             if !cli.quiet && is_interactive {
                 // Version banner — matches psql's style of showing version on
@@ -817,8 +831,13 @@ async fn main() {
             }
 
             // Detect whether the connected role is a superuser so the prompt
-            // can show `#` instead of `>`.
-            settings.is_superuser = capabilities::detect_superuser(&client).await;
+            // can show `#` instead of `>`.  Only needed for the interactive
+            // prompt; skip in scripting / piped / daemon mode.
+            settings.is_superuser = if is_interactive {
+                capabilities::detect_superuser(&client).await
+            } else {
+                false
+            };
 
             let exit_code = if cli.daemon {
                 // Daemon mode: headless continuous monitoring.
