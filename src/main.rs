@@ -154,7 +154,7 @@ struct Cli {
     #[arg(short = 'd', long)]
     dbname: Option<String>,
 
-    /// SSL mode (disable, prefer, require).
+    /// SSL mode (disable, allow, prefer, require, verify-ca, verify-full).
     #[arg(long, value_name = "SSLMODE")]
     sslmode: Option<String>,
 
