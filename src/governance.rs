@@ -917,6 +917,11 @@ impl VetoTracker {
         self.vetoed.len()
     }
 
+    /// Iterate over all active veto entries as `(feature, action_pattern)`.
+    pub fn vetoes(&self) -> &[(FeatureArea, String)] {
+        &self.vetoed
+    }
+
     /// Clear all vetoes (manual reset).
     pub fn clear(&mut self) {
         self.vetoed.clear();

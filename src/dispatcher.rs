@@ -212,6 +212,15 @@ impl Dispatcher {
         &self.promotion_tracker
     }
 
+    /// Return a snapshot of circuit breaker state for every feature that has
+    /// one. Yields `(feature, is_tripped, failure_rate)` tuples.
+    pub fn circuit_breaker_states(&self) -> Vec<(FeatureArea, bool, f64)> {
+        self.circuit_breakers
+            .iter()
+            .map(|(&feature, cb)| (feature, cb.is_tripped(feature), cb.failure_rate(feature)))
+            .collect()
+    }
+
     /// Return a promotion status snapshot for every known feature area.
     ///
     /// Only features that have at least one recorded Supervised action are
