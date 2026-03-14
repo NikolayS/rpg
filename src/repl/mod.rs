@@ -1650,30 +1650,33 @@ Session commands:
   \sv[+] <view>   show view definition
   \h [command]    SQL syntax help
 
-Describe commands (stubs; see #27 for full implementation):
+Describe commands:
   \d  [pattern]     describe objects
-  \dt [pattern]     list tables
-  \di [pattern]     list indexes
-  \ds [pattern]     list sequences
-  \dv [pattern]     list views
-  \dm [pattern]     list materialised views
-  \df [pattern]     list functions
-  \dn [pattern]     list schemas
-  \du [pattern]     list roles
-  \dp [pattern]     list access privileges
   \db [pattern]     list tablespaces
-  \dT [pattern]     list data types
-  \dx [pattern]     list extensions
-  \l  [pattern]     list databases
-  \dE [pattern]     list foreign tables
-  \dD [pattern]     list domains
   \dc [pattern]     list conversions
   \dC [pattern]     list casts
   \dd [pattern]     list object comments
+  \dD [pattern]     list domains
+  \dE [pattern]     list foreign tables
   \des [pattern]    list foreign servers
+  \deu [pattern]    list user mappings
   \dew [pattern]    list foreign-data wrappers
   \det [pattern]    list foreign tables via FDW
-  \deu [pattern]    list user mappings
+  \df [pattern]     list functions
+  \dg [pattern]     list roles (same as \du)
+  \di [pattern]     list indexes
+  \dm [pattern]     list materialised views
+  \dn [pattern]     list schemas
+  \do [pattern]     list operators
+  \dp [pattern]     list access privileges
+  \ds [pattern]     list sequences
+  \dt [pattern]     list tables
+  \dT [pattern]     list data types
+  \du [pattern]     list roles
+  \dv [pattern]     list views
+  \dx [pattern]     list extensions
+  \dy [pattern]     list event triggers
+  \l  [pattern]     list databases
 
 AI commands:
   /ask <prompt>     natural language to SQL
@@ -2145,7 +2148,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
 
     if option.is_empty() {
         // Display all pset options.
-        print_pset_status(&settings.pset);
+        print_pset_status(settings);
         return;
     }
 
@@ -2269,7 +2272,8 @@ fn format_name(fmt: &crate::output::OutputFormat) -> &'static str {
 }
 
 /// Print a summary of the current `PsetConfig` (matching psql `\pset` output).
-fn print_pset_status(pset: &crate::output::PsetConfig) {
+fn print_pset_status(settings: &ReplSettings) {
+    let pset = &settings.pset;
     println!("border         = {}", pset.border);
     println!("expanded       = {}", expanded_mode_str(pset.expanded));
     println!("fieldsep       = \"{}\"", pset.field_sep);
@@ -2278,7 +2282,12 @@ fn print_pset_status(pset: &crate::output::PsetConfig) {
         if pset.footer { "on" } else { "off" }
     );
     println!("format         = {}", format_name(&pset.format));
+    println!("linestyle      = ascii");
     println!("null           = \"{}\"", pset.null_display);
+    println!(
+        "pager          = {}",
+        if settings.pager_enabled { "on" } else { "off" }
+    );
     println!(
         "tuples_only    = {}",
         if pset.tuples_only { "on" } else { "off" }
