@@ -16,10 +16,10 @@ use crate::anomaly::{AnomalyDetector, AnomalyKind, MetricSnapshot};
 use crate::governance::Severity;
 
 // ---------------------------------------------------------------------------
-// Observe SQL (same as daemon.rs DAEMON_OBSERVE_SQL / TOP_WAIT_SQL)
+// Observe SQL — shared with daemon.rs
 // ---------------------------------------------------------------------------
 
-const OBSERVE_SQL: &str = "\
+pub(crate) const OBSERVE_SQL: &str = "\
     select \
         count(*) filter (where state = 'active') as active, \
         count(*) as total, \
@@ -30,7 +30,7 @@ const OBSERVE_SQL: &str = "\
     where pid != pg_backend_pid() \
       and backend_type = 'client backend'";
 
-const TOP_WAIT_SQL: &str = "\
+pub(crate) const TOP_WAIT_SQL: &str = "\
     select count(*) as cnt \
     from pg_stat_activity \
     where state = 'active' and wait_event is not null \

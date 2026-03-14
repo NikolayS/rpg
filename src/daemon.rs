@@ -13,6 +13,7 @@ use crate::anomaly::{AnomalyDetector, MetricSnapshot};
 use crate::config::Config;
 use crate::dispatcher::Dispatcher;
 use crate::governance::{ActionProposal, EvidenceClass, FeatureArea, Severity};
+use crate::observe::{OBSERVE_SQL, TOP_WAIT_SQL};
 
 // ---------------------------------------------------------------------------
 // PID file management
@@ -565,26 +566,6 @@ fn log_dispatch_outcome(
 // Daemon main loop
 // ---------------------------------------------------------------------------
 
-/// Observe query for the daemon monitoring loop.
-const DAEMON_OBSERVE_SQL: &str = "\
-    SELECT \
-        count(*) FILTER (WHERE state = 'active') AS active, \
-        count(*) AS total, \
-        count(*) FILTER (WHERE wait_event_type = 'Lock') AS blocked, \
-        count(*) FILTER (WHERE state = 'active' \
-            AND query_start < now() - interval '30 seconds') AS long_running \
-    FROM pg_stat_activity \
-    WHERE pid != pg_backend_pid() \
-      AND backend_type = 'client backend'";
-
-/// Top wait event query.
-const TOP_WAIT_SQL: &str = "\
-    SELECT count(*) AS cnt \
-    FROM pg_stat_activity \
-    WHERE state = 'active' AND wait_event IS NOT NULL \
-      AND pid != pg_backend_pid() \
-    ORDER BY 1 DESC LIMIT 1";
-
 /// Run the daemon monitoring loop.
 ///
 /// Continuously monitors the database, detects anomalies, and sends
@@ -707,7 +688,7 @@ pub async fn run(
         }
 
         // Collect metrics.
-        if let Ok(messages) = client.simple_query(DAEMON_OBSERVE_SQL).await {
+        if let Ok(messages) = client.simple_query(OBSERVE_SQL).await {
             for msg in &messages {
                 if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
                     snap.active_sessions = row.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -1772,9 +1753,9 @@ mod tests {
 
     #[test]
     fn daemon_observe_sql_is_valid() {
-        assert!(DAEMON_OBSERVE_SQL.contains("pg_stat_activity"));
-        assert!(DAEMON_OBSERVE_SQL.contains("active"));
-        assert!(DAEMON_OBSERVE_SQL.contains("Lock"));
+        assert!(OBSERVE_SQL.contains("pg_stat_activity"));
+        assert!(OBSERVE_SQL.contains("active"));
+        assert!(OBSERVE_SQL.contains("Lock"));
     }
 
     #[test]
