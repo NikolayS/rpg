@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
+
 use crate::governance::Severity;
 
 // ---------------------------------------------------------------------------
@@ -186,11 +188,85 @@ pub struct TimeWindow {
 ///
 /// Concrete implementations (Datadog, pganalyze, `CloudWatch`, etc.)
 /// will be added in Phase 4.
+#[async_trait]
 pub trait Connector: Send + Sync {
     fn id(&self) -> &str;
     fn name(&self) -> &str;
     fn capabilities(&self) -> ConnectorCapabilities;
     fn rate_limit_config(&self) -> RateLimitConfig;
+
+    /// Check whether the connector can reach the external service.
+    async fn health_check(&self) -> Result<ConnectorHealth, ConnectorError>;
+
+    /// Fetch metric data points for a database over the given window.
+    async fn fetch_metrics(
+        &self,
+        database: &DatabaseId,
+        window: &TimeWindow,
+    ) -> Result<Vec<Metric>, ConnectorError>;
+
+    /// Fetch active alerts for a database.
+    async fn fetch_alerts(&self, database: &DatabaseId) -> Result<Vec<Alert>, ConnectorError>;
+
+    /// Create an issue in the external tracker.
+    ///
+    /// Returns [`ConnectorError::NotSupported`] by default; connectors that
+    /// support issue creation should override this.
+    async fn create_issue(&self, issue: &IssueRequest) -> Result<IssueId, ConnectorError> {
+        let _ = issue;
+        Err(ConnectorError::NotSupported("create_issue"))
+    }
+
+    /// Update an existing issue in the external tracker.
+    ///
+    /// Returns [`ConnectorError::NotSupported`] by default; connectors that
+    /// support issue updates should override this.
+    async fn update_issue(&self, id: &IssueId, update: &IssueUpdate) -> Result<(), ConnectorError> {
+        let _ = (id, update);
+        Err(ConnectorError::NotSupported("update_issue"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+/// Runtime registry of registered connectors.
+pub struct ConnectorRegistry {
+    connectors: Vec<Box<dyn Connector>>,
+}
+
+impl ConnectorRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            connectors: Vec::new(),
+        }
+    }
+
+    /// Register a connector.
+    pub fn register(&mut self, connector: Box<dyn Connector>) {
+        self.connectors.push(connector);
+    }
+
+    /// Look up a connector by its [`Connector::id`].
+    pub fn get(&self, id: &str) -> Option<&dyn Connector> {
+        self.connectors
+            .iter()
+            .find(|c| c.id() == id)
+            .map(std::convert::AsRef::as_ref)
+    }
+
+    /// Return all registered connectors in registration order.
+    pub fn list(&self) -> &[Box<dyn Connector>] {
+        &self.connectors
+    }
+}
+
+impl Default for ConnectorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,5 +334,149 @@ mod tests {
     fn connector_error_display_other() {
         let err = ConnectorError::Other("something went wrong".to_string());
         assert_eq!(err.to_string(), "something went wrong");
+    }
+
+    // ------------------------------------------------------------------
+    // ConnectorRegistry tests
+    // ------------------------------------------------------------------
+
+    struct StubConnector {
+        id: &'static str,
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Connector for StubConnector {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn capabilities(&self) -> ConnectorCapabilities {
+            ConnectorCapabilities {
+                can_fetch_metrics: false,
+                can_fetch_alerts: false,
+                can_create_issues: false,
+                can_update_issues: false,
+                can_receive_webhooks: false,
+                supports_pagination: false,
+            }
+        }
+
+        fn rate_limit_config(&self) -> RateLimitConfig {
+            RateLimitConfig {
+                requests_per_second: 1.0,
+                requests_per_minute: None,
+                max_concurrent: 1,
+                backoff: BackoffConfig::default(),
+                respect_retry_after: true,
+            }
+        }
+
+        async fn health_check(&self) -> Result<ConnectorHealth, ConnectorError> {
+            Ok(ConnectorHealth {
+                connected: true,
+                message: None,
+                latency_ms: Some(1),
+            })
+        }
+
+        async fn fetch_metrics(
+            &self,
+            _database: &DatabaseId,
+            _window: &TimeWindow,
+        ) -> Result<Vec<Metric>, ConnectorError> {
+            Ok(vec![])
+        }
+
+        async fn fetch_alerts(&self, _database: &DatabaseId) -> Result<Vec<Alert>, ConnectorError> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn registry_register_and_list() {
+        let mut registry = ConnectorRegistry::new();
+        assert!(registry.list().is_empty());
+
+        registry.register(Box::new(StubConnector {
+            id: "stub-a",
+            name: "Stub A",
+        }));
+        registry.register(Box::new(StubConnector {
+            id: "stub-b",
+            name: "Stub B",
+        }));
+
+        assert_eq!(registry.list().len(), 2);
+    }
+
+    #[test]
+    fn registry_get_existing() {
+        let mut registry = ConnectorRegistry::new();
+        registry.register(Box::new(StubConnector {
+            id: "stub-a",
+            name: "Stub A",
+        }));
+
+        let found = registry.get("stub-a");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id(), "stub-a");
+        assert_eq!(found.unwrap().name(), "Stub A");
+    }
+
+    #[test]
+    fn registry_get_missing() {
+        let registry = ConnectorRegistry::new();
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn registry_default_is_empty() {
+        let registry = ConnectorRegistry::default();
+        assert!(registry.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_create_issue_returns_not_supported() {
+        let connector = StubConnector {
+            id: "stub",
+            name: "Stub",
+        };
+        let req = IssueRequest {
+            title: "test".to_string(),
+            body: "body".to_string(),
+            labels: vec![],
+            assignees: vec![],
+            metadata: HashMap::new(),
+        };
+        let result = connector.create_issue(&req).await;
+        assert!(matches!(
+            result,
+            Err(ConnectorError::NotSupported("create_issue"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn default_update_issue_returns_not_supported() {
+        let connector = StubConnector {
+            id: "stub",
+            name: "Stub",
+        };
+        let id = "issue-1".to_string();
+        let update = IssueUpdate {
+            title: None,
+            body: None,
+            status: None,
+            labels: None,
+        };
+        let result = connector.update_issue(&id, &update).await;
+        assert!(matches!(
+            result,
+            Err(ConnectorError::NotSupported("update_issue"))
+        ));
     }
 }
