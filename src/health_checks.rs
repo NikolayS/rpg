@@ -27,9 +27,6 @@
 //! enabled = true
 //! ```
 
-// Phase 2/3 infrastructure — not yet wired into the main dispatch loop.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -87,6 +84,7 @@ pub struct HealthCheckDefinition {
 /// name = "..."
 /// ...
 /// ```
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CheckFile {
     checks: Vec<HealthCheckDefinition>,
@@ -127,6 +125,7 @@ impl HealthCheckRegistry {
     ///
     /// Returns an error string if the TOML is malformed or does not match
     /// the expected schema.
+    #[allow(dead_code)]
     pub fn load_from_toml(content: &str) -> Result<Vec<HealthCheckDefinition>, String> {
         toml::from_str::<CheckFile>(content)
             .map(|f| f.checks)
@@ -150,6 +149,7 @@ impl HealthCheckRegistry {
     }
 
     /// Return all checks belonging to a given feature area.
+    #[allow(dead_code)]
     pub fn list_by_feature(&self, feature: &str) -> Vec<&HealthCheckDefinition> {
         self.checks
             .iter()
@@ -168,6 +168,7 @@ impl HealthCheckRegistry {
     }
 
     /// Return `true` when the registry contains no checks.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.checks.is_empty()
     }

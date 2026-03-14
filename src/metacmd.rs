@@ -355,6 +355,18 @@ pub enum MetaCmd {
     /// (display mode).  `area` is `"all"` for the bulk-set variant.
     Autonomy(String, String),
 
+    // -- Health check commands (#514) --------------------------------------
+    /// `\health [list | show <name> | enable <name> | disable <name>]`
+    ///
+    /// - `\health` / `\health list` — list all health checks.
+    /// - `\health show <name>` — show details for a named check.
+    /// - `\health enable <name>` — enable a named check.
+    /// - `\health disable <name>` — disable a named check.
+    ///
+    /// The raw argument string (everything after `\health `) is stored here
+    /// for dispatch-time parsing.
+    HealthCheck(String),
+
     // -- Large object commands (#400) --------------------------------------
     /// `\lo_import <filename> [<comment>]` — import a file as a large object.
     ///
@@ -977,6 +989,13 @@ fn parse_c_family(input: &str) -> ParsedMeta {
 /// treated as the topic argument, so `\h SELECT` passes `"SELECT"` and plain
 /// `\h` passes `None`.
 fn parse_h(input: &str) -> ParsedMeta {
+    // `\health` — health check commands (check before bare `\h`)
+    if let Some(rest) = input.strip_prefix("health") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::HealthCheck(rest.trim().to_owned()));
+        }
+    }
+
     let Some(rest) = input.strip_prefix('h') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };

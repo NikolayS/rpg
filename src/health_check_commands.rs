@@ -1,11 +1,7 @@
 //! CLI command handlers for health check management.
 //!
 //! Provides formatting and management functions for [`HealthCheckRegistry`]
-//! entries. These functions are intended for REPL integration (backslash
-//! commands) but are kept in a dedicated module to allow independent testing.
-//!
-//! REPL wiring comes in a later phase; this module compiles cleanly today
-//! with `#[allow(dead_code)]` suppressing unused-item warnings.
+//! entries. Wired into the REPL via `\health` backslash commands.
 //!
 //! ## Limitation
 //!
@@ -13,9 +9,6 @@
 //! `list_by_feature()` — it has no `list_all()`. As a result,
 //! `format_health_list` shows only enabled checks. Disabled checks become
 //! visible again once the registry gains a public `list_all()` iterator.
-
-// Phase 2/3 infrastructure — not yet wired into the main dispatch loop.
-#![allow(dead_code)]
 
 use std::fs;
 use std::path::Path;
@@ -157,6 +150,7 @@ fn indent_sql(sql: &str) -> String {
 ///
 /// Returns an error string when `path` cannot be read as a directory or when
 /// every TOML file in the directory fails to parse.
+#[allow(dead_code)]
 pub fn load_health_checks_from_dir(
     registry: &mut HealthCheckRegistry,
     path: &Path,

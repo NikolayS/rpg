@@ -1039,6 +1039,12 @@ pub struct ReplSettings {
     /// hint is suppressed for any error produced by the fixed query,
     /// avoiding suggestion loops.  Cleared after each query execution.
     pub last_was_fix: bool,
+    /// Health check registry for `\health` commands.
+    ///
+    /// Pre-populated with the built-in default checks at session start.
+    /// Checks can be enabled or disabled at runtime via
+    /// `\health enable <name>` / `\health disable <name>`.
+    pub health_checks: crate::health_checks::HealthCheckRegistry,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1133,6 +1139,10 @@ impl std::fmt::Debug for ReplSettings {
             .field("last_query_duration_ms", &self.last_query_duration_ms)
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
+            .field(
+                "health_checks",
+                &format!("{} checks", self.health_checks.len()),
+            )
             .finish()
     }
 }
@@ -1194,6 +1204,7 @@ impl Default for ReplSettings {
             last_query_duration_ms: None,
             auto_suggest_fix: true,
             last_was_fix: false,
+            health_checks: crate::health_checks::HealthCheckRegistry::with_defaults(),
         }
     }
 }
@@ -1689,6 +1700,12 @@ AI commands:
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
+
+Health checks:
+  \health [list]        list all health checks
+  \health show <name>   show details for a named health check
+  \health enable <name> enable a health check
+  \health disable <name> disable a health check
 
 Named queries:
   \ns <name> <query>  save a named query (name: alphanumerics + underscores)
@@ -3136,6 +3153,10 @@ async fn dispatch_meta(
                 return result;
             }
         }
+        // Health check commands (#514).
+        MetaCmd::HealthCheck(ref args) => {
+            dispatch_health(args, settings);
+        }
         // Autonomy control (#386).
         MetaCmd::Autonomy(ref area, ref level) => {
             dispatch_autonomy(area, level, settings);
@@ -3164,6 +3185,67 @@ async fn dispatch_meta(
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Health check commands (#514)
+// ---------------------------------------------------------------------------
+
+/// Handle `\health [list | show <name> | enable <name> | disable <name>]`.
+fn dispatch_health(args: &str, settings: &mut ReplSettings) {
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("").trim();
+    let name = parts.next().map_or("", str::trim);
+
+    match sub {
+        "" | "list" => {
+            let output = crate::health_check_commands::format_health_list(&settings.health_checks);
+            print!("{output}");
+        }
+        "show" => {
+            if name.is_empty() {
+                eprintln!("\\health show: check name required");
+            } else {
+                let output =
+                    crate::health_check_commands::format_health_show(&settings.health_checks, name);
+                print!("{output}");
+            }
+        }
+        "enable" => {
+            if name.is_empty() {
+                eprintln!("\\health enable: check name required");
+            } else {
+                match crate::health_check_commands::toggle_health_check(
+                    &mut settings.health_checks,
+                    name,
+                    true,
+                ) {
+                    Ok(()) => println!("Health check \"{name}\" enabled."),
+                    Err(e) => eprintln!("\\health enable: {e}"),
+                }
+            }
+        }
+        "disable" => {
+            if name.is_empty() {
+                eprintln!("\\health disable: check name required");
+            } else {
+                match crate::health_check_commands::toggle_health_check(
+                    &mut settings.health_checks,
+                    name,
+                    false,
+                ) {
+                    Ok(()) => println!("Health check \"{name}\" disabled."),
+                    Err(e) => eprintln!("\\health disable: {e}"),
+                }
+            }
+        }
+        other => {
+            eprintln!(
+                "\\health: unknown subcommand \"{other}\". \
+                 Valid: list, show <name>, enable <name>, disable <name>"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
