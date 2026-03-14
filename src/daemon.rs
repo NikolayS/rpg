@@ -260,6 +260,8 @@ pub async fn run(
         notify(ch, &format!("Samo daemon started — monitoring {dbname}")).await;
     }
 
+    let mut iteration: u64 = 0;
+
     loop {
         let mut snap = MetricSnapshot::default();
         let now = chrono_now();
@@ -326,6 +328,82 @@ pub async fn run(
                     }
                     Err(e) => {
                         crate::logging::warn("daemon", &format!("Issue creation failed: {e}"));
+                    }
+                }
+            }
+        }
+
+        iteration += 1;
+
+        // Run index health check every 30 iterations (~5 minutes).
+        if iteration % 30 == 0 {
+            let ih_report = crate::index_health::analyze(client).await;
+            if !ih_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Index health: {} finding(s) detected",
+                    ih_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &ih_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Samo] Index health: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["samo".to_owned(), "index-health".to_owned()],
+                                source: "index-health".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::IndexHealth);
+                let effective = circuit_breaker
+                    .effective_autonomy(crate::governance::FeatureArea::IndexHealth, configured);
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = ih_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg = format!(
+                                "[{dbname}] Auto-executed {executed} index health action(s)"
+                            );
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
                     }
                 }
             }
@@ -490,5 +568,22 @@ mod tests {
         if let NotificationChannel::Slack { webhook_url } = ch {
             assert!(webhook_url.starts_with("https://"));
         }
+    }
+
+    #[test]
+    fn index_health_check_interval_logic() {
+        // Verify that the modulo-30 interval fires at the right iterations.
+        let mut fired_at: Vec<u64> = Vec::new();
+        let mut iteration: u64 = 0;
+        for _ in 0..100 {
+            iteration += 1;
+            if iteration % 30 == 0 {
+                fired_at.push(iteration);
+            }
+        }
+        // Should fire at iterations 30, 60, 90 — exactly 3 times in 100 loops.
+        assert_eq!(fired_at, vec![30, 60, 90]);
+        // First fire at iteration 30, not before.
+        assert_eq!(fired_at[0], 30);
     }
 }
