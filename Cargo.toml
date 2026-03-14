@@ -3,7 +3,7 @@ name = "rpg"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.82"
-description = "Self-driving Postgres agent and psql-compatible terminal"
+description = "Modern Postgres terminal with built-in diagnostics and AI assistant"
 license = "Apache-2.0"
 repository = "https://github.com/NikolayS/project-alpha"
 

@@ -1,4 +1,4 @@
-//! Rpg — self-driving Postgres agent and psql-compatible terminal.
+//! Rpg — modern Postgres terminal with built-in diagnostics and AI assistant.
 //!
 //! This is the CLI entry point. It parses psql-compatible flags and
 //! rpg-specific options, then dispatches to the appropriate subsystem.
@@ -230,7 +230,7 @@ fn long_version() -> &'static str {
     version_string()
 }
 
-/// Rpg — self-driving Postgres agent and psql-compatible terminal.
+/// Rpg — modern Postgres terminal with built-in diagnostics and AI assistant.
 ///
 /// A psql-compatible interface with built-in AI and autonomous
 /// database health management.
@@ -238,7 +238,7 @@ fn long_version() -> &'static str {
 #[command(
     name = "rpg",
     version = long_version(),
-    about = "Self-driving Postgres agent and psql-compatible terminal",
+    about = "Modern Postgres terminal with built-in diagnostics and AI assistant",
     long_about = None,
     // Disable auto-generated -h so we can use it for --host (psql compat).
     disable_help_flag = true,

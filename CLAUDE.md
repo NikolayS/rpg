@@ -2,7 +2,7 @@
 
 ## Project
 
-Rpg — self-driving Postgres agent and psql-compatible terminal. Private repo: NikolayS/project-alpha.
+Rpg — modern Postgres terminal with built-in diagnostics and AI assistant. Repo: NikolayS/project-alpha.
 
 ## Style rules
 
