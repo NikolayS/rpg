@@ -2,7 +2,40 @@
 
 A psql-compatible terminal with built-in DBA diagnostics and AI assistant. Single binary, no dependencies, cross-platform.
 
-## Quick start
+## Installation
+
+No pre-built binaries yet — install from source.
+
+### 1. Install Rust
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Windows — download and run rustup-init.exe from https://rustup.rs
+```
+
+Requires Rust 1.85+. After installing, restart your shell or run `source ~/.cargo/env`.
+
+### 2. Build rpg
+
+```bash
+git clone https://github.com/NikolayS/project-alpha.git
+cd project-alpha
+cargo build --release
+```
+
+The binary is at `./target/release/rpg`. Copy it to your PATH:
+
+```bash
+# macOS / Linux
+cp ./target/release/rpg /usr/local/bin/
+
+# Or add to PATH
+export PATH="$PWD/target/release:$PATH"
+```
+
+### 3. Connect
 
 ```bash
 # Connect like psql
@@ -142,15 +175,6 @@ postgres=# \set AI_MODEL claude-sonnet-4-20250514
 ## PostgreSQL compatibility
 
 Supports PostgreSQL 14, 15, 16, 17, and 18.
-
-## Building from source
-
-Requires Rust 1.85+.
-
-```bash
-cargo build --release
-./target/release/rpg --help
-```
 
 ## License
 
