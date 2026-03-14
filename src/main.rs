@@ -56,6 +56,7 @@ mod connector_health;
 mod connector_setup;
 mod connectors;
 mod dispatcher;
+mod health_checks;
 mod index_health;
 mod issues;
 mod query_optimization;
