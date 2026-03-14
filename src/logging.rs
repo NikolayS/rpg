@@ -354,18 +354,45 @@ pub fn trace(component: &str, msg: &str) {
 
 /// Mask sensitive values in connection strings.
 ///
-/// Replaces `password=<value>` patterns with `password=***`.
-/// The search is case-insensitive.
+/// Handles two formats:
+/// - Key-value: `password=<value>` → `password=***` (case-insensitive)
+/// - URI: `scheme://user:password@host` → `scheme://user:***@host`
 #[allow(dead_code)]
 pub fn mask_credentials(s: &str) -> String {
-    let lower = s.to_lowercase();
+    // First, handle URI-style credentials: scheme://user:password@host
+    // Find "://" and then look for ":password@" after it.
+    let result = if let Some(scheme_end) = s.find("://") {
+        // Everything after "://"
+        let after_scheme = &s[scheme_end + 3..];
+        // The userinfo is the part before the first '@'
+        if let Some(at_pos) = after_scheme.find('@') {
+            let userinfo = &after_scheme[..at_pos];
+            // Only mask if there's a colon in the userinfo (user:password form)
+            if let Some(colon_pos) = userinfo.find(':') {
+                // Reconstruct: prefix + scheme + "://" + user + ":***@" + rest
+                let prefix = &s[..scheme_end + 3];
+                let user = &userinfo[..colon_pos];
+                let rest = &after_scheme[at_pos..]; // includes '@'
+                format!("{prefix}{user}:***{rest}")
+            } else {
+                s.to_owned()
+            }
+        } else {
+            s.to_owned()
+        }
+    } else {
+        s.to_owned()
+    };
+
+    // Then, handle key=value style: password=<value>
+    let lower = result.to_lowercase();
     if let Some(idx) = lower.find("password=") {
-        let prefix = &s[..idx + 9]; // "password=" is 9 bytes
-        let rest = &s[idx + 9..];
+        let prefix = &result[..idx + 9]; // "password=" is 9 bytes
+        let rest = &result[idx + 9..];
         let end = rest.find([' ', '&', ';']).unwrap_or(rest.len());
         format!("{prefix}***{}", &rest[end..])
     } else {
-        s.to_owned()
+        result
     }
 }
 
@@ -486,6 +513,27 @@ mod tests {
         let input = "user=foo&password=bar&host=db";
         let output = mask_credentials(input);
         assert_eq!(output, "user=foo&password=***&host=db");
+    }
+
+    #[test]
+    fn mask_credentials_uri_with_password() {
+        let input = "postgresql://alice:s3cr3t@db.example.com:5432/mydb";
+        let output = mask_credentials(input);
+        assert_eq!(output, "postgresql://alice:***@db.example.com:5432/mydb");
+    }
+
+    #[test]
+    fn mask_credentials_uri_no_password() {
+        let input = "postgresql://alice@db.example.com/mydb";
+        let output = mask_credentials(input);
+        assert_eq!(output, "postgresql://alice@db.example.com/mydb");
+    }
+
+    #[test]
+    fn mask_credentials_uri_postgres_scheme() {
+        let input = "postgres://user:hunter2@localhost/testdb";
+        let output = mask_credentials(input);
+        assert_eq!(output, "postgres://user:***@localhost/testdb");
     }
 
     // -- current_time_hms -----------------------------------------------------

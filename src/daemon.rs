@@ -42,14 +42,14 @@ pub fn check_existing_pid(path: &Path) -> Option<u32> {
     // Check if process exists (Unix only).
     #[cfg(unix)]
     {
-        use std::os::unix::process::ExitStatusExt;
         // kill(pid, 0) checks existence without sending a signal.
-        let status = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .ok()?;
-        if status.success() || status.signal() == Some(0) {
-            return Some(pid);
+        // Returns 0 on success (process exists and we can signal it)
+        // or -1 with ESRCH if the process does not exist.
+        if let Ok(pid_i32) = i32::try_from(pid) {
+            let alive = unsafe { libc::kill(pid_i32, 0) } == 0;
+            if alive {
+                return Some(pid);
+            }
         }
     }
 

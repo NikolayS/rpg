@@ -242,6 +242,12 @@ pub async fn open_tunnel(
         });
     }
 
+    // Warn once per tunnel that host key verification is disabled.
+    eprintln!(
+        "WARNING: SSH host key verification is disabled. \
+         This connection may be vulnerable to MITM attacks."
+    );
+
     // 3. Bind local listener on an OS-assigned port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
