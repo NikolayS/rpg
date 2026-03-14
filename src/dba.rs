@@ -97,6 +97,10 @@ pub async fn execute(
             dba_io(client, verbose, capabilities).await;
             None
         }
+        "backup-analyze" | "ba" => {
+            dba_backup_analyze(client).await;
+            None
+        }
         "" | "help" => {
             print_dba_help();
             None
@@ -284,10 +288,14 @@ fn print_dba_help() {
     println!("  \\dba config      Non-default configuration parameters");
     println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
     println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
+    println!(
+        "  \\dba backup-analyze  Backup monitoring: WAL archiving failures, \
+         archive lag, WAL file accumulation"
+    );
     println!();
     println!(
         "Aliases: act, lock, wait, vac, va, ts, conn, ca, idx, \
-         unused, seq, cache, repl, ra, conf, prog"
+         unused, seq, cache, repl, ra, conf, prog, ba"
     );
     println!();
     println!("Progress sub-commands:");
@@ -928,6 +936,14 @@ async fn dba_vacuum(client: &Client, verbose: bool) {
 /// when `\dba+ vacuum` (verbose) is used.
 async fn dba_vacuum_analyze(client: &Client) {
     let report = crate::vacuum::analyze(client).await;
+    report.display();
+}
+
+/// Run the `BackupMonitoringAnalyzer` and display structured findings.
+///
+/// Called directly from `\dba backup-analyze` / `\dba ba`.
+async fn dba_backup_analyze(client: &Client) {
+    let report = crate::backup_monitoring::BackupMonitoringAnalyzer::analyze(client).await;
     report.display();
 }
 
