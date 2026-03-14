@@ -8,6 +8,8 @@
 
 use tokio_postgres::Client;
 
+use crate::connector_health;
+use crate::connectors::ConnectorRegistry;
 use crate::governance::Severity;
 
 const ANALYZER_COUNT: usize = 9;
@@ -20,14 +22,15 @@ const ANALYZER_COUNT: usize = 9;
 /// stdout, and return an exit code.
 ///
 /// `format` must be `"text"` (default) or `"json"`.
+/// `registry` supplies the connectors whose health is included in the report.
 ///
 /// - `0` — no findings
 /// - `1` — warnings only
 /// - `2` — at least one critical finding
-pub async fn run_report(client: &Client, format: &str) -> i32 {
+pub async fn run_report(client: &Client, format: &str, registry: &ConnectorRegistry) -> i32 {
     match format {
-        "json" => run_report_json(client).await,
-        _ => run_report_text(client).await,
+        "json" => run_report_json(client, registry).await,
+        _ => run_report_text(client, registry).await,
     }
 }
 
@@ -235,8 +238,9 @@ async fn collect_results(client: &Client) -> Vec<AnalyzerResult> {
 // Text format
 // ---------------------------------------------------------------------------
 
-async fn run_report_text(client: &Client) -> i32 {
+async fn run_report_text(client: &Client, registry: &ConnectorRegistry) -> i32 {
     let results = collect_results(client).await;
+    let connector_results = connector_health::check_all_connectors(registry).await;
 
     let total_warnings: usize = results.iter().map(|r| r.warnings).sum();
     let total_criticals: usize = results.iter().map(|r| r.criticals).sum();
@@ -266,6 +270,16 @@ async fn run_report_text(client: &Client) -> i32 {
     }
 
     println!();
+    println!("=== Connectors ===");
+    if connector_results.is_empty() {
+        println!("  (none configured)");
+    } else {
+        for cr in &connector_results {
+            println!("  {}", connector_health::format_text_line(cr));
+        }
+    }
+
+    println!();
     println!("=== Summary ===");
     println!(
         "Analyzers: {ANALYZER_COUNT} | Critical: {total_criticals} \
@@ -279,8 +293,9 @@ async fn run_report_text(client: &Client) -> i32 {
 // JSON format
 // ---------------------------------------------------------------------------
 
-async fn run_report_json(client: &Client) -> i32 {
+async fn run_report_json(client: &Client, registry: &ConnectorRegistry) -> i32 {
     let results = collect_results(client).await;
+    let connector_results = connector_health::check_all_connectors(registry).await;
 
     let total_warnings: usize = results.iter().map(|r| r.warnings).sum();
     let total_criticals: usize = results.iter().map(|r| r.criticals).sum();
@@ -319,8 +334,14 @@ async fn run_report_json(client: &Client) -> i32 {
         );
     }
 
+    let connectors_json: Vec<serde_json::Value> = connector_results
+        .iter()
+        .map(connector_health::format_json_entry)
+        .collect();
+
     let output = serde_json::json!({
         "analyzers": analyzers,
+        "connectors": connectors_json,
         "summary": {
             "total": ANALYZER_COUNT,
             "critical": total_criticals,

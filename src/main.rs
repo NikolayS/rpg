@@ -52,6 +52,7 @@ mod bloat;
 mod check;
 mod config_tuning;
 mod connection_management;
+mod connector_health;
 mod connector_setup;
 mod connectors;
 mod index_health;
@@ -890,7 +891,11 @@ async fn main() {
             // --report [format]: run all analyzers, print detailed report,
             // exit with severity code (0=healthy, 1=warning, 2=critical).
             if let Some(ref format) = cli.report {
-                let exit_code = report::run_report(&client, format).await;
+                let report_registry = {
+                    let connectors_cfg = cfg.connectors.clone().unwrap_or_default();
+                    connector_setup::build_connector_registry(&connectors_cfg)
+                };
+                let exit_code = report::run_report(&client, format, &report_registry).await;
                 std::process::exit(exit_code);
             }
 
