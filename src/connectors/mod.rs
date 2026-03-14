@@ -13,8 +13,11 @@ use crate::governance::Severity;
 
 pub mod cloudwatch;
 pub mod datadog;
+pub mod gitlab;
+pub mod jira;
 pub mod pganalyze;
 pub mod postgresai;
+pub mod supabase;
 
 // ---------------------------------------------------------------------------
 // Identifiers
