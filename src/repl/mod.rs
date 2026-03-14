@@ -21,7 +21,9 @@ use rustyline::{
 use rustyline::{Config, EditMode, Editor};
 use tokio_postgres::Client;
 
-use crate::complete::{load_schema_cache, RpgHelper, SchemaCache};
+use crate::complete::{
+    load_schema_cache, DropdownEventHandler, DropdownKey, RpgHelper, SchemaCache,
+};
 
 use crate::connection::ConnParams;
 
@@ -3714,6 +3716,9 @@ async fn run_readline_loop(
         .max_history_size(HISTORY_SIZE)
         .expect("valid history size")
         .history_ignore_space(true)
+        // Use List mode: first Tab inserts the longest common prefix and
+        // shows the dropdown (via Hinter); subsequent Tabs cycle through
+        // candidates.  The DropdownEventHandler handles Up/Down/Esc navigation.
         .completion_type(rustyline::CompletionType::List)
         .edit_mode(edit_mode)
         .build();
@@ -3738,6 +3743,10 @@ async fn run_readline_loop(
     let highlight = !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb");
     let helper = RpgHelper::new(Arc::clone(&cache), highlight);
 
+    // Obtain a handle to the dropdown state *before* moving the helper into
+    // the editor so we can share it with the event handlers below.
+    let dropdown_handle = helper.dropdown_handle();
+
     let mut rl: Editor<RpgHelper, FileHistory> = match Editor::with_config(config) {
         Ok(e) => e,
         Err(e) => {
@@ -3750,6 +3759,24 @@ async fn run_readline_loop(
     // Shared slot for F-key actions.  The FKeyHandler stores the pending
     // action here and returns Cmd::Interrupt; the loop reads and clears it.
     let fkey_pending: Arc<Mutex<Option<FKeyAction>>> = Arc::new(Mutex::new(None));
+
+    // Bind Down / Up / Escape to the dropdown navigation handler.
+    // When the dropdown is inactive these fall through to the default
+    // behaviour (history navigation for Up/Down, nothing for Escape).
+    for (code, key) in [
+        (KeyCode::Down, DropdownKey::Down),
+        (KeyCode::Up, DropdownKey::Up),
+        (KeyCode::Esc, DropdownKey::Escape),
+    ] {
+        let handler = DropdownEventHandler {
+            key,
+            dropdown: Arc::clone(&dropdown_handle),
+        };
+        rl.bind_sequence(
+            KeyEvent(code, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(handler)),
+        );
+    }
 
     // Bind F2 / F3 / F4 / F5 to their respective toggle actions.
     for (code, action) in [

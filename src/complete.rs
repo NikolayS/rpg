@@ -5,8 +5,19 @@
 //! completion.  The cache is loaded asynchronously via [`load_schema_cache`]
 //! and shared through an `Arc<RwLock<SchemaCache>>` so the REPL can refresh
 //! it without blocking completion.
+//!
+//! ## pgcli-style dropdown
+//!
+//! [`RpgHelper`] also manages a completion dropdown that mimics pgcli's
+//! interactive menu.  When the user presses Tab, candidates are computed and
+//! stored in a shared [`DropdownState`].  Subsequent Down / Up key presses
+//! (handled via a [`DropdownEventHandler`] bound in the REPL) move the
+//! selection without leaving the editing line.  The dropdown is rendered as
+//! a multi-line hint below the cursor via the [`Hinter`] / [`Highlighter`]
+//! combination.  Pressing Escape or any non-navigation key dismisses it.
 
-use std::sync::{Arc, RwLock};
+use std::fmt::Write as FmtWrite;
+use std::sync::{Arc, Mutex, RwLock};
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -832,6 +843,157 @@ pub fn fuzzy_match(input: &str, candidate: &str) -> Option<i32> {
 }
 
 // ---------------------------------------------------------------------------
+// Dropdown state
+// ---------------------------------------------------------------------------
+
+/// Maximum number of candidates shown in the dropdown at once.
+const DROPDOWN_MAX_VISIBLE: usize = 10;
+
+/// ANSI escape sequences used for dropdown rendering.
+mod ansi {
+    /// Reset all attributes.
+    pub const RESET: &str = "\x1b[0m";
+    /// Reverse video (selected row).
+    pub const REVERSE: &str = "\x1b[7m";
+    /// Dim / dark grey (unselected rows).
+    pub const DIM: &str = "\x1b[2m";
+}
+
+/// Shared mutable state for the completion dropdown.
+///
+/// Held inside an `Arc<Mutex<…>>` so it can be shared between
+/// [`RpgHelper`] (which produces hints) and [`DropdownEventHandler`]
+/// (which reacts to Up / Down / Escape).
+#[derive(Default)]
+pub struct DropdownState {
+    /// Whether the dropdown is currently visible.
+    pub active: bool,
+    /// All completion candidates for the current prefix.
+    pub candidates: Vec<String>,
+    /// Index of the currently highlighted candidate (0-based).
+    pub selected: usize,
+    /// Byte offset in the line where the current word starts.
+    pub word_start: usize,
+    /// The original prefix typed by the user (before any completion).
+    pub prefix: String,
+    /// Scroll offset: index of the first visible candidate.
+    pub scroll_offset: usize,
+}
+
+impl DropdownState {
+    /// Reset the dropdown to its default (inactive) state.
+    pub fn dismiss(&mut self) {
+        self.active = false;
+        self.candidates.clear();
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Move selection down by one, wrapping around.
+    pub fn select_next(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.candidates.len();
+        self.fix_scroll();
+    }
+
+    /// Move selection up by one, wrapping around.
+    pub fn select_prev(&mut self) {
+        if self.candidates.is_empty() {
+            return;
+        }
+        self.selected = self
+            .selected
+            .checked_sub(1)
+            .unwrap_or(self.candidates.len() - 1);
+        self.fix_scroll();
+    }
+
+    /// Ensure `scroll_offset` keeps `selected` in view.
+    fn fix_scroll(&mut self) {
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + DROPDOWN_MAX_VISIBLE {
+            self.scroll_offset = self.selected + 1 - DROPDOWN_MAX_VISIBLE;
+        }
+    }
+
+    /// Return the currently selected candidate, if any.
+    ///
+    /// Used by callers that want to know the current selection without
+    /// navigating to it.
+    #[allow(dead_code)]
+    pub fn current(&self) -> Option<&str> {
+        self.candidates.get(self.selected).map(String::as_str)
+    }
+
+    /// Render the dropdown as a multi-line string suitable for the
+    /// [`Hinter`] output.  Uses ANSI escapes to highlight the selected row.
+    ///
+    /// The returned string starts with a newline so it appears below the
+    /// current editing line.
+    pub fn render(&self) -> String {
+        if !self.active || self.candidates.is_empty() {
+            return String::new();
+        }
+
+        let visible_count = DROPDOWN_MAX_VISIBLE.min(self.candidates.len());
+        let end = (self.scroll_offset + visible_count).min(self.candidates.len());
+
+        // Compute the display width for the widest visible candidate so all
+        // rows are the same width.  Clamp to [1, 60] to avoid wrapping on
+        // narrow terminals.
+        let max_width = self.candidates[self.scroll_offset..end]
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap_or(0)
+            .clamp(1, 60);
+
+        let mut out = String::new();
+        for (display_row, cand_idx) in (self.scroll_offset..end).enumerate() {
+            let cand = &self.candidates[cand_idx];
+            // Truncate to max_width and pad with spaces so the row is a
+            // uniform block.
+            let text = if cand.len() > max_width {
+                &cand[..max_width]
+            } else {
+                cand.as_str()
+            };
+            let padding = max_width.saturating_sub(cand.len().min(max_width));
+            let padded = format!(" {text}{:padding$} ", "", padding = padding);
+
+            if cand_idx == self.selected {
+                // Highlighted row: reverse video.
+                out.push('\n');
+                out.push_str(ansi::REVERSE);
+                out.push_str(&padded);
+                out.push_str(ansi::RESET);
+            } else {
+                // Normal row: dim.
+                out.push('\n');
+                out.push_str(ansi::DIM);
+                out.push_str(&padded);
+                out.push_str(ansi::RESET);
+            }
+            // Scroll indicator on the last visible row when there are more
+            // candidates below.
+            if display_row + 1 == visible_count && end < self.candidates.len() {
+                let more = self.candidates.len() - end;
+                let _ = write!(
+                    out,
+                    "\n{DIM} ({more} more\u{2026}) {RESET}",
+                    DIM = ansi::DIM,
+                    RESET = ansi::RESET
+                );
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RpgHelper
 // ---------------------------------------------------------------------------
 
@@ -839,6 +1001,9 @@ pub fn fuzzy_match(input: &str, candidate: &str) -> Option<i32> {
 ///
 /// Wraps an `Arc<RwLock<SchemaCache>>` so the cache can be refreshed from
 /// the async REPL without blocking readline.
+///
+/// Also holds a shared [`DropdownState`] that drives the pgcli-style
+/// completion dropdown rendered via the [`Hinter`] trait.
 pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
@@ -847,6 +1012,9 @@ pub struct RpgHelper {
     ///
     /// When `false`, `complete()` returns no candidates (toggled by F2).
     completion_enabled: bool,
+    /// Shared dropdown state.  Written by `Completer::complete` and by
+    /// [`DropdownEventHandler`]; read by `Hinter::hint`.
+    pub dropdown: Arc<Mutex<DropdownState>>,
 }
 
 impl RpgHelper {
@@ -859,7 +1027,16 @@ impl RpgHelper {
             cache,
             highlight,
             completion_enabled: true,
+            dropdown: Arc::new(Mutex::new(DropdownState::default())),
         }
+    }
+
+    /// Return a clone of the shared dropdown state handle.
+    ///
+    /// The returned `Arc` is used by [`DropdownEventHandler`] so it can
+    /// navigate / dismiss the dropdown without a reference to the helper.
+    pub fn dropdown_handle(&self) -> Arc<Mutex<DropdownState>> {
+        Arc::clone(&self.dropdown)
     }
 
     /// Return `true` when syntax highlighting is enabled.
@@ -881,6 +1058,7 @@ impl RpgHelper {
 impl Completer for RpgHelper {
     type Candidate = Pair;
 
+    #[allow(clippy::too_many_lines)]
     fn complete(
         &self,
         line: &str,
@@ -888,8 +1066,38 @@ impl Completer for RpgHelper {
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         if !self.completion_enabled {
+            // Dismiss any open dropdown when completion is disabled.
+            if let Ok(mut dd) = self.dropdown.lock() {
+                dd.dismiss();
+            }
             return Ok((pos, vec![]));
         }
+
+        // ------------------------------------------------------------------
+        // Check whether the dropdown is already active for this same prefix.
+        // If so, advance the selection rather than recomputing candidates.
+        // ------------------------------------------------------------------
+        {
+            let Ok(mut dd) = self.dropdown.lock() else {
+                return Ok((pos, vec![]));
+            };
+            if dd.active && !dd.candidates.is_empty() {
+                // The user pressed Tab again: advance selection forward.
+                dd.select_next();
+                let selected = dd.selected;
+                let word_start = dd.word_start;
+                let name = dd.candidates[selected].clone();
+                let pair = Pair {
+                    display: name.clone(),
+                    replacement: name,
+                };
+                return Ok((word_start, vec![pair]));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Fresh completion: compute candidates.
+        // ------------------------------------------------------------------
         let context = detect_context(line, pos);
         let (start, prefix) = find_word_start(line, pos);
 
@@ -974,11 +1182,38 @@ impl Completer for RpgHelper {
         candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         candidates.dedup_by(|a, b| a.0 == b.0);
 
-        let pairs = candidates
-            .into_iter()
-            .map(|(name, _)| Pair {
+        let names: Vec<String> = candidates.into_iter().map(|(n, _)| n).collect();
+
+        // ------------------------------------------------------------------
+        // Activate dropdown with the fresh candidates.
+        // ------------------------------------------------------------------
+        if let Ok(mut dd) = self.dropdown.lock() {
+            if names.is_empty() {
+                dd.dismiss();
+            } else {
+                dd.active = true;
+                dd.candidates.clone_from(&names);
+                dd.selected = 0;
+                dd.scroll_offset = 0;
+                dd.word_start = completion_start;
+                dd.prefix.clone_from(&completion_prefix);
+            }
+        }
+
+        if names.is_empty() {
+            return Ok((completion_start, vec![]));
+        }
+
+        // Return all candidates so rustyline can apply the longest-common-
+        // prefix optimisation (it inserts it when there's a unique match).
+        // The dropdown handles the visual selection; rustyline's internal
+        // circular cycling is not relied upon (we use CompletionType::List
+        // which inserts the lcp on first Tab and shows the dropdown).
+        let pairs = names
+            .iter()
+            .map(|name| Pair {
                 display: name.clone(),
-                replacement: name,
+                replacement: name.clone(),
             })
             .collect();
 
@@ -986,11 +1221,56 @@ impl Completer for RpgHelper {
     }
 }
 
-impl Hinter for RpgHelper {
-    type Hint = String;
+/// A hint produced by [`RpgHelper`] that contains the dropdown rendering.
+///
+/// The `display` text is the multi-line dropdown string; `completion` is
+/// `None` because pressing Right-arrow should not insert the dropdown text
+/// into the line (selection is done via Tab / Enter).
+pub struct DropdownHint {
+    text: String,
+}
 
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
+impl rustyline::hint::Hint for DropdownHint {
+    fn display(&self) -> &str {
+        &self.text
+    }
+
+    fn completion(&self) -> Option<&str> {
+        // Right-arrow should NOT insert the whole dropdown string.
         None
+    }
+}
+
+impl Hinter for RpgHelper {
+    type Hint = DropdownHint;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<DropdownHint> {
+        let Ok(dd) = self.dropdown.lock() else {
+            return None;
+        };
+        if !dd.active || dd.candidates.is_empty() {
+            return None;
+        }
+
+        // Dismiss if the user has typed past the completion point or deleted
+        // characters (prefix no longer matches).
+        let (_, current_word) = find_word_start(line, pos);
+        if !current_word
+            .to_lowercase()
+            .starts_with(&dd.prefix.to_lowercase())
+            && !dd.prefix.is_empty()
+        {
+            // Don't mutate inside the lock borrow — just suppress the hint.
+            // The dropdown will be dismissed on the next `complete()` call.
+            return None;
+        }
+
+        let rendered = dd.render();
+        if rendered.is_empty() {
+            None
+        } else {
+            Some(DropdownHint { text: rendered })
+        }
     }
 }
 
@@ -1019,8 +1299,12 @@ impl Highlighter for RpgHelper {
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
-        // Return true to trigger re-highlighting on every keystroke.
-        self.highlight_enabled()
+        // Return true to trigger re-highlighting on every keystroke,
+        // and also whenever the dropdown is active (to keep it fresh).
+        if self.highlight_enabled() {
+            return true;
+        }
+        self.dropdown.lock().map(|dd| dd.active).unwrap_or(false)
     }
 
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
@@ -1030,9 +1314,85 @@ impl Highlighter for RpgHelper {
     ) -> std::borrow::Cow<'b, str> {
         std::borrow::Cow::Borrowed(prompt)
     }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
+        // The hint already contains ANSI escapes from DropdownState::render().
+        // Return it unchanged; rustyline will print it after the cursor.
+        std::borrow::Cow::Borrowed(hint)
+    }
 }
 
 impl Helper for RpgHelper {}
+
+// ---------------------------------------------------------------------------
+// Dropdown event handler
+// ---------------------------------------------------------------------------
+
+/// rustyline [`ConditionalEventHandler`] that intercepts Up / Down / Escape
+/// while the dropdown is visible, and falls through to the default action
+/// when it is not.
+///
+/// Bound in the REPL loop with:
+/// ```text
+/// rl.bind_sequence(KeyEvent(KeyCode::Down, Modifiers::NONE), …);
+/// rl.bind_sequence(KeyEvent(KeyCode::Up,   Modifiers::NONE), …);
+/// rl.bind_sequence(KeyEvent(KeyCode::Esc,  Modifiers::NONE), …);
+/// ```
+#[derive(Clone)]
+pub struct DropdownEventHandler {
+    /// Which key this handler is bound to.
+    pub key: DropdownKey,
+    /// Shared state with [`RpgHelper`].
+    pub dropdown: Arc<Mutex<DropdownState>>,
+}
+
+/// Keys handled by [`DropdownEventHandler`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropdownKey {
+    /// Down arrow — move selection down.
+    Down,
+    /// Up arrow — move selection up.
+    Up,
+    /// Escape — dismiss dropdown.
+    Escape,
+}
+
+impl rustyline::ConditionalEventHandler for DropdownEventHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: rustyline::RepeatCount,
+        _positive: bool,
+        _ctx: &rustyline::EventContext,
+    ) -> Option<rustyline::Cmd> {
+        let Ok(mut dd) = self.dropdown.lock() else {
+            return None; // fall through to default
+        };
+
+        if !dd.active {
+            // Dropdown not open: fall through to the default behaviour
+            // (history navigation for Up/Down, nothing for Escape).
+            return None;
+        }
+
+        match self.key {
+            DropdownKey::Down => {
+                dd.select_next();
+                // Repaint triggers a fresh call to `Hinter::hint` which
+                // re-renders the dropdown with the updated selection.
+                Some(rustyline::Cmd::Repaint)
+            }
+            DropdownKey::Up => {
+                dd.select_prev();
+                Some(rustyline::Cmd::Repaint)
+            }
+            DropdownKey::Escape => {
+                dd.dismiss();
+                Some(rustyline::Cmd::Repaint)
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1818,5 +2178,272 @@ mod tests {
         let (_start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
         let names: Vec<&str> = candidates.iter().map(|p| p.display.as_str()).collect();
         assert!(names.contains(&"id"), "expected 'id' in {names:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Dropdown state unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dropdown_state_default_inactive() {
+        let dd = DropdownState::default();
+        assert!(!dd.active, "fresh dropdown should be inactive");
+        assert!(dd.candidates.is_empty());
+        assert_eq!(dd.selected, 0);
+    }
+
+    #[test]
+    fn test_dropdown_dismiss_clears_state() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["alpha".to_owned(), "beta".to_owned()],
+            selected: 1,
+            scroll_offset: 0,
+            word_start: 5,
+            prefix: "al".to_owned(),
+        };
+        dd.dismiss();
+        assert!(!dd.active);
+        assert!(dd.candidates.is_empty());
+        assert_eq!(dd.selected, 0);
+    }
+
+    #[test]
+    fn test_dropdown_select_next_wraps() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            selected: 2,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        dd.select_next();
+        assert_eq!(dd.selected, 0, "should wrap to 0 after last item");
+    }
+
+    #[test]
+    fn test_dropdown_select_prev_wraps() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        dd.select_prev();
+        assert_eq!(dd.selected, 2, "should wrap to last item");
+    }
+
+    #[test]
+    fn test_dropdown_select_next_advances() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        dd.select_next();
+        assert_eq!(dd.selected, 1);
+        dd.select_next();
+        assert_eq!(dd.selected, 2);
+    }
+
+    #[test]
+    fn test_dropdown_select_prev_decrements() {
+        let mut dd = DropdownState {
+            active: true,
+            candidates: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            selected: 2,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        dd.select_prev();
+        assert_eq!(dd.selected, 1);
+    }
+
+    #[test]
+    fn test_dropdown_current_returns_selected() {
+        let dd = DropdownState {
+            active: true,
+            candidates: vec!["apple".to_owned(), "banana".to_owned()],
+            selected: 1,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        assert_eq!(dd.current(), Some("banana"));
+    }
+
+    #[test]
+    fn test_dropdown_current_empty_returns_none() {
+        let dd = DropdownState::default();
+        assert_eq!(dd.current(), None);
+    }
+
+    #[test]
+    fn test_dropdown_render_empty_when_inactive() {
+        let dd = DropdownState::default();
+        assert_eq!(dd.render(), "");
+    }
+
+    #[test]
+    fn test_dropdown_render_contains_candidates() {
+        let dd = DropdownState {
+            active: true,
+            candidates: vec!["users".to_owned(), "orders".to_owned()],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        let rendered = dd.render();
+        assert!(!rendered.is_empty(), "render should produce output");
+        assert!(
+            rendered.contains("users"),
+            "rendered output should contain 'users'"
+        );
+        assert!(
+            rendered.contains("orders"),
+            "rendered output should contain 'orders'"
+        );
+    }
+
+    #[test]
+    fn test_dropdown_render_highlights_selected() {
+        let dd = DropdownState {
+            active: true,
+            candidates: vec!["alpha".to_owned(), "beta".to_owned()],
+            selected: 0,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        let rendered = dd.render();
+        // The selected row uses reverse video escape; unselected uses dim.
+        // Check that reverse escape appears before "alpha".
+        let reverse_pos = rendered.find("\x1b[7m");
+        let alpha_pos = rendered.find("alpha");
+        assert!(
+            reverse_pos.is_some() && alpha_pos.is_some(),
+            "reverse escape and 'alpha' must both appear in rendered output"
+        );
+        assert!(
+            reverse_pos.unwrap() < alpha_pos.unwrap(),
+            "reverse escape should precede 'alpha'"
+        );
+    }
+
+    #[test]
+    fn test_dropdown_scroll_offset_follows_selection() {
+        // With only 10 visible slots, selecting item 10 should push offset to 1.
+        let candidates: Vec<String> = (0..15).map(|i| format!("item_{i:02}")).collect();
+        let mut dd = DropdownState {
+            active: true,
+            candidates,
+            selected: 9,
+            scroll_offset: 0,
+            word_start: 0,
+            prefix: String::new(),
+        };
+        // Move past the 10th visible slot.
+        dd.select_next(); // selected = 10
+        assert_eq!(dd.scroll_offset, 1, "scroll offset should advance to 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // Dropdown activation via complete()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_complete_activates_dropdown() {
+        use rustyline::history::DefaultHistory;
+
+        let mut cache = SchemaCache::default();
+        cache.tables.push(TableInfo {
+            schema: "public".to_owned(),
+            name: "users".to_owned(),
+            kind: 'r',
+        });
+        cache.tables.push(TableInfo {
+            schema: "public".to_owned(),
+            name: "user_roles".to_owned(),
+            kind: 'r',
+        });
+
+        let cache = Arc::new(RwLock::new(cache));
+        let helper = RpgHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        let line = "SELECT * FROM ";
+        helper.complete(line, line.len(), &ctx).unwrap();
+
+        let dd = helper.dropdown.lock().unwrap();
+        assert!(dd.active, "dropdown should be active after complete()");
+        assert!(
+            dd.candidates.len() >= 2,
+            "expected at least 2 candidates, got {}",
+            dd.candidates.len()
+        );
+    }
+
+    #[test]
+    fn test_complete_empty_result_dismisses_dropdown() {
+        use rustyline::history::DefaultHistory;
+
+        // Empty cache → no completions → dropdown should not be active.
+        let cache = Arc::new(RwLock::new(SchemaCache::default()));
+        let helper = RpgHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        // "SELECT * FROM xyz_no_match" — prefix that won't match anything.
+        let line = "SELECT * FROM xyz_no_match_at_all";
+        helper.complete(line, line.len(), &ctx).unwrap();
+
+        let dd = helper.dropdown.lock().unwrap();
+        assert!(
+            !dd.active,
+            "dropdown should be inactive when no candidates found"
+        );
+    }
+
+    #[test]
+    fn test_dropdown_navigation_via_helper() {
+        // Directly exercise DropdownState select_next / select_prev in the
+        // context of RpgHelper's shared state.
+        use rustyline::history::DefaultHistory;
+
+        let mut cache = SchemaCache::default();
+        for name in &["alpha", "beta", "gamma"] {
+            cache.tables.push(TableInfo {
+                schema: "public".to_owned(),
+                name: (*name).to_owned(),
+                kind: 'r',
+            });
+        }
+
+        let cache = Arc::new(RwLock::new(cache));
+        let helper = RpgHelper::new(cache, false);
+        let history = DefaultHistory::new();
+        let ctx = Context::new(&history);
+
+        // Activate dropdown.
+        helper.complete("SELECT * FROM ", 14, &ctx).unwrap();
+
+        {
+            let mut dd = helper.dropdown.lock().unwrap();
+            assert!(dd.active);
+            let initial = dd.selected;
+            dd.select_next();
+            assert_eq!(dd.selected, initial + 1);
+            dd.select_prev();
+            assert_eq!(dd.selected, initial);
+        }
     }
 }
