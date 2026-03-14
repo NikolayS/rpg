@@ -42,11 +42,11 @@ pub async fn execute(
             None
         }
         "vacuum" | "vac" => {
-            dba_vacuum(client, verbose).await;
+            dba_vacuum(client, verbose, governance).await;
             None
         }
         "vacuum-analyze" | "va" => {
-            dba_vacuum_analyze(client).await;
+            dba_vacuum_analyze(client, governance).await;
             None
         }
         "tablesize" | "ts" => {
@@ -54,11 +54,11 @@ pub async fn execute(
             None
         }
         "connections" | "conn" => {
-            dba_connections(client, verbose).await;
+            dba_connections(client, verbose, governance).await;
             None
         }
         "connection-analyze" | "ca" => {
-            dba_connection_analyze(client).await;
+            dba_connection_analyze(client, governance).await;
             None
         }
         "unused-idx" | "unused" => {
@@ -917,7 +917,11 @@ async fn dba_bloat(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_vacuum(client: &Client, verbose: bool) {
+async fn dba_vacuum(
+    client: &Client,
+    verbose: bool,
+    governance: Option<&crate::config::GovernanceConfig>,
+) {
     // Raw vacuum status table (psql-style tabular output).
     let sql = "select \
         s.schemaname, \
@@ -945,7 +949,7 @@ async fn dba_vacuum(client: &Client, verbose: bool) {
 
     // Structured analysis via VacuumAnalyzer when verbose (`\dba+ vacuum`).
     if verbose {
-        dba_vacuum_analyze(client).await;
+        dba_vacuum_analyze(client, governance).await;
     }
 }
 
@@ -953,9 +957,21 @@ async fn dba_vacuum(client: &Client, verbose: bool) {
 ///
 /// Called directly from `\dba vacuum-analyze` / `\dba va`, or automatically
 /// when `\dba+ vacuum` (verbose) is used.
-async fn dba_vacuum_analyze(client: &Client) {
+async fn dba_vacuum_analyze(client: &Client, governance: Option<&crate::config::GovernanceConfig>) {
     let report = crate::vacuum::analyze(client).await;
     report.display();
+
+    // In Supervised mode, offer to execute proposed remediation actions.
+    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
+        g.autonomy_for(crate::governance::FeatureArea::Vacuum)
+    });
+    if autonomy == crate::governance::AutonomyLevel::Supervised {
+        let proposals = report.to_proposals();
+        if !proposals.is_empty() {
+            let mut audit_log = crate::governance::AuditLog::new();
+            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
+        }
+    }
 }
 
 /// Run the `BackupMonitoringAnalyzer` and display structured findings.
@@ -996,7 +1012,11 @@ async fn dba_tablesize(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_connections(client: &Client, verbose: bool) {
+async fn dba_connections(
+    client: &Client,
+    verbose: bool,
+    governance: Option<&crate::config::GovernanceConfig>,
+) {
     let sql = "select \
         state, \
         usename, \
@@ -1012,7 +1032,7 @@ async fn dba_connections(client: &Client, verbose: bool) {
     // Structured analysis via ConnectionManagementAnalyzer when verbose
     // (`\dba+ connections`).
     if verbose {
-        dba_connection_analyze(client).await;
+        dba_connection_analyze(client, governance).await;
     }
 }
 
@@ -1020,9 +1040,24 @@ async fn dba_connections(client: &Client, verbose: bool) {
 ///
 /// Called directly from `\dba connection-analyze` / `\dba ca`, or
 /// automatically when `\dba+ connections` (verbose) is used.
-async fn dba_connection_analyze(client: &Client) {
+async fn dba_connection_analyze(
+    client: &Client,
+    governance: Option<&crate::config::GovernanceConfig>,
+) {
     let report = crate::connection_management::ConnectionManagementAnalyzer::analyze(client).await;
     report.display();
+
+    // In Supervised mode, offer to execute proposed remediation actions.
+    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
+        g.autonomy_for(crate::governance::FeatureArea::ConnectionManagement)
+    });
+    if autonomy == crate::governance::AutonomyLevel::Supervised {
+        let proposals = report.to_proposals();
+        if !proposals.is_empty() {
+            let mut audit_log = crate::governance::AuditLog::new();
+            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
+        }
+    }
 }
 
 async fn dba_unused_indexes(client: &Client, _verbose: bool) {
