@@ -577,6 +577,10 @@ pub struct ConnectorsConfig {
     pub gitlab: Option<GitLabConfig>,
     /// Jira Issues connector.
     pub jira: Option<JiraConfig>,
+    /// Bidirectional issue sync settings.
+    #[serde(default)]
+    #[allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
+    pub sync: SyncConfig,
 }
 
 /// Datadog connector configuration.
@@ -818,6 +822,22 @@ impl Default for JiraConfig {
             base_url: None,
         }
     }
+}
+
+/// Bidirectional issue sync configuration.
+///
+/// ```toml
+/// [connectors.sync]
+/// enabled = true
+/// targets = ["github", "jira"]
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// Enable bidirectional issue sync. Default: `false`.
+    pub enabled: bool,
+    /// Connector IDs to sync issues to (e.g. `["github", "jira"]`).
+    pub targets: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
