@@ -1924,7 +1924,11 @@ async fn execute_query_interactive(
 ) -> bool {
     // Only intercept when pager is enabled and no output redirection is active.
     if !settings.pager_enabled || settings.output_target.is_some() {
-        return execute_query(client, sql, settings, tx).await;
+        let ok = execute_query(client, sql, settings, tx).await;
+        if ok && is_ddl_statement(sql) {
+            auto_refresh_schema(client, settings).await;
+        }
+        return ok;
     }
 
     // Capture output into a buffer.
@@ -1957,6 +1961,10 @@ async fn execute_query_interactive(
         let _ = io::stdout().write_all(&captured);
     }
 
+    if ok && is_ddl_statement(sql) {
+        auto_refresh_schema(client, settings).await;
+    }
+
     ok
 }
 
@@ -1971,7 +1979,11 @@ async fn execute_query_extended_interactive(
 ) -> bool {
     // Only intercept when pager is enabled and no output redirection is active.
     if !settings.pager_enabled || settings.output_target.is_some() {
-        return execute_query_extended(client, sql, params, settings, tx).await;
+        let ok = execute_query_extended(client, sql, params, settings, tx).await;
+        if ok && is_ddl_statement(sql) {
+            auto_refresh_schema(client, settings).await;
+        }
+        return ok;
     }
 
     // Capture output into a buffer.
@@ -2003,7 +2015,34 @@ async fn execute_query_extended_interactive(
         let _ = io::stdout().write_all(&captured);
     }
 
+    if ok && is_ddl_statement(sql) {
+        auto_refresh_schema(client, settings).await;
+    }
+
     ok
+}
+
+/// Return `true` if `sql` starts with a DDL keyword (CREATE, ALTER, DROP,
+/// or COMMENT), ignoring leading whitespace and case.
+fn is_ddl_statement(sql: &str) -> bool {
+    let upper = sql.trim_start().to_uppercase();
+    upper.starts_with("CREATE")
+        || upper.starts_with("ALTER")
+        || upper.starts_with("DROP")
+        || upper.starts_with("COMMENT")
+}
+
+/// Refresh the schema cache after a successful DDL statement.
+///
+/// Prints `-- Schema cache refreshed` on success.  Errors are silently
+/// ignored so that a cache refresh failure never disrupts normal output.
+async fn auto_refresh_schema(client: &Client, settings: &mut ReplSettings) {
+    if let Some(cache) = &settings.schema_cache {
+        if let Ok(loaded) = load_schema_cache(client).await {
+            *cache.write().unwrap() = loaded;
+            println!("-- Schema cache refreshed");
+        }
+    }
 }
 
 /// Activate the appropriate pager for `text`.
@@ -9623,5 +9662,52 @@ mod tests {
         assert!(!segs[0].0);
         assert!(segs[1].0);
         assert_eq!(segs[1].1, "SELECT 1;");
+    }
+
+    // -- is_ddl_statement -----------------------------------------------------
+
+    #[test]
+    fn ddl_create_table_is_ddl() {
+        assert!(is_ddl_statement("CREATE TABLE foo (id int)"));
+    }
+
+    #[test]
+    fn ddl_alter_table_lowercase_is_ddl() {
+        assert!(is_ddl_statement("alter table foo add column bar text"));
+    }
+
+    #[test]
+    fn ddl_drop_index_is_ddl() {
+        assert!(is_ddl_statement("DROP INDEX idx_foo"));
+    }
+
+    #[test]
+    fn ddl_comment_on_table_is_ddl() {
+        assert!(is_ddl_statement("COMMENT ON TABLE foo IS 'desc'"));
+    }
+
+    #[test]
+    fn ddl_leading_whitespace_is_ddl() {
+        assert!(is_ddl_statement("  create  table foo (id int)"));
+    }
+
+    #[test]
+    fn ddl_select_is_not_ddl() {
+        assert!(!is_ddl_statement("SELECT 1"));
+    }
+
+    #[test]
+    fn ddl_insert_is_not_ddl() {
+        assert!(!is_ddl_statement("INSERT INTO foo VALUES (1)"));
+    }
+
+    #[test]
+    fn ddl_update_is_not_ddl() {
+        assert!(!is_ddl_statement("UPDATE foo SET bar = 1"));
+    }
+
+    #[test]
+    fn ddl_delete_is_not_ddl() {
+        assert!(!is_ddl_statement("DELETE FROM foo WHERE id = 1"));
     }
 }
