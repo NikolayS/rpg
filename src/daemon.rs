@@ -165,6 +165,53 @@ pub enum NotificationChannel {
     Stderr,
 }
 
+impl NotificationChannel {
+    /// Return the canonical name used in routing config.
+    ///
+    /// The name matches the `channel_name` strings accepted by
+    /// [`NotificationRouting`] fields (`critical`, `warning`, `info`).
+    pub fn channel_name(&self) -> &str {
+        match self {
+            Self::Stderr => "stderr",
+            Self::Slack { .. } => "slack",
+            Self::Webhook { .. } => "webhook",
+            Self::PagerDuty { .. } => "pagerduty",
+            Self::Telegram { .. } => "telegram",
+            Self::Email { .. } => "email",
+        }
+    }
+}
+
+/// Filter channels by severity using the routing config.
+///
+/// When `routing` is `None` (not configured), all channels are returned.
+/// When `routing` is present, only channels whose
+/// [`NotificationChannel::channel_name`] appears in the matching severity
+/// list are returned.  An empty list for a given severity means "send to
+/// all channels" (matching the documented default behaviour).
+pub fn channels_for_severity<'a>(
+    channels: &'a [NotificationChannel],
+    severity: &str,
+    routing: Option<&crate::config::NotificationRouting>,
+) -> Vec<&'a NotificationChannel> {
+    let Some(r) = routing else {
+        return channels.iter().collect();
+    };
+    let allowed: &[String] = match severity {
+        "critical" => &r.critical,
+        "warning" => &r.warning,
+        "info" => &r.info,
+        _ => return channels.iter().collect(),
+    };
+    if allowed.is_empty() {
+        return channels.iter().collect();
+    }
+    channels
+        .iter()
+        .filter(|ch| allowed.iter().any(|name| name == ch.channel_name()))
+        .collect()
+}
+
 /// Send a notification to a channel.
 pub async fn notify(channel: &NotificationChannel, message: &str) {
     match channel {
@@ -492,6 +539,7 @@ pub async fn run(
     let mut audit_log = crate::governance::AuditLog::new();
     let mut deduplicator = crate::alert_delivery::AlertDeduplicator::new();
     let interval = Duration::from_secs(10);
+    let routing = Some(&config.notification_routing);
 
     let health = Arc::new(RwLock::new(HealthStatus {
         connected: true,
@@ -546,7 +594,7 @@ pub async fn run(
     }
 
     // Notify startup.
-    for ch in channels {
+    for ch in channels_for_severity(channels, "info", routing) {
         notify(ch, &format!("Rpg daemon started — monitoring {dbname}")).await;
     }
 
@@ -640,7 +688,7 @@ pub async fn run(
                 crate::logging::debug("daemon", &format!("Suppressing duplicate alert: {fp}"));
                 continue;
             }
-            for ch in channels {
+            for ch in channels_for_severity(channels, "warning", routing) {
                 notify(ch, &msg).await;
             }
 
@@ -673,7 +721,7 @@ pub async fn run(
                     "[{dbname}] Index health: {} finding(s) detected",
                     ih_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -730,7 +778,7 @@ pub async fn run(
                             let auto_msg = format!(
                                 "[{dbname}] Auto-executed {executed} index health action(s)"
                             );
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -747,7 +795,7 @@ pub async fn run(
                     "[{dbname}] Vacuum health: {} finding(s) detected",
                     vacuum_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -803,7 +851,7 @@ pub async fn run(
                         if executed > 0 {
                             let auto_msg =
                                 format!("[{dbname}] Auto-executed {executed} vacuum action(s)");
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -820,7 +868,7 @@ pub async fn run(
                     "[{dbname}] Bloat analysis: {} finding(s) detected",
                     bloat_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -873,7 +921,7 @@ pub async fn run(
                         if executed > 0 {
                             let auto_msg =
                                 format!("[{dbname}] Auto-executed {executed} bloat action(s)");
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -891,7 +939,7 @@ pub async fn run(
                     "[{dbname}] Config tuning: {} finding(s) detected",
                     config_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -937,7 +985,7 @@ pub async fn run(
                     "[{dbname}] Query optimization: {} finding(s) detected",
                     qo_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -997,7 +1045,7 @@ pub async fn run(
                                 "[{dbname}] Auto-executed {executed} \
                                  query optimization action(s)"
                             );
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -1015,7 +1063,7 @@ pub async fn run(
                     "[{dbname}] Connection management: {} finding(s) detected",
                     cm_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -1075,7 +1123,7 @@ pub async fn run(
                                 "[{dbname}] Auto-executed {executed} \
                                  connection management action(s)"
                             );
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -1092,7 +1140,7 @@ pub async fn run(
                     "[{dbname}] Replication: {} finding(s) detected",
                     repl_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -1150,7 +1198,7 @@ pub async fn run(
                                 "[{dbname}] Auto-executed {executed} \
                                  replication action(s)"
                             );
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -1168,7 +1216,7 @@ pub async fn run(
                     "[{dbname}] Backup monitoring: {} finding(s) detected",
                     bm_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -1230,7 +1278,7 @@ pub async fn run(
                                 "[{dbname}] Auto-executed {executed} \
                                  backup monitoring action(s)"
                             );
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -1248,7 +1296,7 @@ pub async fn run(
                     "[{dbname}] Security: {} finding(s) detected",
                     sec_report.findings.len()
                 );
-                for ch in channels {
+                for ch in channels_for_severity(channels, "warning", routing) {
                     notify(ch, &msg).await;
                 }
 
@@ -1304,7 +1352,7 @@ pub async fn run(
                         if executed > 0 {
                             let auto_msg =
                                 format!("[{dbname}] Auto-executed {executed} security action(s)");
-                            for ch in channels {
+                            for ch in channels_for_severity(channels, "info", routing) {
                                 notify(ch, &auto_msg).await;
                             }
                         }
@@ -1327,7 +1375,7 @@ pub async fn run(
 
             let rca_msg =
                 format!("[{dbname}] RCA auto-triggered — {data_steps} diagnostic steps collected");
-            for ch in channels {
+            for ch in channels_for_severity(channels, "critical", routing) {
                 notify(ch, &rca_msg).await;
             }
 
@@ -1346,7 +1394,7 @@ pub async fn run(
                     if executed > 0 {
                         let msg =
                             format!("[{dbname}] Auto-executed {executed} mitigation action(s)");
-                        for ch in channels {
+                        for ch in channels_for_severity(channels, "critical", routing) {
                             notify(ch, &msg).await;
                         }
                     }
@@ -1361,7 +1409,7 @@ pub async fn run(
             () = tokio::time::sleep(interval) => {},
             _ = tokio::signal::ctrl_c() => {
                 crate::logging::info("daemon", "Received shutdown signal");
-                for ch in channels {
+                for ch in channels_for_severity(channels, "info", routing) {
                     notify(ch, &format!("Rpg daemon shutting down ({dbname})")).await;
                 }
                 break;
@@ -1821,6 +1869,128 @@ mod tests {
         let pid = PathBuf::from("/run/rpg-daemon");
         let tok = token_path_for(&pid);
         assert_eq!(tok, PathBuf::from("/run/rpg-daemon.token"));
+    }
+
+    // -----------------------------------------------------------------------
+    // channel_name() and channels_for_severity()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn channel_name_returns_expected_strings() {
+        assert_eq!(NotificationChannel::Stderr.channel_name(), "stderr");
+        assert_eq!(
+            NotificationChannel::Slack {
+                webhook_url: "https://hooks.slack.com/x".to_owned()
+            }
+            .channel_name(),
+            "slack"
+        );
+        assert_eq!(
+            NotificationChannel::Webhook {
+                url: "https://example.com/hook".to_owned(),
+                secret: None,
+            }
+            .channel_name(),
+            "webhook"
+        );
+        assert_eq!(
+            NotificationChannel::PagerDuty {
+                routing_key: "key".to_owned()
+            }
+            .channel_name(),
+            "pagerduty"
+        );
+        assert_eq!(
+            NotificationChannel::Telegram {
+                bot_token: "tok".to_owned(),
+                chat_id: "123".to_owned(),
+            }
+            .channel_name(),
+            "telegram"
+        );
+        assert_eq!(
+            NotificationChannel::Email {
+                to: "a@b.com".to_owned()
+            }
+            .channel_name(),
+            "email"
+        );
+    }
+
+    #[test]
+    fn channels_for_severity_none_routing_returns_all() {
+        let channels = vec![
+            NotificationChannel::Stderr,
+            NotificationChannel::Slack {
+                webhook_url: "https://hooks.slack.com/x".to_owned(),
+            },
+        ];
+        let result = channels_for_severity(&channels, "critical", None);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn channels_for_severity_empty_list_returns_all() {
+        use crate::config::NotificationRouting;
+        let channels = vec![
+            NotificationChannel::Stderr,
+            NotificationChannel::Slack {
+                webhook_url: "https://hooks.slack.com/x".to_owned(),
+            },
+        ];
+        let routing = NotificationRouting {
+            critical: vec![],
+            warning: vec![],
+            info: vec![],
+        };
+        // Empty list means "send to all".
+        let result = channels_for_severity(&channels, "critical", Some(&routing));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn channels_for_severity_filters_by_name() {
+        use crate::config::NotificationRouting;
+        let channels = vec![
+            NotificationChannel::Stderr,
+            NotificationChannel::Slack {
+                webhook_url: "https://hooks.slack.com/x".to_owned(),
+            },
+            NotificationChannel::PagerDuty {
+                routing_key: "key".to_owned(),
+            },
+        ];
+        let routing = NotificationRouting {
+            critical: vec!["slack".to_owned(), "pagerduty".to_owned()],
+            warning: vec!["slack".to_owned()],
+            info: vec![],
+        };
+        let critical = channels_for_severity(&channels, "critical", Some(&routing));
+        assert_eq!(critical.len(), 2);
+        assert!(critical.iter().any(|c| c.channel_name() == "slack"));
+        assert!(critical.iter().any(|c| c.channel_name() == "pagerduty"));
+        assert!(!critical.iter().any(|c| c.channel_name() == "stderr"));
+
+        let warning = channels_for_severity(&channels, "warning", Some(&routing));
+        assert_eq!(warning.len(), 1);
+        assert_eq!(warning[0].channel_name(), "slack");
+
+        // Empty info list → all channels.
+        let info = channels_for_severity(&channels, "info", Some(&routing));
+        assert_eq!(info.len(), 3);
+    }
+
+    #[test]
+    fn channels_for_severity_unknown_severity_returns_all() {
+        use crate::config::NotificationRouting;
+        let channels = vec![NotificationChannel::Stderr];
+        let routing = NotificationRouting {
+            critical: vec!["slack".to_owned()],
+            warning: vec![],
+            info: vec![],
+        };
+        let result = channels_for_severity(&channels, "unknown", Some(&routing));
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
