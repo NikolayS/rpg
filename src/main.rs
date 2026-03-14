@@ -61,6 +61,7 @@ mod health_check_commands;
 mod health_checks;
 mod index_health;
 mod issues;
+mod llm_auditor;
 mod query_optimization;
 mod rca_actions;
 mod replication;
