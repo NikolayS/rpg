@@ -29,7 +29,7 @@ pub async fn execute(
 ) -> Option<String> {
     match subcommand {
         "activity" | "act" => {
-            dba_activity(client, verbose).await;
+            dba_activity(client, verbose, capabilities).await;
             None
         }
         "locks" | "lock" => {
@@ -242,7 +242,10 @@ fn print_table(col_names: &[String], rows: &[Vec<String>]) {
 
 fn print_dba_help() {
     println!("\\dba diagnostic commands:");
-    println!("  \\dba activity    Active queries and sessions");
+    println!(
+        "  \\dba activity    pg_stat_activity: grouped by state, \
+         duration, wait events"
+    );
     println!("  \\dba locks       Lock tree (blocked/blocking)");
     println!("  \\dba waits       Wait event breakdown (+ for AI interpretation)");
     println!("  \\dba bloat       Table bloat estimates");
@@ -271,27 +274,153 @@ fn print_dba_help() {
 }
 
 // ---------------------------------------------------------------------------
+// Activity summary helpers
+// ---------------------------------------------------------------------------
+
+/// Counts of sessions by state, used for the summary line in `\dba activity`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ActivityCounts {
+    active: usize,
+    idle_in_xact: usize,
+    idle: usize,
+    other: usize,
+}
+
+impl ActivityCounts {
+    /// Total sessions across all states.
+    fn total(&self) -> usize {
+        self.active + self.idle_in_xact + self.idle + self.other
+    }
+
+    /// Tally a single state string into the correct bucket.
+    fn tally(&mut self, state: &str) {
+        match state {
+            "active" => self.active += 1,
+            "idle in transaction" | "idle in transaction (aborted)" => {
+                self.idle_in_xact += 1;
+            }
+            "idle" => self.idle += 1,
+            _ => self.other += 1,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Subcommand handlers
 // ---------------------------------------------------------------------------
 
-async fn dba_activity(client: &Client, _verbose: bool) {
-    let sql = "select \
-        pid, \
-        state, \
-        case when wait_event_type is not null \
-             then wait_event_type || ':' || wait_event \
-             else '' end as wait, \
-        now() - xact_start as xact_age, \
-        now() - query_start as query_age, \
-        usename, \
-        datname, \
-        application_name, \
-        left(query, 80) as query \
-    from pg_stat_activity \
-    where pid != pg_backend_pid() \
-      and backend_type = 'client backend' \
-    order by xact_start nulls last";
-    run_and_print(client, sql).await;
+async fn dba_activity(
+    client: &Client,
+    _verbose: bool,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
+) {
+    use tokio_postgres::SimpleQueryMessage;
+
+    // PG 14-18: all required columns exist.  The query_id column was added
+    // in PG 14 but is not projected here, so no version branching is needed
+    // for the core columns.  We keep this note for future maintainers.
+    let pg_ver = capabilities
+        .and_then(crate::capabilities::DbCapabilities::pg_major_version)
+        .unwrap_or(14);
+    crate::logging::trace("dba", &format!("dba_activity: pg_major_version={pg_ver}"));
+
+    // duration column:
+    //   active / idle in transaction  → time since query_start
+    //   idle / other                  → time since state_change
+    // Sorted: active (longest first), idle in transaction, then idle/other.
+    // Excludes samo's own backend via pg_backend_pid().
+    let sql = "\
+        select \
+            pid, \
+            usename as user, \
+            datname as database, \
+            coalesce(client_addr::text, '') as client_addr, \
+            coalesce(state, '') as state, \
+            coalesce(wait_event_type, '') as wait_event_type, \
+            coalesce(wait_event, '') as wait_event, \
+            backend_type, \
+            case \
+                when state in ('active', 'idle in transaction', \
+                               'idle in transaction (aborted)') \
+                    then to_char( \
+                        extract(epoch from (now() - query_start))::int, \
+                        '99999999') || 's' \
+                when state_change is not null \
+                    then to_char( \
+                        extract(epoch from (now() - state_change))::int, \
+                        '99999999') || 's' \
+                else '' \
+            end as duration, \
+            left(coalesce(query, ''), 80) as query \
+        from pg_stat_activity \
+        where pid != pg_backend_pid() \
+        order by \
+            case state \
+                when 'active'                          then 1 \
+                when 'idle in transaction'             then 2 \
+                when 'idle in transaction (aborted)'   then 3 \
+                else                                        4 \
+            end, \
+            case \
+                when state in ('active', 'idle in transaction', \
+                               'idle in transaction (aborted)') \
+                    then now() - query_start \
+                else now() - state_change \
+            end desc nulls last";
+
+    crate::logging::trace("dba", &format!("diagnostic query: {}", sql.trim()));
+
+    let messages = match client.simple_query(sql).await {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            eprintln!("\\dba activity: {e}");
+            return;
+        }
+    };
+
+    let mut col_names: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut counts = ActivityCounts::default();
+
+    // Column indices — resolved once we have the first row.
+    let mut state_col: Option<usize> = None;
+
+    for msg in &messages {
+        if let SimpleQueryMessage::Row(row) = msg {
+            if col_names.is_empty() {
+                col_names = (0..row.len())
+                    .map(|i| {
+                        row.columns()
+                            .get(i)
+                            .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                    })
+                    .collect();
+                state_col = col_names.iter().position(|n| n == "state");
+            }
+            let vals: Vec<String> = (0..row.len())
+                .map(|i| row.get(i).unwrap_or("").to_owned())
+                .collect();
+
+            // Tally state counts.
+            let state = state_col
+                .and_then(|ci| vals.get(ci))
+                .map_or("", String::as_str);
+            counts.tally(state);
+
+            rows.push(vals);
+        }
+    }
+
+    print_table(&col_names, &rows);
+
+    // Summary line.
+    println!(
+        "{} active, {} idle in transaction, {} idle, {} total",
+        counts.active,
+        counts.idle_in_xact,
+        counts.idle,
+        counts.total()
+    );
 }
 
 async fn dba_locks(client: &Client, _verbose: bool) {
@@ -856,5 +985,71 @@ mod tests {
     #[test]
     fn print_dba_help_no_panic() {
         print_dba_help();
+    }
+
+    // -- ActivityCounts tests ------------------------------------------------
+
+    #[test]
+    fn activity_counts_default_is_zero() {
+        let c = ActivityCounts::default();
+        assert_eq!(c.active, 0);
+        assert_eq!(c.idle_in_xact, 0);
+        assert_eq!(c.idle, 0);
+        assert_eq!(c.other, 0);
+        assert_eq!(c.total(), 0);
+    }
+
+    #[test]
+    fn activity_counts_tally_active() {
+        let mut c = ActivityCounts::default();
+        c.tally("active");
+        assert_eq!(c.active, 1);
+        assert_eq!(c.total(), 1);
+    }
+
+    #[test]
+    fn activity_counts_tally_idle_in_transaction() {
+        let mut c = ActivityCounts::default();
+        c.tally("idle in transaction");
+        assert_eq!(c.idle_in_xact, 1);
+        assert_eq!(c.total(), 1);
+    }
+
+    #[test]
+    fn activity_counts_tally_idle_in_transaction_aborted() {
+        let mut c = ActivityCounts::default();
+        c.tally("idle in transaction (aborted)");
+        assert_eq!(c.idle_in_xact, 1);
+    }
+
+    #[test]
+    fn activity_counts_tally_idle() {
+        let mut c = ActivityCounts::default();
+        c.tally("idle");
+        assert_eq!(c.idle, 1);
+    }
+
+    #[test]
+    fn activity_counts_tally_other_states() {
+        let mut c = ActivityCounts::default();
+        c.tally("fastpath function call");
+        c.tally("disabled");
+        c.tally("");
+        assert_eq!(c.other, 3);
+    }
+
+    #[test]
+    fn activity_counts_total_is_sum() {
+        let mut c = ActivityCounts::default();
+        c.tally("active");
+        c.tally("active");
+        c.tally("idle in transaction");
+        c.tally("idle");
+        c.tally("disabled");
+        assert_eq!(c.active, 2);
+        assert_eq!(c.idle_in_xact, 1);
+        assert_eq!(c.idle, 1);
+        assert_eq!(c.other, 1);
+        assert_eq!(c.total(), 5);
     }
 }
