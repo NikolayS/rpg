@@ -4423,7 +4423,10 @@ async fn handle_line(
             MetaResult::ExecuteBuffer => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf is intentionally NOT cleared here — the readline
+                // loop adds stmt_buf (which contains the original input with
+                // the terminator, e.g. "select now() \g") to history before
+                // clearing it. See #360.
                 if !sql.is_empty() {
                     if let Some(bind_params) = settings.pending_bind_params.take() {
                         execute_query_extended_interactive(
@@ -4443,7 +4446,7 @@ async fn handle_line(
             MetaResult::ExecuteBufferToFile(path) => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf preserved for history (see #360).
                 if !sql.is_empty() {
                     execute_to_file(client, &sql, &path, settings, tx).await;
                 }
@@ -4452,7 +4455,7 @@ async fn handle_line(
             MetaResult::ExecuteBufferPiped(cmd) => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf preserved for history (see #360).
                 if !sql.is_empty() {
                     execute_piped(client, &sql, &cmd, settings, tx).await;
                 }
@@ -4461,7 +4464,7 @@ async fn handle_line(
             MetaResult::ExecuteBufferExpanded => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf preserved for history (see #360).
                 if !sql.is_empty() {
                     let prev = settings.expanded;
                     settings.expanded = ExpandedMode::On;
@@ -4486,7 +4489,7 @@ async fn handle_line(
             MetaResult::ExecuteBufferExpandedToFile(path) => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf preserved for history (see #360).
                 if !sql.is_empty() {
                     let prev = settings.expanded;
                     settings.expanded = ExpandedMode::On;
@@ -4500,7 +4503,7 @@ async fn handle_line(
             MetaResult::GSet(prefix) => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf preserved for history (see #360).
                 if !sql.is_empty() {
                     execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
                 }
@@ -4509,7 +4512,7 @@ async fn handle_line(
             MetaResult::CrosstabViewBuffer(args) => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
-                stmt_buf.clear();
+                // stmt_buf preserved for history (see #360).
                 if !sql.is_empty() {
                     execute_crosstabview(client, &sql, &args, settings, tx).await;
                 }
@@ -4523,7 +4526,15 @@ async fn handle_line(
                 execute_named_stmt(client, &name, &params, settings, tx).await;
                 HandleLineResult::Continue
             }
-            _ => HandleLineResult::Continue,
+            _ => {
+                // For terminators like \watch that return Continue after running
+                // (the watch loop runs inside dispatch_meta), clear buf so the
+                // readline loop sees buf.is_empty() and records stmt_buf — which
+                // contains the original input, e.g. "select now() \watch 1" —
+                // in history. See #360.
+                buf.clear();
+                HandleLineResult::BufferUpdated
+            }
         };
     }
 
@@ -5580,6 +5591,60 @@ mod tests {
             find_inline_backslash("select 'create table t()' \\gexec"),
             Some(26)
         );
+    }
+
+    // -- history stmt_buf construction for inline terminators (#360) ----------
+
+    /// Helper: simulate the stmt_buf construction for an inline backslash line.
+    ///
+    /// Mirrors the logic in `handle_line` (lines beginning
+    /// "Check for inline backslash command"): find the split point, push
+    /// sql_part then " " + meta_part into stmt_buf.
+    fn build_stmt_buf_for_inline(line: &str) -> Option<String> {
+        let pos = find_inline_backslash(line)?;
+        let sql_part = &line[..pos];
+        let meta_part = line[pos..].trim();
+        let mut stmt_buf = String::new();
+        if !sql_part.trim().is_empty() {
+            stmt_buf.push_str(sql_part.trim_end());
+        }
+        if !stmt_buf.is_empty() {
+            stmt_buf.push(' ');
+        }
+        stmt_buf.push_str(meta_part);
+        Some(stmt_buf)
+    }
+
+    #[test]
+    fn history_stmt_buf_gx_preserves_terminator() {
+        // "select * from users \gx" → stmt_buf must be the full original input
+        // so that history records the terminator, not a bare semicolon. (#360)
+        let line = "select * from users \\gx";
+        let stmt = build_stmt_buf_for_inline(line).expect("should find inline backslash");
+        assert_eq!(stmt, "select * from users \\gx");
+    }
+
+    #[test]
+    fn history_stmt_buf_watch_preserves_terminator() {
+        // "select now() \watch 1" → stmt_buf must contain \watch, not just
+        // the SQL part, so history records the original expression. (#360)
+        let line = "select now() \\watch 1";
+        let stmt = build_stmt_buf_for_inline(line).expect("should find inline backslash");
+        assert_eq!(stmt, "select now() \\watch 1");
+    }
+
+    #[test]
+    fn history_stmt_buf_g_bare_preserves_terminator() {
+        let line = "select 1 \\g";
+        let stmt = build_stmt_buf_for_inline(line).expect("should find inline backslash");
+        assert_eq!(stmt, "select 1 \\g");
+    }
+
+    #[test]
+    fn history_stmt_buf_gset_preserves_terminator() {
+        let line = "select count(*) from users \\gset";
+        let stmt = build_stmt_buf_for_inline(line).expect("should find inline backslash");
+        assert_eq!(stmt, "select count(*) from users \\gset");
     }
 
     // -- AI command prefix detection -----------------------------------------
