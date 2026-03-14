@@ -88,6 +88,11 @@ pub struct ConnParams {
     pub sslmode: SslMode,
     pub application_name: String,
     pub connect_timeout: Option<u64>,
+    /// Whether the connection was actually established over TLS.
+    ///
+    /// `false` when `sslmode=disable` or when `sslmode=prefer` fell back to
+    /// a plain connection.  `true` when TLS handshake completed successfully.
+    pub tls_in_use: bool,
 }
 
 /// Custom `Debug` implementation that masks the password field.
@@ -102,6 +107,7 @@ impl fmt::Debug for ConnParams {
             .field("sslmode", &self.sslmode)
             .field("application_name", &self.application_name)
             .field("connect_timeout", &self.connect_timeout)
+            .field("tls_in_use", &self.tls_in_use)
             .finish()
     }
 }
@@ -117,6 +123,7 @@ impl Default for ConnParams {
             sslmode: SslMode::default(),
             application_name: "samo".to_owned(),
             connect_timeout: None,
+            tls_in_use: false,
         }
     }
 }
@@ -784,22 +791,24 @@ pub async fn connect(
         pg_config.connect_timeout(std::time::Duration::from_secs(timeout));
     }
 
-    let client = match params.sslmode {
-        SslMode::Disable => connect_plain(&pg_config, &params).await?,
+    let (client, tls_used) = match params.sslmode {
+        SslMode::Disable => (connect_plain(&pg_config, &params).await?, false),
         SslMode::Prefer => match connect_tls(&pg_config, &params).await {
-            Ok(c) => c,
+            Ok(c) => (c, true),
             Err(_) => {
                 // sslmode=prefer: silently fall back to a plain connection
                 // when TLS is unavailable. This matches psql's default
                 // behavior — no warning is shown to the user.
-                connect_plain(&pg_config, &params).await?
+                (connect_plain(&pg_config, &params).await?, false)
             }
         },
         SslMode::Require => {
             pg_config.ssl_mode(TokioSslMode::Require);
-            connect_tls(&pg_config, &params).await?
+            (connect_tls(&pg_config, &params).await?, true)
         }
     };
+
+    params.tls_in_use = tls_used;
 
     // Auth retry: if the initial connect failed with an auth error and the
     // server is requesting a password, prompt and retry once (psql behaviour).
@@ -892,22 +901,42 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
     }
 }
 
+/// SSL status line appended when TLS is in use, matching psql's format.
+///
+/// psql shows full protocol/cipher details (e.g. `TLSv1.3`,
+/// `TLS_AES_256_GCM_SHA384`).  The `tokio-postgres-rustls` backend does not
+/// expose session-level cipher information after the handshake, so we emit
+/// the shorter form here.
+const SSL_LINE: &str = "SSL connection (protocol: TLS, compression: off)";
+
 /// Format a human-friendly connection-success message, matching psql output.
 ///
 /// TCP:    You are connected to database "db" as user "u" on host "h" at port "5432".
 /// Socket: You are connected to database "db" as user "u" via socket in "/run/pg" at port "5432".
+///
+/// When `params.tls_in_use` is true an SSL line is appended, e.g.:
+/// ```text
+/// SSL connection (protocol: TLS, compression: off)
+/// ```
 pub fn connection_info(params: &ConnParams) -> String {
     let is_socket = params.host.starts_with('/');
-    if is_socket {
+    let connected_line = if is_socket {
         format!(
-            "You are connected to database \"{}\" as user \"{}\" via socket in \"{}\" at port \"{}\".",
+            "You are connected to database \"{}\" as user \"{}\" \
+             via socket in \"{}\" at port \"{}\".",
             params.dbname, params.user, params.host, params.port,
         )
     } else {
         format!(
-            "You are connected to database \"{}\" as user \"{}\" on host \"{}\" at port \"{}\".",
+            "You are connected to database \"{}\" as user \"{}\" \
+             on host \"{}\" at port \"{}\".",
             params.dbname, params.user, params.host, params.port,
         )
+    };
+    if params.tls_in_use {
+        format!("{connected_line}\n{SSL_LINE}")
+    } else {
+        connected_line
     }
 }
 
@@ -924,13 +953,22 @@ pub fn connection_info(params: &ConnParams) -> String {
 /// at port "5432".
 /// ```
 ///
+/// When `new_params.tls_in_use` is true an SSL line is appended after the
+/// connected line, matching psql behaviour:
+///
+/// ```text
+/// You are now connected to database "mydb" as user "alice" on host "h"
+/// at port "5432".
+/// SSL connection (protocol: TLS, compression: off)
+/// ```
+///
 /// `client_version` is samo's own version string (from [`crate::version_string`]).
 /// `server_version` is the server's version string from `SHOW server_version`.
 /// `old_params` is the previous connection (used to detect endpoint change).
 /// `new_params` is the newly established connection.
 ///
-/// Returns one or two lines joined by `\n` when a version banner is needed,
-/// or just the "You are now connected" line otherwise.
+/// Returns lines joined by `\n` — the exact number depends on whether a
+/// version banner and/or SSL line is needed.
 pub fn reconnect_info(
     client_version: &str,
     server_version: Option<&str>,
@@ -954,12 +992,18 @@ pub fn reconnect_info(
         )
     };
 
+    let ssl_suffix = if new_params.tls_in_use {
+        format!("\n{SSL_LINE}")
+    } else {
+        String::new()
+    };
+
     if server_changed {
         let ver = server_version.unwrap_or("unknown");
         let banner = format!("{client_version} (server PostgreSQL {ver})");
-        format!("{banner}\n{connected_line}")
+        format!("{banner}\n{connected_line}{ssl_suffix}")
     } else {
-        connected_line
+        format!("{connected_line}{ssl_suffix}")
     }
 }
 
@@ -1543,6 +1587,107 @@ mod tests {
             "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL unknown)\n\
              You are now connected to database \"postgres\" as user \"postgres\" \
              on host \"other.host\" at port \"5432\".",
+        );
+    }
+
+    // -- SSL / TLS status line --------------------------------------------
+
+    #[test]
+    fn test_connection_info_tcp_with_tls() {
+        let params = ConnParams {
+            host: "db.example.com".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            tls_in_use: true,
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            connection_info(&params),
+            "You are connected to database \"mydb\" as user \"alice\" \
+             on host \"db.example.com\" at port \"5432\".\n\
+             SSL connection (protocol: TLS, compression: off)",
+        );
+    }
+
+    #[test]
+    fn test_connection_info_socket_no_tls() {
+        // Sockets never use TLS; tls_in_use must remain false.
+        let params = ConnParams {
+            host: "/var/run/postgresql".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            tls_in_use: false,
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            connection_info(&params),
+            "You are connected to database \"mydb\" as user \"alice\" \
+             via socket in \"/var/run/postgresql\" at port \"5432\".",
+        );
+    }
+
+    #[test]
+    fn test_reconnect_info_same_server_with_tls() {
+        // Same host/port + TLS → SSL line appended.
+        let old = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            tls_in_use: true,
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info(
+                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                Some("17.2"),
+                &old,
+                &new
+            ),
+            "You are now connected to database \"mydb\" as user \"alice\" \
+             on host \"localhost\" at port \"5432\".\n\
+             SSL connection (protocol: TLS, compression: off)",
+        );
+    }
+
+    #[test]
+    fn test_reconnect_info_different_host_with_tls() {
+        // Different host + TLS → version banner then connected line then SSL.
+        let old = ConnParams {
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            dbname: "postgres".into(),
+            ..ConnParams::default()
+        };
+        let new = ConnParams {
+            host: "other.example.com".into(),
+            port: 5432,
+            user: "alice".into(),
+            dbname: "mydb".into(),
+            tls_in_use: true,
+            ..ConnParams::default()
+        };
+        assert_eq!(
+            reconnect_info(
+                "samo 0.1.0 (abc1234, built 2026-01-01)",
+                Some("16.3"),
+                &old,
+                &new
+            ),
+            "samo 0.1.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
+             You are now connected to database \"mydb\" as user \"alice\" \
+             on host \"other.example.com\" at port \"5432\".\n\
+             SSL connection (protocol: TLS, compression: off)",
         );
     }
 }
