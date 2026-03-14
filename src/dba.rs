@@ -44,6 +44,10 @@ pub async fn execute(
             dba_vacuum(client, verbose).await;
             None
         }
+        "vacuum-analyze" | "va" => {
+            dba_vacuum_analyze(client).await;
+            None
+        }
         "tablesize" | "ts" => {
             dba_tablesize(client, verbose).await;
             None
@@ -249,7 +253,11 @@ fn print_dba_help() {
     println!("  \\dba locks       Lock tree (blocked/blocking)");
     println!("  \\dba waits       Wait event breakdown (+ for AI interpretation)");
     println!("  \\dba bloat       Table bloat estimates");
-    println!("  \\dba vacuum      Vacuum status and dead tuples");
+    println!("  \\dba vacuum      Vacuum status and dead tuples (+ for analyzer)");
+    println!(
+        "  \\dba vacuum-analyze  Structured vacuum health findings \
+         (dead tuples, XID age, stale tables)"
+    );
     println!("  \\dba tablesize   Largest tables");
     println!("  \\dba connections Connection counts by state");
     println!("  \\dba indexes     Index health report (unused, redundant, invalid, bloated)");
@@ -261,7 +269,10 @@ fn print_dba_help() {
     println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
     println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
     println!();
-    println!("Aliases: act, lock, wait, vac, ts, conn, idx, unused, seq, cache, repl, conf, prog");
+    println!(
+        "Aliases: act, lock, wait, vac, va, ts, conn, idx, \
+         unused, seq, cache, repl, conf, prog"
+    );
     println!();
     println!("Progress sub-commands:");
     println!("  \\dba progress             All in-progress operations");
@@ -863,7 +874,8 @@ async fn dba_bloat(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_vacuum(client: &Client, _verbose: bool) {
+async fn dba_vacuum(client: &Client, verbose: bool) {
+    // Raw vacuum status table (psql-style tabular output).
     let sql = "select \
         s.schemaname, \
         s.relname, \
@@ -887,6 +899,20 @@ async fn dba_vacuum(client: &Client, _verbose: bool) {
     order by s.n_dead_tup desc \
     limit 30";
     run_and_print(client, sql).await;
+
+    // Structured analysis via VacuumAnalyzer when verbose (`\dba+ vacuum`).
+    if verbose {
+        dba_vacuum_analyze(client).await;
+    }
+}
+
+/// Run the `VacuumAnalyzer` and display structured findings.
+///
+/// Called directly from `\dba vacuum-analyze` / `\dba va`, or automatically
+/// when `\dba+ vacuum` (verbose) is used.
+async fn dba_vacuum_analyze(client: &Client) {
+    let report = crate::vacuum::analyze(client).await;
+    report.display();
 }
 
 async fn dba_tablesize(client: &Client, _verbose: bool) {
