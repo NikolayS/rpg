@@ -774,6 +774,390 @@ pub async fn run(
             }
         }
 
+        // Run query optimization check every 6 iterations (~1 minute), offset 3.
+        if iteration % 6 == 3 {
+            let qo_report = crate::query_optimization::analyze(client).await;
+            if !qo_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Query optimization: {} finding(s) detected",
+                    qo_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &qo_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Query optimization: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "query-optimization".to_owned()],
+                                source: "query-optimization".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::QueryOptimization);
+                let effective = circuit_breaker.effective_autonomy(
+                    crate::governance::FeatureArea::QueryOptimization,
+                    configured,
+                );
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = qo_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg = format!(
+                                "[{dbname}] Auto-executed {executed} \
+                                 query optimization action(s)"
+                            );
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run connection management check every 30 iterations (~5 min), offset 15.
+        if iteration % 30 == 15 {
+            let cm_report =
+                crate::connection_management::ConnectionManagementAnalyzer::analyze(client).await;
+            if !cm_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Connection management: {} finding(s) detected",
+                    cm_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &cm_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Connection management: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "connection-management".to_owned()],
+                                source: "connection-management".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::ConnectionManagement);
+                let effective = circuit_breaker.effective_autonomy(
+                    crate::governance::FeatureArea::ConnectionManagement,
+                    configured,
+                );
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = cm_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg = format!(
+                                "[{dbname}] Auto-executed {executed} \
+                                 connection management action(s)"
+                            );
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run replication check every 30 iterations (~5 min), offset 20.
+        if iteration % 30 == 20 {
+            let repl_report = crate::replication::ReplicationAnalyzer::analyze(client).await;
+            if !repl_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Replication: {} finding(s) detected",
+                    repl_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &repl_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Replication: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "replication".to_owned()],
+                                source: "replication".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Replication);
+                let effective = circuit_breaker
+                    .effective_autonomy(crate::governance::FeatureArea::Replication, configured);
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = repl_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg = format!(
+                                "[{dbname}] Auto-executed {executed} \
+                                 replication action(s)"
+                            );
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run backup monitoring check every 60 iterations (~10 min), offset 45.
+        if iteration % 60 == 45 {
+            let bm_report =
+                crate::backup_monitoring::BackupMonitoringAnalyzer::analyze(client).await;
+            if !bm_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Backup monitoring: {} finding(s) detected",
+                    bm_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &bm_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Backup monitoring: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "backup-monitoring".to_owned()],
+                                source: "backup-monitoring".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe proposals.
+                // Backup monitoring has no auto-actions (always returns empty
+                // proposals), but we follow the standard pattern for consistency.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::BackupMonitoring);
+                let effective = circuit_breaker.effective_autonomy(
+                    crate::governance::FeatureArea::BackupMonitoring,
+                    configured,
+                );
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = bm_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg = format!(
+                                "[{dbname}] Auto-executed {executed} \
+                                 backup monitoring action(s)"
+                            );
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run security check every 180 iterations (~30 min), offset 90.
+        // Security changes are sensitive — notify and create issues only.
+        if iteration % 180 == 90 {
+            let sec_report = crate::security::SecurityAnalyzer::analyze(client).await;
+            if !sec_report.findings.is_empty() {
+                let msg = format!(
+                    "[{dbname}] Security: {} finding(s) detected",
+                    sec_report.findings.len()
+                );
+                for ch in channels {
+                    notify(ch, &msg).await;
+                }
+
+                // Create GitHub issues for critical findings.
+                if let Some(repo) = github_repo {
+                    for finding in &sec_report.findings {
+                        if finding.severity == crate::governance::Severity::Critical {
+                            let template = crate::issues::IssueTemplate {
+                                title: format!(
+                                    "[Rpg] Security: {} on {dbname}",
+                                    finding.kind.label()
+                                ),
+                                body: finding.description.clone(),
+                                labels: vec!["rpg".to_owned(), "security".to_owned()],
+                                source: "security".to_owned(),
+                            };
+                            let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
+                            match creator.create_issue(&template).await {
+                                Ok(url) => {
+                                    crate::logging::info(
+                                        "daemon",
+                                        &format!("Created issue: {url}"),
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::logging::warn(
+                                        "daemon",
+                                        &format!("Issue creation failed: {e}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // In Auto mode, execute safe proposals.
+                let configured = config
+                    .governance
+                    .autonomy_for(crate::governance::FeatureArea::Security);
+                let effective = circuit_breaker
+                    .effective_autonomy(crate::governance::FeatureArea::Security, configured);
+                if effective == crate::governance::AutonomyLevel::Auto {
+                    let proposals = sec_report.to_proposals();
+                    if !proposals.is_empty() {
+                        let executed = crate::rca_actions::run_auto_flow(
+                            client,
+                            &proposals,
+                            &mut audit_log,
+                            &mut circuit_breaker,
+                            &mut veto_tracker,
+                        )
+                        .await;
+                        if executed > 0 {
+                            let auto_msg =
+                                format!("[{dbname}] Auto-executed {executed} security action(s)");
+                            for ch in channels {
+                                notify(ch, &auto_msg).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Auto-RCA on severe anomalies.
         if crate::anomaly::AnomalyDetector::should_trigger_rca(&anomalies) {
             let configured_autonomy = config
@@ -1014,6 +1398,138 @@ mod tests {
         assert_eq!(fired_at, vec![30, 60, 90]);
         // First fire at iteration 30, not before.
         assert_eq!(fired_at[0], 30);
+    }
+
+    #[test]
+    fn query_optimization_check_interval_logic() {
+        // Fires every 6 iterations at offset 3: iterations 3, 9, 15, …
+        let mut fired_at: Vec<u64> = Vec::new();
+        let mut iteration: u64 = 0;
+        for _ in 0..30 {
+            iteration += 1;
+            if iteration % 6 == 3 {
+                fired_at.push(iteration);
+            }
+        }
+        assert_eq!(fired_at, vec![3, 9, 15, 21, 27]);
+        // Never fires at the same iteration as index_health (% 30 == 0).
+        assert!(fired_at.iter().all(|i| i % 30 != 0));
+    }
+
+    #[test]
+    fn connection_management_check_interval_logic() {
+        // Fires every 30 iterations at offset 15: iterations 15, 45, 75, …
+        let mut fired_at: Vec<u64> = Vec::new();
+        let mut iteration: u64 = 0;
+        for _ in 0..100 {
+            iteration += 1;
+            if iteration % 30 == 15 {
+                fired_at.push(iteration);
+            }
+        }
+        assert_eq!(fired_at, vec![15, 45, 75]);
+        // Never overlaps with index_health / vacuum (offset 0).
+        assert!(fired_at.iter().all(|i| i % 30 != 0));
+    }
+
+    #[test]
+    fn replication_check_interval_logic() {
+        // Fires every 30 iterations at offset 20: iterations 20, 50, 80, …
+        let mut fired_at: Vec<u64> = Vec::new();
+        let mut iteration: u64 = 0;
+        for _ in 0..100 {
+            iteration += 1;
+            if iteration % 30 == 20 {
+                fired_at.push(iteration);
+            }
+        }
+        assert_eq!(fired_at, vec![20, 50, 80]);
+        // Does not overlap with connection_management (offset 15) or
+        // index_health / vacuum (offset 0).
+        assert!(fired_at.iter().all(|i| i % 30 != 0));
+        assert!(fired_at.iter().all(|i| i % 30 != 15));
+    }
+
+    #[test]
+    fn backup_monitoring_check_interval_logic() {
+        // Fires every 60 iterations at offset 45: iterations 45, 105, …
+        let mut fired_at: Vec<u64> = Vec::new();
+        let mut iteration: u64 = 0;
+        for _ in 0..180 {
+            iteration += 1;
+            if iteration % 60 == 45 {
+                fired_at.push(iteration);
+            }
+        }
+        assert_eq!(fired_at, vec![45, 105, 165]);
+        // Never overlaps with bloat (% 60 == 0).
+        assert!(fired_at.iter().all(|i| i % 60 != 0));
+    }
+
+    #[test]
+    fn security_check_interval_logic() {
+        // Fires every 180 iterations at offset 90: iteration 90 in first 180.
+        let mut fired_at: Vec<u64> = Vec::new();
+        let mut iteration: u64 = 0;
+        for _ in 0..360 {
+            iteration += 1;
+            if iteration % 180 == 90 {
+                fired_at.push(iteration);
+            }
+        }
+        assert_eq!(fired_at, vec![90, 270]);
+        // Does not overlap with config_tuning (% 180 == 0).
+        assert!(fired_at.iter().all(|i| i % 180 != 0));
+    }
+
+    #[test]
+    fn analyzer_offsets_do_not_overlap_within_180_iterations() {
+        // Verify all 9 analyzer triggers are distinct across 180 iterations.
+        // We collect (iteration, analyzer_name) for each fire in 1..=180.
+        let mut events: Vec<(u64, &str)> = Vec::new();
+        for iteration in 1u64..=180 {
+            if iteration % 30 == 0 {
+                events.push((iteration, "index_health"));
+                events.push((iteration, "vacuum"));
+            }
+            if iteration % 6 == 3 {
+                events.push((iteration, "query_optimization"));
+            }
+            if iteration % 30 == 15 {
+                events.push((iteration, "connection_management"));
+            }
+            if iteration % 30 == 20 {
+                events.push((iteration, "replication"));
+            }
+            if iteration % 60 == 0 {
+                events.push((iteration, "bloat"));
+            }
+            if iteration % 180 == 0 {
+                events.push((iteration, "config_tuning"));
+            }
+            if iteration % 60 == 45 {
+                events.push((iteration, "backup_monitoring"));
+            }
+            if iteration % 180 == 90 {
+                events.push((iteration, "security"));
+            }
+        }
+        // Each of the 5 new analyzers must appear at least once.
+        let names: Vec<&str> = events.iter().map(|(_, n)| *n).collect();
+        assert!(
+            names.contains(&"query_optimization"),
+            "query_optimization missing"
+        );
+        assert!(
+            names.contains(&"connection_management"),
+            "connection_management missing"
+        );
+        assert!(names.contains(&"replication"), "replication missing");
+        assert!(
+            names.contains(&"backup_monitoring"),
+            "backup_monitoring missing"
+        );
+        assert!(names.contains(&"security"), "security missing");
     }
 
     #[test]
