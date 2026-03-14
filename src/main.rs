@@ -54,6 +54,7 @@ mod issues;
 mod query_optimization;
 mod rca_actions;
 mod replication;
+mod security;
 mod vacuum;
 mod verification;
 

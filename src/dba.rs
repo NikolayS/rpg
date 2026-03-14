@@ -108,6 +108,10 @@ pub async fn execute(
             eprintln!("{}", snapshot.to_prompt());
             None
         }
+        "security" | "sec" => {
+            dba_security_analyze(client).await;
+            None
+        }
         "" | "help" => {
             print_dba_help();
             None
@@ -303,10 +307,14 @@ fn print_dba_help() {
         "  \\dba rca          Root cause analysis snapshot \
          (diagnostic data collection)"
     );
+    println!(
+        "  \\dba security        Security audit: superuser roles, password policy, \
+         weak hashes, trust auth (PG 15+)"
+    );
     println!();
     println!(
         "Aliases: act, lock, wait, vac, va, ts, conn, ca, idx, \
-         unused, seq, cache, repl, ra, conf, prog, ba, rca"
+         unused, seq, cache, repl, ra, conf, prog, ba, rca, sec"
     );
     println!();
     println!("Progress sub-commands:");
@@ -955,6 +963,14 @@ async fn dba_vacuum_analyze(client: &Client) {
 /// Called directly from `\dba backup-analyze` / `\dba ba`.
 async fn dba_backup_analyze(client: &Client) {
     let report = crate::backup_monitoring::BackupMonitoringAnalyzer::analyze(client).await;
+    report.display();
+}
+
+/// Run the `SecurityAnalyzer` and display structured findings.
+///
+/// Called directly from `\dba security` / `\dba sec`.
+async fn dba_security_analyze(client: &Client) {
+    let report = crate::security::SecurityAnalyzer::analyze(client).await;
     report.display();
 }
 
