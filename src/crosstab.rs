@@ -6,12 +6,12 @@
 //! \crosstabview [colV [colH [colD [sortcolH]]]]
 //! ```
 //!
-//! - `colV`     — column whose distinct values form the row labels (default: 0).
-//! - `colH`     — column whose distinct values form the column headers (default: 1).
-//! - `colD`     — column whose values populate the cells (default: 2).
+//! - `colV`     — column whose distinct values form the row labels (default: 1).
+//! - `colH`     — column whose distinct values form the column headers (default: 2).
+//! - `colD`     — column whose values populate the cells (default: 3).
 //! - `sortcolH` — column used to sort the horizontal headers (optional).
 //!
-//! Column arguments may be specified as zero-based index numbers or as column
+//! Column arguments may be specified as 1-based index numbers or as column
 //! names.  The query must return at least 3 columns.  Each `(colV, colH)` pair
 //! must be unique; a duplicate is a fatal error.
 //!
@@ -25,37 +25,45 @@ use unicode_width::UnicodeWidthStr;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Column-specification argument: either a name or a zero-based index.
+/// Column-specification argument: either a name or a 1-based index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColSpec {
     /// Column identified by its header name.
     Name(String),
-    /// Column identified by zero-based position.
+    /// Column identified by 1-based position (matches psql convention).
     Index(usize),
 }
 
 impl ColSpec {
-    /// Parse a string as either an index (all digits) or a name.
+    /// Parse a string as either a 1-based index (all digits, >= 1) or a name.
+    ///
+    /// The value `"0"` is treated as a name (matching psql: column numbers
+    /// start at 1).
     fn from_str(s: &str) -> Self {
         if let Ok(n) = s.parse::<usize>() {
-            Self::Index(n)
-        } else {
-            Self::Name(s.to_owned())
+            if n >= 1 {
+                return Self::Index(n);
+            }
         }
+        Self::Name(s.to_owned())
     }
 
     /// Resolve to a zero-based column index given the header list.
+    ///
+    /// The stored index is 1-based; this converts to zero-based internally.
     ///
     /// Returns `Err` with an informative message if the column is not found or
     /// the index is out of range.
     fn resolve(&self, headers: &[String]) -> Result<usize, String> {
         match self {
             Self::Index(n) => {
-                if *n < headers.len() {
-                    Ok(*n)
+                // n is 1-based; convert to zero-based.
+                let zero = n - 1;
+                if zero < headers.len() {
+                    Ok(zero)
                 } else {
                     Err(format!(
-                        "\\crosstabview: column index {} is out of range \
+                        "\\crosstabview: column number {} is out of range \
                          (query has {} columns)",
                         n,
                         headers.len()
@@ -374,10 +382,11 @@ mod tests {
 
     #[test]
     fn parse_args_index() {
-        let a = parse_args("0 1 2");
-        assert_eq!(a.col_v, Some(ColSpec::Index(0)));
-        assert_eq!(a.col_h, Some(ColSpec::Index(1)));
-        assert_eq!(a.col_d, Some(ColSpec::Index(2)));
+        // 1-based column numbers: "1 2 3" refers to columns 1, 2, 3.
+        let a = parse_args("1 2 3");
+        assert_eq!(a.col_v, Some(ColSpec::Index(1)));
+        assert_eq!(a.col_h, Some(ColSpec::Index(2)));
+        assert_eq!(a.col_d, Some(ColSpec::Index(3)));
         assert!(a.sort_col_h.is_none());
     }
 
@@ -399,10 +408,11 @@ mod tests {
     #[test]
     fn parse_args_excess_tokens_ignored() {
         // More than 4 tokens: extras are silently dropped.
-        let a = parse_args("0 1 2 3 4 5");
-        assert_eq!(a.col_v, Some(ColSpec::Index(0)));
-        assert_eq!(a.col_d, Some(ColSpec::Index(2)));
-        assert_eq!(a.sort_col_h, Some(ColSpec::Index(3)));
+        // Columns are 1-based so "1 2 3 4" selects columns 1, 2, 3, 4.
+        let a = parse_args("1 2 3 4 5 6");
+        assert_eq!(a.col_v, Some(ColSpec::Index(1)));
+        assert_eq!(a.col_d, Some(ColSpec::Index(3)));
+        assert_eq!(a.sort_col_h, Some(ColSpec::Index(4)));
     }
 
     // -- pivot ---------------------------------------------------------------
@@ -451,8 +461,8 @@ mod tests {
     #[test]
     fn pivot_col_v_eq_col_h_error() {
         let args = CrosstabArgs {
-            col_v: Some(ColSpec::Index(0)),
-            col_h: Some(ColSpec::Index(0)),
+            col_v: Some(ColSpec::Index(1)),
+            col_h: Some(ColSpec::Index(1)),
             ..Default::default()
         };
         let err = pivot(&headers(), &simple_rows(), &args).unwrap_err();
@@ -492,6 +502,72 @@ mod tests {
         assert!(err.contains("out of range"), "got: {err}");
     }
 
+    #[test]
+    fn pivot_col_by_1based_index() {
+        // "1 2 3" (1-based) selects row=col0, col=col1, val=col2.
+        let args = CrosstabArgs {
+            col_v: Some(ColSpec::Index(1)),
+            col_h: Some(ColSpec::Index(2)),
+            col_d: Some(ColSpec::Index(3)),
+            sort_col_h: None,
+        };
+        let (ph, pr) = pivot(&headers(), &simple_rows(), &args).unwrap();
+        assert_eq!(ph, vec!["row", "x", "y"]);
+        assert_eq!(pr[0], vec!["a", "1", "2"]);
+        assert_eq!(pr[1], vec!["b", "3", "4"]);
+    }
+
+    #[test]
+    fn pivot_with_sortcolh() {
+        // Build rows where encounter order of col headers is y, x
+        // but sort column (col index 2, i.e. the "val" column as sort key)
+        // would order them x first.
+        // We use an extra column for sorting.
+        let sort_headers = vec![
+            "row".to_owned(),
+            "col".to_owned(),
+            "sort_key".to_owned(),
+            "val".to_owned(),
+        ];
+        let sort_rows = vec![
+            vec![
+                "a".to_owned(),
+                "y".to_owned(),
+                "2".to_owned(),
+                "ay".to_owned(),
+            ],
+            vec![
+                "a".to_owned(),
+                "x".to_owned(),
+                "1".to_owned(),
+                "ax".to_owned(),
+            ],
+            vec![
+                "b".to_owned(),
+                "y".to_owned(),
+                "2".to_owned(),
+                "by".to_owned(),
+            ],
+            vec![
+                "b".to_owned(),
+                "x".to_owned(),
+                "1".to_owned(),
+                "bx".to_owned(),
+            ],
+        ];
+        let args = CrosstabArgs {
+            col_v: Some(ColSpec::Name("row".to_owned())),
+            col_h: Some(ColSpec::Name("col".to_owned())),
+            col_d: Some(ColSpec::Name("val".to_owned())),
+            sort_col_h: Some(ColSpec::Name("sort_key".to_owned())),
+        };
+        let (ph, pr) = pivot(&sort_headers, &sort_rows, &args).unwrap();
+        // sortcolH "sort_key" values: x→"1", y→"2" → x sorts before y.
+        assert_eq!(ph, vec!["row", "x", "y"]);
+        assert_eq!(pr[0], vec!["a", "ax", "ay"]);
+        assert_eq!(pr[1], vec!["b", "bx", "by"]);
+    }
+
     // -- format_pivot --------------------------------------------------------
 
     #[test]
@@ -527,8 +603,15 @@ mod tests {
 
     #[test]
     fn col_spec_numeric() {
-        assert_eq!(ColSpec::from_str("0"), ColSpec::Index(0));
+        // 1-based: "1" and "7" are valid column numbers.
+        assert_eq!(ColSpec::from_str("1"), ColSpec::Index(1));
         assert_eq!(ColSpec::from_str("7"), ColSpec::Index(7));
+    }
+
+    #[test]
+    fn col_spec_zero_is_name() {
+        // "0" is not a valid 1-based column number; treated as a column name.
+        assert_eq!(ColSpec::from_str("0"), ColSpec::Name("0".to_owned()));
     }
 
     #[test]
