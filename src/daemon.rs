@@ -5,6 +5,7 @@
 //!
 //! Usage: `rpg daemon --config config.toml`
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use tokio_postgres::Client;
@@ -60,6 +61,108 @@ pub fn check_existing_pid(path: &Path) -> Option<u32> {
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// Bearer-token helpers for the health endpoint
+// ---------------------------------------------------------------------------
+
+/// Generate a random 32-byte bearer token encoded as 64 lowercase hex chars.
+///
+/// Reads entropy from `/dev/urandom` on Unix; falls back to a
+/// time-seeded XOR-shift when that is unavailable (e.g. Windows CI).
+/// The token is written to a companion `.token` file next to the PID
+/// file so that monitoring scripts can read it without parsing logs.
+pub fn generate_health_token() -> String {
+    let mut bytes = [0u8; 32];
+
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut bytes).is_ok() {
+                return hex_encode(&bytes);
+            }
+        }
+    }
+
+    // Fallback: XOR-shift PRNG seeded from current time + PID.
+    // Truncation is intentional: we want only the low 64 bits of the
+    // nanosecond timestamp as a seed.
+    #[allow(clippy::cast_possible_truncation)]
+    let mut state: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+        ^ (u64::from(std::process::id()) << 32);
+
+    for chunk in bytes.chunks_mut(8) {
+        // xorshift64
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        for (i, b) in chunk.iter_mut().enumerate() {
+            // Truncation intentional: extract one byte from each 8-byte word.
+            #[allow(clippy::cast_possible_truncation)]
+            let byte = (state >> (i * 8)) as u8;
+            *b = byte;
+        }
+    }
+
+    hex_encode(&bytes)
+}
+
+/// Encode a byte slice as lowercase hexadecimal.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// Derive the token-file path from the PID file path by appending `.token`.
+///
+/// Example: `/run/user/1000/rpg.pid` → `/run/user/1000/rpg.pid.token`
+pub fn token_file_path(pid_path: &Path) -> PathBuf {
+    let mut p = pid_path.to_owned();
+    let name = p.file_name().map_or_else(
+        || std::ffi::OsString::from("rpg.pid.token"),
+        |n| {
+            let mut s = n.to_owned();
+            s.push(".token");
+            s
+        },
+    );
+    p.set_file_name(name);
+    p
+}
+
+/// Write the bearer token to a token file (mode 0600 on Unix).
+///
+/// Returns `Err` if the write fails.  The caller should log a warning
+/// and continue — the health endpoint will operate unauthenticated.
+#[cfg(unix)]
+pub fn write_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(token.as_bytes())
+}
+
+/// Write the bearer token to a token file (non-Unix fallback).
+#[cfg(not(unix))]
+pub fn write_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    std::fs::write(path, token)
+}
+
+/// Remove the token file on shutdown (best-effort).
+pub fn remove_token_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,12 +261,28 @@ impl HealthStatus {
 
 /// Run a minimal HTTP health check server on the given port.
 ///
-/// Responds to `GET /health` with JSON status.
+/// # Authentication
+///
+/// When `token` is `Some`, every request must include the header:
+///
+/// ```text
+/// Authorization: Bearer <token>
+/// ```
+///
+/// Requests that omit the header or supply a wrong token receive
+/// `401 Unauthorized` and an empty body.  The token is written to a
+/// `.token` file beside the PID file (mode 0600) so monitoring scripts
+/// can read it without parsing logs.
+///
+/// When `token` is `None` the endpoint is **unauthenticated**; a warning
+/// is emitted at startup.  This can happen when token-file creation
+/// fails (e.g. read-only filesystem).
 pub async fn run_health_server(
     port: u16,
     health: std::sync::Arc<tokio::sync::RwLock<HealthStatus>>,
+    token: Option<String>,
 ) {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     let addr = format!("127.0.0.1:{port}");
@@ -175,12 +294,37 @@ pub async fn run_health_server(
         }
     };
 
+    if token.is_none() {
+        crate::logging::warn(
+            "daemon",
+            "Health endpoint is UNAUTHENTICATED — any local user can query it",
+        );
+    }
+
     crate::logging::info("daemon", &format!("Health endpoint listening on {addr}"));
 
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
             continue;
         };
+
+        // Read the HTTP request (up to 4 KiB — enough for any reasonable
+        // set of headers).
+        let mut buf = vec![0u8; 4096];
+        let Ok(n) = stream.read(&mut buf).await else {
+            continue;
+        };
+        let request = String::from_utf8_lossy(&buf[..n]);
+
+        // If a token is configured, enforce it.
+        if let Some(ref expected) = token {
+            if !is_authorized(&request, expected) {
+                let response = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                continue;
+            }
+        }
+
         let status = health.read().await;
         let body = status.to_json();
         let response = format!(
@@ -190,6 +334,44 @@ pub async fn run_health_server(
         );
         let _ = stream.write_all(response.as_bytes()).await;
     }
+}
+
+/// Return `true` if the HTTP request carries a valid bearer token.
+///
+/// Scans the raw HTTP request headers for a line of the form:
+/// `Authorization: Bearer <token>` (case-insensitive header name).
+/// Comparison is done in constant time (same length checked first, then
+/// XOR-accumulation) to avoid timing side-channels.
+fn is_authorized(request: &str, expected_token: &str) -> bool {
+    for line in request.lines() {
+        // Headers end at the blank line.
+        if line.is_empty() {
+            break;
+        }
+        // Case-insensitive match on the header name.
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("authorization:") {
+            let value = rest.trim();
+            if let Some(provided) = value.strip_prefix("bearer ") {
+                return constant_time_eq(provided.trim(), expected_token);
+            }
+        }
+    }
+    false
+}
+
+/// Constant-time string comparison (same length + XOR-accumulate).
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +402,10 @@ const TOP_WAIT_SQL: &str = "\
 ///
 /// Continuously monitors the database, detects anomalies, and sends
 /// notifications. Exits on SIGTERM or SIGINT.
+///
+/// `health_token` is the bearer token for the `/health` HTTP endpoint.
+/// Pass `Some(token)` to require authentication; `None` leaves the
+/// endpoint unauthenticated (a warning is logged in that case).
 #[allow(clippy::too_many_lines)]
 pub async fn run(
     client: &Client,
@@ -227,6 +413,7 @@ pub async fn run(
     dbname: &str,
     channels: &[NotificationChannel],
     health_port: Option<u16>,
+    health_token: Option<String>,
     github_repo: Option<&str>,
 ) {
     use std::sync::Arc;
@@ -249,8 +436,9 @@ pub async fn run(
     // Start health server if port configured.
     if let Some(port) = health_port {
         let h = Arc::clone(&health);
+        let tok = health_token.clone();
         tokio::spawn(async move {
-            run_health_server(port, h).await;
+            run_health_server(port, h, tok).await;
         });
     }
 
@@ -622,5 +810,63 @@ mod tests {
         assert_eq!(fired_at, vec![30, 60, 90]);
         // First fire at iteration 30, not before.
         assert_eq!(fired_at[0], 30);
+    }
+
+    #[test]
+    fn generate_health_token_is_64_hex_chars() {
+        let token = generate_health_token();
+        assert_eq!(token.len(), 64, "token should be 64 hex chars: {token}");
+        assert!(
+            token.chars().all(|c| c.is_ascii_hexdigit()),
+            "token should be all hex: {token}"
+        );
+    }
+
+    #[test]
+    fn generate_health_token_is_unique() {
+        // Two consecutive calls should (almost certainly) differ.
+        let t1 = generate_health_token();
+        let t2 = generate_health_token();
+        assert_ne!(t1, t2, "two tokens should differ");
+    }
+
+    #[test]
+    fn token_file_path_appends_token() {
+        let pid = std::path::PathBuf::from("/tmp/rpg.pid");
+        let tok = token_file_path(&pid);
+        assert_eq!(tok, std::path::PathBuf::from("/tmp/rpg.pid.token"));
+    }
+
+    #[test]
+    fn is_authorized_accepts_correct_token() {
+        let request = "GET /health HTTP/1.1\r\nAuthorization: Bearer mytoken123\r\n\r\n";
+        assert!(is_authorized(request, "mytoken123"));
+    }
+
+    #[test]
+    fn is_authorized_rejects_wrong_token() {
+        let request = "GET /health HTTP/1.1\r\nAuthorization: Bearer wrongtoken\r\n\r\n";
+        assert!(!is_authorized(request, "mytoken123"));
+    }
+
+    #[test]
+    fn is_authorized_rejects_missing_header() {
+        let request = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert!(!is_authorized(request, "mytoken123"));
+    }
+
+    #[test]
+    fn is_authorized_case_insensitive_header_name() {
+        let request = "GET /health HTTP/1.1\r\nAUTHORIZATION: Bearer mytoken123\r\n\r\n";
+        assert!(is_authorized(request, "mytoken123"));
+    }
+
+    #[test]
+    fn constant_time_eq_works() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "abcd"));
+        assert!(!constant_time_eq("", "x"));
+        assert!(constant_time_eq("", ""));
     }
 }

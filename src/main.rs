@@ -348,6 +348,17 @@ struct Cli {
     #[arg(long, value_name = "PORT")]
     health_port: Option<u16>,
 
+    /// Bearer token for the HTTP health endpoint.
+    ///
+    /// If omitted, a random token is generated at startup and written to
+    /// `<pid-file>.token` (mode 0600).  Clients must send the header:
+    ///   `Authorization: Bearer <token>`
+    ///
+    /// Pass an empty string (`--health-token ""`) to disable
+    /// authentication entirely (not recommended on shared hosts).
+    #[arg(long, value_name = "TOKEN")]
+    health_token: Option<String>,
+
     /// Slack webhook URL for daemon notifications.
     #[arg(long, value_name = "URL")]
     slack_webhook: Option<String>,
@@ -456,8 +467,17 @@ fn build_settings(
     cfg: &config::Config,
     project: &config::ProjectConfigResult,
 ) -> repl::ReplSettings {
-    // Build PsetConfig from CLI flags.
+    // Build PsetConfig: start with struct default, apply config-file values,
+    // then let CLI flags override.  This ordering means explicit CLI flags
+    // always win without needing sentinel-value comparisons.
     let mut pset = output::PsetConfig::default();
+
+    // Apply config-file display.border before CLI args so that CLI takes
+    // precedence.
+    if let Some(b) = cfg.display.border {
+        pset.border = b.min(2);
+    }
+
     if cli.csv {
         pset.format = output::OutputFormat::Csv;
     } else if cli.json {
@@ -522,14 +542,6 @@ fn build_settings(
     let safety_enabled = cfg.safety.destructive_warning;
     let vi_mode = cfg.display.vi_mode;
 
-    // Apply config display.border default if it wasn't set via -P border=N.
-    // The CLI -P args were already applied above via apply_cli_pset; if
-    // border is still at the struct default (1) and the config overrides
-    // it, apply the config value here.
-    if pset.border == 1 && cfg.display.border != 1 {
-        pset.border = cfg.display.border.min(2);
-    }
-
     // Initialise pager_command from the PAGER environment variable.
     // A non-empty PAGER that is not "on"/"off" sets an external pager.
     // An empty or absent PAGER leaves the built-in pager as default.
@@ -542,7 +554,7 @@ fn build_settings(
     let expanded = pset.expanded;
 
     // Pager min-lines threshold from config; 0 means always page (default).
-    let pager_min_lines = cfg.display.pager_min_lines;
+    let pager_min_lines = cfg.display.pager_min_lines.unwrap_or(0);
 
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
@@ -855,6 +867,41 @@ async fn main() {
                     std::process::exit(2);
                 }
 
+                // Determine the bearer token for the health endpoint.
+                //
+                // Priority:
+                //   1. --health-token <value>  — use exactly as supplied.
+                //      An empty string disables auth (user's explicit choice).
+                //   2. No --health-token flag   — generate a random token and
+                //      write it to <pid-file>.token (mode 0600).
+                let token_path = daemon::token_file_path(&pid_path);
+                let health_token: Option<String> = if let Some(ref explicit) = cli.health_token {
+                    // Empty string means "no auth"; non-empty means use it.
+                    if explicit.is_empty() {
+                        None
+                    } else {
+                        Some(explicit.clone())
+                    }
+                } else if cli.health_port.is_some() {
+                    // Auto-generate only when the health server is enabled.
+                    let tok = daemon::generate_health_token();
+                    match daemon::write_token_file(&token_path, &tok) {
+                        Ok(()) => {
+                            eprintln!("rpg: health token written to {}", token_path.display());
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "rpg: warning: could not write token file \
+                                     ({e}); health endpoint will be \
+                                     unauthenticated"
+                            );
+                        }
+                    }
+                    Some(tok)
+                } else {
+                    None
+                };
+
                 let mut channels = vec![daemon::NotificationChannel::Stderr];
                 if let Some(ref url) = cli.slack_webhook {
                     channels.push(daemon::NotificationChannel::Slack {
@@ -868,11 +915,13 @@ async fn main() {
                     &resolved.dbname,
                     &channels,
                     cli.health_port,
+                    health_token,
                     cli.github_repo.as_deref(),
                 )
                 .await;
 
                 daemon::remove_pid_file(&pid_path);
+                daemon::remove_token_file(&token_path);
                 0
             } else if !cli.command.is_empty() {
                 // -c CMD [--c CMD ...]: execute commands in order and exit.
