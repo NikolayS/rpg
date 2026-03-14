@@ -9706,7 +9706,11 @@ mod tests {
 
         // Both surrounding text segments are present and would be suppressed
         // by the InputMode::Text2Sql guard in handle_ai_ask().
-        assert_eq!(text_segs.len(), 2, "expected two suppressible text segments");
+        assert_eq!(
+            text_segs.len(),
+            2,
+            "expected two suppressible text segments"
+        );
         assert_eq!(sql_segs.len(), 1, "expected one SQL segment");
         assert_eq!(sql_segs[0].1, "select count(*) from users;");
     }
