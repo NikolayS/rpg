@@ -17,8 +17,6 @@
 //! | `statement_timeout` disabled | Advisory | `pg_settings` |
 //! | Restart-required GUCs | Heuristic | `pg_settings` context |
 
-// Phase 2/3 infrastructure — compiled but not yet wired into the main dispatch
-// loop. Items are exercised via unit tests and will be connected in Phase 3.
 #![allow(dead_code)]
 
 use crate::governance::{EvidenceClass, Severity};
