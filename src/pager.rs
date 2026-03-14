@@ -37,6 +37,37 @@ use ratatui::{
 };
 
 // ---------------------------------------------------------------------------
+// TerminalGuard — RAII wrapper for raw mode + alternate screen
+// ---------------------------------------------------------------------------
+
+/// RAII guard that enables raw mode and enters the alternate screen on
+/// construction, then restores the terminal unconditionally on drop —
+/// even if the caller panics.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    /// Enter raw mode and the alternate screen.
+    ///
+    /// Returns `Err` if either crossterm call fails; in that case the
+    /// terminal is left in whatever partial state it reached.
+    fn new() -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Best-effort restoration — errors are intentionally ignored so that
+        // the terminal is always restored, including during panics.
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -51,24 +82,16 @@ pub fn run_pager(content: &str) -> io::Result<()> {
     // Split content into owned lines so they outlive this function's scope.
     let lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
 
-    // Enter raw mode and alternate screen.
-    terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    // Enter raw mode and alternate screen; restored on drop (panic-safe).
+    let _guard = TerminalGuard::new()?;
 
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = PagerState::new(&lines);
 
-    // Run the event loop; always restore terminal state afterward.
-    let result = run_pager_loop(&mut terminal, &lines, &mut state);
-
-    // Restore terminal state — must happen even on error.
-    let _ = terminal::disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
-
-    result
+    // Run the event loop. The guard ensures terminal cleanup on exit or panic.
+    run_pager_loop(&mut terminal, &lines, &mut state)
 }
 
 /// Pipe `content` to an external pager command.
