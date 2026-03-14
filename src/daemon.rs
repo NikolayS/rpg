@@ -95,7 +95,8 @@ pub async fn notify(channel: &NotificationChannel, message: &str) {
 }
 
 async fn send_slack_notification(webhook_url: &str, message: &str) {
-    let payload = format!(r#"{{"text":"{}"}}"#, message.replace('"', r#"\""#));
+    let payload = serde_json::to_string(&serde_json::json!({ "text": message }))
+        .unwrap_or_else(|_| r#"{"text":"(encoding error)"}"#.to_owned());
 
     match reqwest::Client::new()
         .post(webhook_url)
@@ -466,16 +467,36 @@ pub async fn run(
     }
 }
 
-/// Get current time as ISO 8601 string.
+/// Get current time as ISO 8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
+///
+/// Uses only `std::time::SystemTime` — no external crate required.
 fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now();
-    let secs = now
-        .duration_since(SystemTime::UNIX_EPOCH)
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // Simple UTC timestamp without chrono dependency.
-    format!("{secs}")
+
+    // Decompose epoch seconds into a calendar date + time-of-day.
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+
+    // Gregorian calendar conversion (proleptic; valid for 1970+).
+    // Algorithm: shift epoch to 1 March 0000, then use the 400-year cycle.
+    let z = days_since_epoch + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +589,22 @@ mod tests {
         if let NotificationChannel::Slack { webhook_url } = ch {
             assert!(webhook_url.starts_with("https://"));
         }
+    }
+
+    #[test]
+    fn chrono_now_is_iso8601() {
+        let ts = chrono_now();
+        // Expected format: YYYY-MM-DDTHH:MM:SSZ (20 chars)
+        assert_eq!(ts.len(), 20, "expected 20-char ISO 8601 string, got: {ts}");
+        assert!(ts.ends_with('Z'), "should end with Z: {ts}");
+        assert_eq!(&ts[4..5], "-", "char 4 should be '-': {ts}");
+        assert_eq!(&ts[7..8], "-", "char 7 should be '-': {ts}");
+        assert_eq!(&ts[10..11], "T", "char 10 should be 'T': {ts}");
+        assert_eq!(&ts[13..14], ":", "char 13 should be ':': {ts}");
+        assert_eq!(&ts[16..17], ":", "char 16 should be ':': {ts}");
+        // Year should be 2025 or later.
+        let year: u64 = ts[..4].parse().expect("year should be numeric");
+        assert!(year >= 2025, "year should be >= 2025, got {year}");
     }
 
     #[test]
