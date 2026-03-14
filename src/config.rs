@@ -378,6 +378,44 @@ impl GovernanceConfig {
 }
 
 // ---------------------------------------------------------------------------
+// SSH tunnel configuration
+// ---------------------------------------------------------------------------
+
+/// SSH tunnel configuration for a connection profile (FR-22).
+///
+/// When present in a profile, Samo establishes an SSH tunnel to the bastion
+/// host and forwards the Postgres connection through it.
+///
+/// ```toml
+/// [connections.production.ssh_tunnel]
+/// host = "bastion.example.com"
+/// port = 22
+/// user = "deploy"
+/// key = "~/.ssh/id_ed25519"
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SshTunnelConfig {
+    /// SSH bastion host.
+    pub host: String,
+    /// SSH server port. Default: `22`.
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    /// SSH user name on the bastion.
+    pub user: String,
+    /// Path to an SSH private key file.  `~` is expanded to `$HOME`.
+    /// When `None`, default key paths (`~/.ssh/id_ed25519`, `~/.ssh/id_rsa`)
+    /// are tried.
+    pub key: Option<String>,
+    /// SSH password (never logged).  Prefer key-based auth.
+    pub password: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+// ---------------------------------------------------------------------------
 // Connection profile
 // ---------------------------------------------------------------------------
 
@@ -397,6 +435,21 @@ pub struct ConnectionProfile {
     pub sslmode: Option<String>,
     /// Password (stored in plaintext — use `.pgpass` where possible).
     pub password: Option<String>,
+    /// Optional SSH tunnel to use when connecting to this profile.
+    ///
+    /// ```toml
+    /// [connections.production]
+    /// host = "10.0.1.5"
+    /// port = 5432
+    /// dbname = "myapp"
+    /// username = "app_user"
+    /// [connections.production.ssh_tunnel]
+    /// host = "bastion.example.com"
+    /// port = 22
+    /// user = "deploy"
+    /// key = "~/.ssh/id_ed25519"
+    /// ```
+    pub ssh_tunnel: Option<SshTunnelConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,5 +1290,49 @@ index_health = "auto"
         let overlay = Config::default();
         let merged = merge_config(base, overlay);
         assert_eq!(merged.governance.index_health, AutonomyLevel::Auto);
+    }
+
+    // -- ConnectionProfile with ssh_tunnel field -----------------------------
+
+    #[test]
+    fn parse_profile_with_ssh_tunnel() {
+        let toml_str = r#"
+[connections.production]
+host = "10.0.1.5"
+port = 5432
+dbname = "myapp"
+username = "app_user"
+
+[connections.production.ssh_tunnel]
+host = "bastion.example.com"
+port = 22
+user = "deploy"
+key = "~/.ssh/id_ed25519"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let profile = cfg.connections.get("production").expect("profile missing");
+        let tunnel = profile.ssh_tunnel.as_ref().expect("ssh_tunnel missing");
+        assert_eq!(tunnel.host, "bastion.example.com");
+        assert_eq!(tunnel.port, 22);
+        assert_eq!(tunnel.user, "deploy");
+        assert_eq!(tunnel.key.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert!(tunnel.password.is_none());
+    }
+
+    #[test]
+    fn parse_profile_without_ssh_tunnel_is_none() {
+        let toml_str = r#"
+[connections.local]
+dbname = "mydb"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let profile = cfg.connections.get("local").expect("profile missing");
+        assert!(profile.ssh_tunnel.is_none());
+    }
+
+    #[test]
+    fn connection_profile_defaults_include_no_ssh_tunnel() {
+        let p = ConnectionProfile::default();
+        assert!(p.ssh_tunnel.is_none());
     }
 }

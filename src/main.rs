@@ -36,6 +36,7 @@ mod safety;
 mod session;
 mod session_store;
 mod setup;
+mod ssh_tunnel;
 mod vars;
 
 // Phase 2/3 infrastructure — compiled but not yet wired into the main
@@ -163,6 +164,15 @@ struct Cli {
     /// Never prompt for password.
     #[arg(short = 'w', long = "no-password")]
     no_password: bool,
+
+    /// SSH tunnel in `user@host:port` format (port defaults to 22).
+    ///
+    /// Establishes an SSH tunnel through the specified bastion host and
+    /// routes the Postgres connection through it automatically.
+    ///
+    /// Example: `--ssh-tunnel deploy@bastion.example.com:22`
+    #[arg(long, value_name = "USER@HOST:PORT")]
+    ssh_tunnel: Option<String>,
 
     // -- Psql scripting flags -----------------------------------------------
     /// Set psql variable (can be specified multiple times).
@@ -365,6 +375,9 @@ impl Cli {
             force_password: self.password,
             no_password: self.no_password,
             sslmode: self.sslmode.clone(),
+            ssh_tunnel: self.ssh_tunnel.as_deref().and_then(|s| {
+                ssh_tunnel::SshTunnelSpec::parse(s).map(config::SshTunnelConfig::from)
+            }),
         }
     }
 }
@@ -635,6 +648,9 @@ async fn main() {
         .filter(|s| s.starts_with('@'))
         .map(|s| s[1..].to_owned());
 
+    // Track the ssh_tunnel from a named profile (CLI --ssh-tunnel wins).
+    let mut profile_ssh_tunnel: Option<config::SshTunnelConfig> = None;
+
     if let Some(ref name) = profile_name {
         if let Some(profile) = config::get_profile(&cfg, name) {
             if cli.host.is_none() {
@@ -651,6 +667,10 @@ async fn main() {
             }
             if cli.sslmode.is_none() {
                 cli.sslmode.clone_from(&profile.sslmode);
+            }
+            // Carry the profile's ssh_tunnel; CLI --ssh-tunnel overrides it.
+            if cli.ssh_tunnel.is_none() {
+                profile_ssh_tunnel.clone_from(&profile.ssh_tunnel);
             }
             // Clear the positional dbname so connection resolution does not
             // misinterpret "@production" as a literal database name.
@@ -688,7 +708,40 @@ async fn main() {
         cli.sslmode.clone_from(&cfg.connection.sslmode);
     }
 
-    let opts = cli.conn_opts();
+    let mut opts = cli.conn_opts();
+
+    // Profile ssh_tunnel fills in when CLI --ssh-tunnel was not given.
+    if opts.ssh_tunnel.is_none() {
+        opts.ssh_tunnel = profile_ssh_tunnel;
+    }
+
+    // If an SSH tunnel is configured, establish it now and redirect the
+    // Postgres host/port to the local tunnel endpoint.  The `_tunnel` handle
+    // must stay alive for the entire process (dropping it kills the tunnel).
+    let _tunnel: Option<ssh_tunnel::SshTunnel> = if let Some(ref tcfg) = opts.ssh_tunnel {
+        let target_host = opts.host.clone().unwrap_or_else(|| "localhost".to_owned());
+        let target_port = opts.port.unwrap_or(5432);
+        match ssh_tunnel::open_tunnel(tcfg, &target_host, target_port).await {
+            Ok(tunnel) => {
+                if !cli.quiet {
+                    eprintln!(
+                        "samo: SSH tunnel established \
+                         (127.0.0.1:{} → {}:{})",
+                        tunnel.local_port, target_host, target_port
+                    );
+                }
+                opts.host = Some("127.0.0.1".to_owned());
+                opts.port = Some(tunnel.local_port);
+                Some(tunnel)
+            }
+            Err(e) => {
+                eprintln!("samo: {e}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
 
     // Resolve parameters once; pass into connect() so both display and the
     // actual driver use the exact same values (avoids double-resolve drift).
