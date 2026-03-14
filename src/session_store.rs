@@ -67,7 +67,9 @@ impl SessionStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create data directory: {e}"))?;
         }
-        Ok(Self { path: path.to_path_buf() })
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
     }
 
     // -----------------------------------------------------------------------
