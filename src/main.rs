@@ -23,6 +23,7 @@ mod governance;
 mod highlight;
 mod init;
 mod io;
+mod large_object;
 mod logging;
 mod markdown;
 mod metacmd;
