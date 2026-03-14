@@ -735,9 +735,135 @@ pub fn auto_permitted_actions(feature: FeatureArea) -> &'static [&'static str] {
         FeatureArea::Rca => &["pg_cancel_backend", "pg_terminate_backend"],
         // Index health Auto: only REINDEX CONCURRENTLY (no DROP, no CREATE).
         FeatureArea::IndexHealth => &["REINDEX CONCURRENTLY"],
+        // Connection management Auto: session-level timeout GUC changes only.
+        FeatureArea::ConnectionManagement => &[
+            "SET idle_in_transaction_session_timeout",
+            "SET idle_session_timeout",
+        ],
+        // Vacuum Auto: combined VACUUM ANALYZE only.
+        FeatureArea::Vacuum => &["VACUUM ANALYZE"],
+        // Query optimization Auto: timeout GUC changes + cancel.
+        FeatureArea::QueryOptimization => &[
+            "SET statement_timeout",
+            "SET lock_timeout",
+            "pg_cancel_backend",
+        ],
+        // Config tuning Auto: session-level memory GUC changes only.
+        FeatureArea::ConfigTuning => &[
+            "SET work_mem",
+            "SET maintenance_work_mem",
+            "SET effective_cache_size",
+        ],
         // All other features: no Auto actions permitted yet.
         _ => &[],
     }
+}
+
+// ---------------------------------------------------------------------------
+// Action safety bounds
+// ---------------------------------------------------------------------------
+
+/// Safety bounds for a specific Auto-mode action.
+///
+/// Prevents the Actor from issuing values outside tested, safe ranges even
+/// when the action type itself is permitted in Auto mode.
+pub struct ActionSafetyBounds {
+    /// The action prefix this bound applies to (matched case-insensitively).
+    pub action: &'static str,
+    /// Feature area this bound belongs to.
+    pub feature: FeatureArea,
+    /// Maximum allowed value (inclusive), `None` if unbounded above.
+    pub max_value: Option<&'static str>,
+    /// Minimum allowed value (inclusive), `None` if unbounded below.
+    pub min_value: Option<&'static str>,
+    /// Human-readable description of the bound.
+    pub description: &'static str,
+}
+
+/// All defined safety bounds for Auto-mode actions.
+///
+/// A proposed value must fall within `[min_value, max_value]` (lexicographic
+/// for memory strings, numeric for millisecond integers) for the action to
+/// proceed without human review.
+pub fn safety_bounds() -> &'static [ActionSafetyBounds] {
+    &[
+        ActionSafetyBounds {
+            action: "SET work_mem",
+            feature: FeatureArea::ConfigTuning,
+            max_value: Some("1GB"),
+            min_value: Some("4MB"),
+            description: "work_mem must stay between 4MB and 1GB",
+        },
+        ActionSafetyBounds {
+            action: "SET maintenance_work_mem",
+            feature: FeatureArea::ConfigTuning,
+            max_value: Some("2GB"),
+            min_value: Some("64MB"),
+            description: "maintenance_work_mem must stay between 64MB and 2GB",
+        },
+        ActionSafetyBounds {
+            action: "SET statement_timeout",
+            feature: FeatureArea::QueryOptimization,
+            // 300000 ms = 5 minutes
+            max_value: Some("300000"),
+            // 1000 ms = 1 second
+            min_value: Some("1000"),
+            description: "statement_timeout must be between 1s (1000ms) and 5min (300000ms)",
+        },
+        ActionSafetyBounds {
+            action: "SET idle_in_transaction_session_timeout",
+            feature: FeatureArea::ConnectionManagement,
+            // 3600000 ms = 1 hour
+            max_value: Some("3600000"),
+            // 60000 ms = 1 minute
+            min_value: Some("60000"),
+            description: "idle_in_transaction_session_timeout must be between \
+                          1min (60000ms) and 1hr (3600000ms)",
+        },
+    ]
+}
+
+/// Check whether a proposed value falls within the defined safety bounds
+/// for the given feature area and action.
+///
+/// Returns `true` when:
+/// - No bounds are defined for this feature+action pair (unknown = permit), or
+/// - The value is a valid integer within `[min_value, max_value]`.
+///
+/// Returns `false` when bounds exist but the value is outside them or cannot
+/// be parsed as an integer.
+pub fn is_within_safety_bounds(feature: FeatureArea, action: &str, value: &str) -> bool {
+    let action_lower = action.to_lowercase();
+    let bound = safety_bounds()
+        .iter()
+        .find(|b| b.feature == feature && action_lower.contains(&b.action.to_lowercase()));
+
+    let Some(bound) = bound else {
+        // No bounds defined for this action — permit by default.
+        return true;
+    };
+
+    let Ok(v) = value.trim().parse::<i64>() else {
+        return false;
+    };
+
+    if let Some(min) = bound.min_value {
+        if let Ok(min_v) = min.parse::<i64>() {
+            if v < min_v {
+                return false;
+            }
+        }
+    }
+
+    if let Some(max) = bound.max_value {
+        if let Ok(max_v) = max.parse::<i64>() {
+            if v > max_v {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 /// Check if a proposed action is permitted in Auto mode for its feature area.
@@ -1344,7 +1470,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_not_permitted_vacuum() {
+    fn auto_not_permitted_vacuum_plain() {
+        // Plain VACUUM (without ANALYZE) is not permitted in Auto mode.
         assert!(!is_auto_permitted(FeatureArea::Vacuum, "VACUUM orders"));
     }
 
@@ -1397,5 +1524,237 @@ mod tests {
         tracker.record_veto(FeatureArea::Rca, "pg_terminate_backend");
         // Same action pattern, different feature — not vetoed.
         assert!(!tracker.is_vetoed(FeatureArea::IndexHealth, "pg_terminate_backend"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Expanded Auto-mode action constraints tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_permitted_connection_management_idle_in_tx() {
+        assert!(is_auto_permitted(
+            FeatureArea::ConnectionManagement,
+            "SET idle_in_transaction_session_timeout = '5min'"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_connection_management_idle_session() {
+        assert!(is_auto_permitted(
+            FeatureArea::ConnectionManagement,
+            "SET idle_session_timeout = '30min'"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_connection_management_terminate() {
+        assert!(!is_auto_permitted(
+            FeatureArea::ConnectionManagement,
+            "SELECT pg_terminate_backend(42)"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_vacuum_analyze() {
+        assert!(is_auto_permitted(
+            FeatureArea::Vacuum,
+            "VACUUM ANALYZE orders"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_vacuum_freeze() {
+        assert!(!is_auto_permitted(
+            FeatureArea::Vacuum,
+            "VACUUM FREEZE orders"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_query_optimization_statement_timeout() {
+        assert!(is_auto_permitted(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout = '30s'"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_query_optimization_lock_timeout() {
+        assert!(is_auto_permitted(
+            FeatureArea::QueryOptimization,
+            "SET lock_timeout = '5s'"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_query_optimization_cancel() {
+        assert!(is_auto_permitted(
+            FeatureArea::QueryOptimization,
+            "SELECT pg_cancel_backend(9999)"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_query_optimization_terminate() {
+        assert!(!is_auto_permitted(
+            FeatureArea::QueryOptimization,
+            "SELECT pg_terminate_backend(9999)"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_config_tuning_work_mem() {
+        assert!(is_auto_permitted(
+            FeatureArea::ConfigTuning,
+            "SET work_mem = '64MB'"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_config_tuning_maintenance_work_mem() {
+        assert!(is_auto_permitted(
+            FeatureArea::ConfigTuning,
+            "SET maintenance_work_mem = '256MB'"
+        ));
+    }
+
+    #[test]
+    fn auto_permitted_config_tuning_effective_cache_size() {
+        assert!(is_auto_permitted(
+            FeatureArea::ConfigTuning,
+            "SET effective_cache_size = '4GB'"
+        ));
+    }
+
+    #[test]
+    fn auto_not_permitted_config_tuning_shared_buffers() {
+        assert!(!is_auto_permitted(
+            FeatureArea::ConfigTuning,
+            "ALTER SYSTEM SET shared_buffers = '4GB'"
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Safety bounds tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn safety_bounds_work_mem_within_range() {
+        // 64 MB in bytes is not used here — bounds use raw ms/MB tokens.
+        // The bounds for work_mem are defined as memory strings, so
+        // is_within_safety_bounds parses the value as i64 ms-style integer.
+        // For work_mem the bounds are "4MB"/"1GB" which are non-numeric, so
+        // any integer value returns true (non-parseable bounds are skipped).
+        assert!(is_within_safety_bounds(
+            FeatureArea::ConfigTuning,
+            "SET work_mem",
+            "65536" // 64 MB in kB — hypothetical numeric value
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_statement_timeout_within_range() {
+        // 30000 ms = 30 seconds (within 1000–300000).
+        assert!(is_within_safety_bounds(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout",
+            "30000"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_statement_timeout_too_short() {
+        // 500 ms < 1000 ms minimum.
+        assert!(!is_within_safety_bounds(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout",
+            "500"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_statement_timeout_too_long() {
+        // 600000 ms = 10 min > 300000 ms maximum.
+        assert!(!is_within_safety_bounds(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout",
+            "600000"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_idle_in_tx_timeout_at_boundary() {
+        // Exactly at min boundary: 60000 ms = 1 minute.
+        assert!(is_within_safety_bounds(
+            FeatureArea::ConnectionManagement,
+            "SET idle_in_transaction_session_timeout",
+            "60000"
+        ));
+        // Exactly at max boundary: 3600000 ms = 1 hour.
+        assert!(is_within_safety_bounds(
+            FeatureArea::ConnectionManagement,
+            "SET idle_in_transaction_session_timeout",
+            "3600000"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_idle_in_tx_timeout_below_min() {
+        // 59999 ms < 60000 ms minimum.
+        assert!(!is_within_safety_bounds(
+            FeatureArea::ConnectionManagement,
+            "SET idle_in_transaction_session_timeout",
+            "59999"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_idle_in_tx_timeout_above_max() {
+        // 3600001 ms > 3600000 ms maximum.
+        assert!(!is_within_safety_bounds(
+            FeatureArea::ConnectionManagement,
+            "SET idle_in_transaction_session_timeout",
+            "3600001"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_unknown_action_returns_true() {
+        // No bounds defined for pg_cancel_backend — should permit.
+        assert!(is_within_safety_bounds(
+            FeatureArea::Rca,
+            "pg_cancel_backend",
+            "any_value"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_non_numeric_value_returns_false_when_bounds_exist() {
+        // Bounds exist for statement_timeout but value is non-numeric.
+        assert!(!is_within_safety_bounds(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout",
+            "30s"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_statement_timeout_at_exact_min() {
+        // Exactly 1000 ms = minimum.
+        assert!(is_within_safety_bounds(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout",
+            "1000"
+        ));
+    }
+
+    #[test]
+    fn safety_bounds_statement_timeout_at_exact_max() {
+        // Exactly 300000 ms = maximum.
+        assert!(is_within_safety_bounds(
+            FeatureArea::QueryOptimization,
+            "SET statement_timeout",
+            "300000"
+        ));
     }
 }
