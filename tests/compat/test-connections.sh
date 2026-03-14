@@ -34,7 +34,8 @@ normalize() {
     -e 's/\brpg\b/BINARY/g' \
     -e 's/\bpsql\b/BINARY/g' \
     -e '/^Time: [0-9]/d' \
-    -e '/^Timing is /d' | \
+    -e '/^Timing is /d' \
+    -e '/^SSL connection /d' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
@@ -73,7 +74,8 @@ compare_conn_same() {
       psql --no-psqlrc "$@" 2>&1 | normalize
   ) || true
   rpg_out=$(
-    "${RPG}" "$@" 2>&1 | normalize
+    env PGPASSWORD="${TEST_PGPASSWORD}" \
+      "${RPG}" "$@" 2>&1 | normalize
   ) || true
 
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
@@ -298,9 +300,10 @@ test_pgpass_file() {
   fi
 }
 
-# (i) Unix socket connection (only when socket directory exists)
+# (i) Unix socket connection (only when a socket file actually exists)
 test_unix_socket() {
-  if [[ -d /var/run/postgresql ]]; then
+  local socket_file="/var/run/postgresql/.s.PGSQL.${TEST_PGPORT}"
+  if [[ -S "${socket_file}" ]]; then
     compare_conn_same "Unix socket connection" \
       -h /var/run/postgresql \
       -p "${TEST_PGPORT}" \
@@ -308,7 +311,7 @@ test_unix_socket() {
       -d "${TEST_PGDATABASE}" \
       -c '\conninfo'
   else
-    echo "SKIP: Unix socket connection (/var/run/postgresql not found)"
+    echo "SKIP: Unix socket (${socket_file} not found)"
   fi
 }
 
