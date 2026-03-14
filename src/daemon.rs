@@ -90,11 +90,10 @@ pub fn generate_health_token() -> String {
 
 /// Write the bearer token to the token file (mode 0600 on Unix).
 pub fn write_token_file(path: &Path, token: &str) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    use std::io::Write as _;
-
     #[cfg(unix)]
     {
+        use std::fs::OpenOptions;
+        use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt;
         let mut opts = OpenOptions::new();
         opts.write(true).create(true).truncate(true).mode(0o600);
