@@ -56,6 +56,7 @@ mod issues;
 mod query_optimization;
 mod rca_actions;
 mod replication;
+mod report;
 mod security;
 mod vacuum;
 mod verification;
@@ -861,6 +862,13 @@ async fn main() {
             // severity code (0=healthy, 1=warning, 2=critical).
             if cli.check {
                 let exit_code = check::run_health_check(&client).await;
+                std::process::exit(exit_code);
+            }
+
+            // --report [format]: run all analyzers, print detailed report,
+            // exit with severity code (0=healthy, 1=warning, 2=critical).
+            if let Some(ref format) = cli.report {
+                let exit_code = report::run_report(&client, format).await;
                 std::process::exit(exit_code);
             }
 
