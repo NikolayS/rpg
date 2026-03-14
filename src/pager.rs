@@ -438,7 +438,19 @@ fn build_line<'a>(
     current_match: usize,
 ) -> Line<'a> {
     let display_str: &str = if col_offset < line.len() {
-        &line[col_offset..]
+        // Clamp col_offset to the nearest valid char boundary so that a
+        // scroll_x increment that lands mid-character (e.g. inside a
+        // multibyte UTF-8 sequence) never causes a panic.
+        let safe_offset = if line.is_char_boundary(col_offset) {
+            col_offset
+        } else {
+            // Walk back to the nearest char boundary.
+            (0..col_offset)
+                .rev()
+                .find(|&i| line.is_char_boundary(i))
+                .unwrap_or(0)
+        };
+        &line[safe_offset..]
     } else {
         ""
     };
@@ -814,8 +826,8 @@ pub fn needs_paging_with_min(content: &str, rows: usize, min_lines: usize) -> bo
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_col_boundaries, find_matches, first_match_from, is_divider_line, last_match_before,
-        needs_paging, needs_paging_with_min,
+        build_line, detect_col_boundaries, find_matches, first_match_from, is_divider_line,
+        last_match_before, needs_paging, needs_paging_with_min,
     };
 
     // --- needs_paging ---
@@ -1096,5 +1108,95 @@ mod tests {
         // 6 lines, terminal = 3, min_lines = 5 → paging activated.
         let content = "1\n2\n3\n4\n5\n6";
         assert!(needs_paging_with_min(content, 3, 5));
+    }
+
+    // --- build_line: multibyte UTF-8 scroll boundary safety ---
+
+    /// Helper: render `build_line` with no search highlighting and return the
+    /// concatenated text of all spans as a `String`.
+    fn render_line(line: &str, col_offset: usize) -> String {
+        let rendered = build_line(line, 0, col_offset, 0, &[], 0);
+        rendered.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn test_build_line_cyrillic_exact_boundary() {
+        // "Привет мир" — each Cyrillic char is 2 bytes in UTF-8.
+        // The first char 'П' occupies bytes 0..2, 'р' bytes 2..4, etc.
+        // col_offset = 2 is a valid boundary (start of 'р').
+        let line = "Привет мир";
+        let result = render_line(line, 2);
+        assert_eq!(result, "ривет мир");
+    }
+
+    #[test]
+    fn test_build_line_cyrillic_mid_char_no_panic() {
+        // col_offset = 1 is mid-character for 'П' (bytes 0-1).
+        // Must not panic; should clamp back to byte 0 and show the full string.
+        let line = "Привет мир";
+        let result = render_line(line, 1);
+        // Clamped to 0, so the full string is returned.
+        assert_eq!(result, "Привет мир");
+    }
+
+    #[test]
+    fn test_build_line_cyrillic_scroll_by_4_no_panic() {
+        // "Привет мир" — each Cyrillic char is 2 bytes in UTF-8:
+        //   П=0-1, р=2-3, и=4-5, в=6-7, е=8-9, т=10-11, ' '=12, м=13-14, и=15-16, р=17-18
+        // offset 4 is a valid boundary (start of 'и'), result = "ивет мир".
+        let line = "Привет мир";
+        let r4 = render_line(line, 4);
+        assert_eq!(r4, "ивет мир");
+        // offset 3 is mid-character for 'р' (bytes 2-3) — clamp to 2 (start of 'р').
+        let r3 = render_line(line, 3);
+        assert_eq!(r3, "ривет мир");
+    }
+
+    #[test]
+    fn test_build_line_emoji_mid_char_no_panic() {
+        // "🎉🚀" — each emoji is 4 bytes in UTF-8.
+        // offset 1 is mid-'🎉'; must clamp to 0 without panic.
+        let line = "🎉🚀";
+        let result = render_line(line, 1);
+        assert_eq!(result, "🎉🚀");
+    }
+
+    #[test]
+    fn test_build_line_emoji_second_char_boundary() {
+        // offset 4 is the start of '🚀' — a valid boundary.
+        let line = "🎉🚀";
+        let result = render_line(line, 4);
+        assert_eq!(result, "🚀");
+    }
+
+    #[test]
+    fn test_build_line_emoji_scroll_by_4_mid_second_char() {
+        // "AB🎉🚀" byte layout:
+        //   'A'=0, 'B'=1, '🎉'=2-5, '🚀'=6-9
+        // offset 4 is mid-'🎉' — must clamp to 2 (start of '🎉'), giving "🎉🚀".
+        // offset 6 is the start of '🚀' (valid boundary), giving "🚀".
+        let line = "AB🎉🚀";
+        let r4 = render_line(line, 4);
+        // Clamped back to 2 (start of '🎉').
+        assert_eq!(r4, "🎉🚀");
+        let r6 = render_line(line, 6);
+        // Valid boundary — start of '🚀'.
+        assert_eq!(r6, "🚀");
+    }
+
+    #[test]
+    fn test_build_line_col_offset_beyond_line() {
+        // col_offset past end of line → empty string.
+        let line = "hello";
+        let result = render_line(line, 100);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_build_line_ascii_exact_boundary() {
+        // ASCII: every byte is a char boundary; basic sanity check.
+        let line = "hello world";
+        assert_eq!(render_line(line, 6), "world");
+        assert_eq!(render_line(line, 0), "hello world");
     }
 }
