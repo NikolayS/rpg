@@ -843,6 +843,10 @@ pub struct SamoHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
     highlight: bool,
+    /// Whether schema-aware tab completion is active.
+    ///
+    /// When `false`, `complete()` returns no candidates (toggled by F2).
+    completion_enabled: bool,
 }
 
 impl SamoHelper {
@@ -851,7 +855,11 @@ impl SamoHelper {
     /// `highlight` enables ANSI syntax highlighting.  Pass `false` when
     /// stdout is not a terminal or `$TERM` is `dumb`.
     pub fn new(cache: Arc<RwLock<SchemaCache>>, highlight: bool) -> Self {
-        Self { cache, highlight }
+        Self {
+            cache,
+            highlight,
+            completion_enabled: true,
+        }
     }
 
     /// Return `true` when syntax highlighting is enabled.
@@ -862,6 +870,11 @@ impl SamoHelper {
     /// Enable or disable syntax highlighting at runtime.
     pub fn set_highlight(&mut self, enabled: bool) {
         self.highlight = enabled;
+    }
+
+    /// Enable or disable schema-aware tab completion at runtime.
+    pub fn set_completion(&mut self, enabled: bool) {
+        self.completion_enabled = enabled;
     }
 }
 
@@ -874,6 +887,9 @@ impl Completer for SamoHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        if !self.completion_enabled {
+            return Ok((pos, vec![]));
+        }
         let context = detect_context(line, pos);
         let (start, prefix) = find_word_start(line, pos);
 

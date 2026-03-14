@@ -313,6 +313,14 @@ pub enum MetaCmd {
     /// `\session resume <id>` — reconnect using a saved session.
     SessionResume(String),
 
+    // -- Function key toggles (#321) ---------------------------------------
+    /// `\f2` — toggle schema-aware completion on/off (F2).
+    ToggleCompletion,
+    /// `\f3` — toggle single-line mode on/off (F3).
+    ToggleSingleLine,
+    /// `\f5` — toggle auto-EXPLAIN on/off (F5).
+    ToggleAutoExplain,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -458,7 +466,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('c') => parse_c_family(input),
         Some('C') => parse_set_title(input),
         Some('e') => parse_e_family(input),
-        Some('f') => parse_field_sep(input),
+        Some('f') => parse_f_family(input),
         Some('h') => parse_h(input),
         Some('H') => parse_simple_or_unknown(input, "H", MetaCmd::ToggleHtml),
         Some('i') => parse_i_family(input),
@@ -731,11 +739,25 @@ fn parse_y_family(input: &str) -> ParsedMeta {
 /// `\f` must be followed by nothing, whitespace, or the separator itself.
 /// If the character immediately after `f` is a letter (e.g. `\foo`), it is
 /// an unknown command, not a field-separator command.
-fn parse_field_sep(input: &str) -> ParsedMeta {
+/// Dispatch `\f…` commands: function-key aliases and field separator.
+///
+/// - `\f2` → toggle completion (F2)
+/// - `\f3` → toggle single-line mode (F3)
+/// - `\f5` → toggle auto-EXPLAIN (F5)
+/// - `\f [sep]` → set field separator for unaligned output
+fn parse_f_family(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix('f') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
-    // Reject if `f` is immediately followed by another letter/digit (e.g. `\foo`).
+    // Function-key aliases: `\f2`, `\f3`, `\f5` (no trailing chars allowed).
+    match rest.trim() {
+        "2" => return ParsedMeta::simple(MetaCmd::ToggleCompletion),
+        "3" => return ParsedMeta::simple(MetaCmd::ToggleSingleLine),
+        "5" => return ParsedMeta::simple(MetaCmd::ToggleAutoExplain),
+        _ => {}
+    }
+    // Reject if `f` is immediately followed by another letter/digit
+    // that isn't one of the known aliases above (e.g. `\foo`).
     if rest.starts_with(|c: char| c.is_alphanumeric()) {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     }
@@ -3238,5 +3260,35 @@ mod tests {
     fn parse_profiles_not_confused_with_plan() {
         assert_eq!(parse("\\plan").cmd, MetaCmd::PlanMode);
         assert_eq!(parse("\\profiles").cmd, MetaCmd::ListProfiles);
+    }
+
+    // -- Function-key aliases (#321) ----------------------------------------
+
+    #[test]
+    fn parse_f2_toggle_completion() {
+        assert_eq!(parse("\\f2").cmd, MetaCmd::ToggleCompletion);
+    }
+
+    #[test]
+    fn parse_f3_toggle_single_line() {
+        assert_eq!(parse("\\f3").cmd, MetaCmd::ToggleSingleLine);
+    }
+
+    #[test]
+    fn parse_f5_toggle_auto_explain() {
+        assert_eq!(parse("\\f5").cmd, MetaCmd::ToggleAutoExplain);
+    }
+
+    #[test]
+    fn parse_f2_not_confused_with_field_sep() {
+        // `\f` bare → FieldSep; `\f2` → ToggleCompletion
+        assert_eq!(parse("\\f").cmd, MetaCmd::FieldSep(None));
+        assert_eq!(parse("\\f2").cmd, MetaCmd::ToggleCompletion);
+    }
+
+    #[test]
+    fn parse_field_sep_still_works_after_f_family_refactor() {
+        assert_eq!(parse("\\f").cmd, MetaCmd::FieldSep(None));
+        assert_eq!(parse("\\f ,").cmd, MetaCmd::FieldSep(Some(",".to_owned())));
     }
 }

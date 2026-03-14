@@ -9,10 +9,14 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
+use rustyline::{
+    Cmd, ConditionalEventHandler, Event, EventContext, EventHandler, KeyCode, KeyEvent, Modifiers,
+    RepeatCount,
+};
 use rustyline::{Config, EditMode, Editor};
 use tokio_postgres::Client;
 
@@ -905,6 +909,10 @@ pub struct ReplSettings {
     ///
     /// Set by `--no-highlight` CLI flag or `\set HIGHLIGHT off`.
     pub no_highlight: bool,
+    /// Disable schema-aware tab completion in the interactive REPL.
+    ///
+    /// Toggled by the F2 key or `\f2` metacommand.
+    pub no_completion: bool,
     /// Whether the built-in pager is enabled.
     ///
     /// Defaults to `true`. Disable with `\set PAGER off` or by setting the
@@ -1048,6 +1056,7 @@ impl std::fmt::Debug for ReplSettings {
                 &format!("{} stmts", self.named_statements.len()),
             )
             .field("no_highlight", &self.no_highlight)
+            .field("no_completion", &self.no_completion)
             .field("pager_enabled", &self.pager_enabled)
             .field("pager_command", &self.pager_command)
             .field("pager_min_lines", &self.pager_min_lines)
@@ -1108,6 +1117,7 @@ impl Default for ReplSettings {
             pending_bind_params: None,
             named_statements: HashMap::new(),
             no_highlight: false,
+            no_completion: false,
             // Pager is enabled by default in interactive mode.
             pager_enabled: true,
             pager_command: None,
@@ -2888,7 +2898,12 @@ Auto-EXPLAIN:
   \\set EXPLAIN on       show EXPLAIN for every query
   \\set EXPLAIN analyze  show EXPLAIN ANALYZE for every query
   \\set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
-  \\set EXPLAIN off      disable auto-EXPLAIN"
+  \\set EXPLAIN off      disable auto-EXPLAIN
+
+Function keys (interactive mode):
+  F2 / \\f2   toggle schema-aware tab completion on/off
+  F3 / \\f3   toggle single-line mode on/off
+  F5 / \\f5   toggle auto-EXPLAIN on/off"
     );
 }
 
@@ -3181,6 +3196,33 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
         }
     } else {
         eprintln!("\\unset: variable {name} was not set");
+    }
+}
+
+/// Apply a function-key toggle action and print confirmation.
+///
+/// Called by the readline loop when an F-key `ConditionalEventHandler` fires.
+/// Also reachable via the `\f2` / `\f3` / `\f5` metacommands.
+fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
+    match action {
+        FKeyAction::Completion => {
+            settings.no_completion = !settings.no_completion;
+            let state = if settings.no_completion { "off" } else { "on" };
+            println!("Completion is {state}.");
+        }
+        FKeyAction::SingleLine => {
+            settings.single_line = !settings.single_line;
+            let state = if settings.single_line { "on" } else { "off" };
+            println!("Single-line mode is {state}.");
+        }
+        FKeyAction::AutoExplain => {
+            settings.auto_explain = if settings.auto_explain == AutoExplain::Off {
+                AutoExplain::On
+            } else {
+                AutoExplain::Off
+            };
+            println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+        }
     }
 }
 
@@ -4320,6 +4362,16 @@ async fn dispatch_meta(
                 }
             },
         },
+        // Function-key toggle metacommands (#321).
+        MetaCmd::ToggleCompletion => {
+            apply_fkey_toggle(FKeyAction::Completion, settings);
+        }
+        MetaCmd::ToggleSingleLine => {
+            apply_fkey_toggle(FKeyAction::SingleLine, settings);
+        }
+        MetaCmd::ToggleAutoExplain => {
+            apply_fkey_toggle(FKeyAction::AutoExplain, settings);
+        }
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
@@ -4801,6 +4853,51 @@ pub async fn run_repl(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Function key bindings (#321)
+// ---------------------------------------------------------------------------
+
+/// Action triggered by an F-key press.
+///
+/// The handler stores the pending action in a shared slot; the readline loop
+/// reads and handles it when `Cmd::Interrupt` is returned by the handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FKeyAction {
+    /// F2 — toggle schema-aware completion.
+    Completion,
+    /// F3 — toggle single-line mode.
+    SingleLine,
+    /// F5 — toggle auto-EXPLAIN.
+    AutoExplain,
+}
+
+/// rustyline `ConditionalEventHandler` for a single F-key.
+///
+/// On each press it stores `action` into the shared `pending` slot and
+/// returns `Cmd::Interrupt` so the readline loop gets control back without
+/// adding a blank line to history.  The loop checks the slot, clears it,
+/// and performs the toggle.
+#[derive(Clone)]
+struct FKeyHandler {
+    action: FKeyAction,
+    pending: Arc<Mutex<Option<FKeyAction>>>,
+}
+
+impl ConditionalEventHandler for FKeyHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext,
+    ) -> Option<Cmd> {
+        if let Ok(mut slot) = self.pending.lock() {
+            *slot = Some(self.action);
+        }
+        Some(Cmd::Interrupt)
+    }
+}
+
 /// Run with rustyline readline support.
 #[allow(clippy::too_many_lines)]
 async fn run_readline_loop(
@@ -4849,6 +4946,26 @@ async fn run_readline_loop(
         }
     };
     rl.set_helper(Some(helper));
+
+    // Shared slot for F-key actions.  The FKeyHandler stores the pending
+    // action here and returns Cmd::Interrupt; the loop reads and clears it.
+    let fkey_pending: Arc<Mutex<Option<FKeyAction>>> = Arc::new(Mutex::new(None));
+
+    // Bind F2 / F3 / F5 to their respective toggle actions.
+    for (code, action) in [
+        (KeyCode::F(2), FKeyAction::Completion),
+        (KeyCode::F(3), FKeyAction::SingleLine),
+        (KeyCode::F(5), FKeyAction::AutoExplain),
+    ] {
+        let handler = FKeyHandler {
+            action,
+            pending: Arc::clone(&fkey_pending),
+        };
+        rl.bind_sequence(
+            KeyEvent(code, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(handler)),
+        );
+    }
 
     let hist_path = history_file();
     if let Some(ref p) = hist_path {
@@ -4909,12 +5026,13 @@ async fn run_readline_loop(
                     stmt_buf.clear();
                 }
 
-                // Keep the helper's highlight state in sync with settings
-                // (allows `\set HIGHLIGHT off` to take effect live).
+                // Keep the helper's highlight and completion state in sync
+                // with settings (allows live toggles via \set and F-keys).
                 if let Some(h) = rl.helper_mut() {
                     h.set_highlight(
                         !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb"),
                     );
+                    h.set_completion(!settings.no_completion);
                 }
 
                 match result {
@@ -4933,6 +5051,18 @@ async fn run_readline_loop(
                 }
             }
             Err(ReadlineError::Interrupted) => {
+                // Check whether an F-key handler triggered the interrupt.
+                // If so, perform the toggle and re-prompt without clearing
+                // the buffer or printing a blank line.
+                let fkey_action = fkey_pending.lock().ok().and_then(|mut g| g.take());
+                if let Some(action) = fkey_action {
+                    apply_fkey_toggle(action, settings);
+                    // Sync helper state immediately.
+                    if let Some(h) = rl.helper_mut() {
+                        h.set_completion(!settings.no_completion);
+                    }
+                    continue;
+                }
                 // Ctrl-C at idle prompt: psql prints a blank line and
                 // re-prompts.  Clear any partial multi-line buffer so the
                 // user gets a clean slate.
