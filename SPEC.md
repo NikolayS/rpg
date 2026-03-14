@@ -2716,45 +2716,45 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 #### Week-by-week (Phase 3)
 
 **Week 23-24: Framework + RCA (Observe)**
-- [ ] AAA Architecture framework (Analyzer, Actor, Auditor) — **all three from day one**
-- [ ] Rule-based Auditor: action type whitelist, target validation, evidence freshness check, rate limit enforcement. No LLM needed initially — deterministic checks that validate every proposal the Analyzer produces.
-- [ ] Per-feature autonomy configuration system
-- [ ] Action audit log (every action: timestamp, feature, level, justification, outcome, Auditor assessment)
-- [ ] pg_ash detection and integration
-- [ ] RCA Analyzer: LLM-driven investigation chain (activity_summary → top_waits → timeline → queries → lock tree → stats)
-- [ ] Block tree reconstruction from pg_locks + pg_stat_activity
-- [ ] RCA report generation with three-tier mitigation (immediate / mid-term GUCs / long-term app changes)
+- [x] AAA Architecture framework (Analyzer, Actor, Auditor) — **all three from day one**
+- [x] Rule-based Auditor: action type whitelist, target validation, evidence freshness check, rate limit enforcement. No LLM needed initially — deterministic checks that validate every proposal the Analyzer produces.
+- [x] Per-feature autonomy configuration system
+- [x] Action audit log (every action: timestamp, feature, level, justification, outcome, Auditor assessment)
+- [x] pg_ash detection and integration
+- [x] RCA Analyzer: LLM-driven investigation chain (activity_summary → top_waits → timeline → queries → lock tree → stats)
+- [x] Block tree reconstruction from pg_locks + pg_stat_activity
+- [x] RCA report generation with three-tier mitigation (immediate / mid-term GUCs / long-term app changes)
 
 **Week 25-26: RCA (Supervised) + Index Health (Observe)**
-- [ ] RCA Supervised: propose immediate mitigation (cancel/terminate blockers), wait for approval
-- [ ] RCA Supervised: propose GUC changes (idle_in_transaction_session_timeout, lock_timeout, statement_timeout)
-- [ ] Actor component: isolated executor with DB permission validation
-- [ ] `rpg_ops` wrapper generation for cancel/terminate + config changes
-- [ ] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
-- [ ] Index health report generation (structured output)
+- [x] RCA Supervised: propose immediate mitigation (cancel/terminate blockers), wait for approval
+- [x] RCA Supervised: propose GUC changes (idle_in_transaction_session_timeout, lock_timeout, statement_timeout)
+- [x] Actor component: isolated executor with DB permission validation
+- [x] `rpg_ops` wrapper generation for cancel/terminate + config changes
+- [x] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
+- [x] Index health report generation (structured output)
 
 **Week 27-28: Index Health (Supervised) + Daemon mode**
-- [ ] Index health Supervised: propose actions with justification, wait for approval
-- [ ] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes, lock cascades (triggers Observe-mode investigation)
-- [ ] Daemon mode: headless operation, PID file, signal handling
-- [ ] Notification channels: Slack webhook, email
-- [ ] HTTP health check endpoint:
+- [x] Index health Supervised: propose actions with justification, wait for approval
+- [x] Anomaly detection: auto-trigger RCA on wait event spikes, session count spikes, lock cascades (triggers Observe-mode investigation)
+- [x] Daemon mode: headless operation, PID file, signal handling
+- [x] Notification channels: Slack webhook, email
+- [x] HTTP health check endpoint:
   ```json
   {"status": "healthy", "databases": {"production": {"connected": true, "last_check": "2026-03-12T14:23:01Z", "circuit_breakers": []}}}
   ```
 
 **Week 29-30: Auditor Enhancement + Issue Integration**
-- [ ] Auditor LLM upgrade: adversarial review for high-risk actions (complements rule-based Auditor from Week 23-24)
-- [ ] Auditor post-action verification (did cancel resolve the lock cascade? did reindex reduce bloat? did GUC change prevent recurrence?)
-- [ ] PostgresAI Issues connector
-- [ ] GitHub Issues connector
+- [x] Auditor LLM upgrade: adversarial review for high-risk actions (complements rule-based Auditor from Week 23-24)
+- [x] Auditor post-action verification (did cancel resolve the lock cascade? did reindex reduce bloat? did GUC change prevent recurrence?)
+- [x] PostgresAI Issues connector
+- [x] GitHub Issues connector
 
 **Week 31-32: Platform services + remaining features (Observe)**
-- [ ] Systemd unit file and install guide
-- [ ] Launchd plist for macOS
-- [ ] Windows service support
-- [ ] Container image (Alpine-based, ~15MB)
-- [ ] Observe mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
+- [x] Systemd unit file and install guide
+- [x] Launchd plist for macOS
+- [x] Windows service support
+- [x] Container image (Alpine-based, ~15MB)
+- [x] Observe mode for remaining features: vacuum, bloat, config_tuning, query_optimization, etc.
 
 **v1.0 Milestone:** RCA and index health work at Observe and Supervised levels. RCA can detect lock contention, document it, propose mitigation with Auditor validation, and execute after human approval. Other features work at Observe level. Agent runs as a daemon on all platforms. **No Auto mode in v1.0.**
 
@@ -2774,12 +2774,12 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 
 **Goal:** Connect to the outside world.
 
-- [ ] Datadog connector
-- [ ] pganalyze connector
-- [ ] AWS CloudWatch connector (metrics, logs, alarms, RDS Performance Insights, Enhanced Monitoring)
-- [ ] Supabase connector
-- [ ] Jira connector
-- [ ] GitLab Issues connector
+- [x] Datadog connector
+- [x] pganalyze connector
+- [x] AWS CloudWatch connector (metrics, logs, alarms, RDS Performance Insights, Enhanced Monitoring)
+- [x] Supabase connector
+- [x] Jira connector
+- [x] GitLab Issues connector
 - [ ] Plugin system for custom connectors
 - [x] Helm chart for Kubernetes sidecar deployment
 - [ ] Protocol marketplace (shareable health check definitions)
