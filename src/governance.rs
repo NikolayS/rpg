@@ -388,6 +388,20 @@ impl AuditLog {
         }
     }
 
+    /// Restore a previously-persisted entry without re-assigning the seq.
+    ///
+    /// Used when loading entries from a JSONL persistence file so that
+    /// historic records keep their original sequence numbers.  `next_seq`
+    /// is advanced to `entry.seq + 1` when the entry's seq is at or above
+    /// the current counter, ensuring subsequent calls to [`record`] never
+    /// collide with restored seqs.
+    pub fn restore(&mut self, entry: AuditLogEntry) {
+        if entry.seq >= self.next_seq {
+            self.next_seq = entry.seq + 1;
+        }
+        self.entries.push(entry);
+    }
+
     /// Serialize the log to JSON (for export/persistence).
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(&self.entries)

@@ -373,8 +373,9 @@ impl Default for LoggingConfig {
 /// rca = "observe"
 /// index_health = "supervised"
 /// vacuum = "supervised"
+/// audit_log_path = "~/.local/share/rpg/audit.jsonl"
 /// ```
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct GovernanceConfig {
     /// Vacuum management autonomy.
@@ -397,6 +398,19 @@ pub struct GovernanceConfig {
     pub backup_monitoring: AutonomyLevel,
     /// Security audit autonomy.
     pub security: AutonomyLevel,
+    /// Optional path for JSONL audit log persistence.
+    ///
+    /// When set, every governance decision is appended to this file so that
+    /// the audit history survives process restarts.  Tilde (`~`) is expanded
+    /// to the home directory at load time.
+    ///
+    /// ```toml
+    /// [governance]
+    /// audit_log_path = "~/.local/share/rpg/audit.jsonl"
+    /// ```
+    ///
+    /// Defaults to `None` (in-memory only).
+    pub audit_log_path: Option<PathBuf>,
 }
 
 impl Default for GovernanceConfig {
@@ -412,6 +426,7 @@ impl Default for GovernanceConfig {
             rca: AutonomyLevel::Observe,
             backup_monitoring: AutonomyLevel::Observe,
             security: AutonomyLevel::Observe,
+            audit_log_path: None,
         }
     }
 }
@@ -1306,6 +1321,8 @@ fn merge_governance(base: GovernanceConfig, overlay: GovernanceConfig) -> Govern
         rca: pick(base.rca, overlay.rca),
         backup_monitoring: pick(base.backup_monitoring, overlay.backup_monitoring),
         security: pick(base.security, overlay.security),
+        // Overlay wins if set; fall back to base.
+        audit_log_path: overlay.audit_log_path.or(base.audit_log_path),
     }
 }
 

@@ -720,6 +720,13 @@ fn build_settings(
     // Pager min-lines threshold from config; 0 means always page (default).
     let pager_min_lines = cfg.display.pager_min_lines.unwrap_or(0);
 
+    // Build the governance dispatcher, optionally loading prior persisted
+    // entries when `governance.audit_log_path` is set in the config.
+    let dispatcher = match cfg.governance.audit_log_path.clone() {
+        Some(path) => dispatcher::Dispatcher::new_with_path(path),
+        None => dispatcher::Dispatcher::new(),
+    };
+
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
         expanded,
@@ -750,6 +757,7 @@ fn build_settings(
         i_know_what_im_doing: cli.i_know_what_im_doing,
         project_context: project.postgres_md.clone(),
         ai_context_files: cfg.ai.project_context_files.clone(),
+        dispatcher,
         ..Default::default()
     }
 }
