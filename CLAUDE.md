@@ -1,8 +1,8 @@
-# CLAUDE.md — Samo
+# CLAUDE.md — Rpg
 
 ## Project
 
-Samo — self-driving Postgres agent and psql-compatible terminal. Private repo: NikolayS/project-alpha.
+Rpg — self-driving Postgres agent and psql-compatible terminal. Private repo: NikolayS/project-alpha.
 
 ## Style rules
 

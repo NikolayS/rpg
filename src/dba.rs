@@ -328,7 +328,7 @@ async fn dba_activity(
     //   active / idle in transaction  → time since query_start
     //   idle / other                  → time since state_change
     // Sorted: active (longest first), idle in transaction, then idle/other.
-    // Excludes samo's own backend via pg_backend_pid().
+    // Excludes rpg's own backend via pg_backend_pid().
     let sql = "\
         select \
             pid, \

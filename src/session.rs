@@ -3,7 +3,7 @@
 //! Each function is invoked by [`crate::repl::dispatch_meta`] and operates
 //! directly on the live Postgres client.  The `echo_hidden` flag, when true,
 //! prints internally-generated SQL to stdout before executing it (matching
-//! the behaviour of `psql -E` / `samo -E`).
+//! the behaviour of `psql -E` / `rpg -E`).
 
 use tokio_postgres::Client;
 

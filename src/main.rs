@@ -1,7 +1,7 @@
-//! Samo — self-driving Postgres agent and psql-compatible terminal.
+//! Rpg — self-driving Postgres agent and psql-compatible terminal.
 //!
 //! This is the CLI entry point. It parses psql-compatible flags and
-//! samo-specific options, then dispatches to the appropriate subsystem.
+//! rpg-specific options, then dispatches to the appropriate subsystem.
 
 use clap::Parser;
 
@@ -49,12 +49,12 @@ mod rca_actions;
 mod verification;
 
 /// Build-time git commit hash injected by `build.rs`.
-const GIT_HASH: &str = env!("SAMO_GIT_HASH");
+const GIT_HASH: &str = env!("RPG_GIT_HASH");
 
 /// Build-time date (UTC, `YYYY-MM-DD`) injected by `build.rs`.
-const BUILD_DATE: &str = env!("SAMO_BUILD_DATE");
+const BUILD_DATE: &str = env!("RPG_BUILD_DATE");
 
-/// One-line version string: `samo 0.2.0 (abc1234, built 2026-03-13)`.
+/// One-line version string: `rpg 0.2.0 (abc1234, built 2026-03-13)`.
 ///
 /// Exposed as `pub` so that meta-command handlers can print it without
 /// duplicating the formatting logic.
@@ -63,7 +63,7 @@ pub fn version_string() -> &'static str {
     // process lifetime.
     Box::leak(
         format!(
-            "samo {} ({}, built {})",
+            "rpg {} ({}, built {})",
             env!("CARGO_PKG_VERSION"),
             GIT_HASH,
             BUILD_DATE,
@@ -73,7 +73,7 @@ pub fn version_string() -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Autonomy levels (samo-specific)
+// Autonomy levels (rpg-specific)
 // ---------------------------------------------------------------------------
 
 /// Autonomy level for the agent subsystem.
@@ -100,13 +100,13 @@ fn long_version() -> &'static str {
     version_string()
 }
 
-/// Samo — self-driving Postgres agent and psql-compatible terminal.
+/// Rpg — self-driving Postgres agent and psql-compatible terminal.
 ///
 /// A psql-compatible interface with built-in AI and autonomous
 /// database health management.
 #[derive(Parser, Debug)]
 #[command(
-    name = "samo",
+    name = "rpg",
     version = long_version(),
     about = "Self-driving Postgres agent and psql-compatible terminal",
     long_about = None,
@@ -190,7 +190,7 @@ struct Cli {
     #[arg(short = 'f', long)]
     file: Option<String>,
 
-    /// Do not read startup file (~/.psqlrc / ~/.samorc).
+    /// Do not read startup file (~/.psqlrc / ~/.rpgrc).
     #[arg(short = 'X', long = "no-psqlrc")]
     no_psqlrc: bool,
 
@@ -242,7 +242,7 @@ struct Cli {
     #[arg(short = '0', long = "record-separator-zero")]
     record_separator_zero: bool,
 
-    /// Echo queries that samo generates internally.
+    /// Echo queries that rpg generates internally.
     #[arg(short = 'E', long = "echo-hidden")]
     echo_hidden: bool,
 
@@ -282,7 +282,7 @@ struct Cli {
     #[arg(short = 'D', long)]
     debug: bool,
 
-    // -- Samo-specific flags ------------------------------------------------
+    // -- Rpg-specific flags ------------------------------------------------
     /// Show psql compatibility report and exit.
     #[arg(long)]
     compat: bool,
@@ -336,7 +336,7 @@ struct Cli {
     #[arg(long, value_name = "LEVEL")]
     log_level: Option<String>,
 
-    /// Generate `samo_ops` wrapper SQL and exit. Specify PG version (e.g. 14, 16).
+    /// Generate `rpg_ops` wrapper SQL and exit. Specify PG version (e.g. 14, 16).
     #[arg(long, value_name = "PG_VERSION", default_missing_value = "16", num_args = 0..=1)]
     generate_wrappers: Option<String>,
 
@@ -405,7 +405,7 @@ fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
                 "html" => output::OutputFormat::Html,
                 "wrapped" => output::OutputFormat::Wrapped,
                 other => {
-                    eprintln!("samo: invalid value for -P format: \"{other}\"");
+                    eprintln!("rpg: invalid value for -P format: \"{other}\"");
                     std::process::exit(2);
                 }
             };
@@ -441,7 +441,7 @@ fn open_log_file(path: &str) -> Box<dyn std::io::Write> {
     match OpenOptions::new().create(true).append(true).open(path) {
         Ok(f) => Box::new(f),
         Err(e) => {
-            eprintln!("samo: -L: could not open \"{path}\": {e}");
+            eprintln!("rpg: -L: could not open \"{path}\": {e}");
             std::process::exit(2);
         }
     }
@@ -491,7 +491,7 @@ fn build_settings(
         if let Some((name, val)) = assignment.split_once('=') {
             vars.set(name, val);
         } else {
-            eprintln!("samo: -v requires name=value");
+            eprintln!("rpg: -v requires name=value");
         }
     }
 
@@ -502,7 +502,7 @@ fn build_settings(
         .map(|path| match io::open_output(Some(path)) {
             Ok(w) => w.expect("open_output with Some path returns Some"),
             Err(e) => {
-                eprintln!("samo: {e}");
+                eprintln!("rpg: {e}");
                 std::process::exit(2);
             }
         });
@@ -642,11 +642,11 @@ async fn main() {
     // by --quiet as before.
     for w in &config_warnings {
         if !cli.quiet {
-            eprintln!("samo: warning: {w}");
+            eprintln!("rpg: warning: {w}");
         }
     }
 
-    // Load project config (.samo.toml) and merge it on top of user config.
+    // Load project config (.rpg.toml) and merge it on top of user config.
     let project_result = config::load_project_config();
     let cfg = config::merge_project_config(base_cfg, &project_result.config);
 
@@ -697,7 +697,7 @@ async fn main() {
             // misinterpret "@production" as a literal database name.
             cli.dbname_pos = None;
         } else {
-            eprintln!("samo: unknown profile \"@{name}\"");
+            eprintln!("rpg: unknown profile \"@{name}\"");
             eprintln!(
                 "Configure profiles in {} under [connections.{name}]",
                 config::user_config_path_display()
@@ -746,7 +746,7 @@ async fn main() {
             Ok(tunnel) => {
                 if !cli.quiet {
                     eprintln!(
-                        "samo: SSH tunnel established \
+                        "rpg: SSH tunnel established \
                          (127.0.0.1:{} → {}:{})",
                         tunnel.local_port, target_host, target_port
                     );
@@ -756,7 +756,7 @@ async fn main() {
                 Some(tunnel)
             }
             Err(e) => {
-                eprintln!("samo: {e}");
+                eprintln!("rpg: {e}");
                 std::process::exit(2);
             }
         }
@@ -769,7 +769,7 @@ async fn main() {
     let params = match connection::resolve_params(&opts) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("samo: {e}");
+            eprintln!("rpg: {e}");
             std::process::exit(2);
         }
     };
@@ -847,11 +847,11 @@ async fn main() {
                     .map_or_else(daemon::default_pid_path, std::path::PathBuf::from);
 
                 if let Some(existing) = daemon::check_existing_pid(&pid_path) {
-                    eprintln!("samo: daemon already running (PID {existing})");
+                    eprintln!("rpg: daemon already running (PID {existing})");
                     std::process::exit(1);
                 }
                 if let Err(e) = daemon::write_pid_file(&pid_path) {
-                    eprintln!("samo: could not write PID file: {e}");
+                    eprintln!("rpg: could not write PID file: {e}");
                     std::process::exit(2);
                 }
 
@@ -901,7 +901,7 @@ async fn main() {
             }
         }
         Err(e) => {
-            eprintln!("samo: {e}");
+            eprintln!("rpg: {e}");
             std::process::exit(2);
         }
     }

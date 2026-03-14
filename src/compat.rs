@@ -1,6 +1,6 @@
 //! psql compatibility report for the `--compat` flag.
 //!
-//! Prints a formatted table showing which psql metacommands Samo supports,
+//! Prints a formatted table showing which psql metacommands Rpg supports,
 //! grouped by category, then exits.
 
 // ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ fn categories() -> Vec<(&'static str, Vec<CompatEntry>)> {
                 CompatEntry::new(r"\qecho", CompatStatus::Full, "print text to query output"),
                 CompatEntry::new(r"\warn", CompatStatus::Full, "print text to stderr"),
                 CompatEntry::new(r"\copyright", CompatStatus::Full, "show copyright notice"),
-                CompatEntry::new(r"\version", CompatStatus::Full, "show samo version"),
+                CompatEntry::new(r"\version", CompatStatus::Full, "show rpg version"),
             ],
         ),
         (

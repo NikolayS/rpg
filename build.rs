@@ -13,13 +13,13 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
 
-    println!("cargo:rustc-env=SAMO_GIT_HASH={hash}");
+    println!("cargo:rustc-env=RPG_GIT_HASH={hash}");
 
     // Embed the build date (UTC, YYYY-MM-DD format).
     // Uses the SOURCE_DATE_EPOCH env var for reproducible builds when set;
     // otherwise falls back to the current UTC date.
     let build_date = build_date();
-    println!("cargo:rustc-env=SAMO_BUILD_DATE={build_date}");
+    println!("cargo:rustc-env=RPG_BUILD_DATE={build_date}");
 
     // Re-run if HEAD changes (branch switch).
     println!("cargo:rerun-if-changed=.git/HEAD");

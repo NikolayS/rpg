@@ -5,7 +5,7 @@
 //! - `?` matches a single character (SQL `_`)
 //! - `schema.name` is a schema-qualified pattern
 //!
-//! Because Samo uses `simple_query` (no parameterised queries), values must
+//! Because Rpg uses `simple_query` (no parameterised queries), values must
 //! be embedded directly in SQL strings.  All user-supplied strings are escaped
 //! using standard SQL single-quote doubling (`'` → `''`) to prevent injection.
 

@@ -1,4 +1,4 @@
-//! Structured logging for Samo.
+//! Structured logging for Rpg.
 //!
 //! Provides a simple, lightweight logging system with configurable
 //! log levels, output targets, and structured formatting.
@@ -10,12 +10,12 @@
 //! [`init`], the logger automatically rotates the active file whenever it
 //! would exceed `max_file_size_mb` MiB:
 //!
-//! - `samo.log`   → renamed to `samo.log.1`
-//! - `samo.log.1` → renamed to `samo.log.2`
+//! - `rpg.log`   → renamed to `rpg.log.1`
+//! - `rpg.log.1` → renamed to `rpg.log.2`
 //! - …
-//! - `samo.log.{max_files}` → deleted
+//! - `rpg.log.{max_files}` → deleted
 //!
-//! A fresh `samo.log` is then opened for writing.  Set `max_file_size_mb = 0`
+//! A fresh `rpg.log` is then opened for writing.  Set `max_file_size_mb = 0`
 //! to disable rotation entirely.
 
 use std::fs::{self, OpenOptions};
@@ -111,7 +111,7 @@ struct Logger {
 
 /// Wraps an open log file together with the metadata needed for rotation.
 struct FileSink {
-    /// Path to the active log file (e.g. `/var/log/samo/samo.log`).
+    /// Path to the active log file (e.g. `/var/log/rpg/rpg.log`).
     path: PathBuf,
     /// Open handle to `path`.
     writer: Box<dyn Write + Send>,
@@ -145,12 +145,12 @@ impl FileSink {
     /// Rotate archived files and open a fresh active log.
     ///
     /// ```text
-    /// samo.log.{max_files}   → deleted
-    /// samo.log.{max_files-1} → samo.log.{max_files}
+    /// rpg.log.{max_files}   → deleted
+    /// rpg.log.{max_files-1} → rpg.log.{max_files}
     /// …
-    /// samo.log.1             → samo.log.2
-    /// samo.log               → samo.log.1
-    /// (new) samo.log         opened for writing
+    /// rpg.log.1             → rpg.log.2
+    /// rpg.log               → rpg.log.1
+    /// (new) rpg.log         opened for writing
     /// ```
     fn rotate(&mut self) {
         // Flush + drop the current writer before renaming.
@@ -195,7 +195,7 @@ impl FileSink {
     }
 }
 
-/// Return the path for archive number `n` (e.g. `samo.log` → `samo.log.3`).
+/// Return the path for archive number `n` (e.g. `rpg.log` → `rpg.log.3`).
 fn numbered_path(base: &std::path::Path, n: u32) -> PathBuf {
     let mut s = base.as_os_str().to_owned();
     s.push(format!(".{n}"));
@@ -241,7 +241,7 @@ pub fn init_rotating(level: Level, log_path: PathBuf, rotation: RotationConfig) 
             let _ = LOGGER.set(Arc::new(Mutex::new(logger)));
         }
         Err(e) => {
-            eprintln!("samo: --log-file: {e}");
+            eprintln!("rpg: --log-file: {e}");
             std::process::exit(2);
         }
     }
@@ -507,9 +507,9 @@ mod tests {
 
     #[test]
     fn numbered_path_appends_suffix() {
-        let base = PathBuf::from("/tmp/samo.log");
-        assert_eq!(numbered_path(&base, 1), PathBuf::from("/tmp/samo.log.1"));
-        assert_eq!(numbered_path(&base, 3), PathBuf::from("/tmp/samo.log.3"));
+        let base = PathBuf::from("/tmp/rpg.log");
+        assert_eq!(numbered_path(&base, 1), PathBuf::from("/tmp/rpg.log.1"));
+        assert_eq!(numbered_path(&base, 3), PathBuf::from("/tmp/rpg.log.3"));
     }
 
     // -- RotationConfig -------------------------------------------------------

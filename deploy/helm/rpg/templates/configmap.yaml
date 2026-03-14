@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "samo.fullname" . }}
+  name: {{ include "rpg.fullname" . }}
   labels:
-    {{- include "samo.labels" . | nindent 4 }}
+    {{- include "rpg.labels" . | nindent 4 }}
 data:
   config.toml: |
     [connection]

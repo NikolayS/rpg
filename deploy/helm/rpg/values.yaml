@@ -1,7 +1,7 @@
-# Samo Helm chart default values.
+# Rpg Helm chart default values.
 
 image:
-  repository: ghcr.io/nikolays/samo
+  repository: ghcr.io/nikolays/rpg
   tag: ""  # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
 
@@ -18,16 +18,16 @@ replicaCount: 1
 # Either provide a connectionString or individual fields.
 postgres:
   # Full connection string (takes precedence).
-  # connectionString: "host=mydb port=5432 dbname=mydb user=samo"
+  # connectionString: "host=mydb port=5432 dbname=mydb user=rpg"
   host: ""
   port: 5432
   database: "postgres"
-  user: "samo"
+  user: "rpg"
   # Reference to an existing Secret for the password.
   existingSecret: ""
   existingSecretKey: "password"
 
-# Samo daemon configuration.
+# Rpg daemon configuration.
 daemon:
   # Monitoring interval in seconds.
   interval: 10
@@ -74,7 +74,7 @@ resources:
     cpu: 50m
     memory: 64Mi
 
-# Security context for the Samo container.
+# Security context for the Rpg container.
 securityContext:
   runAsNonRoot: true
   runAsUser: 65534

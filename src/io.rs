@@ -1,4 +1,4 @@
-//! File I/O, buffer, and utility command handlers for Samo.
+//! File I/O, buffer, and utility command handlers for Rpg.
 //!
 //! Implements the low-level side-effects for the I/O family of backslash
 //! commands: `\i`, `\ir`, `\o`, `\w`, `\e`, `\!`, `\cd`, `\echo`, `\qecho`,
@@ -81,7 +81,7 @@ pub fn include_file<'a>(
         let end_depth = settings.cond.depth();
         if end_depth > start_depth {
             eprintln!(
-                "samo: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
+                "rpg: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
                 end_depth - start_depth
             );
         }
@@ -223,7 +223,7 @@ pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<St
 fn temp_file_path() -> String {
     let pid = std::process::id();
     let dir = std::env::temp_dir();
-    dir.join(format!("samo_edit_{pid}.sql"))
+    dir.join(format!("rpg_edit_{pid}.sql"))
         .to_string_lossy()
         .into_owned()
 }
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn change_dir_nonexistent_fails() {
-        let result = change_dir(Some("/this/path/does/not/exist/samo_test"));
+        let result = change_dir(Some("/this/path/does/not/exist/rpg_test"));
         assert!(result.is_err(), "chdir to nonexistent path should fail");
     }
 
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn write_buffer_roundtrip() {
         let dir = std::env::temp_dir();
-        let path = dir.join("samo_test_write_buffer.sql");
+        let path = dir.join("rpg_test_write_buffer.sql");
         let path_str = path.to_str().expect("path is valid UTF-8");
 
         write_buffer("select 1;", path_str).expect("write_buffer should succeed");
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn write_buffer_invalid_path_fails() {
-        let result = write_buffer("select 1;", "/no/such/directory/samo_test.sql");
+        let result = write_buffer("select 1;", "/no/such/directory/rpg_test.sql");
         assert!(result.is_err(), "write to invalid path should fail");
     }
 
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn open_output_path_creates_file() {
         let dir = std::env::temp_dir();
-        let path = dir.join("samo_test_open_output.txt");
+        let path = dir.join("rpg_test_open_output.txt");
         let path_str = path.to_str().expect("path is valid UTF-8");
 
         let result = open_output(Some(path_str)).expect("open_output should succeed");

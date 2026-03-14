@@ -1,5 +1,5 @@
 [package]
-name = "samo"
+name = "rpg"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
@@ -16,7 +16,7 @@ lto = true
 codegen-units = 1
 
 [[bin]]
-name = "samo"
+name = "rpg"
 path = "src/main.rs"
 
 [dependencies]

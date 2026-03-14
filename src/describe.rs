@@ -3102,7 +3102,7 @@ order by 1";
     /// Verify that the non-verbose SQL for `\do` includes all six expected
     /// columns (including Description) and queries `pg_operator`.
     ///
-    /// Bug #188: psql's basic `\do` always shows Description; samo previously
+    /// Bug #188: psql's basic `\do` always shows Description; rpg previously
     /// omitted it from the non-verbose path.
     #[test]
     fn list_operators_sql_has_expected_columns() {
@@ -3280,7 +3280,7 @@ order by 1";
     /// Verify that verbose `\db+` SQL adds Access privileges, Options, Size,
     /// and Description columns, matching psql's exact query.
     ///
-    /// Bug #178: samo previously had no plus branch for `\db`.
+    /// Bug #178: rpg previously had no plus branch for `\db`.
     #[test]
     fn list_tablespaces_plus_sql_has_verbose_columns() {
         let sql = "select

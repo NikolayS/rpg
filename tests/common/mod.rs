@@ -1,4 +1,4 @@
-//! Shared test helpers for Samo integration tests.
+//! Shared test helpers for Rpg integration tests.
 //!
 //! Usage:
 //! ```rust,ignore

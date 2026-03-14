@@ -1,4 +1,4 @@
-//! Interactive REPL loop for Samo.
+//! Interactive REPL loop for Rpg.
 //!
 //! Provides readline-based line editing with persistent history, multi-line
 //! SQL accumulation, backslash command handling, transaction-state prompts,
@@ -20,7 +20,7 @@ use rustyline::{
 use rustyline::{Config, EditMode, Editor};
 use tokio_postgres::Client;
 
-use crate::complete::{load_schema_cache, SamoHelper, SchemaCache};
+use crate::complete::{load_schema_cache, RpgHelper, SchemaCache};
 
 use crate::connection::ConnParams;
 
@@ -29,7 +29,7 @@ use crate::connection::ConnParams;
 // ---------------------------------------------------------------------------
 
 /// Default history file path (relative to home directory).
-const DEFAULT_HISTORY_FILE: &str = ".samo_history";
+const DEFAULT_HISTORY_FILE: &str = ".rpg_history";
 
 /// Maximum number of history entries kept in memory and on disk.
 const HISTORY_SIZE: usize = 2000;
@@ -353,7 +353,7 @@ pub fn expand_prompt(template: &str, ctx: &PromptContext<'_>) -> String {
 /// Format: `dbname=>` (idle), `dbname=*>` (in-tx), `dbname=!>` (failed).
 /// Continuation uses `-` instead of `=` as the first separator.
 ///
-/// Samo-specific execution and input mode tags (` plan`, ` text2sql`, etc.)
+/// Rpg-specific execution and input mode tags (` plan`, ` text2sql`, etc.)
 /// are inserted as a literal prefix before the psql-compatible `%R%x%#`
 /// codes, so that [`expand_prompt`] drives the actual substitution.
 ///
@@ -380,7 +380,7 @@ pub fn build_prompt(
         },
     };
     // Build a template equivalent to the default PROMPT1 (`%/%R%x%# `) but
-    // with the Samo mode tag injected as a literal between `%/` and `%R`.
+    // with the Rpg mode tag injected as a literal between `%/` and `%R`.
     let template = format!("%/{mode_tag}%R%x%# ");
     let ctx = PromptContext {
         dbname,
@@ -405,7 +405,7 @@ pub fn build_prompt(
 /// Uses PROMPT2 when `continuation` is `true`.  Falls back to the default
 /// `%/%R%x%# ` if the variable has been unset.
 ///
-/// Samo-specific mode tags are handled by [`build_prompt`]; callers that
+/// Rpg-specific mode tags are handled by [`build_prompt`]; callers that
 /// want full variable-driven prompts should use this function instead.
 pub fn build_prompt_from_settings(
     settings: &ReplSettings,
@@ -1075,13 +1075,13 @@ pub struct ReplSettings {
     /// `CommandComplete` message; `None` when no query has completed yet
     /// or the query produced no `CommandComplete` (e.g. error).
     pub last_row_count: Option<u64>,
-    /// Contents of `POSTGRES.md` found alongside `.samo.toml`, if any.
+    /// Contents of `POSTGRES.md` found alongside `.rpg.toml`, if any.
     ///
     /// When present, this text is injected into the AI system prompt for
     /// `/ask`, `/fix`, and `/explain` commands to provide project-specific
     /// Postgres context (schema notes, conventions, etc.).
     pub project_context: Option<String>,
-    /// Paths from `[ai] context_files` in `.samo.toml`.
+    /// Paths from `[ai] context_files` in `.rpg.toml`.
     ///
     /// These files are read at AI-call time and appended to the system
     /// prompt so the LLM has project-specific schema and query context.
@@ -1259,7 +1259,7 @@ impl Default for ReplSettings {
 ///
 /// Priority:
 /// 1. `PSQL_HISTORY` environment variable
-/// 2. `~/.samo_history`
+/// 2. `~/.rpg_history`
 pub fn history_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("PSQL_HISTORY") {
         return Some(PathBuf::from(val));
@@ -1275,7 +1275,7 @@ pub fn history_file() -> Option<PathBuf> {
 ///
 /// Priority:
 /// 1. `$PSQLRC` environment variable
-/// 2. `~/.samorc` if the file exists
+/// 2. `~/.rpgrc` if the file exists
 /// 3. `~/.psqlrc` if the file exists
 /// 4. `None` — no startup file
 pub fn startup_file() -> Option<PathBuf> {
@@ -1283,9 +1283,9 @@ pub fn startup_file() -> Option<PathBuf> {
         return Some(PathBuf::from(val));
     }
     if let Some(home) = dirs::home_dir() {
-        let samorc = home.join(".samorc");
-        if samorc.exists() {
-            return Some(samorc);
+        let rpgrc = home.join(".rpgrc");
+        if rpgrc.exists() {
+            return Some(rpgrc);
         }
         let psqlrc = home.join(".psqlrc");
         if psqlrc.exists() {
@@ -2463,11 +2463,11 @@ async fn auto_refresh_schema(client: &Client, settings: &mut ReplSettings) {
 fn run_pager_for_text(settings: &ReplSettings, text: &str, raw_bytes: &[u8]) {
     if let Some(ref cmd) = settings.pager_command {
         if let Err(e) = crate::pager::run_pager_external(cmd, text) {
-            eprintln!("samo: pager error: {e}");
+            eprintln!("rpg: pager error: {e}");
             let _ = io::stdout().write_all(raw_bytes);
         }
     } else if let Err(e) = crate::pager::run_pager(text) {
-        eprintln!("samo: pager error: {e}");
+        eprintln!("rpg: pager error: {e}");
         let _ = io::stdout().write_all(raw_bytes);
     }
 }
@@ -2922,7 +2922,7 @@ pub async fn exec_file(
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("samo: could not read file \"{path}\": {e}");
+            eprintln!("rpg: could not read file \"{path}\": {e}");
             return 1;
         }
     };
@@ -2933,7 +2933,7 @@ pub async fn exec_file(
     // logged, or prompted (they are internal bookkeeping, not user SQL).
     if settings.single_transaction {
         if let Err(e) = client.simple_query("begin").await {
-            eprintln!("samo: could not begin transaction: {e}");
+            eprintln!("rpg: could not begin transaction: {e}");
             return 1;
         }
         tx.update_from_sql("begin");
@@ -2950,7 +2950,7 @@ pub async fn exec_file(
 
     if settings.cond.depth() > 0 {
         eprintln!(
-            "samo: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
+            "rpg: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
             settings.cond.depth()
         );
     }
@@ -2959,7 +2959,7 @@ pub async fn exec_file(
     if settings.single_transaction {
         if exit_code == 0 {
             if let Err(e) = client.simple_query("commit").await {
-                eprintln!("samo: could not commit transaction: {e}");
+                eprintln!("rpg: could not commit transaction: {e}");
                 exit_code = 1;
             } else {
                 tx.update_from_sql("commit");
@@ -2979,7 +2979,7 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     let lines = stdin.lock().lines().map_while(|l| match l {
         Ok(line) => Some(line),
         Err(e) => {
-            eprintln!("samo: read error: {e}");
+            eprintln!("rpg: read error: {e}");
             None
         }
     });
@@ -2988,7 +2988,7 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
 
     if settings.cond.depth() > 0 {
         eprintln!(
-            "samo: warning: {} unterminated \\if block(s) at end of input",
+            "rpg: warning: {} unterminated \\if block(s) at end of input",
             settings.cond.depth()
         );
     }
@@ -3214,15 +3214,15 @@ fn print_help() {
     println!(
         r"
 Backslash commands:
-  \q              quit samo
-  quit            quit samo (interactive mode only)
-  exit            quit samo (interactive mode only)
+  \q              quit rpg
+  quit            quit rpg (interactive mode only)
+  exit            quit rpg (interactive mode only)
   help            show this help overview (interactive mode only)
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
   \conninfo       show connection information
   \copyright      show PostgreSQL usage and distribution terms
-  \version        show samo version and build information
+  \version        show rpg version and build information
   \?              show this help
 
 Session commands:
@@ -3311,7 +3311,7 @@ Function keys (interactive mode):
 fn print_profiles(config: &crate::config::Config) {
     if config.connections.is_empty() {
         println!("No connection profiles configured.");
-        println!("Add profiles to ~/.config/samo/config.toml under [connections.<name>].");
+        println!("Add profiles to ~/.config/rpg/config.toml under [connections.<name>].");
         return;
     }
 
@@ -4042,7 +4042,7 @@ fn format_system_time(now: std::time::SystemTime) -> String {
 
     // Unix path: use libc::localtime_r for local-time conversion.
     // `#[allow(deprecated)]` silences the musl time_t 32→64-bit transition
-    // warning; the cast is correct on all 64-bit targets Samo ships for.
+    // warning; the cast is correct on all 64-bit targets Rpg ships for.
     #[cfg(not(windows))]
     {
         #[allow(deprecated)]
@@ -5472,7 +5472,7 @@ async fn run_readline_loop(
         }
         Err(e) => {
             if settings.debug {
-                eprintln!("samo: schema cache load failed: {e}");
+                eprintln!("rpg: schema cache load failed: {e}");
             }
         }
     }
@@ -5481,12 +5481,12 @@ async fn run_readline_loop(
     settings.schema_cache = Some(Arc::clone(&cache));
     // Enable syntax highlighting unless the user opted out or $TERM is dumb.
     let highlight = !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb");
-    let helper = SamoHelper::new(Arc::clone(&cache), highlight);
+    let helper = RpgHelper::new(Arc::clone(&cache), highlight);
 
-    let mut rl: Editor<SamoHelper, FileHistory> = match Editor::with_config(config) {
+    let mut rl: Editor<RpgHelper, FileHistory> = match Editor::with_config(config) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("samo: readline init failed: {e}");
+            eprintln!("rpg: readline init failed: {e}");
             return 1;
         }
     };
@@ -5649,7 +5649,7 @@ async fn run_readline_loop(
                 break;
             }
             Err(e) => {
-                eprintln!("samo: readline error: {e}");
+                eprintln!("rpg: readline error: {e}");
                 break;
             }
         }
@@ -5661,7 +5661,7 @@ async fn run_readline_loop(
 
     if settings.cond.depth() > 0 {
         eprintln!(
-            "samo: warning: {} unterminated \\if block(s) at end of session",
+            "rpg: warning: {} unterminated \\if block(s) at end of session",
             settings.cond.depth()
         );
     }
@@ -5762,7 +5762,7 @@ async fn run_dumb_loop(
                 }
             }
             Err(e) => {
-                eprintln!("samo: read error: {e}");
+                eprintln!("rpg: read error: {e}");
                 return 1;
             }
         }
@@ -5770,7 +5770,7 @@ async fn run_dumb_loop(
 
     if settings.cond.depth() > 0 {
         eprintln!(
-            "samo: warning: {} unterminated \\if block(s) at end of input",
+            "rpg: warning: {} unterminated \\if block(s) at end of input",
             settings.cond.depth()
         );
     }
@@ -6115,10 +6115,10 @@ async fn handle_backslash_dumb(
 /// the standard backslash commands for further assistance.
 fn print_bare_help() {
     println!(
-        "You are using samo, the command-line interface to PostgreSQL.\n\
+        "You are using rpg, the command-line interface to PostgreSQL.\n\
          Type:  \\copyright for distribution terms\n       \
                 \\h for help with SQL commands\n       \
-                \\? for help with samo commands\n       \
+                \\? for help with rpg commands\n       \
                 \\g or terminate with semicolon to execute query\n       \
                 \\q to quit"
     );
@@ -7334,7 +7334,7 @@ fn parse_ai_response_segments(response: &str) -> Vec<AiResponseSegment> {
 ///
 /// Gathers schema context, sends the user's natural-language prompt to the
 /// LLM with a plan-generation system prompt, and streams the resulting plan.
-/// Offers to save the plan to `~/.local/share/samo/plans/`.
+/// Offers to save the plan to `~/.local/share/rpg/plans/`.
 #[allow(clippy::too_many_lines)]
 async fn handle_ai_plan(
     client: &Client,
@@ -7438,7 +7438,7 @@ async fn handle_ai_plan(
     if ask_yn_prompt("Save this plan? [y/N] ", false) {
         let plans_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("samo")
+            .join("rpg")
             .join("plans");
         if let Err(e) = std::fs::create_dir_all(&plans_dir) {
             eprintln!("Cannot create plans directory: {e}");
@@ -8532,17 +8532,17 @@ mod tests {
     #[test]
     fn startup_file_returns_psqlrc_env_when_set() {
         // Override PSQLRC to a known path.
-        std::env::set_var("PSQLRC", "/tmp/test_samo_rc");
+        std::env::set_var("PSQLRC", "/tmp/test_rpg_rc");
         let result = startup_file();
         std::env::remove_var("PSQLRC");
-        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test_samo_rc")));
+        assert_eq!(result, Some(std::path::PathBuf::from("/tmp/test_rpg_rc")));
     }
 
     #[test]
     fn startup_file_returns_none_when_no_rc_exists_and_no_env() {
         // Remove PSQLRC env so the function falls through to file checks.
         std::env::remove_var("PSQLRC");
-        // We cannot guarantee ~/.samorc or ~/.psqlrc don't exist on the test
+        // We cannot guarantee ~/.rpgrc or ~/.psqlrc don't exist on the test
         // machine, so we just verify the function doesn't panic and returns
         // an Option.
         let _result = startup_file();
@@ -10044,25 +10044,25 @@ mod tests {
 
     #[test]
     fn resolve_api_key_env_var() {
-        std::env::set_var("SAMO_TEST_API_KEY_12345", "test-secret-value");
-        let result = resolve_api_key(Some("SAMO_TEST_API_KEY_12345"));
+        std::env::set_var("RPG_TEST_API_KEY_12345", "test-secret-value");
+        let result = resolve_api_key(Some("RPG_TEST_API_KEY_12345"));
         assert_eq!(result, Some("test-secret-value".to_owned()));
-        std::env::remove_var("SAMO_TEST_API_KEY_12345");
+        std::env::remove_var("RPG_TEST_API_KEY_12345");
     }
 
     #[test]
     fn resolve_api_key_missing_env_var() {
-        std::env::remove_var("NONEXISTENT_SAMO_VAR_99999");
-        let result = resolve_api_key(Some("NONEXISTENT_SAMO_VAR_99999"));
+        std::env::remove_var("NONEXISTENT_RPG_VAR_99999");
+        let result = resolve_api_key(Some("NONEXISTENT_RPG_VAR_99999"));
         assert!(result.is_none());
     }
 
     #[test]
     fn resolve_api_key_empty_env_var() {
-        std::env::set_var("SAMO_EMPTY_KEY_TEST", "");
-        let result = resolve_api_key(Some("SAMO_EMPTY_KEY_TEST"));
+        std::env::set_var("RPG_EMPTY_KEY_TEST", "");
+        let result = resolve_api_key(Some("RPG_EMPTY_KEY_TEST"));
         assert!(result.is_none());
-        std::env::remove_var("SAMO_EMPTY_KEY_TEST");
+        std::env::remove_var("RPG_EMPTY_KEY_TEST");
     }
 
     // -- --no-readline / use_readline routing ---------------------------------

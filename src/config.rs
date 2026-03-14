@@ -1,10 +1,10 @@
-//! TOML configuration file loading for Samo.
+//! TOML configuration file loading for Rpg.
 //!
 //! Config hierarchy (later entries override earlier):
-//! 1. `/etc/samo/config.toml` (system-wide)
-//! 2. `~/.config/samo/config.toml` (user)
-//! 3. `.samo.toml` (project, searched from CWD up to home)
-//! 4. `SAMO_*` environment variables
+//! 1. `/etc/rpg/config.toml` (system-wide)
+//! 2. `~/.config/rpg/config.toml` (user)
+//! 3. `.rpg.toml` (project, searched from CWD up to home)
+//! 4. `RPG_*` environment variables
 //! 5. CLI flags
 //! 6. `\set` commands (runtime)
 
@@ -38,7 +38,7 @@ pub struct Config {
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
-    /// Named queries loaded from the project config (`.samo.toml`).
+    /// Named queries loaded from the project config (`.rpg.toml`).
     ///
     /// Not present in user/system config files — populated by
     /// [`merge_project_config`] after project config is loaded.
@@ -215,16 +215,16 @@ pub struct AiConfig {
     /// reaches this limit, further AI requests are refused until the session
     /// is restarted.  Defaults to 0 (unlimited).
     pub token_budget: u64,
-    /// Project-specific system prompt injected from `.samo.toml`.
+    /// Project-specific system prompt injected from `.rpg.toml`.
     ///
     /// When set, this string is prepended to the AI system prompt for
     /// every request.  Not present in user/system config files — populated
     /// by [`merge_project_config`].
     #[serde(skip)]
     pub project_system_prompt: Option<String>,
-    /// Paths to context files from `.samo.toml` `[ai] context_files`.
+    /// Paths to context files from `.rpg.toml` `[ai] context_files`.
     ///
-    /// Resolved relative to the directory containing `.samo.toml`.
+    /// Resolved relative to the directory containing `.rpg.toml`.
     /// Not present in user/system config files — populated by
     /// [`merge_project_config`].
     #[serde(skip)]
@@ -311,7 +311,7 @@ impl AiConfig {
 /// [logging]
 /// max_file_size_mb = 10
 /// max_files = 5
-/// audit_file = "~/.local/share/samo/queries.log"
+/// audit_file = "~/.local/share/rpg/queries.log"
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -332,7 +332,7 @@ pub struct LoggingConfig {
     ///
     /// ```toml
     /// [logging]
-    /// audit_file = "~/.local/share/samo/queries.log"
+    /// audit_file = "~/.local/share/rpg/queries.log"
     /// ```
     pub audit_file: Option<String>,
 }
@@ -467,7 +467,7 @@ impl GovernanceConfig {
 
 /// SSH tunnel configuration for a connection profile (FR-22).
 ///
-/// When present in a profile, Samo establishes an SSH tunnel to the bastion
+/// When present in a profile, Rpg establishes an SSH tunnel to the bastion
 /// host and forwards the Postgres connection through it.
 ///
 /// ```toml
@@ -503,7 +503,7 @@ fn default_ssh_port() -> u16 {
 // Connection profile
 // ---------------------------------------------------------------------------
 
-/// A named connection profile used with `samo @profile` or `\c @profile`.
+/// A named connection profile used with `rpg @profile` or `\c @profile`.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct ConnectionProfile {
@@ -537,10 +537,10 @@ pub struct ConnectionProfile {
 }
 
 // ---------------------------------------------------------------------------
-// Project config (.samo.toml)
+// Project config (.rpg.toml)
 // ---------------------------------------------------------------------------
 
-/// Project-specific config loaded from `.samo.toml`.
+/// Project-specific config loaded from `.rpg.toml`.
 ///
 /// Searched from the current working directory up to the user's home
 /// directory.  When found, it is merged on top of the user config.
@@ -575,7 +575,7 @@ pub struct ProjectConfig {
     pub safety: ProjectSafetyConfig,
 }
 
-/// Connection settings that can be overridden in `.samo.toml`.
+/// Connection settings that can be overridden in `.rpg.toml`.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct ProjectConnectionConfig {
@@ -585,20 +585,20 @@ pub struct ProjectConnectionConfig {
     pub default_host: Option<String>,
 }
 
-/// AI context settings in `.samo.toml`.
+/// AI context settings in `.rpg.toml`.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct ProjectAiConfig {
     /// Paths to context files to include in AI prompts.
     ///
-    /// Resolved relative to the directory containing `.samo.toml`.
+    /// Resolved relative to the directory containing `.rpg.toml`.
     #[serde(default)]
     pub context_files: Vec<String>,
     /// Project-specific system prompt prefix injected into AI requests.
     pub system_prompt: Option<String>,
 }
 
-/// Safety overrides in `.samo.toml`.
+/// Safety overrides in `.rpg.toml`.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct ProjectSafetyConfig {
@@ -615,7 +615,7 @@ pub struct ProjectSafetyConfig {
 pub struct ProjectConfigResult {
     /// The parsed project config, or a default if none was found.
     pub config: ProjectConfig,
-    /// Absolute path of the `.samo.toml` that was loaded, if any.
+    /// Absolute path of the `.rpg.toml` that was loaded, if any.
     pub config_path: Option<PathBuf>,
     /// Absolute path of the `POSTGRES.md` file that was found, if any.
     pub postgres_md_path: Option<PathBuf>,
@@ -637,7 +637,7 @@ pub fn load_config() -> (Config, Vec<String>) {
     let mut config = Config::default();
 
     // 1. System-wide config.
-    let system_path = PathBuf::from("/etc/samo/config.toml");
+    let system_path = PathBuf::from("/etc/rpg/config.toml");
     if system_path.exists() {
         match load_file(&system_path) {
             Ok(c) => config = merge_config(config, c),
@@ -661,15 +661,15 @@ pub fn load_config() -> (Config, Vec<String>) {
     (config, warnings)
 }
 
-/// Search for `.samo.toml` starting from `start_dir` and walking up to
+/// Search for `.rpg.toml` starting from `start_dir` and walking up to
 /// the user's home directory (inclusive).
 ///
-/// Returns the path of the first `.samo.toml` found, or `None`.
+/// Returns the path of the first `.rpg.toml` found, or `None`.
 pub fn find_project_config(start_dir: &Path) -> Option<PathBuf> {
     let home = dirs::home_dir();
     let mut dir = start_dir.to_path_buf();
     loop {
-        let candidate = dir.join(".samo.toml");
+        let candidate = dir.join(".rpg.toml");
         if candidate.exists() {
             return Some(candidate);
         }
@@ -687,7 +687,7 @@ pub fn find_project_config(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Load a `.samo.toml` project config file and look for `POSTGRES.md`
+/// Load a `.rpg.toml` project config file and look for `POSTGRES.md`
 /// alongside it.
 ///
 /// Searches from the current working directory up to the user's home
@@ -801,27 +801,27 @@ pub fn merge_project_config(mut base: Config, project: &ProjectConfig) -> Config
 /// Return the path to the user config file, or `None` if the config
 /// directory cannot be determined.
 fn user_config_path() -> Option<PathBuf> {
-    // Check XDG-style path first (~/.config/samo/config.toml) since that's
+    // Check XDG-style path first (~/.config/rpg/config.toml) since that's
     // what our docs and error messages reference.  On macOS `dirs::config_dir`
     // returns ~/Library/Application Support/ which is unexpected for CLI
     // tools, so we prefer the XDG path when it exists.
     if let Some(home) = dirs::home_dir() {
-        let xdg_path = home.join(".config").join("samo").join("config.toml");
+        let xdg_path = home.join(".config").join("rpg").join("config.toml");
         if xdg_path.exists() {
             return Some(xdg_path);
         }
     }
     // Fall back to the platform-native config dir.
-    dirs::config_dir().map(|d| d.join("samo").join("config.toml"))
+    dirs::config_dir().map(|d| d.join("rpg").join("config.toml"))
 }
 
 /// Return a human-readable path string for the user config file (for error
-/// messages).  Prefers `~/.config/samo/config.toml` since that's cross-platform.
+/// messages).  Prefers `~/.config/rpg/config.toml` since that's cross-platform.
 pub fn user_config_path_display() -> String {
     if let Some(home) = dirs::home_dir() {
-        format!("{}/.config/samo/config.toml", home.display())
+        format!("{}/.config/rpg/config.toml", home.display())
     } else {
-        "~/.config/samo/config.toml".to_owned()
+        "~/.config/rpg/config.toml".to_owned()
     }
 }
 
@@ -1853,8 +1853,8 @@ protected_tables = ["users", "payments", "audit_log"]
     fn find_project_config_finds_file_in_cwd() {
         use std::fs;
         let dir = tempfile::tempdir().expect("temp dir");
-        let config_path = dir.path().join(".samo.toml");
-        fs::write(&config_path, "[connection]\n").expect("write .samo.toml");
+        let config_path = dir.path().join(".rpg.toml");
+        fs::write(&config_path, "[connection]\n").expect("write .rpg.toml");
 
         let found = find_project_config(dir.path());
         assert_eq!(found.as_deref(), Some(config_path.as_path()));
@@ -1866,8 +1866,8 @@ protected_tables = ["users", "payments", "audit_log"]
         let parent = tempfile::tempdir().expect("temp dir");
         let child = parent.path().join("subdir");
         fs::create_dir(&child).expect("create subdir");
-        let config_path = parent.path().join(".samo.toml");
-        fs::write(&config_path, "[connection]\n").expect("write .samo.toml");
+        let config_path = parent.path().join(".rpg.toml");
+        fs::write(&config_path, "[connection]\n").expect("write .rpg.toml");
 
         let found = find_project_config(&child);
         assert_eq!(found.as_deref(), Some(config_path.as_path()));
@@ -1876,13 +1876,13 @@ protected_tables = ["users", "payments", "audit_log"]
     #[test]
     fn find_project_config_returns_none_when_absent() {
         let dir = tempfile::tempdir().expect("temp dir");
-        // No .samo.toml in this temp dir; walk will stop at root before home.
+        // No .rpg.toml in this temp dir; walk will stop at root before home.
         let found = find_project_config(dir.path());
-        // May find a real .samo.toml in parent dirs, so only assert None
+        // May find a real .rpg.toml in parent dirs, so only assert None
         // when we are outside the home directory tree.
         if let Some(path) = found {
-            // A .samo.toml exists somewhere above the temp dir — that is fine.
-            assert!(path.file_name().unwrap() == ".samo.toml");
+            // A .rpg.toml exists somewhere above the temp dir — that is fine.
+            assert!(path.file_name().unwrap() == ".rpg.toml");
         }
     }
 }

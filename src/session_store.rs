@@ -1,7 +1,7 @@
-//! JSON file-backed session persistence for Samo.
+//! JSON file-backed session persistence for Rpg.
 //!
 //! Stores connection parameters and usage statistics across REPL sessions.
-//! The file is kept at `~/.local/share/samo/sessions.json` (XDG data home).
+//! The file is kept at `~/.local/share/rpg/sessions.json` (XDG data home).
 //!
 //! The store is a JSON array of [`SessionRecord`] objects. Every mutating
 //! operation reads the current file, applies the change in memory, then writes
@@ -193,13 +193,13 @@ impl SessionStore {
 // Path helper
 // ---------------------------------------------------------------------------
 
-/// Return the path to `~/.local/share/samo/sessions.json`.
+/// Return the path to `~/.local/share/rpg/sessions.json`.
 ///
 /// Uses `dirs::data_dir()` which respects `$XDG_DATA_HOME` on Linux and
 /// returns the appropriate platform path on macOS and Windows.
 pub fn store_path() -> Option<PathBuf> {
     let mut p = dirs::data_dir()?;
-    p.push("samo");
+    p.push("rpg");
     p.push("sessions.json");
     Some(p)
 }
@@ -276,10 +276,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "samo_test_sessions_{n}_{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rpg_test_sessions_{n}_{}.json", std::process::id()));
         let store = SessionStore::open_at(&path).unwrap();
         (store, path)
     }

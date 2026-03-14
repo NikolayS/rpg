@@ -450,8 +450,8 @@ async fn repl_gexec_skips_null_cells() {
 // \gset — execute buffer and store columns as variables
 // ---------------------------------------------------------------------------
 
-/// Helper: run the samo binary with a piped script and return stdout.
-fn run_samo_script(script: &str) -> String {
+/// Helper: run the rpg binary with a piped script and return stdout.
+fn run_rpg_script(script: &str) -> String {
     use std::io::Write as _;
 
     let host = std::env::var("TEST_PGHOST").unwrap_or_else(|_| "localhost".to_owned());
@@ -460,7 +460,7 @@ fn run_samo_script(script: &str) -> String {
     let password = std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
     let dbname = std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
 
-    let bin = env!("CARGO_BIN_EXE_samo");
+    let bin = env!("CARGO_BIN_EXE_rpg");
 
     let mut child = std::process::Command::new(bin)
         .args([
@@ -480,12 +480,12 @@ fn run_samo_script(script: &str) -> String {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("failed to spawn samo binary");
+        .expect("failed to spawn rpg binary");
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(script.as_bytes());
     }
-    let output = child.wait_with_output().expect("failed to wait for samo");
+    let output = child.wait_with_output().expect("failed to wait for rpg");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
@@ -497,7 +497,7 @@ fn run_samo_script(script: &str) -> String {
 async fn gset_stores_columns_as_variables() {
     let _ = connect_or_skip!();
 
-    let stdout = run_samo_script("select 1 as x, 'hello' as y \\gset\n\\echo :x\n\\echo :y\n");
+    let stdout = run_rpg_script("select 1 as x, 'hello' as y \\gset\n\\echo :x\n\\echo :y\n");
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(
         lines.iter().any(|l| l.trim() == "1"),
@@ -514,7 +514,7 @@ async fn gset_stores_columns_as_variables() {
 async fn gset_stores_columns_with_prefix() {
     let _ = connect_or_skip!();
 
-    let stdout = run_samo_script("select 1 as x \\gset my_\n\\echo :my_x\n");
+    let stdout = run_rpg_script("select 1 as x \\gset my_\n\\echo :my_x\n");
     assert!(
         stdout.lines().any(|l| l.trim() == "1"),
         "expected '1' in output for :my_x, got: {stdout:?}"

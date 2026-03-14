@@ -1,9 +1,9 @@
 //! Daemon mode — headless continuous monitoring.
 //!
-//! Runs Samo without a REPL, performing continuous observation and
+//! Runs Rpg without a REPL, performing continuous observation and
 //! anomaly detection. Reports via configured notification channels.
 //!
-//! Usage: `samo daemon --config config.toml`
+//! Usage: `rpg daemon --config config.toml`
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +31,7 @@ pub fn remove_pid_file(path: &Path) {
 /// Default PID file path.
 pub fn default_pid_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
-    PathBuf::from(runtime_dir).join("samo.pid")
+    PathBuf::from(runtime_dir).join("rpg.pid")
 }
 
 /// Check if another daemon is already running.
@@ -258,7 +258,7 @@ pub async fn run(
 
     // Notify startup.
     for ch in channels {
-        notify(ch, &format!("Samo daemon started — monitoring {dbname}")).await;
+        notify(ch, &format!("Rpg daemon started — monitoring {dbname}")).await;
     }
 
     let mut iteration: u64 = 0;
@@ -354,11 +354,11 @@ pub async fn run(
                         if finding.severity == crate::governance::Severity::Critical {
                             let template = crate::issues::IssueTemplate {
                                 title: format!(
-                                    "[Samo] Index health: {} on {dbname}",
+                                    "[Rpg] Index health: {} on {dbname}",
                                     finding.kind.label()
                                 ),
                                 body: finding.description.clone(),
-                                labels: vec!["samo".to_owned(), "index-health".to_owned()],
+                                labels: vec!["rpg".to_owned(), "index-health".to_owned()],
                                 source: "index-health".to_owned(),
                             };
                             let creator = crate::issues::GitHubIssueCreator::new(repo.to_owned());
@@ -459,7 +459,7 @@ pub async fn run(
             _ = tokio::signal::ctrl_c() => {
                 crate::logging::info("daemon", "Received shutdown signal");
                 for ch in channels {
-                    notify(ch, &format!("Samo daemon shutting down ({dbname})")).await;
+                    notify(ch, &format!("Rpg daemon shutting down ({dbname})")).await;
                 }
                 break;
             },
@@ -511,7 +511,7 @@ mod tests {
     fn default_pid_path_is_absolute() {
         let path = default_pid_path();
         assert!(path.is_absolute());
-        assert!(path.to_str().unwrap().contains("samo.pid"));
+        assert!(path.to_str().unwrap().contains("rpg.pid"));
     }
 
     #[test]
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn pid_file_write_and_check() {
-        let dir = std::env::temp_dir().join("samo_test_pid");
+        let dir = std::env::temp_dir().join("rpg_test_pid");
         let _ = std::fs::create_dir_all(&dir);
         let pid_path = dir.join("test.pid");
 
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn check_stale_pid() {
-        let dir = std::env::temp_dir().join("samo_test_stale");
+        let dir = std::env::temp_dir().join("rpg_test_stale");
         let _ = std::fs::create_dir_all(&dir);
         let pid_path = dir.join("stale.pid");
 

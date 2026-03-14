@@ -130,7 +130,7 @@ jobs:
           key: compat-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             compat-${{ runner.os }}-cargo-
-      - name: Build samo
+      - name: Build rpg
         run: cargo build --release
       - name: Run compatibility tests
-        run: bash tests/compat/test-compat.sh target/release/samo
+        run: bash tests/compat/test-compat.sh target/release/rpg

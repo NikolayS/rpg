@@ -28,31 +28,31 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
-            artifact: samo-linux-x86_64
+            artifact: rpg-linux-x86_64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
-            artifact: samo-linux-aarch64
+            artifact: rpg-linux-aarch64
           # macOS (native runners)
           # x86_64 cross-compiled on aarch64 runner (macos-13 deprecated)
           - target: x86_64-apple-darwin
             os: macos-14
             use_cross: false
-            artifact: samo-darwin-x86_64
+            artifact: rpg-darwin-x86_64
           - target: aarch64-apple-darwin
             os: macos-14
             use_cross: false
-            artifact: samo-darwin-aarch64
+            artifact: rpg-darwin-aarch64
           # Windows (MSVC)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             use_cross: false
-            artifact: samo-windows-x86_64.exe
+            artifact: rpg-windows-x86_64.exe
           # Windows aarch64 cross-compiled from x64 via MSVC
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             use_cross: false
-            artifact: samo-windows-aarch64.exe
+            artifact: rpg-windows-aarch64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -97,7 +97,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           IFS=$'\n\t'
-          cp "target/${{ matrix.target }}/release/samo" "${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/rpg" "${{ matrix.artifact }}"
           chmod +x "${{ matrix.artifact }}"
 
       - name: Prepare artifact (windows)
@@ -106,7 +106,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           IFS=$'\n\t'
-          cp "target/${{ matrix.target }}/release/samo.exe" "${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/rpg.exe" "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

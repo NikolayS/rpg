@@ -1,4 +1,4 @@
-//! Smoke tests that verify Samo can connect to a real Postgres instance.
+//! Smoke tests that verify Rpg can connect to a real Postgres instance.
 //!
 //! These tests require a running Postgres server.  Start one with:
 //!
@@ -44,24 +44,24 @@ macro_rules! connect_or_skip {
     };
 }
 
-/// Run the `samo` binary with the given arguments, targeting the test DB.
+/// Run the `rpg` binary with the given arguments, targeting the test DB.
 ///
 /// Returns `(stdout, stderr, exit_code)`.
-fn run_samo(extra_args: &[&str]) -> (String, String, i32) {
+fn run_rpg(extra_args: &[&str]) -> (String, String, i32) {
     let host = std::env::var("TEST_PGHOST").unwrap_or_else(|_| "localhost".to_owned());
     let port = std::env::var("TEST_PGPORT").unwrap_or_else(|_| "15432".to_owned());
     let user = std::env::var("TEST_PGUSER").unwrap_or_else(|_| "testuser".to_owned());
     let password = std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
     let dbname = std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
 
-    let bin = env!("CARGO_BIN_EXE_samo");
+    let bin = env!("CARGO_BIN_EXE_rpg");
 
     let output = std::process::Command::new(bin)
         .args(["-h", &host, "-p", &port, "-U", &user, "-d", &dbname])
         .args(extra_args)
         .env("PGPASSWORD", &password)
         .output()
-        .expect("failed to spawn samo binary");
+        .expect("failed to spawn rpg binary");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -90,7 +90,7 @@ async fn smoke_execute() {
     let db = connect_or_skip!();
     // set_config is a void-returning function; execute is appropriate here.
     let affected = db
-        .execute("select set_config('application_name', 'samo-test', true)")
+        .execute("select set_config('application_name', 'rpg-test', true)")
         .await
         .expect("execute failed");
     // SELECT returns 1 row, execute returns rows affected
@@ -176,11 +176,11 @@ async fn smoke_schema_and_data() {
 // Query execution + output formatting tests (issue #19)
 // ---------------------------------------------------------------------------
 
-/// `samo -c "select 1"` prints an aligned table with `(1 row)` footer
+/// `rpg -c "select 1"` prints an aligned table with `(1 row)` footer
 /// and exits 0.
 #[test]
 fn query_select_one_aligned_output() {
-    let (stdout, _stderr, code) = run_samo(&["-c", "select 1 as n"]);
+    let (stdout, _stderr, code) = run_rpg(&["-c", "select 1 as n"]);
     assert_eq!(code, 0, "expected exit 0, got {code}\nstdout: {stdout}");
     assert!(
         stdout.contains("(1 row)"),
@@ -199,7 +199,7 @@ fn query_select_one_aligned_output() {
 /// A syntax error exits 1 and prints an error message to stderr.
 #[test]
 fn query_syntax_error_exits_1() {
-    let (stdout, stderr, code) = run_samo(&["-c", "SELEC 1"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", "SELEC 1"]);
     assert_eq!(code, 1, "expected exit 1 for syntax error, got {code}");
     let combined = format!("{stdout}{stderr}");
     assert!(
@@ -211,7 +211,7 @@ fn query_syntax_error_exits_1() {
 /// Multi-statement: `select 1; select 2` prints two result sets.
 #[test]
 fn query_multi_statement() {
-    let (stdout, _stderr, code) = run_samo(&["-c", "select 1 as a; select 2 as b"]);
+    let (stdout, _stderr, code) = run_rpg(&["-c", "select 1 as a; select 2 as b"]);
     assert_eq!(
         code, 0,
         "expected exit 0 for multi-statement:\nstdout={stdout}"
@@ -229,11 +229,11 @@ fn query_multi_statement() {
 
 /// Multiple `-c` flags execute all commands in order and exit 0.
 ///
-/// `samo -c "select 1 as a" -c "select 2 as b"` must produce both result
+/// `rpg -c "select 1 as a" -c "select 2 as b"` must produce both result
 /// sets — mirroring psql behaviour (issue #128).
 #[test]
 fn query_multiple_c_flags() {
-    let (stdout, _stderr, code) = run_samo(&["-c", "select 1 as a", "-c", "select 2 as b"]);
+    let (stdout, _stderr, code) = run_rpg(&["-c", "select 1 as a", "-c", "select 2 as b"]);
     assert_eq!(
         code, 0,
         "expected exit 0 for multiple -c flags:\nstdout={stdout}"
@@ -251,7 +251,7 @@ fn query_multiple_c_flags() {
 /// Multiple `-c` flags stop on the first error (psql-compatible).
 #[test]
 fn query_multiple_c_flags_stop_on_error() {
-    let (stdout, stderr, code) = run_samo(&["-c", "SELEC 1", "-c", "select 2 as b"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", "SELEC 1", "-c", "select 2 as b"]);
     assert_eq!(
         code, 1,
         "expected exit 1 when first -c errors:\nstdout={stdout}\nstderr={stderr}"
@@ -266,15 +266,15 @@ fn query_multiple_c_flags_stop_on_error() {
 /// NULL values display as the configured null string (default: empty).
 #[test]
 fn query_null_display() {
-    let (stdout, _stderr, code) = run_samo(&["-c", "select null::text as val"]);
+    let (stdout, _stderr, code) = run_rpg(&["-c", "select null::text as val"]);
     assert_eq!(code, 0, "expected exit 0:\nstdout={stdout}");
     assert!(stdout.contains("(1 row)"), "expected '(1 row)':\n{stdout}");
 }
 
-/// `samo -c "select true, false"` renders booleans as `t` / `f`.
+/// `rpg -c "select true, false"` renders booleans as `t` / `f`.
 #[test]
 fn query_boolean_format() {
-    let (stdout, _stderr, code) = run_samo(&["-c", "select true as yes, false as no"]);
+    let (stdout, _stderr, code) = run_rpg(&["-c", "select true as yes, false as no"]);
     assert_eq!(code, 0, "expected exit 0:\nstdout={stdout}");
     // psql renders booleans as 't' / 'f'
     assert!(
@@ -295,7 +295,7 @@ fn query_boolean_format() {
 #[test]
 fn session_sf_shows_function_source() {
     // Apply the fixture schema that defines user_order_count.
-    let (_, _, setup_code) = run_samo(&[
+    let (_, _, setup_code) = run_rpg(&[
         "-c",
         "create or replace function user_order_count(p_user_id int8)\n\
          returns int8 language sql stable as $$\n\
@@ -307,7 +307,7 @@ fn session_sf_shows_function_source() {
         return;
     }
 
-    let (stdout, stderr, code) = run_samo(&["-c", "\\sf user_order_count"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", "\\sf user_order_count"]);
     // Backslash commands in -c mode are not supported; the exit code is 1
     // and the message goes to stderr — this is expected behaviour.
     let combined = format!("{stdout}{stderr}");
@@ -318,7 +318,7 @@ fn session_sf_shows_function_source() {
 /// `\sv active_products` shows view definition.
 #[test]
 fn session_sv_shows_view_def() {
-    let (stdout, stderr, code) = run_samo(&["-c", "\\sv active_products"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", "\\sv active_products"]);
     let combined = format!("{stdout}{stderr}");
     assert_ne!(code, 2, "unexpected connection failure:\n{combined}");
 }
@@ -326,7 +326,7 @@ fn session_sv_shows_view_def() {
 /// `\h SELECT` shows help text containing "from".
 #[test]
 fn session_h_select_shows_help() {
-    let (stdout, stderr, code) = run_samo(&["-c", "\\h SELECT"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", "\\h SELECT"]);
     let combined = format!("{stdout}{stderr}");
     // Backslash commands in -c mode are unsupported; no crash expected.
     assert_ne!(code, 2, "unexpected connection failure:\n{combined}");
@@ -366,7 +366,7 @@ async fn session_sf_via_raw_client() {
     // First, create the function under test.
     client
         .batch_execute(
-            "create or replace function _samo_test_func()
+            "create or replace function _rpg_test_func()
              returns int language sql as $$ select 42; $$;",
         )
         .await
@@ -377,7 +377,7 @@ async fn session_sf_via_raw_client() {
                from pg_catalog.pg_proc as p\n\
                left join pg_catalog.pg_namespace as n\n\
                    on n.oid = p.pronamespace\n\
-               where p.proname = '_samo_test_func'\n\
+               where p.proname = '_rpg_test_func'\n\
                  and n.nspname not in ('pg_catalog', 'information_schema');";
 
     let msgs = client
@@ -390,7 +390,7 @@ async fn session_sf_via_raw_client() {
         if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
             let src = row.get(0).expect("function source missing");
             assert!(
-                src.contains("_samo_test_func"),
+                src.contains("_rpg_test_func"),
                 "source should contain function name:\n{src}"
             );
             assert!(
@@ -404,7 +404,7 @@ async fn session_sf_via_raw_client() {
 
     // Clean up.
     client
-        .batch_execute("drop function if exists _samo_test_func();")
+        .batch_execute("drop function if exists _rpg_test_func();")
         .await
         .expect("drop function failed");
 }
@@ -428,7 +428,7 @@ async fn session_sv_via_raw_client() {
 
     // Create a simple view under test.
     client
-        .batch_execute("create or replace view _samo_test_view as select 1 as n;")
+        .batch_execute("create or replace view _rpg_test_view as select 1 as n;")
         .await
         .expect("create view failed");
 
@@ -437,7 +437,7 @@ async fn session_sv_via_raw_client() {
                from pg_catalog.pg_class as c\n\
                left join pg_catalog.pg_namespace as n\n\
                    on n.oid = c.relnamespace\n\
-               where c.relname = '_samo_test_view'\n\
+               where c.relname = '_rpg_test_view'\n\
                  and c.relkind in ('v', 'm')\n\
                  and n.nspname not in ('pg_catalog', 'information_schema');";
 
@@ -461,7 +461,7 @@ async fn session_sv_via_raw_client() {
 
     // Clean up.
     client
-        .batch_execute("drop view if exists _samo_test_view;")
+        .batch_execute("drop view if exists _rpg_test_view;")
         .await
         .expect("drop view failed");
 }
@@ -469,7 +469,7 @@ async fn session_sv_via_raw_client() {
 /// A connection failure (bad host) exits with code 2.
 #[test]
 fn query_connection_failure_exits_2() {
-    let bin = env!("CARGO_BIN_EXE_samo");
+    let bin = env!("CARGO_BIN_EXE_rpg");
     let output = std::process::Command::new(bin)
         .args([
             "-h",
@@ -485,7 +485,7 @@ fn query_connection_failure_exits_2() {
             "-w", // never prompt for password
         ])
         .output()
-        .expect("failed to spawn samo");
+        .expect("failed to spawn rpg");
     let code = output.status.code().unwrap_or(-1);
     assert_eq!(
         code, 2,
@@ -510,7 +510,7 @@ async fn describe_dt_lists_tables() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\dt"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\dt"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -547,7 +547,7 @@ async fn describe_dt_with_pattern() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\dt users"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\dt users"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -574,7 +574,7 @@ async fn describe_d_table() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\d users"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\d users"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -606,7 +606,7 @@ async fn describe_d_table_partial_index_where_clause() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\d products"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\d products"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -639,7 +639,7 @@ async fn describe_d_no_args_lists_relations() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\d"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\d"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -662,7 +662,7 @@ async fn describe_di_lists_indexes() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\di"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\di"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -679,7 +679,7 @@ async fn describe_di_lists_indexes() {
 /// `\dn` lists schemas.
 #[tokio::test]
 async fn describe_dn_lists_schemas() {
-    let (stdout, stderr, code) = run_samo(&["-c", r"\dn"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\dn"]);
     assert_eq!(
         code, 0,
         "\\dn should exit 0\nstdout: {stdout}\nstderr: {stderr}"
@@ -694,7 +694,7 @@ async fn describe_dn_lists_schemas() {
 /// `\du` lists roles.
 #[tokio::test]
 async fn describe_du_lists_roles() {
-    let (stdout, stderr, code) = run_samo(&["-c", r"\du"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\du"]);
     assert_eq!(
         code, 0,
         "\\du should exit 0\nstdout: {stdout}\nstderr: {stderr}"
@@ -709,7 +709,7 @@ async fn describe_du_lists_roles() {
 /// `\l` lists databases.
 #[tokio::test]
 async fn describe_l_lists_databases() {
-    let (stdout, stderr, code) = run_samo(&["-c", r"\l"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\l"]);
     assert_eq!(
         code, 0,
         "\\l should exit 0\nstdout: {stdout}\nstderr: {stderr}"
@@ -731,7 +731,7 @@ async fn describe_dt_plus_shows_size() {
         .await
         .expect("schema fixture failed");
 
-    let (stdout, stderr, code) = run_samo(&["-c", r"\dt+"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\dt+"]);
     db.teardown_schema().await.expect("teardown failed");
 
     assert_eq!(
@@ -747,7 +747,7 @@ async fn describe_dt_plus_shows_size() {
 /// `\dx` lists installed extensions.
 #[tokio::test]
 async fn describe_dx_lists_extensions() {
-    let (stdout, stderr, code) = run_samo(&["-c", r"\dx"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\dx"]);
     assert_eq!(
         code, 0,
         "\\dx should exit 0\nstdout: {stdout}\nstderr: {stderr}"
@@ -762,7 +762,7 @@ async fn describe_dx_lists_extensions() {
 /// `\df` lists functions (at minimum the output exits 0).
 #[tokio::test]
 async fn describe_df_lists_functions() {
-    let (stdout, stderr, code) = run_samo(&["-c", r"\df"]);
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\df"]);
     assert_eq!(
         code, 0,
         "\\df should exit 0\nstdout: {stdout}\nstderr: {stderr}"

@@ -1,6 +1,6 @@
-//! Schema-aware tab completion for the Samo REPL.
+//! Schema-aware tab completion for the Rpg REPL.
 //!
-//! Provides [`SamoHelper`], which implements rustyline's [`Helper`] trait,
+//! Provides [`RpgHelper`], which implements rustyline's [`Helper`] trait,
 //! and [`SchemaCache`], which holds `pg_catalog` metadata used during
 //! completion.  The cache is loaded asynchronously via [`load_schema_cache`]
 //! and shared through an `Arc<RwLock<SchemaCache>>` so the REPL can refresh
@@ -832,14 +832,14 @@ pub fn fuzzy_match(input: &str, candidate: &str) -> Option<i32> {
 }
 
 // ---------------------------------------------------------------------------
-// SamoHelper
+// RpgHelper
 // ---------------------------------------------------------------------------
 
-/// rustyline [`Helper`] implementation for Samo.
+/// rustyline [`Helper`] implementation for Rpg.
 ///
 /// Wraps an `Arc<RwLock<SchemaCache>>` so the cache can be refreshed from
 /// the async REPL without blocking readline.
-pub struct SamoHelper {
+pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
     highlight: bool,
@@ -849,7 +849,7 @@ pub struct SamoHelper {
     completion_enabled: bool,
 }
 
-impl SamoHelper {
+impl RpgHelper {
     /// Create a new helper backed by the given cache.
     ///
     /// `highlight` enables ANSI syntax highlighting.  Pass `false` when
@@ -878,7 +878,7 @@ impl SamoHelper {
     }
 }
 
-impl Completer for SamoHelper {
+impl Completer for RpgHelper {
     type Candidate = Pair;
 
     fn complete(
@@ -986,7 +986,7 @@ impl Completer for SamoHelper {
     }
 }
 
-impl Hinter for SamoHelper {
+impl Hinter for RpgHelper {
     type Hint = String;
 
     fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
@@ -994,9 +994,9 @@ impl Hinter for SamoHelper {
     }
 }
 
-impl Validator for SamoHelper {}
+impl Validator for RpgHelper {}
 
-impl Highlighter for SamoHelper {
+impl Highlighter for RpgHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
         if self.highlight_enabled() {
             // Build a set of known schema object names (tables + columns) for
@@ -1032,7 +1032,7 @@ impl Highlighter for SamoHelper {
     }
 }
 
-impl Helper for SamoHelper {}
+impl Helper for RpgHelper {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1261,15 +1261,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SamoHelper trait bounds
+    // RpgHelper trait bounds
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_samo_helper_implements_helper() {
-        // Compile-time check: SamoHelper must implement Helper.
+    fn test_rpg_helper_implements_helper() {
+        // Compile-time check: RpgHelper must implement Helper.
         fn assert_helper<T: Helper>(_: &T) {}
         let cache = Arc::new(RwLock::new(SchemaCache::default()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         assert_helper(&helper);
     }
 
@@ -1298,7 +1298,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SamoHelper::complete integration smoke tests (no DB required)
+    // RpgHelper::complete integration smoke tests (no DB required)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1306,7 +1306,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(SchemaCache::default()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1334,7 +1334,7 @@ mod tests {
         });
 
         let cache = Arc::new(RwLock::new(cache));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1358,7 +1358,7 @@ mod tests {
         });
 
         let cache = Arc::new(RwLock::new(cache));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1658,7 +1658,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SamoHelper::complete — new scenario smoke tests
+    // RpgHelper::complete — new scenario smoke tests
     // -----------------------------------------------------------------------
 
     fn make_cache_with_table_and_columns() -> SchemaCache {
@@ -1685,7 +1685,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1702,7 +1702,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1718,7 +1718,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1734,7 +1734,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1749,7 +1749,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1764,7 +1764,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1779,7 +1779,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1794,7 +1794,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 
@@ -1810,7 +1810,7 @@ mod tests {
         use rustyline::history::DefaultHistory;
 
         let cache = Arc::new(RwLock::new(make_cache_with_table_and_columns()));
-        let helper = SamoHelper::new(cache, false);
+        let helper = RpgHelper::new(cache, false);
         let history = DefaultHistory::new();
         let ctx = Context::new(&history);
 

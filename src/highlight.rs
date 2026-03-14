@@ -1,10 +1,10 @@
-//! SQL syntax highlighting for the Samo REPL.
+//! SQL syntax highlighting for the Rpg REPL.
 //!
 //! Provides a simple tokenizer that classifies SQL tokens and emits ANSI
-//! escape sequences for coloring.  This is used by [`SamoHelper`]'s
+//! escape sequences for coloring.  This is used by [`RpgHelper`]'s
 //! `Highlighter` implementation.
 //!
-//! [`SamoHelper`]: crate::complete::SamoHelper
+//! [`RpgHelper`]: crate::complete::RpgHelper
 
 /// Token categories for coloring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
