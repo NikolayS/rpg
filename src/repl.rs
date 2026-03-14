@@ -6721,21 +6721,36 @@ async fn handle_ai_plan(
 /// `` ``` ... ``` `` fence) and returns the inner content, trimmed.  If no
 /// fences are found it returns `None`.
 fn extract_last_sql_block(text: &str) -> Option<&str> {
-    // Find the last opening fence.
-    let last_open = text.rfind("```")?;
-    let after_fence = &text[last_open + 3..];
-    // Skip optional language tag on the opening fence line.
-    let body_start = after_fence
-        .find('\n')
-        .map_or(after_fence, |i| &after_fence[i + 1..]);
-    // Find the closing fence.
-    let body_end = body_start.find("```")?;
-    let body = body_start[..body_end].trim();
-    if body.is_empty() {
-        None
-    } else {
-        Some(body)
+    // Iterate forward through all fence pairs, keeping the last non-empty one.
+    // rfind("```") was incorrect: it found the closing fence, then looked for
+    // another "```" after it — always returning None for a single block.
+    let mut last_sql: Option<&str> = None;
+    let mut search_from = 0;
+    while let Some(open_pos) = text[search_from..].find("```") {
+        let open_abs = search_from + open_pos;
+        let after_open = &text[open_abs + 3..];
+        // Skip optional language tag (e.g. "sql\n") on the opening fence line.
+        let body_start_rel = after_open
+            .find('\n')
+            .map_or(after_open.len(), |i| i + 1);
+        let body_text = &after_open[body_start_rel..];
+        if let Some(close_pos) = body_text.find("```") {
+            let body = body_text[..close_pos].trim();
+            if !body.is_empty() {
+                last_sql = Some(body);
+            }
+            // Advance past the closing fence before looking for the next pair.
+            search_from = open_abs + 3 + body_start_rel + close_pos + 3;
+        } else {
+            // Unclosed fence — treat rest of text as the body.
+            let body = body_text.trim();
+            if !body.is_empty() {
+                last_sql = Some(body);
+            }
+            break;
+        }
     }
+    last_sql
 }
 
 /// Handle a `/fix` command end-to-end.
@@ -8814,6 +8829,38 @@ mod tests {
         // We test the predicate here; the async handler itself requires a DB.
         let would_bail = settings.last_error.is_none();
         assert!(would_bail);
+    }
+
+    // -- extract_last_sql_block ------------------------------------------------
+
+    #[test]
+    fn extract_sql_block_single() {
+        let text = "Explanation\n```sql\nSELECT 1;\n```";
+        assert_eq!(extract_last_sql_block(text), Some("SELECT 1;"));
+    }
+
+    #[test]
+    fn extract_sql_block_multiple_returns_last() {
+        let text = "First\n```sql\nSELECT 1;\n```\nSecond\n```sql\nSELECT 2;\n```";
+        assert_eq!(extract_last_sql_block(text), Some("SELECT 2;"));
+    }
+
+    #[test]
+    fn extract_sql_block_no_fences_returns_none() {
+        assert_eq!(extract_last_sql_block("just plain text"), None);
+    }
+
+    #[test]
+    fn extract_sql_block_unclosed_fence() {
+        // Unclosed fence: content after the opening fence is treated as body.
+        let text = "```sql\nSELECT 42;";
+        assert_eq!(extract_last_sql_block(text), Some("SELECT 42;"));
+    }
+
+    #[test]
+    fn extract_sql_block_plain_fence_no_lang_tag() {
+        let text = "```\nSELECT 1;\n```";
+        assert_eq!(extract_last_sql_block(text), Some("SELECT 1;"));
     }
 
     // -- extract_table_names ---------------------------------------------------

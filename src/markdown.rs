@@ -187,17 +187,11 @@ fn render_code_fence(out: &mut String, lang: &str, code_lines: &[&str]) {
 
     if is_sql {
         // Join the code lines and run through the SQL highlighter.
+        // No box-drawing decorations — just emit the highlighted SQL,
+        // matching psql's plain presentation style.
         let code = code_lines.join("\n");
         let highlighted = crate::highlight::highlight_sql(&code, None);
-        out.push_str(DIM);
-        out.push_str("┌── sql ");
-        out.push_str(RESET);
-        out.push('\n');
         out.push_str(&highlighted);
-        out.push('\n');
-        out.push_str(DIM);
-        out.push_str("└───────");
-        out.push_str(RESET);
     } else {
         // Non-SQL code blocks: dim with a language label if present.
         let label = if lang.is_empty() {
@@ -638,8 +632,8 @@ mod tests {
         let result = render_markdown(md, false);
         // Should contain the SQL content.
         assert!(strip(&result).contains("SELECT 1;"));
-        // The fence box should be present.
-        assert!(result.contains('┌'));
+        // No box-drawing decorations for SQL blocks.
+        assert!(!result.contains('┌'));
     }
 
     #[test]
