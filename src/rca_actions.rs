@@ -395,7 +395,8 @@ pub async fn run_auto_flow(
         let outcome = actor.execute(client, &action_request).await;
         let success = matches!(outcome, ActionOutcome::Success { .. });
 
-        if success {
+        // Capture verification result before consuming outcome.
+        let verified_result: Option<bool> = if success {
             if let ActionOutcome::Success { ref detail } = outcome {
                 crate::logging::info("auto", &format!("Executed: {detail}"));
             }
@@ -415,14 +416,19 @@ pub async fn run_auto_flow(
                     ),
                 );
             }
+            Some(verified)
         } else {
             if let ActionOutcome::Failure { ref error } = outcome {
                 crate::logging::warn("auto", &format!("Failed: {error}"));
             }
             circuit_breaker.record(proposal.feature, false);
-        }
+            None
+        };
 
-        log_action(audit_log, proposal, AutonomyLevel::Auto, outcome, None);
+        let seq = log_action(audit_log, proposal, AutonomyLevel::Auto, outcome, None);
+        if let Some(verified) = verified_result {
+            audit_log.set_verification(seq, verified);
+        }
         if success {
             executed += 1;
         }
@@ -436,13 +442,16 @@ pub async fn run_auto_flow(
 }
 
 /// Log an action to the audit log.
+///
+/// Returns the sequence number of the new entry, so callers can
+/// update it later (e.g., with a verification result).
 fn log_action(
     audit_log: &mut AuditLog,
     proposal: &ActionProposal,
     autonomy: AutonomyLevel,
     outcome: ActionOutcome,
     note: Option<String>,
-) {
+) -> u64 {
     audit_log.record(
         proposal.feature,
         autonomy,
@@ -450,7 +459,7 @@ fn log_action(
         proposal.finding.clone(),
         outcome,
         note,
-    );
+    )
 }
 
 /// Present a single proposal, prompt the user, and execute if approved.
@@ -557,33 +566,38 @@ async fn present_and_execute(
     let success = matches!(outcome, ActionOutcome::Success { .. });
 
     // Post-action verification (on success only).
-    let verified_note = if success {
+    let (verified_note, verified_result) = if success {
         if let ActionOutcome::Success { detail } = &outcome {
             eprintln!("      Done: {detail}");
         }
         let vr = crate::verification::verify_action(client, &action_request.action_type).await;
         eprintln!("      Verify: {vr}\n");
 
+        let confirmed = vr.is_confirmed();
         // Append verification result to auditor note.
         let vr_str = format!(" | Verification: {vr}");
-        Some(match note {
+        let combined_note = Some(match note {
             Some(n) => format!("{n}{vr_str}"),
             None => vr_str,
-        })
+        });
+        (combined_note, Some(confirmed))
     } else {
         match &outcome {
             ActionOutcome::Failure { error } => eprintln!("      Failed: {error}\n"),
             other => eprintln!("      {other:?}\n"),
         }
-        note
+        (note, None)
     };
-    log_action(
+    let seq = log_action(
         audit_log,
         proposal,
         AutonomyLevel::Supervised,
         outcome,
         verified_note,
     );
+    if let Some(verified) = verified_result {
+        audit_log.set_verification(seq, verified);
+    }
     success
 }
 
