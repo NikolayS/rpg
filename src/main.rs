@@ -364,6 +364,10 @@ struct Cli {
     #[arg(long, value_name = "URL")]
     slack_webhook: Option<String>,
 
+    /// Generic webhook URL for daemon notifications (POSTs JSON).
+    #[arg(long, value_name = "URL")]
+    webhook_url: Option<String>,
+
     /// Path to PID file for daemon mode.
     #[arg(long, value_name = "PATH")]
     pid_file: Option<String>,
@@ -881,6 +885,9 @@ async fn main() {
                     channels.push(daemon::NotificationChannel::Slack {
                         webhook_url: url.clone(),
                     });
+                }
+                if let Some(ref url) = cli.webhook_url {
+                    channels.push(daemon::NotificationChannel::Webhook { url: url.clone() });
                 }
 
                 daemon::run(
