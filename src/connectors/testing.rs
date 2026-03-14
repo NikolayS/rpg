@@ -246,6 +246,7 @@ impl<C: Connector> RecordingConnector<C> {
     /// Return a shared handle to the calls list.
     ///
     /// Useful when you need to inspect calls from a different thread.
+    #[allow(dead_code)]
     pub fn calls_arc(&self) -> Arc<Mutex<Vec<RecordedCall>>> {
         Arc::clone(&self.calls)
     }
