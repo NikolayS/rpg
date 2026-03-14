@@ -18,6 +18,13 @@
 //! Frozen columns are pinned at the left edge and remain visible during
 //! horizontal scrolling. A `│` separator is drawn between frozen and
 //! scrollable columns. The status bar shows "Frozen: N" when N > 0.
+//!
+//! ## Clipboard Copy (OSC 52)
+//!
+//! Press `y` to copy the current line to the system clipboard via OSC 52.
+//! Press `Y` to copy all visible lines to the clipboard.
+//! A brief "Copied!" or "Copied N lines!" message appears in the status bar
+//! for 1 second after copying.
 
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -35,6 +42,61 @@ use ratatui::{
     widgets::Paragraph,
     Terminal,
 };
+
+// ---------------------------------------------------------------------------
+// Base64 encoding (inline — no external crate needed)
+// ---------------------------------------------------------------------------
+
+/// Encode `data` as standard base64 (RFC 4648, with `=` padding).
+///
+/// Used for OSC 52 clipboard copy sequences.
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
+        let combined = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((combined >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((combined >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((combined >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(combined & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// OSC 52 clipboard copy
+// ---------------------------------------------------------------------------
+
+/// Write an OSC 52 clipboard copy escape sequence for `text` directly to
+/// stdout, bypassing ratatui's internal buffer.
+///
+/// This is best-effort: errors are intentionally ignored so that a missing
+/// or non-compliant terminal does not crash the pager.
+fn osc52_copy(text: &str) {
+    let encoded = base64_encode(text.as_bytes());
+    let mut stdout = io::stdout();
+    let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
+    let _ = stdout.flush();
+}
 
 // ---------------------------------------------------------------------------
 // TerminalGuard — RAII wrapper for raw mode + alternate screen
@@ -234,6 +296,11 @@ struct PagerState {
     frozen_cols: usize,
     /// Byte offsets of `|` separators detected in the header line.
     col_boundaries: Vec<usize>,
+    /// Temporary status-bar message with the time it was set.
+    ///
+    /// Shown for 1 second after a clipboard copy, then reverts to normal
+    /// status.
+    status_flash: Option<(String, std::time::Instant)>,
 }
 
 impl PagerState {
@@ -248,6 +315,7 @@ impl PagerState {
             search_forward: true,
             frozen_cols: 0,
             col_boundaries: detect_col_boundaries(lines),
+            status_flash: None,
         }
     }
 
@@ -597,8 +665,20 @@ fn draw_frame(
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, content_area);
 
-    // Status bar — search input prompt, match info, or normal hints.
-    let status_text = if let Some(ref buf) = state.search_input {
+    // Status bar — flash message, search input prompt, match info, or normal hints.
+    let status_text = if let Some((ref msg, instant)) = state.status_flash {
+        if instant.elapsed() < std::time::Duration::from_secs(1) {
+            format!(" {msg} ")
+        } else {
+            // Flash expired; fall through to normal status on the next draw.
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let status_text = if !status_text.is_empty() {
+        status_text
+    } else if let Some(ref buf) = state.search_input {
         let prefix = if state.search_forward { "/" } else { "?" };
         format!("{prefix}{buf}")
     } else {
@@ -698,6 +778,7 @@ fn handle_search_key(key: event::KeyEvent, state: &mut PagerState, lines: &[Stri
 fn handle_nav_key(
     key: event::KeyEvent,
     state: &mut PagerState,
+    lines: &[String],
     max_scroll_y: usize,
     max_x: usize,
     content_height: usize,
@@ -749,6 +830,21 @@ fn handle_nav_key(
         KeyCode::Char('N') => {
             state.prev_match();
         }
+        // y — copy the current line to the clipboard via OSC 52.
+        KeyCode::Char('y') => {
+            if let Some(line) = lines.get(state.scroll_y) {
+                osc52_copy(line);
+                state.status_flash = Some(("Copied!".to_owned(), std::time::Instant::now()));
+            }
+        }
+        // Y — copy all visible lines to the clipboard via OSC 52.
+        KeyCode::Char('Y') => {
+            let end = (state.scroll_y + content_height).min(lines.len());
+            let text = lines[state.scroll_y..end].join("\n");
+            let n = end.saturating_sub(state.scroll_y);
+            osc52_copy(&text);
+            state.status_flash = Some((format!("Copied {n} lines!"), std::time::Instant::now()));
+        }
         _ => {}
     }
     false
@@ -760,6 +856,13 @@ fn run_pager_loop(
     state: &mut PagerState,
 ) -> io::Result<()> {
     loop {
+        // Expire the status flash if its 1-second window has passed.
+        if let Some((_, instant)) = state.status_flash {
+            if instant.elapsed() >= std::time::Duration::from_secs(1) {
+                state.status_flash = None;
+            }
+        }
+
         let area = terminal.size()?;
         let content_height = area.height.saturating_sub(1) as usize;
         let content_width = area.width as usize;
@@ -770,13 +873,19 @@ fn run_pager_loop(
             draw_frame(frame, lines, state, content_height, max_y);
         })?;
 
-        // Poll for input with a short timeout to remain responsive to resize.
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Use a shorter poll timeout while a flash is active so the status
+        // bar clears promptly; fall back to 100 ms otherwise.
+        let poll_ms = if state.status_flash.is_some() {
+            50
+        } else {
+            100
+        };
+        if event::poll(std::time::Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 let quit = if state.in_search_input() {
                     handle_search_key(key, state, lines)
                 } else {
-                    handle_nav_key(key, state, max_y, max_x, content_height)
+                    handle_nav_key(key, state, lines, max_y, max_x, content_height)
                 };
                 if quit {
                     break;
@@ -826,9 +935,49 @@ pub fn needs_paging_with_min(content: &str, rows: usize, min_lines: usize) -> bo
 #[cfg(test)]
 mod tests {
     use super::{
-        build_line, detect_col_boundaries, find_matches, first_match_from, is_divider_line,
-        last_match_before, needs_paging, needs_paging_with_min,
+        base64_encode, build_line, detect_col_boundaries, find_matches, first_match_from,
+        is_divider_line, last_match_before, needs_paging, needs_paging_with_min,
     };
+
+    // --- base64_encode ---
+
+    #[test]
+    fn test_base64_encode_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn test_base64_encode_one_byte() {
+        // 'M' → binary 01001101 → 010011 01xxxx → MTI= padded
+        // Actually "M" → "TQ=="
+        assert_eq!(base64_encode(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn test_base64_encode_two_bytes() {
+        // "Ma" → "TWE="
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+    }
+
+    #[test]
+    fn test_base64_encode_three_bytes() {
+        // "Man" → "TWFu" (RFC 4648 example)
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+    }
+
+    #[test]
+    fn test_base64_encode_hello() {
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn test_base64_encode_full_sentence() {
+        // Known-good value from RFC / online encoders.
+        assert_eq!(
+            base64_encode(b"The quick brown fox"),
+            "VGhlIHF1aWNrIGJyb3duIGZveA=="
+        );
+    }
 
     // --- needs_paging ---
 
