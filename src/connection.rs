@@ -8,16 +8,23 @@
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
+use std::future::Future;
+use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_postgres::config::SslMode as TokioSslMode;
+use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect};
 use tokio_postgres::Client;
-use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
 
 // ---------------------------------------------------------------------------
 // Public error types
@@ -57,6 +64,59 @@ pub enum ConnectionError {
 
     #[error("service file error: {0}")]
     ServiceFileError(String),
+}
+
+// ---------------------------------------------------------------------------
+// TLS session info
+// ---------------------------------------------------------------------------
+
+/// Negotiated TLS protocol version and cipher suite, captured after handshake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsInfo {
+    /// Protocol version string, e.g. `"TLSv1.3"` or `"TLSv1.2"`.
+    pub protocol: String,
+    /// Cipher suite name in IANA format, e.g. `"TLS_AES_256_GCM_SHA384"`.
+    pub cipher: String,
+}
+
+impl TlsInfo {
+    /// Format the SSL status line exactly as psql does:
+    /// `SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384,
+    /// compression: off)`
+    pub fn status_line(&self) -> String {
+        format!(
+            "SSL connection (protocol: {}, cipher: {}, compression: off)",
+            self.protocol, self.cipher,
+        )
+    }
+}
+
+/// Convert a rustls `ProtocolVersion` to the psql display string.
+///
+/// rustls uses `TLSv1_2` / `TLSv1_3`; psql shows `TLSv1.2` / `TLSv1.3`.
+fn protocol_version_str(v: rustls::ProtocolVersion) -> String {
+    match v.as_str() {
+        Some(s) => s.replace('_', "."),
+        None => format!("TLS(0x{:04x})", u16::from(v)),
+    }
+}
+
+/// Convert a rustls `CipherSuite` to the IANA name used by psql.
+///
+/// rustls names TLS 1.3 suites as `TLS13_AES_256_GCM_SHA384`; IANA (and psql)
+/// use `TLS_AES_256_GCM_SHA384`.  TLS 1.2 suites already start with `TLS_`.
+fn cipher_suite_str(cs: rustls::CipherSuite) -> String {
+    match cs.as_str() {
+        Some(s) => {
+            // rustls prefixes TLS 1.3 suites with "TLS13_"; IANA uses "TLS_".
+            if let Some(rest) = s.strip_prefix("TLS13_") {
+                format!("TLS_{rest}")
+            } else {
+                s.to_owned()
+            }
+        }
+        None => format!("CipherSuite(0x{:04x})", u16::from(cs)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,11 +188,13 @@ pub struct ConnParams {
     /// Server-side GUC options sent at connection startup via the `options`
     /// startup parameter (equivalent to `PGOPTIONS` / `options` conninfo key).
     pub options: Option<String>,
-    /// Whether the connection was actually established over TLS.
+    /// TLS session details captured after the handshake.
     ///
-    /// `false` when `sslmode=disable` or when `sslmode=prefer` fell back to
-    /// a plain connection.  `true` when TLS handshake completed successfully.
-    pub tls_in_use: bool,
+    /// `None` when `sslmode=disable` or when `sslmode=prefer` fell back to a
+    /// plain connection.  `Some` when the TLS handshake completed, containing
+    /// the negotiated protocol version (e.g. `"TLSv1.3"`) and cipher suite
+    /// (e.g. `"TLS_AES_256_GCM_SHA384"`).
+    pub tls_info: Option<TlsInfo>,
     /// The numeric IP address that the TCP connection was made to, if known.
     ///
     /// `None` for Unix-socket connections or when DNS resolution was not
@@ -158,7 +220,7 @@ impl fmt::Debug for ConnParams {
             .field("application_name", &self.application_name)
             .field("connect_timeout", &self.connect_timeout)
             .field("options", &self.options)
-            .field("tls_in_use", &self.tls_in_use)
+            .field("tls_info", &self.tls_info)
             .field("resolved_addr", &self.resolved_addr)
             .finish()
     }
@@ -179,7 +241,7 @@ impl Default for ConnParams {
             application_name: "rpg".to_owned(),
             connect_timeout: None,
             options: None,
-            tls_in_use: false,
+            tls_info: None,
             resolved_addr: None,
         }
     }
@@ -1339,6 +1401,168 @@ impl ServerCertVerifier for NoCnVerifier {
 }
 
 // ---------------------------------------------------------------------------
+// Capturing TLS connector
+// ---------------------------------------------------------------------------
+
+/// Shared slot written by [`CapturingTlsStream`] when the TLS handshake
+/// completes.  The [`connect`] function reads from this after
+/// `pg_config.connect()` resolves.
+type TlsInfoSlot = Arc<Mutex<Option<TlsInfo>>>;
+
+/// A [`MakeTlsConnect`] that wraps `tokio-rustls` and captures the negotiated
+/// TLS protocol version and cipher suite into a shared [`TlsInfoSlot`].
+struct CapturingMakeConnect {
+    connector: TlsConnector,
+    slot: TlsInfoSlot,
+}
+
+impl CapturingMakeConnect {
+    fn new(config: ClientConfig, slot: TlsInfoSlot) -> Self {
+        Self {
+            connector: TlsConnector::from(Arc::new(config)),
+            slot,
+        }
+    }
+}
+
+impl<S> MakeTlsConnect<S> for CapturingMakeConnect
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = CapturingTlsStream<S>;
+    type TlsConnect = CapturingConnect<S>;
+    type Error = rustls::pki_types::InvalidDnsNameError;
+
+    fn make_tls_connect(&mut self, hostname: &str) -> Result<Self::TlsConnect, Self::Error> {
+        let server_name = ServerName::try_from(hostname)?.to_owned();
+        Ok(CapturingConnect {
+            server_name,
+            connector: self.connector.clone(),
+            slot: Arc::clone(&self.slot),
+            _marker: std::marker::PhantomData,
+        })
+    }
+}
+
+/// The [`TlsConnect`] returned by [`CapturingMakeConnect`].
+struct CapturingConnect<S> {
+    server_name: ServerName<'static>,
+    connector: TlsConnector,
+    slot: TlsInfoSlot,
+    _marker: std::marker::PhantomData<S>,
+}
+
+impl<S> TlsConnect<S> for CapturingConnect<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = CapturingTlsStream<S>;
+    type Error = io::Error;
+    type Future = Pin<Box<dyn Future<Output = io::Result<Self::Stream>> + Send>>;
+
+    fn connect(self, stream: S) -> Self::Future {
+        let Self {
+            server_name,
+            connector,
+            slot,
+            ..
+        } = self;
+
+        Box::pin(async move {
+            let tls_stream = connector.connect(server_name, stream).await?;
+
+            // After the handshake the session info is available.
+            let (_, session) = tls_stream.get_ref();
+            let info = TlsInfo {
+                protocol: session
+                    .protocol_version()
+                    .map_or_else(|| "TLS".to_owned(), protocol_version_str),
+                cipher: session
+                    .negotiated_cipher_suite()
+                    .map_or_else(|| "unknown".to_owned(), |cs| cipher_suite_str(cs.suite())),
+            };
+            *slot.lock().unwrap() = Some(info);
+
+            Ok(CapturingTlsStream(Box::pin(tls_stream)))
+        })
+    }
+}
+
+/// Thin wrapper around `tokio_rustls::client::TlsStream` that implements
+/// the `tokio_postgres::tls::TlsStream` trait.
+struct CapturingTlsStream<S>(Pin<Box<TlsStream<S>>>);
+
+impl<S> tokio_postgres::tls::TlsStream for CapturingTlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn channel_binding(&self) -> ChannelBinding {
+        use x509_certificate::{DigestAlgorithm, SignatureAlgorithm, X509Certificate};
+        use DigestAlgorithm::{Sha1, Sha256, Sha384, Sha512};
+        use SignatureAlgorithm::{
+            EcdsaSha256, EcdsaSha384, Ed25519, NoSignature, RsaSha1, RsaSha256, RsaSha384,
+            RsaSha512,
+        };
+
+        let (_, session) = self.0.get_ref();
+        match session.peer_certificates() {
+            Some(certs) if !certs.is_empty() => X509Certificate::from_der(&certs[0])
+                .ok()
+                .and_then(|cert| cert.signature_algorithm())
+                .map_or_else(ChannelBinding::none, |algorithm| {
+                    let alg = match algorithm {
+                        RsaSha1 | RsaSha256 | EcdsaSha256 => &ring::digest::SHA256,
+                        RsaSha384 | EcdsaSha384 => &ring::digest::SHA384,
+                        RsaSha512 | Ed25519 => &ring::digest::SHA512,
+                        NoSignature(algo) => match algo {
+                            Sha1 | Sha256 => &ring::digest::SHA256,
+                            Sha384 => &ring::digest::SHA384,
+                            Sha512 => &ring::digest::SHA512,
+                        },
+                    };
+                    let hash = ring::digest::digest(alg, certs[0].as_ref());
+                    ChannelBinding::tls_server_end_point(hash.as_ref().into())
+                }),
+            _ => ChannelBinding::none(),
+        }
+    }
+}
+
+impl<S> AsyncRead for CapturingTlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.0.as_mut().poll_read(cx, buf)
+    }
+}
+
+impl<S> AsyncWrite for CapturingTlsStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.0.as_mut().poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.0.as_mut().poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.0.as_mut().poll_shutdown(cx)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Connect
 // ---------------------------------------------------------------------------
 
@@ -1375,54 +1599,52 @@ pub async fn connect(
         pg_config.options(opts_str);
     }
 
-    let (client, tls_used) = match params.sslmode {
-        SslMode::Disable => (connect_plain(&pg_config, &params).await?, false),
+    let (client, tls_info) = match params.sslmode {
+        SslMode::Disable => (connect_plain(&pg_config, &params).await?, None),
 
         // sslmode=allow: try plain first; if the server rejects it and
         // demands SSL, retry with TLS.
         SslMode::Allow => match connect_plain(&pg_config, &params).await {
-            Ok(c) => (c, false),
+            Ok(c) => (c, None),
             Err(ConnectionError::SslRequired) => {
-                (connect_tls_default(&pg_config, &params).await?, true)
+                let (c, info) = connect_tls_default(&pg_config, &params).await?;
+                (c, Some(info))
             }
             Err(e) => return Err(e),
         },
 
         SslMode::Prefer => match connect_tls_default(&pg_config, &params).await {
-            Ok(c) => (c, true),
+            Ok((c, info)) => (c, Some(info)),
             Err(_) => {
                 // sslmode=prefer: silently fall back to a plain connection
                 // when TLS is unavailable. This matches psql's default
                 // behavior — no warning is shown to the user.
-                (connect_plain(&pg_config, &params).await?, false)
+                (connect_plain(&pg_config, &params).await?, None)
             }
         },
 
         SslMode::Require => {
             pg_config.ssl_mode(TokioSslMode::Require);
-            (connect_tls_default(&pg_config, &params).await?, true)
+            let (c, info) = connect_tls_default(&pg_config, &params).await?;
+            (c, Some(info))
         }
 
         SslMode::VerifyCa => {
             pg_config.ssl_mode(TokioSslMode::Require);
             let tls_cfg = make_tls_config_verify_ca(&params)?;
-            (
-                connect_tls_with_config(&pg_config, &params, tls_cfg).await?,
-                true,
-            )
+            let (c, info) = connect_tls_with_config(&pg_config, &params, tls_cfg).await?;
+            (c, Some(info))
         }
 
         SslMode::VerifyFull => {
             pg_config.ssl_mode(TokioSslMode::Require);
             let tls_cfg = make_tls_config_verify_full(&params)?;
-            (
-                connect_tls_with_config(&pg_config, &params, tls_cfg).await?,
-                true,
-            )
+            let (c, info) = connect_tls_with_config(&pg_config, &params, tls_cfg).await?;
+            (c, Some(info))
         }
     };
 
-    params.tls_in_use = tls_used;
+    params.tls_info = tls_info;
 
     // Resolve the hostname to a numeric IP so \conninfo can display it like
     // psql does: `on host "localhost" (address "127.0.0.1") at port "5432".`
@@ -1463,17 +1685,21 @@ async fn connect_plain(
 async fn connect_tls_default(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
-) -> Result<Client, ConnectionError> {
+) -> Result<(Client, TlsInfo), ConnectionError> {
     connect_tls_with_config(pg_config, params, make_tls_config_default()).await
 }
 
 /// Connect with TLS using a caller-supplied `ClientConfig`.
+///
+/// Returns the connected `Client` together with the [`TlsInfo`] captured from
+/// the negotiated TLS session (protocol version and cipher suite).
 async fn connect_tls_with_config(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
     tls_config: ClientConfig,
-) -> Result<Client, ConnectionError> {
-    let tls = MakeRustlsConnect::new(tls_config);
+) -> Result<(Client, TlsInfo), ConnectionError> {
+    let slot: TlsInfoSlot = Arc::new(Mutex::new(None));
+    let tls = CapturingMakeConnect::new(tls_config, Arc::clone(&slot));
 
     let (client, connection) = pg_config
         .connect(tls)
@@ -1486,7 +1712,14 @@ async fn connect_tls_with_config(
         }
     });
 
-    Ok(client)
+    // The slot is populated synchronously during `connect()` above, before
+    // the postgres handshake begins.  It is always `Some` at this point.
+    let info = slot.lock().unwrap().take().unwrap_or(TlsInfo {
+        protocol: "TLS".to_owned(),
+        cipher: "unknown".to_owned(),
+    });
+
+    Ok((client, info))
 }
 
 /// Map a `tokio_postgres::Error` into our `ConnectionError`.
@@ -1532,22 +1765,14 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
     }
 }
 
-/// SSL status line appended when TLS is in use, matching psql's format.
-///
-/// psql shows full protocol/cipher details (e.g. `TLSv1.3`,
-/// `TLS_AES_256_GCM_SHA384`).  The `tokio-postgres-rustls` backend does not
-/// expose session-level cipher information after the handshake, so we emit
-/// the shorter form here.
-const SSL_LINE: &str = "SSL connection (protocol: TLS, compression: off)";
-
 /// Format a human-friendly connection-success message, matching psql output.
 ///
 /// TCP:    You are connected to database "db" as user "u" on host "h" at port "5432".
 /// Socket: You are connected to database "db" as user "u" via socket in "/run/pg" at port "5432".
 ///
-/// When `params.tls_in_use` is true an SSL line is appended, e.g.:
+/// When `params.tls_info` is `Some`, the SSL status line is appended:
 /// ```text
-/// SSL connection (protocol: TLS, compression: off)
+/// SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
 /// ```
 pub fn connection_info(params: &ConnParams) -> String {
     let is_socket = params.host.starts_with('/');
@@ -1573,8 +1798,8 @@ pub fn connection_info(params: &ConnParams) -> String {
             ),
         }
     };
-    if params.tls_in_use {
-        format!("{connected_line}\n{SSL_LINE}")
+    if let Some(ref info) = params.tls_info {
+        format!("{connected_line}\n{}", info.status_line())
     } else {
         connected_line
     }
@@ -1594,14 +1819,14 @@ pub fn connection_info(params: &ConnParams) -> String {
 /// If `server_version` is `None`, the banner is omitted and only the
 /// connected line is printed.
 ///
-/// When `new_params.tls_in_use` is true an SSL line is appended after the
-/// connected line, matching psql behaviour:
+/// When `new_params.tls_info` is `Some`, the SSL status line is appended after
+/// the connected line, matching psql behaviour:
 ///
 /// ```text
 /// rpg 0.2.0 (...) (server PostgreSQL 17.7)
 /// You are now connected to database "mydb" as user "alice" on host "h"
 /// at port "5432".
-/// SSL connection (protocol: TLS, compression: off)
+/// SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
 /// ```
 ///
 /// `client_version` is rpg's own version string (from [`crate::version_string`]).
@@ -1630,8 +1855,8 @@ pub fn reconnect_info(
         )
     };
 
-    let ssl_suffix = if new_params.tls_in_use {
-        format!("\n{SSL_LINE}")
+    let ssl_suffix = if let Some(ref info) = new_params.tls_info {
+        format!("\n{}", info.status_line())
     } else {
         String::new()
     };
@@ -2276,32 +2501,104 @@ mod tests {
     // -- SSL / TLS status line --------------------------------------------
 
     #[test]
+    fn test_tls_info_status_line() {
+        let info = TlsInfo {
+            protocol: "TLSv1.3".into(),
+            cipher: "TLS_AES_256_GCM_SHA384".into(),
+        };
+        assert_eq!(
+            info.status_line(),
+            "SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, \
+             compression: off)",
+        );
+    }
+
+    #[test]
+    fn test_tls_info_status_line_tls12() {
+        let info = TlsInfo {
+            protocol: "TLSv1.2".into(),
+            cipher: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".into(),
+        };
+        assert_eq!(
+            info.status_line(),
+            "SSL connection (protocol: TLSv1.2, \
+             cipher: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, compression: off)",
+        );
+    }
+
+    #[test]
+    fn test_protocol_version_str_tls13() {
+        assert_eq!(
+            protocol_version_str(rustls::ProtocolVersion::TLSv1_3),
+            "TLSv1.3",
+        );
+    }
+
+    #[test]
+    fn test_protocol_version_str_tls12() {
+        assert_eq!(
+            protocol_version_str(rustls::ProtocolVersion::TLSv1_2),
+            "TLSv1.2",
+        );
+    }
+
+    #[test]
+    fn test_cipher_suite_str_tls13() {
+        // TLS 1.3 suites: rustls prefix "TLS13_" → IANA "TLS_"
+        assert_eq!(
+            cipher_suite_str(rustls::CipherSuite::TLS13_AES_256_GCM_SHA384),
+            "TLS_AES_256_GCM_SHA384",
+        );
+        assert_eq!(
+            cipher_suite_str(rustls::CipherSuite::TLS13_AES_128_GCM_SHA256),
+            "TLS_AES_128_GCM_SHA256",
+        );
+        assert_eq!(
+            cipher_suite_str(rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256),
+            "TLS_CHACHA20_POLY1305_SHA256",
+        );
+    }
+
+    #[test]
+    fn test_cipher_suite_str_tls12() {
+        // TLS 1.2 suites already start with "TLS_", no transformation needed.
+        assert_eq!(
+            cipher_suite_str(rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384),
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        );
+    }
+
+    #[test]
     fn test_connection_info_tcp_with_tls() {
         let params = ConnParams {
             host: "db.example.com".into(),
             port: 5432,
             user: "alice".into(),
             dbname: "mydb".into(),
-            tls_in_use: true,
+            tls_info: Some(TlsInfo {
+                protocol: "TLSv1.3".into(),
+                cipher: "TLS_AES_256_GCM_SHA384".into(),
+            }),
             ..ConnParams::default()
         };
         assert_eq!(
             connection_info(&params),
             "You are connected to database \"mydb\" as user \"alice\" \
              on host \"db.example.com\" at port \"5432\".\n\
-             SSL connection (protocol: TLS, compression: off)",
+             SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, \
+             compression: off)",
         );
     }
 
     #[test]
     fn test_connection_info_socket_no_tls() {
-        // Sockets never use TLS; tls_in_use must remain false.
+        // Sockets never use TLS; tls_info must remain None.
         let params = ConnParams {
             host: "/var/run/postgresql".into(),
             port: 5432,
             user: "alice".into(),
             dbname: "mydb".into(),
-            tls_in_use: false,
+            tls_info: None,
             ..ConnParams::default()
         };
         assert_eq!(
@@ -2319,7 +2616,10 @@ mod tests {
             port: 5432,
             user: "alice".into(),
             dbname: "mydb".into(),
-            tls_in_use: true,
+            tls_info: Some(TlsInfo {
+                protocol: "TLSv1.3".into(),
+                cipher: "TLS_AES_256_GCM_SHA384".into(),
+            }),
             ..ConnParams::default()
         };
         assert_eq!(
@@ -2327,7 +2627,8 @@ mod tests {
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"localhost\" at port \"5432\".\n\
-             SSL connection (protocol: TLS, compression: off)",
+             SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, \
+             compression: off)",
         );
     }
 
@@ -2339,7 +2640,10 @@ mod tests {
             port: 5432,
             user: "alice".into(),
             dbname: "mydb".into(),
-            tls_in_use: true,
+            tls_info: Some(TlsInfo {
+                protocol: "TLSv1.3".into(),
+                cipher: "TLS_AES_256_GCM_SHA384".into(),
+            }),
             ..ConnParams::default()
         };
         assert_eq!(
@@ -2347,7 +2651,8 @@ mod tests {
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".\n\
-             SSL connection (protocol: TLS, compression: off)",
+             SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, \
+             compression: off)",
         );
     }
 
