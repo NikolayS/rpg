@@ -5460,6 +5460,7 @@ async fn run_readline_loop(
         .max_history_size(HISTORY_SIZE)
         .expect("valid history size")
         .history_ignore_space(true)
+        .completion_type(rustyline::CompletionType::List)
         .edit_mode(edit_mode)
         .build();
 
