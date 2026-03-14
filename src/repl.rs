@@ -2901,9 +2901,11 @@ Auto-EXPLAIN:
   \\set EXPLAIN off      disable auto-EXPLAIN
 
 Function keys (interactive mode):
-  F2 / \\f2   toggle schema-aware tab completion on/off
-  F3 / \\f3   toggle single-line mode on/off
-  F5 / \\f5   toggle auto-EXPLAIN on/off"
+  F2 / \\f2       toggle schema-aware tab completion on/off
+  F3 / \\f3       toggle single-line mode on/off
+  F4 / \\f4       toggle Vi/Emacs editing mode (next session)
+  F5 / \\f5       toggle auto-EXPLAIN on/off
+  Ctrl-T          toggle SQL/text2sql input mode"
     );
 }
 
@@ -3202,7 +3204,7 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
 /// Apply a function-key toggle action and print confirmation.
 ///
 /// Called by the readline loop when an F-key `ConditionalEventHandler` fires.
-/// Also reachable via the `\f2` / `\f3` / `\f5` metacommands.
+/// Also reachable via the `\f2` / `\f3` / `\f4` / `\f5` metacommands.
 fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
     match action {
         FKeyAction::Completion => {
@@ -3215,6 +3217,15 @@ fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
             let state = if settings.single_line { "on" } else { "off" };
             println!("Single-line mode is {state}.");
         }
+        FKeyAction::ViEmacs => {
+            settings.vi_mode = !settings.vi_mode;
+            settings.config.display.vi_mode = settings.vi_mode;
+            if settings.vi_mode {
+                eprintln!("Vi mode enabled. Takes effect on next session.");
+            } else {
+                eprintln!("Emacs mode (default). Takes effect on next session.");
+            }
+        }
         FKeyAction::AutoExplain => {
             settings.auto_explain = if settings.auto_explain == AutoExplain::Off {
                 AutoExplain::On
@@ -3222,6 +3233,18 @@ fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
                 AutoExplain::Off
             };
             println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+        }
+        FKeyAction::Text2Sql => {
+            settings.input_mode = if settings.input_mode == InputMode::Text2Sql {
+                InputMode::Sql
+            } else {
+                InputMode::Text2Sql
+            };
+            let label = match settings.input_mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            };
+            eprintln!("Input mode: {label}");
         }
     }
 }
@@ -4362,12 +4385,15 @@ async fn dispatch_meta(
                 }
             },
         },
-        // Function-key toggle metacommands (#321).
+        // Function-key toggle metacommands (#321, #324, #325).
         MetaCmd::ToggleCompletion => {
             apply_fkey_toggle(FKeyAction::Completion, settings);
         }
         MetaCmd::ToggleSingleLine => {
             apply_fkey_toggle(FKeyAction::SingleLine, settings);
+        }
+        MetaCmd::ToggleViEmacs => {
+            apply_fkey_toggle(FKeyAction::ViEmacs, settings);
         }
         MetaCmd::ToggleAutoExplain => {
             apply_fkey_toggle(FKeyAction::AutoExplain, settings);
@@ -4867,8 +4893,12 @@ enum FKeyAction {
     Completion,
     /// F3 — toggle single-line mode.
     SingleLine,
+    /// F4 — toggle Vi/Emacs editing mode (#325).
+    ViEmacs,
     /// F5 — toggle auto-EXPLAIN.
     AutoExplain,
+    /// Ctrl-T — toggle SQL/text2sql input mode (#324).
+    Text2Sql,
 }
 
 /// rustyline `ConditionalEventHandler` for a single F-key.
@@ -4951,10 +4981,11 @@ async fn run_readline_loop(
     // action here and returns Cmd::Interrupt; the loop reads and clears it.
     let fkey_pending: Arc<Mutex<Option<FKeyAction>>> = Arc::new(Mutex::new(None));
 
-    // Bind F2 / F3 / F5 to their respective toggle actions.
+    // Bind F2 / F3 / F4 / F5 to their respective toggle actions.
     for (code, action) in [
         (KeyCode::F(2), FKeyAction::Completion),
         (KeyCode::F(3), FKeyAction::SingleLine),
+        (KeyCode::F(4), FKeyAction::ViEmacs),
         (KeyCode::F(5), FKeyAction::AutoExplain),
     ] {
         let handler = FKeyHandler {
@@ -4963,6 +4994,18 @@ async fn run_readline_loop(
         };
         rl.bind_sequence(
             KeyEvent(code, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(handler)),
+        );
+    }
+
+    // Bind Ctrl-T to text2sql toggle (#324).
+    {
+        let handler = FKeyHandler {
+            action: FKeyAction::Text2Sql,
+            pending: Arc::clone(&fkey_pending),
+        };
+        rl.bind_sequence(
+            KeyEvent(KeyCode::Char('T'), Modifiers::CTRL),
             EventHandler::Conditional(Box::new(handler)),
         );
     }
@@ -9990,5 +10033,42 @@ mod tests {
     #[test]
     fn ddl_delete_is_not_ddl() {
         assert!(!is_ddl_statement("DELETE FROM foo WHERE id = 1"));
+    }
+
+    // -- FKeyAction toggles (#324, #325) --------------------------------------
+
+    #[test]
+    fn fkey_text2sql_toggle_sql_to_text2sql() {
+        let mut s = ReplSettings::default();
+        s.input_mode = InputMode::Sql;
+        apply_fkey_toggle(FKeyAction::Text2Sql, &mut s);
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+    }
+
+    #[test]
+    fn fkey_text2sql_toggle_text2sql_to_sql() {
+        let mut s = ReplSettings::default();
+        s.input_mode = InputMode::Text2Sql;
+        apply_fkey_toggle(FKeyAction::Text2Sql, &mut s);
+        assert_eq!(s.input_mode, InputMode::Sql);
+    }
+
+    #[test]
+    fn fkey_vi_emacs_toggle_on() {
+        let mut s = ReplSettings::default();
+        s.vi_mode = false;
+        apply_fkey_toggle(FKeyAction::ViEmacs, &mut s);
+        assert!(s.vi_mode);
+        assert!(s.config.display.vi_mode);
+    }
+
+    #[test]
+    fn fkey_vi_emacs_toggle_off() {
+        let mut s = ReplSettings::default();
+        s.vi_mode = true;
+        s.config.display.vi_mode = true;
+        apply_fkey_toggle(FKeyAction::ViEmacs, &mut s);
+        assert!(!s.vi_mode);
+        assert!(!s.config.display.vi_mode);
     }
 }

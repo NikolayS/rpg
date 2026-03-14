@@ -318,6 +318,8 @@ pub enum MetaCmd {
     ToggleCompletion,
     /// `\f3` — toggle single-line mode on/off (F3).
     ToggleSingleLine,
+    /// `\f4` — toggle Vi/Emacs editing mode (F4, #325).
+    ToggleViEmacs,
     /// `\f5` — toggle auto-EXPLAIN on/off (F5).
     ToggleAutoExplain,
 
@@ -743,16 +745,18 @@ fn parse_y_family(input: &str) -> ParsedMeta {
 ///
 /// - `\f2` → toggle completion (F2)
 /// - `\f3` → toggle single-line mode (F3)
+/// - `\f4` → toggle Vi/Emacs mode (F4, #325)
 /// - `\f5` → toggle auto-EXPLAIN (F5)
 /// - `\f [sep]` → set field separator for unaligned output
 fn parse_f_family(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix('f') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
-    // Function-key aliases: `\f2`, `\f3`, `\f5` (no trailing chars allowed).
+    // Function-key aliases: `\f2`, `\f3`, `\f4`, `\f5` (no trailing chars allowed).
     match rest.trim() {
         "2" => return ParsedMeta::simple(MetaCmd::ToggleCompletion),
         "3" => return ParsedMeta::simple(MetaCmd::ToggleSingleLine),
+        "4" => return ParsedMeta::simple(MetaCmd::ToggleViEmacs),
         "5" => return ParsedMeta::simple(MetaCmd::ToggleAutoExplain),
         _ => {}
     }
@@ -3272,6 +3276,11 @@ mod tests {
     #[test]
     fn parse_f3_toggle_single_line() {
         assert_eq!(parse("\\f3").cmd, MetaCmd::ToggleSingleLine);
+    }
+
+    #[test]
+    fn parse_f4_toggle_vi_emacs() {
+        assert_eq!(parse("\\f4").cmd, MetaCmd::ToggleViEmacs);
     }
 
     #[test]
