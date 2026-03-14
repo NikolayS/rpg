@@ -2557,6 +2557,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 14, // "SELECT * FROM " is 14 bytes
             prefix: "user".to_owned(),
+            prompt_width: 0,
         };
         dd.select_next();
         assert_eq!(
@@ -2574,6 +2575,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: String::new(),
+            prompt_width: 0,
         };
         dd.select_prev();
         assert_eq!(
@@ -2593,6 +2595,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: "u".to_owned(),
+            prompt_width: 0,
         };
         dd.dismiss();
         assert!(
@@ -2638,6 +2641,7 @@ mod tests {
             scroll_offset: 0,
             word_start: 0,
             prefix: "ord".to_owned(),
+            prompt_width: 0,
         };
         assert_eq!(dd.current(), Some("orders"));
         dd.select_next();
