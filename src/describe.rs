@@ -1454,6 +1454,7 @@ order by 1, 2"
 /// List foreign servers.
 ///
 /// Matches psql's `\des [pattern]` output: Name, Owner, Foreign-data wrapper.
+/// With `+`: also shows Type, Version, FDW options, Description.
 async fn list_foreign_servers(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "s.srvname", None);
 
@@ -1468,14 +1469,14 @@ async fn list_foreign_servers(client: &Client, meta: &ParsedMeta) -> bool {
             "select
     s.srvname as \"Name\",
     pg_catalog.pg_get_userbyid(s.srvowner) as \"Owner\",
-    w.fdwname as \"Foreign-data wrapper\",
+    f.fdwname as \"Foreign-data wrapper\",
     s.srvtype as \"Type\",
     s.srvversion as \"Version\",
-    pg_catalog.array_to_string(s.srvoptions, ', ') as \"FDW options\",
-    coalesce(pg_catalog.array_to_string(s.srvacl, E'\\n'), '') as \"Access privileges\"
+    s.srvoptions as \"FDW options\",
+    pg_catalog.obj_description(s.oid, 'pg_foreign_server') as \"Description\"
 from pg_catalog.pg_foreign_server as s
-join pg_catalog.pg_foreign_data_wrapper as w
-    on w.oid = s.srvfdw
+join pg_catalog.pg_foreign_data_wrapper as f
+    on f.oid = s.srvfdw
 {where_clause}
 order by 1"
         )
@@ -1484,10 +1485,10 @@ order by 1"
             "select
     s.srvname as \"Name\",
     pg_catalog.pg_get_userbyid(s.srvowner) as \"Owner\",
-    w.fdwname as \"Foreign-data wrapper\"
+    f.fdwname as \"Foreign-data wrapper\"
 from pg_catalog.pg_foreign_server as s
-join pg_catalog.pg_foreign_data_wrapper as w
-    on w.oid = s.srvfdw
+join pg_catalog.pg_foreign_data_wrapper as f
+    on f.oid = s.srvfdw
 {where_clause}
 order by 1"
         )
@@ -1509,8 +1510,9 @@ order by 1"
 /// List foreign-data wrappers.
 ///
 /// Matches psql's `\dew [pattern]` output: Name, Owner, Handler, Validator.
+/// With `+`: also shows FDW options, Description.
 async fn list_fdws(client: &Client, meta: &ParsedMeta) -> bool {
-    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "w.fdwname", None);
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "fdwname", None);
 
     let where_clause = if name_filter.is_empty() {
         String::new()
@@ -1521,32 +1523,24 @@ async fn list_fdws(client: &Client, meta: &ParsedMeta) -> bool {
     let sql = if meta.plus {
         format!(
             "select
-    w.fdwname as \"Name\",
-    pg_catalog.pg_get_userbyid(w.fdwowner) as \"Owner\",
-    coalesce(h.proname, '-') as \"Handler\",
-    coalesce(v.proname, '-') as \"Validator\",
-    pg_catalog.array_to_string(w.fdwoptions, ', ') as \"FDW options\",
-    coalesce(pg_catalog.array_to_string(w.fdwacl, E'\\n'), '') as \"Access privileges\"
-from pg_catalog.pg_foreign_data_wrapper as w
-left join pg_catalog.pg_proc as h
-    on h.oid = w.fdwhandler
-left join pg_catalog.pg_proc as v
-    on v.oid = w.fdwvalidator
+    fdwname as \"Name\",
+    pg_catalog.pg_get_userbyid(fdwowner) as \"Owner\",
+    fdwhandler::regproc as \"Handler\",
+    fdwvalidator::regproc as \"Validator\",
+    fdwoptions as \"FDW options\",
+    pg_catalog.obj_description(oid, 'pg_foreign_data_wrapper') as \"Description\"
+from pg_catalog.pg_foreign_data_wrapper
 {where_clause}
 order by 1"
         )
     } else {
         format!(
             "select
-    w.fdwname as \"Name\",
-    pg_catalog.pg_get_userbyid(w.fdwowner) as \"Owner\",
-    coalesce(h.proname, '-') as \"Handler\",
-    coalesce(v.proname, '-') as \"Validator\"
-from pg_catalog.pg_foreign_data_wrapper as w
-left join pg_catalog.pg_proc as h
-    on h.oid = w.fdwhandler
-left join pg_catalog.pg_proc as v
-    on v.oid = w.fdwvalidator
+    fdwname as \"Name\",
+    pg_catalog.pg_get_userbyid(fdwowner) as \"Owner\",
+    fdwhandler::regproc as \"Handler\",
+    fdwvalidator::regproc as \"Validator\"
+from pg_catalog.pg_foreign_data_wrapper
 {where_clause}
 order by 1"
         )
@@ -1568,6 +1562,7 @@ order by 1"
 /// List foreign tables registered via foreign-data wrappers.
 ///
 /// Matches psql's `\det [pattern]` output: Schema, Table, Server.
+/// With `+`: also shows FDW options, Description.
 async fn list_foreign_tables_via_fdw(client: &Client, meta: &ParsedMeta) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.relname", Some("n.nspname"));
@@ -1596,22 +1591,43 @@ async fn list_foreign_tables_via_fdw(client: &Client, meta: &ParsedMeta) -> bool
         format!("and {}", where_parts.join("\n    and "))
     };
 
-    let sql = format!(
-        "select
+    let sql = if meta.plus {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    c.relname as \"Table\",
+    s.srvname as \"Server\",
+    t.ftoptions as \"FDW options\",
+    pg_catalog.obj_description(c.oid, 'pg_class') as \"Description\"
+from pg_catalog.pg_foreign_table as t
+join pg_catalog.pg_class as c
+    on c.oid = t.ftrelid
+join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+join pg_catalog.pg_foreign_server as s
+    on s.oid = t.ftserver
+where true
+    {extra_cond}
+order by 1, 2"
+        )
+    } else {
+        format!(
+            "select
     n.nspname as \"Schema\",
     c.relname as \"Table\",
     s.srvname as \"Server\"
-from pg_catalog.pg_foreign_table as ft
+from pg_catalog.pg_foreign_table as t
 join pg_catalog.pg_class as c
-    on c.oid = ft.ftrelid
-left join pg_catalog.pg_namespace as n
+    on c.oid = t.ftrelid
+join pg_catalog.pg_namespace as n
     on n.oid = c.relnamespace
 join pg_catalog.pg_foreign_server as s
-    on s.oid = ft.ftserver
-where c.relkind = 'f'
+    on s.oid = t.ftserver
+where true
     {extra_cond}
 order by 1, 2"
-    );
+        )
+    };
 
     run_and_print_titled(
         client,
@@ -1629,8 +1645,9 @@ order by 1, 2"
 /// List user mappings for foreign servers.
 ///
 /// Matches psql's `\deu [pattern]` output: Server, User name.
+/// With `+`: also shows FDW options.
 async fn list_user_mappings(client: &Client, meta: &ParsedMeta) -> bool {
-    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "s.srvname", None);
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "um.srvname", None);
 
     let where_clause = if name_filter.is_empty() {
         String::new()
@@ -1638,16 +1655,26 @@ async fn list_user_mappings(client: &Client, meta: &ParsedMeta) -> bool {
         format!("where {name_filter}")
     };
 
-    let sql = format!(
-        "select
-    s.srvname as \"Server\",
-    pg_catalog.pg_get_userbyid(u.umuser) as \"User name\"
-from pg_catalog.pg_user_mapping as u
-join pg_catalog.pg_foreign_server as s
-    on s.oid = u.umserver
+    let sql = if meta.plus {
+        format!(
+            "select
+    um.srvname as \"Server\",
+    um.usename as \"User name\",
+    um.umoptions as \"FDW options\"
+from pg_catalog.pg_user_mappings as um
 {where_clause}
 order by 1, 2"
-    );
+        )
+    } else {
+        format!(
+            "select
+    um.srvname as \"Server\",
+    um.usename as \"User name\"
+from pg_catalog.pg_user_mappings as um
+{where_clause}
+order by 1, 2"
+        )
+    };
 
     run_and_print_titled(
         client,
