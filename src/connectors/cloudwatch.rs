@@ -4,8 +4,6 @@
 //! AWS Signature V4 request signing implemented via `ring::hmac` and
 //! `ring::digest`.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -27,6 +25,7 @@ use super::{
 /// Authentication uses AWS access key credentials; temporary credentials
 /// (e.g. from IAM role assumption) are supported via the optional
 /// session token.
+#[allow(dead_code)]
 pub struct CloudWatchConnector {
     region: String,
     access_key_id: String,
@@ -48,12 +47,14 @@ impl CloudWatchConnector {
     }
 
     /// Attach a session token for temporary credentials (STS / IAM role).
+    #[allow(dead_code)]
     pub fn with_session_token(mut self, token: String) -> Self {
         self.session_token = Some(token);
         self
     }
 
     /// Scope all metric/alarm queries to a specific RDS DB instance.
+    #[allow(dead_code)]
     pub fn with_db_instance(mut self, id: String) -> Self {
         self.db_instance_id = Some(id);
         self

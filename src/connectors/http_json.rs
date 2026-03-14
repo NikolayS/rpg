@@ -20,6 +20,7 @@ use crate::governance::Severity;
 // ---------------------------------------------------------------------------
 
 /// Authentication strategy for an [`HttpJsonConnector`].
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum HttpJsonAuth {
     /// `Authorization: Bearer <token>`
@@ -37,6 +38,7 @@ pub enum HttpJsonAuth {
 // ---------------------------------------------------------------------------
 
 /// Describes how to extract a single metric value from a JSON response.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MetricMapping {
     /// Dot-notation path into the JSON object, e.g. `"data.cpu_percent"`.
@@ -54,6 +56,7 @@ pub struct MetricMapping {
 /// Config-driven HTTP JSON connector.
 ///
 /// Construct via [`HttpJsonConnectorBuilder`].
+#[allow(dead_code)]
 pub struct HttpJsonConnector {
     connector_id: String,
     connector_name: String,
@@ -68,6 +71,7 @@ pub struct HttpJsonConnector {
     client: reqwest::Client,
 }
 
+#[allow(dead_code)]
 impl HttpJsonConnector {
     /// Return the fully-qualified URL for a given endpoint path.
     fn url(&self, path: &str) -> String {
@@ -303,6 +307,7 @@ impl Connector for HttpJsonConnector {
 ///
 /// For example, `"data.cpu_percent"` navigates `json["data"]["cpu_percent"]`
 /// and returns the value as `f64` if it is a JSON number.
+#[allow(dead_code)]
 pub fn extract_json_value(json: &serde_json::Value, path: &str) -> Option<f64> {
     let mut current = json;
     for key in path.split('.') {
@@ -311,6 +316,7 @@ pub fn extract_json_value(json: &serde_json::Value, path: &str) -> Option<f64> {
     current.as_f64()
 }
 
+#[allow(dead_code)]
 fn parse_severity(s: &str) -> Severity {
     match s.to_lowercase().as_str() {
         "critical" | "error" | "high" => Severity::Critical,
@@ -319,6 +325,7 @@ fn parse_severity(s: &str) -> Severity {
     }
 }
 
+#[allow(dead_code)]
 fn parse_alert_status(s: &str) -> AlertStatus {
     match s.to_lowercase().as_str() {
         "acknowledged" | "ack" => AlertStatus::Acknowledged,
@@ -348,6 +355,7 @@ fn parse_alert_status(s: &str) -> AlertStatus {
 ///     .rate_limit_rps(10.0)
 ///     .build();
 /// ```
+#[allow(dead_code)]
 pub struct HttpJsonConnectorBuilder {
     connector_id: String,
     connector_name: String,
@@ -359,6 +367,7 @@ pub struct HttpJsonConnectorBuilder {
     rate_limit_rps: f64,
 }
 
+#[allow(dead_code)]
 impl HttpJsonConnectorBuilder {
     /// Start a new builder.  `id` is the unique connector identifier.
     pub fn new(

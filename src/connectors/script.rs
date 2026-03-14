@@ -24,6 +24,7 @@ use crate::governance::Severity;
 ///
 /// The command receives a JSON object on stdin and must write a JSON response
 /// to stdout before exiting.  A non-zero exit code is treated as an error.
+#[allow(dead_code)]
 pub struct ScriptConnector {
     connector_id: String,
     connector_name: String,
@@ -37,6 +38,7 @@ pub struct ScriptConnector {
     warned_about_external: bool,
 }
 
+#[allow(dead_code)]
 impl ScriptConnector {
     /// Create a new `ScriptConnector` with default timeout (30 s) and rate
     /// limit (1.0 RPS).
@@ -338,6 +340,7 @@ impl Connector for ScriptConnector {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn system_time_to_iso8601(ts: SystemTime) -> String {
     let total_secs = ts.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     // Minimal RFC 3339 / ISO 8601 UTC representation without pulling in chrono.
@@ -353,6 +356,7 @@ fn system_time_to_iso8601(ts: SystemTime) -> String {
 /// Convert days-since-Unix-epoch to `(year, month, day)`.
 ///
 /// Uses the proleptic Gregorian calendar algorithm (Tomohiko Sakamoto variant).
+#[allow(dead_code)]
 fn days_to_ymd(days: u64) -> (u32, u32, u32) {
     // Algorithm works with i64; days since 1970-01-01.
     // Saturate at i64::MAX for dates far in the future (> ~2.5 × 10^16 years).
@@ -388,6 +392,7 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
     )
 }
 
+#[allow(dead_code)]
 fn parse_severity(s: &str) -> Severity {
     match s.to_lowercase().as_str() {
         "critical" => Severity::Critical,
@@ -396,6 +401,7 @@ fn parse_severity(s: &str) -> Severity {
     }
 }
 
+#[allow(dead_code)]
 fn parse_alert_status(s: &str) -> AlertStatus {
     match s.to_lowercase().as_str() {
         "acknowledged" | "ack" => AlertStatus::Acknowledged,

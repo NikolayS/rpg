@@ -109,6 +109,7 @@ struct MetricUnit {
 /// Top-level response from `GET /api/v1/monitor`.
 type MonitorsResponse = Vec<MonitorEntry>;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct MonitorEntry {
     id: u64,

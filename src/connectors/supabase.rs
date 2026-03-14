@@ -27,6 +27,7 @@ const DEFAULT_BASE_URL: &str = "https://api.supabase.com";
 // ---------------------------------------------------------------------------
 
 /// Connector for the Supabase platform.
+#[allow(dead_code)]
 pub struct SupabaseConnector {
     access_token: String,
     project_ref: Option<String>,
@@ -46,12 +47,14 @@ impl SupabaseConnector {
     }
 
     /// Set the Supabase project reference (e.g., `"abcdefghijklmnop"`).
+    #[allow(dead_code)]
     pub fn with_project_ref(mut self, project_ref: String) -> Self {
         self.project_ref = Some(project_ref);
         self
     }
 
     /// Override the API base URL (useful for testing with a mock server).
+    #[allow(dead_code)]
     pub fn with_base_url(mut self, base_url: String) -> Self {
         self.base_url = base_url;
         self

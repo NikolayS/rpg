@@ -3,8 +3,6 @@
 //! Integrates with the postgres.ai API to fetch open issues as alerts
 //! and create/update issues in the `PostgresAI` tracker.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -25,6 +23,7 @@ use crate::governance::Severity;
 ///
 /// Supports creating and updating issues, and fetching open issues as
 /// alerts. Does not provide metric data.
+#[allow(dead_code)]
 pub struct PostgresAIConnector {
     api_key: String,
     org_id: Option<String>,
@@ -48,18 +47,21 @@ impl PostgresAIConnector {
     }
 
     /// Set the organisation ID scope for API requests.
+    #[allow(dead_code)]
     pub fn with_org(mut self, org_id: String) -> Self {
         self.org_id = Some(org_id);
         self
     }
 
     /// Set the project ID scope for API requests.
+    #[allow(dead_code)]
     pub fn with_project(mut self, project_id: String) -> Self {
         self.project_id = Some(project_id);
         self
     }
 
     /// Override the base URL (useful for testing against staging).
+    #[allow(dead_code)]
     pub fn with_base_url(mut self, url: String) -> Self {
         self.base_url = url;
         self
@@ -92,6 +94,7 @@ impl PostgresAIConnector {
 // Wire types — minimal shapes expected from the postgres.ai API
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssue {
     id: String,
@@ -104,12 +107,14 @@ struct ApiIssue {
     database_id: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssueList {
     #[serde(default)]
     issues: Vec<ApiIssue>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssueCreated {
     id: String,
@@ -318,6 +323,7 @@ impl Connector for PostgresAIConnector {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn parse_severity(s: Option<&str>) -> Severity {
     match s {
         Some("critical") => Severity::Critical,
