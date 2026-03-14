@@ -3,14 +3,12 @@
 //! Provides a secondary safety layer that sends high-risk action proposals to
 //! an LLM for adversarial review before execution.  The LLM acts as a
 //! skeptical auditor looking for reasons to reject rather than approve.
-//!
-//! This module is a stub: the `review_proposal` function returns a
-//! pass-through approval until an LLM provider is wired in (Phase 3).
 
-#![allow(dead_code)]
+use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::ai::{CompletionOptions, LlmProvider, Message, Role};
 use crate::governance::ActionProposal;
 
 // ---------------------------------------------------------------------------
@@ -59,6 +57,7 @@ pub struct LlmAuditReview {
     /// `true` if the LLM considers the action safe to proceed.
     pub approved: bool,
     /// Zero or more specific concerns identified by the LLM.
+    #[allow(dead_code)]
     pub concerns: Vec<String>,
     /// A brief free-text recommendation from the LLM.
     pub recommendation: String,
@@ -153,26 +152,75 @@ pub fn parse_review_response(response: &str) -> Result<LlmAuditReview, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Review function (stub)
+// Review function
 // ---------------------------------------------------------------------------
 
 /// Submit a proposal for adversarial LLM review.
 ///
-/// This is currently a stub that returns an unconditional approval with a
-/// note that no LLM provider is configured.  The actual provider call will
-/// be wired in Phase 3 when the AI subsystem is available to the governance
-/// framework.
-// `async` is intentional: the real implementation will await an LLM call.
-#[allow(clippy::unused_async)]
+/// When a provider is supplied and the auditor config has `enabled = true`,
+/// the proposal is sent to the LLM using [`build_adversarial_prompt`] and the
+/// response is parsed with [`parse_review_response`].  The call is wrapped in
+/// a timeout derived from [`LlmAuditorConfig::timeout_ms`].
+///
+/// Falls back to heuristic approval (no-provider path) in three cases:
+/// - `provider` is `None`
+/// - `config.enabled` is `false`
+/// - The LLM call times out or returns an error
 pub async fn review_proposal(
-    _proposal: &ActionProposal,
-    _config: &LlmAuditorConfig,
+    proposal: &ActionProposal,
+    config: &LlmAuditorConfig,
+    provider: Option<&dyn LlmProvider>,
 ) -> Result<LlmAuditReview, String> {
-    Ok(LlmAuditReview {
-        approved: true,
-        concerns: vec![],
-        recommendation: "No LLM provider configured".to_owned(),
-    })
+    let Some(provider) = provider else {
+        return Ok(LlmAuditReview {
+            approved: true,
+            concerns: vec![],
+            recommendation: "No LLM provider configured".to_owned(),
+        });
+    };
+
+    if !config.enabled {
+        return Ok(LlmAuditReview {
+            approved: true,
+            concerns: vec![],
+            recommendation: "LLM auditor disabled".to_owned(),
+        });
+    }
+
+    let prompt = build_adversarial_prompt(proposal);
+    let messages = vec![Message {
+        role: Role::User,
+        content: prompt,
+    }];
+    let options = CompletionOptions {
+        model: String::new(),
+        max_tokens: 512,
+        temperature: 0.0,
+    };
+
+    let timeout = Duration::from_millis(config.timeout_ms);
+    let call = provider.complete(&messages, &options);
+
+    match tokio::time::timeout(timeout, call).await {
+        Ok(Ok(result)) => parse_review_response(&result.content),
+        Ok(Err(err)) => {
+            // LLM returned an error — fall back to heuristic approval so
+            // that a transient provider outage does not block all actions.
+            Ok(LlmAuditReview {
+                approved: true,
+                concerns: vec![],
+                recommendation: format!("LLM error (heuristic fallback): {err}"),
+            })
+        }
+        Err(_elapsed) => Ok(LlmAuditReview {
+            approved: true,
+            concerns: vec![],
+            recommendation: format!(
+                "LLM timed out after {}ms (heuristic fallback)",
+                config.timeout_ms
+            ),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +229,11 @@ pub async fn review_proposal(
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
     use std::time::SystemTime;
 
     use super::*;
+    use crate::ai::{CompletionResult, LlmProvider};
     use crate::governance::{ActionProposal, EvidenceClass, FeatureArea, Severity};
 
     fn sample_proposal() -> ActionProposal {
@@ -196,6 +246,108 @@ mod tests {
             expected_outcome: "Dead tuples reclaimed, autovacuum reset".to_owned(),
             risk: "Low — VACUUM does not lock the table".to_owned(),
             created_at: SystemTime::now(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock provider that returns a fixed response
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct MockProvider {
+        response: String,
+    }
+
+    impl MockProvider {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+            }
+        }
+    }
+
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn default_model(&self) -> &'static str {
+            "mock-model"
+        }
+
+        fn complete(
+            &self,
+            _messages: &[crate::ai::Message],
+            _options: &crate::ai::CompletionOptions,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>>
+        {
+            let content = self.response.clone();
+            Box::pin(async move {
+                Ok(CompletionResult {
+                    content,
+                    input_tokens: 10,
+                    output_tokens: 20,
+                })
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock provider that always returns an error
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct ErrorProvider;
+
+    impl LlmProvider for ErrorProvider {
+        fn name(&self) -> &'static str {
+            "error-mock"
+        }
+
+        fn default_model(&self) -> &'static str {
+            "error-model"
+        }
+
+        fn complete(
+            &self,
+            _messages: &[crate::ai::Message],
+            _options: &crate::ai::CompletionOptions,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>>
+        {
+            Box::pin(async move { Err("simulated provider error".to_owned()) })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock provider that simulates a slow response (for timeout testing)
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct SlowProvider;
+
+    impl LlmProvider for SlowProvider {
+        fn name(&self) -> &'static str {
+            "slow-mock"
+        }
+
+        fn default_model(&self) -> &'static str {
+            "slow-model"
+        }
+
+        fn complete(
+            &self,
+            _messages: &[crate::ai::Message],
+            _options: &crate::ai::CompletionOptions,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>>
+        {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(CompletionResult {
+                    content: "late response".to_owned(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                })
+            })
         }
     }
 
@@ -327,15 +479,136 @@ mod tests {
         );
     }
 
-    // --- review_proposal stub ---
+    // --- review_proposal: no provider ---
 
     #[tokio::test]
-    async fn review_proposal_stub_returns_approved() {
+    async fn review_proposal_no_provider_returns_approved() {
         let p = sample_proposal();
         let cfg = LlmAuditorConfig::default();
-        let review = review_proposal(&p, &cfg).await.expect("no error");
+        let review = review_proposal(&p, &cfg, None).await.expect("no error");
         assert!(review.approved);
         assert!(review.concerns.is_empty());
         assert!(review.recommendation.contains("No LLM provider"));
+    }
+
+    // --- review_proposal: disabled config ---
+
+    #[tokio::test]
+    async fn review_proposal_disabled_config_returns_approved() {
+        let p = sample_proposal();
+        let cfg = LlmAuditorConfig {
+            enabled: false,
+            ..LlmAuditorConfig::default()
+        };
+        let provider = MockProvider::new(
+            r#"{"approved": false, "concerns": ["risky"], "recommendation": "reject"}"#,
+        );
+        let review = review_proposal(&p, &cfg, Some(&provider))
+            .await
+            .expect("no error");
+        assert!(
+            review.approved,
+            "disabled auditor must approve without calling the provider"
+        );
+        assert!(review.recommendation.contains("disabled"));
+    }
+
+    // --- review_proposal: enabled, provider returns approve ---
+
+    #[tokio::test]
+    async fn review_proposal_with_provider_approve() {
+        let p = sample_proposal();
+        let cfg = LlmAuditorConfig {
+            enabled: true,
+            ..LlmAuditorConfig::default()
+        };
+        let provider = MockProvider::new(
+            r#"{"approved": true, "concerns": [], "recommendation": "Looks safe"}"#,
+        );
+        let review = review_proposal(&p, &cfg, Some(&provider))
+            .await
+            .expect("no error");
+        assert!(review.approved);
+        assert_eq!(review.recommendation, "Looks safe");
+    }
+
+    // --- review_proposal: enabled, provider returns reject ---
+
+    #[tokio::test]
+    async fn review_proposal_with_provider_reject() {
+        let p = sample_proposal();
+        let cfg = LlmAuditorConfig {
+            enabled: true,
+            ..LlmAuditorConfig::default()
+        };
+        let provider = MockProvider::new(
+            r#"{"approved": false, "concerns": ["Could cause downtime"], "recommendation": "Defer"}"#,
+        );
+        let review = review_proposal(&p, &cfg, Some(&provider))
+            .await
+            .expect("no error");
+        assert!(!review.approved);
+        assert_eq!(review.concerns.len(), 1);
+        assert_eq!(review.recommendation, "Defer");
+    }
+
+    // --- review_proposal: provider returns heuristic-parsed prose ---
+
+    #[tokio::test]
+    async fn review_proposal_provider_prose_reject_keyword() {
+        let p = sample_proposal();
+        let cfg = LlmAuditorConfig {
+            enabled: true,
+            ..LlmAuditorConfig::default()
+        };
+        let provider = MockProvider::new("I would reject this action due to risk.");
+        let review = review_proposal(&p, &cfg, Some(&provider))
+            .await
+            .expect("no error");
+        assert!(
+            !review.approved,
+            "heuristic parse must reject when 'reject' keyword present"
+        );
+    }
+
+    // --- review_proposal: provider error falls back to approval ---
+
+    #[tokio::test]
+    async fn review_proposal_provider_error_fallback_approves() {
+        let p = sample_proposal();
+        let cfg = LlmAuditorConfig {
+            enabled: true,
+            ..LlmAuditorConfig::default()
+        };
+        let provider = ErrorProvider;
+        let review = review_proposal(&p, &cfg, Some(&provider))
+            .await
+            .expect("no error");
+        assert!(
+            review.approved,
+            "provider error must fall back to heuristic approval"
+        );
+        assert!(review.recommendation.contains("LLM error"));
+    }
+
+    // --- review_proposal: provider timeout falls back to approval ---
+
+    #[tokio::test]
+    async fn review_proposal_provider_timeout_fallback_approves() {
+        let p = sample_proposal();
+        let cfg = LlmAuditorConfig {
+            enabled: true,
+            timeout_ms: 1, // 1ms timeout — SlowProvider sleeps 60s
+            ..LlmAuditorConfig::default()
+        };
+        let provider = SlowProvider;
+        let review = review_proposal(&p, &cfg, Some(&provider))
+            .await
+            .expect("no error");
+        assert!(
+            review.approved,
+            "timeout must fall back to heuristic approval"
+        );
+        assert!(review.recommendation.contains("timed out"));
     }
 }

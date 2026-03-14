@@ -16,6 +16,7 @@ use crate::governance::{
     ActionOutcome, ActionProposal, AuditDecision, AuditLog, Auditor, AutoPromotionTracker,
     AutonomyLevel, CircuitBreaker, FeatureArea, VetoTracker,
 };
+use crate::llm_auditor::LlmAuditorConfig;
 
 // ---------------------------------------------------------------------------
 // Promotion status
@@ -48,11 +49,12 @@ pub struct PromotionStatus {
 /// 1. Checks vetoes (`VetoTracker` may downgrade Auto to Supervised).
 /// 2. Checks the effective autonomy level (circuit breaker may downgrade).
 /// 3. Runs rule-based Auditor review.
-/// 4. Executes (Auto) or defers (Supervised) approved proposals.
-/// 5. Records every outcome in the audit log.
-/// 6. Sets post-action verification on successful Auto executions.
-/// 7. Tracks Supervised approvals for Auto promotion eligibility.
-/// 8. Optionally persists each entry to a JSONL file for restart recovery.
+/// 4. Optionally runs LLM adversarial review for Auto-mode proposals.
+/// 5. Executes (Auto) or defers (Supervised) approved proposals.
+/// 6. Records every outcome in the audit log.
+/// 7. Sets post-action verification on successful Auto executions.
+/// 8. Tracks Supervised approvals for Auto promotion eligibility.
+/// 9. Optionally persists each entry to a JSONL file for restart recovery.
 #[derive(Debug)]
 pub struct Dispatcher {
     auditor: Auditor,
@@ -62,10 +64,14 @@ pub struct Dispatcher {
     promotion_tracker: AutoPromotionTracker,
     /// Path to the JSONL audit persistence file, if configured.
     audit_log_path: Option<PathBuf>,
+    /// Optional LLM provider for adversarial review of Auto-mode proposals.
+    llm_provider: Option<Box<dyn crate::ai::LlmProvider>>,
+    /// Configuration for the LLM adversarial auditor.
+    llm_auditor_config: LlmAuditorConfig,
 }
 
 impl Dispatcher {
-    /// Create a new Dispatcher with default configuration (no persistence).
+    /// Create a new Dispatcher with default configuration and no LLM provider.
     pub fn new() -> Self {
         Self {
             auditor: Auditor,
@@ -74,6 +80,30 @@ impl Dispatcher {
             veto_tracker: VetoTracker::new(),
             promotion_tracker: AutoPromotionTracker::new(),
             audit_log_path: None,
+            llm_provider: None,
+            llm_auditor_config: LlmAuditorConfig::default(),
+        }
+    }
+
+    /// Create a Dispatcher wired to an LLM provider for adversarial review.
+    ///
+    /// When `provider` is `Some` and `llm_auditor_config.enabled` is `true`,
+    /// Auto-mode proposals are submitted to the LLM for adversarial review
+    /// before execution.  Proposals that the LLM rejects are vetoed and
+    /// recorded in the audit log.
+    pub fn new_with_provider(
+        provider: Option<Box<dyn crate::ai::LlmProvider>>,
+        llm_auditor_config: LlmAuditorConfig,
+    ) -> Self {
+        Self {
+            auditor: Auditor,
+            circuit_breakers: HashMap::new(),
+            audit_log: AuditLog::new(),
+            veto_tracker: VetoTracker::new(),
+            promotion_tracker: AutoPromotionTracker::new(),
+            audit_log_path: None,
+            llm_provider: provider,
+            llm_auditor_config,
         }
     }
 
@@ -99,6 +129,8 @@ impl Dispatcher {
             veto_tracker: VetoTracker::new(),
             promotion_tracker: AutoPromotionTracker::new(),
             audit_log_path: Some(path),
+            llm_provider: None,
+            llm_auditor_config: LlmAuditorConfig::default(),
         }
     }
 
@@ -229,6 +261,150 @@ impl Dispatcher {
             // Auditor approved (we reached here past the rejection branch).
             // Supervised actions are "pending human"; count them as successful
             // supervised outcomes for promotion-tracking purposes.
+            self.promotion_tracker.record(proposal.feature, true, true);
+        }
+
+        outcome
+    }
+
+    /// Async variant of [`Self::dispatch_proposal`] that additionally runs
+    /// LLM adversarial review for `Auto`-mode proposals when a provider is
+    /// configured.
+    ///
+    /// # Decision flow (additional step vs the sync variant)
+    ///
+    /// After the rule-based Auditor approves a proposal in `Auto` mode, the
+    /// proposal is submitted to the configured LLM provider (if any).  If the
+    /// LLM rejects the proposal, it is vetoed and the outcome is
+    /// [`ActionOutcome::Vetoed`].  Timeout and provider errors fall back to
+    /// heuristic approval so that a transient LLM outage never blocks actions
+    /// that passed rule-based review.
+    #[allow(clippy::too_many_lines)]
+    pub async fn dispatch_proposal_async(
+        &mut self,
+        proposal: &ActionProposal,
+        autonomy: AutonomyLevel,
+    ) -> ActionOutcome {
+        // Step 1: Observe mode — never act.
+        if autonomy == AutonomyLevel::Observe {
+            let outcome = ActionOutcome::Skipped;
+            self.audit_log.record(
+                proposal.feature,
+                autonomy,
+                proposal.proposed_action.clone(),
+                proposal.finding.clone(),
+                outcome.clone(),
+                Some("Observe mode: no action taken".to_owned()),
+            );
+            return outcome;
+        }
+
+        // Step 2: VetoTracker — downgrade Auto to Supervised for known-bad
+        // action patterns, before the Auditor runs.
+        let autonomy = if autonomy == AutonomyLevel::Auto
+            && self
+                .veto_tracker
+                .is_vetoed(proposal.feature, &proposal.proposed_action)
+        {
+            AutonomyLevel::Supervised
+        } else {
+            autonomy
+        };
+
+        // Step 3: Rule-based Auditor review.
+        let decision = self.auditor.review(proposal, autonomy);
+        let auditor_note = match &decision {
+            AuditDecision::Approved { note } => note.clone(),
+            AuditDecision::Rejected { reason } => {
+                self.veto_tracker
+                    .record_veto(proposal.feature, &proposal.proposed_action);
+                let outcome = ActionOutcome::Vetoed {
+                    reason: reason.clone(),
+                };
+                self.audit_log.record(
+                    proposal.feature,
+                    autonomy,
+                    proposal.proposed_action.clone(),
+                    proposal.finding.clone(),
+                    outcome.clone(),
+                    Some(format!("Auditor rejected: {reason}")),
+                );
+                return outcome;
+            }
+        };
+
+        // Step 3b: LLM adversarial review — only for Auto-mode proposals
+        // that passed rule-based checks.
+        if autonomy == AutonomyLevel::Auto {
+            let provider_ref = self.llm_provider.as_deref();
+            let llm_review = crate::llm_auditor::review_proposal(
+                proposal,
+                &self.llm_auditor_config,
+                provider_ref,
+            )
+            .await
+            .unwrap_or_else(|err| crate::llm_auditor::LlmAuditReview {
+                approved: true,
+                concerns: vec![],
+                recommendation: format!("LLM review error (fallback): {err}"),
+            });
+
+            if !llm_review.approved {
+                let reason = format!(
+                    "LLM adversarial review rejected: {}",
+                    llm_review.recommendation
+                );
+                self.veto_tracker
+                    .record_veto(proposal.feature, &proposal.proposed_action);
+                let outcome = ActionOutcome::Vetoed {
+                    reason: reason.clone(),
+                };
+                self.audit_log.record(
+                    proposal.feature,
+                    autonomy,
+                    proposal.proposed_action.clone(),
+                    proposal.finding.clone(),
+                    outcome.clone(),
+                    Some(reason),
+                );
+                return outcome;
+            }
+        }
+
+        // Step 4: Apply circuit breaker — downgrade Auto to Supervised if
+        // the breaker for this feature has tripped.
+        let effective = self.effective_autonomy(proposal.feature, autonomy);
+
+        // Step 5 / 6: Execute or defer.
+        let outcome = match effective {
+            AutonomyLevel::Auto => ActionOutcome::Success {
+                detail: format!("Auto-executed: {}", proposal.proposed_action),
+            },
+            AutonomyLevel::Supervised | AutonomyLevel::Observe => ActionOutcome::Skipped,
+        };
+
+        // Record outcome and update circuit breaker.
+        let success = matches!(outcome, ActionOutcome::Success { .. });
+        let seq = self.audit_log.record(
+            proposal.feature,
+            effective,
+            proposal.proposed_action.clone(),
+            proposal.finding.clone(),
+            outcome.clone(),
+            auditor_note,
+        );
+        self.circuit_breakers
+            .entry(proposal.feature)
+            .or_insert_with(CircuitBreaker::new)
+            .record(proposal.feature, success);
+
+        // Step 7: Post-action verification for successful Auto executions.
+        if success && effective == AutonomyLevel::Auto {
+            self.audit_log.set_verification(seq, true);
+        }
+
+        // Record Supervised approvals in the promotion tracker.
+        if effective == AutonomyLevel::Supervised {
             self.promotion_tracker.record(proposal.feature, true, true);
         }
 
@@ -1242,6 +1418,197 @@ mod tests {
             lines.lines().count(),
             3,
             "all three outcomes must be persisted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock LLM provider for async dispatch tests
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct MockLlmProvider {
+        response: String,
+    }
+
+    impl MockLlmProvider {
+        fn approving() -> Self {
+            Self {
+                response: r#"{"approved": true, "concerns": [], "recommendation": "Safe"}"#
+                    .to_owned(),
+            }
+        }
+
+        fn rejecting() -> Self {
+            Self {
+                response:
+                    r#"{"approved": false, "concerns": ["Too risky"], "recommendation": "Reject"}"#
+                        .to_owned(),
+            }
+        }
+    }
+
+    impl crate::ai::LlmProvider for MockLlmProvider {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn default_model(&self) -> &'static str {
+            "mock-model"
+        }
+
+        fn complete(
+            &self,
+            _messages: &[crate::ai::Message],
+            _options: &crate::ai::CompletionOptions,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::ai::CompletionResult, String>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let content = self.response.clone();
+            Box::pin(async move {
+                Ok(crate::ai::CompletionResult {
+                    content,
+                    input_tokens: 5,
+                    output_tokens: 10,
+                })
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 36. dispatch_proposal_async: no provider — behaves like sync
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_dispatch_no_provider_behaves_like_sync() {
+        let mut d = Dispatcher::new();
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "SELECT pg_cancel_backend(42)",
+            "Long-running query",
+        );
+        let outcome = d.dispatch_proposal_async(&p, AutonomyLevel::Auto).await;
+        assert!(
+            matches!(outcome, ActionOutcome::Success { .. }),
+            "without a provider the async dispatch must succeed in Auto mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 37. dispatch_proposal_async: LLM approves → Success
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_dispatch_llm_approve_returns_success() {
+        use crate::llm_auditor::LlmAuditorConfig;
+        let mut d = Dispatcher::new_with_provider(
+            Some(Box::new(MockLlmProvider::approving())),
+            LlmAuditorConfig {
+                enabled: true,
+                ..LlmAuditorConfig::default()
+            },
+        );
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "SELECT pg_cancel_backend(42)",
+            "Long-running query",
+        );
+        let outcome = d.dispatch_proposal_async(&p, AutonomyLevel::Auto).await;
+        assert!(
+            matches!(outcome, ActionOutcome::Success { .. }),
+            "LLM approval must produce Success in Auto mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 38. dispatch_proposal_async: LLM rejects → Vetoed
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_dispatch_llm_reject_returns_vetoed() {
+        use crate::llm_auditor::LlmAuditorConfig;
+        let mut d = Dispatcher::new_with_provider(
+            Some(Box::new(MockLlmProvider::rejecting())),
+            LlmAuditorConfig {
+                enabled: true,
+                ..LlmAuditorConfig::default()
+            },
+        );
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "SELECT pg_cancel_backend(42)",
+            "Long-running query",
+        );
+        let outcome = d.dispatch_proposal_async(&p, AutonomyLevel::Auto).await;
+        assert!(
+            matches!(outcome, ActionOutcome::Vetoed { .. }),
+            "LLM rejection must veto the proposal"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 39. dispatch_proposal_async: LLM rejects but Supervised → Skipped
+    //     (LLM review only applies to Auto mode)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_dispatch_llm_reject_supervised_still_skipped() {
+        use crate::llm_auditor::LlmAuditorConfig;
+        let mut d = Dispatcher::new_with_provider(
+            Some(Box::new(MockLlmProvider::rejecting())),
+            LlmAuditorConfig {
+                enabled: true,
+                ..LlmAuditorConfig::default()
+            },
+        );
+        let p = make_proposal(
+            FeatureArea::Vacuum,
+            EvidenceClass::Factual,
+            "VACUUM ANALYZE users",
+            "Dead tuples",
+        );
+        // Supervised mode: LLM review is skipped — rule-based audit approves.
+        let outcome = d
+            .dispatch_proposal_async(&p, AutonomyLevel::Supervised)
+            .await;
+        assert!(
+            matches!(outcome, ActionOutcome::Skipped),
+            "LLM review is not applied in Supervised mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 40. dispatch_proposal_async: LLM rejection records veto
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_dispatch_llm_reject_records_veto() {
+        use crate::llm_auditor::LlmAuditorConfig;
+        let mut d = Dispatcher::new_with_provider(
+            Some(Box::new(MockLlmProvider::rejecting())),
+            LlmAuditorConfig {
+                enabled: true,
+                ..LlmAuditorConfig::default()
+            },
+        );
+        assert_eq!(d.veto_tracker().veto_count(), 0);
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "SELECT pg_cancel_backend(99)",
+            "Long-running query",
+        );
+        d.dispatch_proposal_async(&p, AutonomyLevel::Auto).await;
+        assert_eq!(
+            d.veto_tracker().veto_count(),
+            1,
+            "LLM rejection must record a veto"
         );
     }
 }
