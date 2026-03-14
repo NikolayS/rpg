@@ -84,6 +84,35 @@ fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
     }
 }
 
+/// Resolve the configured AI provider, ready to use for a request.
+///
+/// Combines the three repeated steps — provider-name lookup, API-key
+/// resolution, and provider construction — into a single call.
+///
+/// Returns `Err` when:
+/// - `config.ai.provider` is absent or empty ("AI not configured"), or
+/// - `crate::ai::create_provider` returns an error (unknown provider,
+///   missing key, etc.).
+///
+/// Callers that want a custom "not configured" message should check
+/// `settings.config.ai.provider` themselves first; callers that are
+/// happy with a generic `"AI error: …"` message can use this directly.
+fn get_ai_provider(settings: &ReplSettings) -> Result<Box<dyn crate::ai::LlmProvider>, String> {
+    let provider_name = settings
+        .config
+        .ai
+        .provider
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "AI not configured".to_owned())?;
+    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
+    crate::ai::create_provider(
+        provider_name,
+        api_key.as_deref(),
+        settings.config.ai.base_url.as_deref(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Transaction state
 // ---------------------------------------------------------------------------
@@ -4312,8 +4341,14 @@ async fn observe_loop(
         return;
     }
 
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-    if provider_name.is_empty() {
+    if settings
+        .config
+        .ai
+        .provider
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+    {
         return;
     }
 
@@ -4321,13 +4356,7 @@ async fn observe_loop(
         return;
     }
 
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
+    let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -6582,19 +6611,8 @@ async fn suggest_error_fix_inline(sql: &str, error_message: &str, settings: &mut
         return;
     }
 
-    let provider_name = match settings.config.ai.provider.as_deref() {
-        Some(p) if !p.is_empty() => p,
-        _ => return, // AI not configured — silently skip.
-    };
-
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let Ok(provider) = crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) else {
-        return;
+    let Ok(provider) = get_ai_provider(settings) else {
+        return; // AI not configured or error — silently skip.
     };
 
     let messages = vec![
@@ -6643,19 +6661,8 @@ async fn interpret_auto_explain(
         return;
     }
 
-    let provider_name = match settings.config.ai.provider.as_deref() {
-        Some(p) if !p.is_empty() => p,
-        _ => return,
-    };
-
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let Ok(provider) = crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) else {
-        return;
+    let Ok(provider) = get_ai_provider(settings) else {
+        return; // AI not configured or error — silently skip.
     };
 
     let messages = vec![
@@ -6699,26 +6706,8 @@ async fn interpret_dba_output(context: &str, subcommand: &str, settings: &mut Re
         return;
     }
 
-    let provider_name = match settings.config.ai.provider.as_deref() {
-        Some(p) if !p.is_empty() => p,
-        _ => {
-            eprintln!("-- AI interpretation requires [ai] provider to be configured");
-            return;
-        }
-    };
-
-    let api_key = settings
-        .config
-        .ai
-        .api_key_env
-        .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok());
-
-    let Ok(provider) = crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) else {
+    let Ok(provider) = get_ai_provider(settings) else {
+        eprintln!("-- AI interpretation requires [ai] provider to be configured");
         return;
     };
 
@@ -7034,9 +7023,14 @@ async fn handle_ai_ask(
     params: &ConnParams,
     tx: &mut TxState,
 ) {
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-
-    if provider_name.is_empty() {
+    if settings
+        .config
+        .ai
+        .provider
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+    {
         eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
@@ -7049,14 +7043,7 @@ async fn handle_ai_ask(
         return;
     }
 
-    // Resolve the API key (handles raw keys, missing env vars, etc.).
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
+    let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -7355,9 +7342,14 @@ async fn handle_ai_plan(
     settings: &ReplSettings,
     params: &ConnParams,
 ) {
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-
-    if provider_name.is_empty() {
+    if settings
+        .config
+        .ai
+        .provider
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+    {
         eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
@@ -7365,13 +7357,7 @@ async fn handle_ai_plan(
         return;
     }
 
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
+    let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -7540,9 +7526,14 @@ async fn handle_ai_fix(
         return;
     };
 
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-
-    if provider_name.is_empty() {
+    if settings
+        .config
+        .ai
+        .provider
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+    {
         eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
@@ -7555,14 +7546,7 @@ async fn handle_ai_fix(
         return;
     }
 
-    // Resolve the API key (handles raw keys, missing env vars, etc.).
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
+    let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -7748,23 +7732,8 @@ async fn handle_ai_explain(
     println!("{plan_text}");
 
     // AI interpretation — skip gracefully when AI is not configured.
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-    if provider_name.is_empty() {
+    let Ok(provider) = get_ai_provider(settings) else {
         return;
-    }
-
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("AI error: {e}");
-            return;
-        }
     };
 
     // Build schema context for richer analysis.
@@ -7981,28 +7950,13 @@ async fn handle_ai_optimize(
     }
 
     // AI optimization — skip gracefully when AI is not configured.
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-    if provider_name.is_empty() {
+    let Ok(provider) = get_ai_provider(settings) else {
         eprintln!(
             "\nAI not configured — showing raw plan only. \
              Add an [ai] section to {} for optimization suggestions.",
             crate::config::user_config_path_display()
         );
         return;
-    }
-
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("AI error: {e}");
-            return;
-        }
     };
 
     let schema_ctx = match crate::ai::context::build_schema_context(client).await {
@@ -8078,27 +8032,12 @@ async fn handle_ai_describe(
     settings: &mut ReplSettings,
     params: &ConnParams,
 ) {
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-    if provider_name.is_empty() {
+    let Ok(provider) = get_ai_provider(settings) else {
         eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
         );
         return;
-    }
-
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("AI error: {e}");
-            return;
-        }
     };
 
     // Gather table metadata.
@@ -8247,8 +8186,15 @@ async fn handle_ai_describe(
 
 /// Handle the `/rca` command: collect diagnostic snapshot and analyze.
 async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &ConnParams) {
-    let provider_name = settings.config.ai.provider.as_deref().unwrap_or("");
-    if provider_name.is_empty() {
+    // Check whether AI is configured; if not, still show raw diagnostic data.
+    let ai_configured = settings
+        .config
+        .ai
+        .provider
+        .as_deref()
+        .is_some_and(|p| !p.is_empty());
+
+    if !ai_configured {
         // Without AI, still collect and display the diagnostic snapshot.
         eprintln!("AI not configured — collecting raw diagnostic data only.");
         let pg_ash = settings
@@ -8273,13 +8219,7 @@ async fn handle_ai_rca(client: &Client, settings: &mut ReplSettings, params: &Co
     let total_steps = snapshot.steps.len();
     eprintln!("Collected {data_steps}/{total_steps} steps with data. Analyzing...\n");
 
-    let api_key = resolve_api_key(settings.config.ai.api_key_env.as_deref());
-
-    let provider = match crate::ai::create_provider(
-        provider_name,
-        api_key.as_deref(),
-        settings.config.ai.base_url.as_deref(),
-    ) {
+    let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("AI error: {e}");
