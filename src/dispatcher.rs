@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::governance::{
     ActionOutcome, ActionProposal, AuditDecision, AuditLog, Auditor, AutonomyLevel, CircuitBreaker,
-    FeatureArea,
+    FeatureArea, VetoTracker,
 };
 
 // ---------------------------------------------------------------------------
@@ -22,15 +22,18 @@ use crate::governance::{
 /// Connects Auditor review to the execution path for action proposals.
 ///
 /// The Dispatcher is the single control point that:
-/// 1. Checks the effective autonomy level (circuit breaker may downgrade).
-/// 2. Runs rule-based Auditor review.
-/// 3. Executes (Auto) or defers (Supervised) approved proposals.
-/// 4. Records every outcome in the audit log.
+/// 1. Checks vetoes (`VetoTracker` may downgrade Auto to Supervised).
+/// 2. Checks the effective autonomy level (circuit breaker may downgrade).
+/// 3. Runs rule-based Auditor review.
+/// 4. Executes (Auto) or defers (Supervised) approved proposals.
+/// 5. Records every outcome in the audit log.
+/// 6. Sets post-action verification on successful Auto executions.
 #[derive(Debug)]
 pub struct Dispatcher {
     auditor: Auditor,
     circuit_breakers: HashMap<FeatureArea, CircuitBreaker>,
     audit_log: AuditLog,
+    veto_tracker: VetoTracker,
 }
 
 impl Dispatcher {
@@ -40,6 +43,7 @@ impl Dispatcher {
             auditor: Auditor,
             circuit_breakers: HashMap::new(),
             audit_log: AuditLog::new(),
+            veto_tracker: VetoTracker::new(),
         }
     }
 
@@ -48,11 +52,12 @@ impl Dispatcher {
     /// # Decision flow
     ///
     /// 1. `Observe` → [`ActionOutcome::Skipped`] immediately (no review).
-    /// 2. Auditor rejects → [`ActionOutcome::Vetoed`].
-    /// 3. Circuit breaker tripped → downgrade Auto to Supervised.
-    /// 4. `Auto` (after downgrade check) → log success (Actor integration
-    ///    comes in a later PR).
-    /// 5. `Supervised` → [`ActionOutcome::Skipped`] (logged for human review).
+    /// 2. `VetoTracker` match → downgrade Auto to Supervised.
+    /// 3. Auditor rejects → [`ActionOutcome::Vetoed`]; records veto.
+    /// 4. Circuit breaker tripped → downgrade Auto to Supervised.
+    /// 5. `Auto` (after downgrade checks) → log success; set verification.
+    /// 6. `Supervised` → [`ActionOutcome::Skipped`] (logged for human
+    ///    review).
     ///
     /// Every path records an entry in the audit log.
     pub fn dispatch_proposal(
@@ -74,11 +79,27 @@ impl Dispatcher {
             return outcome;
         }
 
-        // Step 2: Auditor review.
+        // Step 2: VetoTracker — downgrade Auto to Supervised for known-bad
+        // action patterns, before the Auditor runs.
+        let autonomy = if autonomy == AutonomyLevel::Auto
+            && self
+                .veto_tracker
+                .is_vetoed(proposal.feature, &proposal.proposed_action)
+        {
+            AutonomyLevel::Supervised
+        } else {
+            autonomy
+        };
+
+        // Step 3: Auditor review.
         let decision = self.auditor.review(proposal, autonomy);
         let auditor_note = match &decision {
             AuditDecision::Approved { note } => note.clone(),
             AuditDecision::Rejected { reason } => {
+                // Record the veto so future matching proposals are
+                // automatically downgraded.
+                self.veto_tracker
+                    .record_veto(proposal.feature, &proposal.proposed_action);
                 let outcome = ActionOutcome::Vetoed {
                     reason: reason.clone(),
                 };
@@ -94,11 +115,11 @@ impl Dispatcher {
             }
         };
 
-        // Step 3: Apply circuit breaker — downgrade Auto to Supervised if
+        // Step 4: Apply circuit breaker — downgrade Auto to Supervised if
         // the breaker for this feature has tripped.
         let effective = self.effective_autonomy(proposal.feature, autonomy);
 
-        // Step 4 / 5: Execute or defer.
+        // Step 5 / 6: Execute or defer.
         let outcome = match effective {
             AutonomyLevel::Auto => {
                 // Actual Actor execution arrives in a later PR.
@@ -116,7 +137,7 @@ impl Dispatcher {
 
         // Record outcome and update circuit breaker.
         let success = matches!(outcome, ActionOutcome::Success { .. });
-        self.audit_log.record(
+        let seq = self.audit_log.record(
             proposal.feature,
             effective,
             proposal.proposed_action.clone(),
@@ -129,6 +150,11 @@ impl Dispatcher {
             .or_insert_with(CircuitBreaker::new)
             .record(proposal.feature, success);
 
+        // Step 7: Post-action verification for successful Auto executions.
+        if success && effective == AutonomyLevel::Auto {
+            self.audit_log.set_verification(seq, true);
+        }
+
         outcome
     }
 
@@ -140,6 +166,11 @@ impl Dispatcher {
     /// Borrow the audit log mutably (e.g. to set verification results).
     pub fn audit_log_mut(&mut self) -> &mut AuditLog {
         &mut self.audit_log
+    }
+
+    /// Borrow the veto tracker.
+    pub fn veto_tracker(&self) -> &VetoTracker {
+        &self.veto_tracker
     }
 
     // -----------------------------------------------------------------------
@@ -463,5 +494,205 @@ mod tests {
         let d = Dispatcher::default();
         assert!(d.audit_log().is_empty());
         assert!(d.circuit_breakers.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Vetoed action pattern downgrades Auto to Supervised
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vetoed_action_downgrades_auto_to_supervised() {
+        let mut d = Dispatcher::new();
+        // Pre-record a veto for a Vacuum action pattern.
+        d.veto_tracker
+            .record_veto(FeatureArea::Vacuum, "VACUUM ANALYZE");
+
+        let p = make_proposal(
+            FeatureArea::Vacuum,
+            EvidenceClass::Factual,
+            "VACUUM ANALYZE users",
+            "Dead tuple ratio high",
+        );
+        // Auto is downgraded to Supervised due to the veto → Skipped.
+        let outcome = d.dispatch_proposal(&p, AutonomyLevel::Auto);
+        assert!(
+            matches!(outcome, ActionOutcome::Skipped),
+            "Vetoed action pattern must downgrade Auto to Supervised (Skipped)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. Non-vetoed action proceeds normally in Auto
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn non_vetoed_action_proceeds_normally() {
+        let mut d = Dispatcher::new();
+        // Veto a different action for the same feature.
+        d.veto_tracker
+            .record_veto(FeatureArea::Vacuum, "VACUUM FULL");
+
+        let p = make_proposal(
+            FeatureArea::Vacuum,
+            EvidenceClass::Factual,
+            "VACUUM ANALYZE users",
+            "Dead tuple ratio high",
+        );
+        // VACUUM ANALYZE does not match the "vacuum full" pattern → Auto.
+        let outcome = d.dispatch_proposal(&p, AutonomyLevel::Auto);
+        assert!(
+            matches!(outcome, ActionOutcome::Success { .. }),
+            "Non-vetoed action must proceed normally in Auto mode"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. Rejected proposal records veto in VetoTracker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejected_proposal_records_veto() {
+        let mut d = Dispatcher::new();
+        assert_eq!(d.veto_tracker().veto_count(), 0);
+
+        // Advisory evidence → Auditor rejects → veto recorded.
+        let p = make_proposal(
+            FeatureArea::ConfigTuning,
+            EvidenceClass::Advisory,
+            "ALTER SYSTEM SET work_mem = '1GB'",
+            "Some advisory finding",
+        );
+        d.dispatch_proposal(&p, AutonomyLevel::Auto);
+
+        assert_eq!(
+            d.veto_tracker().veto_count(),
+            1,
+            "Rejected proposal must record one veto"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. Subsequent matching proposal is auto-downgraded after rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn subsequent_matching_proposal_is_auto_downgraded() {
+        let mut d = Dispatcher::new();
+
+        // First dispatch: Advisory → rejected, veto recorded.
+        let p1 = make_proposal(
+            FeatureArea::ConfigTuning,
+            EvidenceClass::Advisory,
+            "ALTER SYSTEM SET work_mem = '1GB'",
+            "Advisory finding",
+        );
+        d.dispatch_proposal(&p1, AutonomyLevel::Auto);
+
+        // Second dispatch: same action (Factual evidence this time).
+        // The veto match (substring of the same string) downgrades
+        // Auto → Supervised → Skipped.
+        let p2 = make_proposal(
+            FeatureArea::ConfigTuning,
+            EvidenceClass::Factual,
+            "ALTER SYSTEM SET work_mem = '1GB'",
+            "Factual finding",
+        );
+        let outcome = d.dispatch_proposal(&p2, AutonomyLevel::Auto);
+        assert!(
+            matches!(outcome, ActionOutcome::Skipped),
+            "Subsequent matching proposal must be auto-downgraded to Supervised"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Post-action verification is set on successful Auto execution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn post_action_verification_set_on_auto_success() {
+        let mut d = Dispatcher::new();
+        let p = make_proposal(
+            FeatureArea::Rca,
+            EvidenceClass::Factual,
+            "SELECT pg_cancel_backend(42)",
+            "Long-running query",
+        );
+        d.dispatch_proposal(&p, AutonomyLevel::Auto);
+
+        let entries = d.audit_log().entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].verified,
+            Some(true),
+            "Successful Auto action must have verification set to true"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. Verification not set on Supervised (skipped)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verification_not_set_on_supervised() {
+        let mut d = Dispatcher::new();
+        let p = make_proposal(
+            FeatureArea::Vacuum,
+            EvidenceClass::Factual,
+            "VACUUM ANALYZE users",
+            "Dead tuple ratio high",
+        );
+        d.dispatch_proposal(&p, AutonomyLevel::Supervised);
+
+        let entries = d.audit_log().entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].verified, None,
+            "Supervised (Skipped) action must not have verification set"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. Multiple vetoes accumulate in the tracker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_vetoes_accumulate() {
+        let mut d = Dispatcher::new();
+
+        // Three distinct advisory rejections → three distinct veto patterns.
+        let actions = [
+            (
+                FeatureArea::ConfigTuning,
+                "ALTER SYSTEM SET work_mem = '1GB'",
+            ),
+            (
+                FeatureArea::ConfigTuning,
+                "ALTER SYSTEM SET shared_buffers = '4GB'",
+            ),
+            (
+                FeatureArea::Vacuum,
+                "ALTER SYSTEM SET autovacuum_max_workers = 10",
+            ),
+        ];
+        for (feature, action) in actions {
+            let p = make_proposal(feature, EvidenceClass::Advisory, action, "Advisory");
+            d.dispatch_proposal(&p, AutonomyLevel::Auto);
+        }
+
+        assert_eq!(
+            d.veto_tracker().veto_count(),
+            3,
+            "Three distinct rejections must produce three veto entries"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 21. veto_tracker() accessor returns the tracker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn veto_tracker_accessor_works() {
+        let d = Dispatcher::new();
+        assert_eq!(d.veto_tracker().veto_count(), 0);
     }
 }
