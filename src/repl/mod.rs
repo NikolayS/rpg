@@ -3623,6 +3623,12 @@ pub async fn run_repl(
     // Build rustyline editor (skip if --no-readline).
     let use_readline = !no_readline && io::stdin().is_terminal();
 
+    // Clear terminal so the REPL starts with a clean screen.
+    if use_readline {
+        print!("\x1b[2J\x1b[H");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
     // Initialise the status bar for interactive sessions.
     // Enabled when: readline mode AND stderr is a terminal AND config allows it.
     if use_readline
