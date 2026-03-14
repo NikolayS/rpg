@@ -297,6 +297,10 @@ pub enum MetaCmd {
     /// `\profiles` — list all configured connection profiles.
     ListProfiles,
 
+    // -- Schema cache (#301) -----------------------------------------------
+    /// `\refresh` — reload the schema cache for tab completion.
+    RefreshSchema,
+
     // -- Session persistence (#247) ----------------------------------------
     /// `\session list` — show recent sessions.
     SessionList,
@@ -1127,6 +1131,12 @@ fn parse_o(input: &str) -> ParsedMeta {
 /// `\qecho` here as a special prefix-matched command reached from the `q`
 /// branch — wait, `\qecho` starts with `q`. This function is for `\r` only.
 fn parse_r_family(input: &str) -> ParsedMeta {
+    // `\refresh` — reload schema cache (check before bare `\r`).
+    if let Some(rest) = input.strip_prefix("refresh") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::RefreshSchema);
+        }
+    }
     // `\r` — bare reset
     if let Some(rest) = input.strip_prefix('r') {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
