@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::governance::{AutonomyLevel, FeatureArea};
+use crate::llm_auditor::LlmAuditorConfig;
 
 // ---------------------------------------------------------------------------
 // Top-level config
@@ -411,6 +412,8 @@ pub struct GovernanceConfig {
     ///
     /// Defaults to `None` (in-memory only).
     pub audit_log_path: Option<PathBuf>,
+    /// LLM adversarial auditor settings.
+    pub llm_auditor: LlmAuditorConfig,
 }
 
 impl Default for GovernanceConfig {
@@ -427,6 +430,7 @@ impl Default for GovernanceConfig {
             backup_monitoring: AutonomyLevel::Observe,
             security: AutonomyLevel::Observe,
             audit_log_path: None,
+            llm_auditor: LlmAuditorConfig::default(),
         }
     }
 }
@@ -1310,6 +1314,13 @@ fn merge_governance(base: GovernanceConfig, overlay: GovernanceConfig) -> Govern
             overlay_level
         }
     };
+    // For the llm_auditor sub-config, the overlay wins when it has enabled=true
+    // (i.e., is not at the default disabled state).
+    let llm_auditor = if overlay.llm_auditor.enabled {
+        overlay.llm_auditor
+    } else {
+        base.llm_auditor
+    };
     GovernanceConfig {
         vacuum: pick(base.vacuum, overlay.vacuum),
         bloat: pick(base.bloat, overlay.bloat),
@@ -1323,6 +1334,7 @@ fn merge_governance(base: GovernanceConfig, overlay: GovernanceConfig) -> Govern
         security: pick(base.security, overlay.security),
         // Overlay wins if set; fall back to base.
         audit_log_path: overlay.audit_log_path.or(base.audit_log_path),
+        llm_auditor,
     }
 }
 
