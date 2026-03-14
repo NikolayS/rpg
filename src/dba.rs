@@ -33,7 +33,7 @@ pub async fn execute(
             None
         }
         "locks" | "lock" => {
-            dba_locks(client, verbose).await;
+            dba_locks(client, verbose, capabilities).await;
             None
         }
         "bloat" => {
@@ -423,43 +423,427 @@ async fn dba_activity(
     );
 }
 
-async fn dba_locks(client: &Client, _verbose: bool) {
-    let sql = "select \
-        blocked_locks.pid as blocked_pid, \
-        blocked_activity.usename as blocked_user, \
-        blocking_locks.pid as blocking_pid, \
-        blocking_activity.usename as blocking_user, \
-        blocked_activity.query as blocked_query, \
-        blocking_activity.query as blocking_query \
-    from pg_catalog.pg_locks as blocked_locks \
-    join pg_catalog.pg_stat_activity as blocked_activity \
-        on blocked_activity.pid = blocked_locks.pid \
-    join pg_catalog.pg_locks as blocking_locks \
-        on blocking_locks.locktype = blocked_locks.locktype \
-        and blocking_locks.database \
-                is not distinct from blocked_locks.database \
-        and blocking_locks.relation \
-                is not distinct from blocked_locks.relation \
-        and blocking_locks.page \
-                is not distinct from blocked_locks.page \
-        and blocking_locks.tuple \
-                is not distinct from blocked_locks.tuple \
-        and blocking_locks.virtualxid \
-                is not distinct from blocked_locks.virtualxid \
-        and blocking_locks.transactionid \
-                is not distinct from blocked_locks.transactionid \
-        and blocking_locks.classid \
-                is not distinct from blocked_locks.classid \
-        and blocking_locks.objid \
-                is not distinct from blocked_locks.objid \
-        and blocking_locks.objsubid \
-                is not distinct from blocked_locks.objsubid \
-        and blocking_locks.pid != blocked_locks.pid \
-    join pg_catalog.pg_stat_activity as blocking_activity \
-        on blocking_activity.pid = blocking_locks.pid \
-    where not blocked_locks.granted \
-    order by blocked_activity.query_start";
-    run_and_print(client, sql).await;
+// ---------------------------------------------------------------------------
+// Lock-tree data structures
+// ---------------------------------------------------------------------------
+
+/// One row returned by the lock-tree diagnostic query.
+struct LockEdge {
+    /// PID that is waiting (blocked).
+    blocked_pid: i32,
+    /// Username of the blocked session.
+    blocked_user: String,
+    /// Database name of the blocked session.
+    blocked_db: String,
+    /// PID that holds the conflicting lock (blocker).
+    blocking_pid: i32,
+    /// Username of the blocking session.
+    blocking_user: String,
+    /// Database name of the blocking session.
+    blocking_db: String,
+    /// Lock type (e.g. `"relation"`, `"transactionid"`).
+    lock_type: String,
+    /// Lock mode the blocked session is requesting.
+    lock_mode: String,
+    /// Relation name the lock is on, if applicable.
+    relation: String,
+    /// How long the blocked session has been waiting (human-readable).
+    wait_duration: String,
+    /// Query text of the blocked session (first 80 chars).
+    blocked_query: String,
+    /// Query text of the blocking session (first 80 chars).
+    blocking_query: String,
+}
+
+/// Collect lock edges from `pg_locks` joined with `pg_stat_activity`.
+///
+/// Uses `waitstart` (PG 14+) for accurate wait duration; falls back to
+/// `query_start` on older versions where `waitstart` may be absent.
+async fn collect_lock_edges(
+    client: &Client,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
+) -> Vec<LockEdge> {
+    // waitstart was added in PG 14. Since we target PG 14-18 it is always
+    // available, but guard defensively in case the capabilities probe failed.
+    let has_waitstart = capabilities
+        .is_none_or(|c| c.pg_major_version().is_none_or(|v| v >= 14));
+
+    let sql = build_locks_sql(has_waitstart);
+    crate::logging::trace("dba", &format!("locks diagnostic query: {}", sql.trim()));
+
+    let messages = match client.simple_query(&sql).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("\\dba locks: {e}");
+            return Vec::new();
+        }
+    };
+
+    parse_lock_edges(messages)
+}
+
+/// Build the lock-tree diagnostic SQL.
+///
+/// `has_waitstart` selects between the `waitstart` column (PG 14+) and the
+/// `query_start` fallback for the wait-duration calculation.
+fn build_locks_sql(has_waitstart: bool) -> String {
+    let wait_expr = if has_waitstart {
+        "extract(epoch from (now() - blocked_activity.waitstart))"
+    } else {
+        "extract(epoch from (now() - blocked_activity.query_start))"
+    };
+
+    // SQL keywords are lowercase per CLAUDE.md style guide.
+    format!(
+        "\
+        with lock_pairs as (\
+            select \
+                blocked_locks.pid                          as blocked_pid, \
+                blocked_activity.usename                   as blocked_user, \
+                coalesce(blocked_activity.datname, '')     as blocked_db, \
+                blocking_locks.pid                         as blocking_pid, \
+                blocking_activity.usename                  as blocking_user, \
+                coalesce(blocking_activity.datname, '')    as blocking_db, \
+                blocked_locks.locktype                     as lock_type, \
+                blocked_locks.mode                         as lock_mode, \
+                coalesce(\
+                    (select relname \
+                     from pg_catalog.pg_class \
+                     where oid = blocked_locks.relation), \
+                    '') as relation, \
+                {wait_expr}                                as wait_secs, \
+                left(coalesce(blocked_activity.query, ''), 80)  as blocked_query, \
+                left(coalesce(blocking_activity.query, ''), 80) as blocking_query \
+            from pg_catalog.pg_locks as blocked_locks \
+            join pg_catalog.pg_stat_activity as blocked_activity \
+                on blocked_activity.pid = blocked_locks.pid \
+            join pg_catalog.pg_locks as blocking_locks \
+                on  blocking_locks.locktype = blocked_locks.locktype \
+                and blocking_locks.database \
+                        is not distinct from blocked_locks.database \
+                and blocking_locks.relation \
+                        is not distinct from blocked_locks.relation \
+                and blocking_locks.page \
+                        is not distinct from blocked_locks.page \
+                and blocking_locks.tuple \
+                        is not distinct from blocked_locks.tuple \
+                and blocking_locks.virtualxid \
+                        is not distinct from blocked_locks.virtualxid \
+                and blocking_locks.transactionid \
+                        is not distinct from blocked_locks.transactionid \
+                and blocking_locks.classid \
+                        is not distinct from blocked_locks.classid \
+                and blocking_locks.objid \
+                        is not distinct from blocked_locks.objid \
+                and blocking_locks.objsubid \
+                        is not distinct from blocked_locks.objsubid \
+                and blocking_locks.pid != blocked_locks.pid \
+            join pg_catalog.pg_stat_activity as blocking_activity \
+                on blocking_activity.pid = blocking_locks.pid \
+            where not blocked_locks.granted \
+        ) \
+        select \
+            blocked_pid, \
+            blocked_user, \
+            blocked_db, \
+            blocking_pid, \
+            blocking_user, \
+            blocking_db, \
+            lock_type, \
+            lock_mode, \
+            relation, \
+            coalesce(wait_secs::text, '0') as wait_secs, \
+            blocked_query, \
+            blocking_query \
+        from lock_pairs \
+        order by wait_secs desc nulls last"
+    )
+}
+
+/// Parse `SimpleQueryMessage` rows into `LockEdge` values.
+fn parse_lock_edges(
+    messages: Vec<tokio_postgres::SimpleQueryMessage>,
+) -> Vec<LockEdge> {
+    let mut edges = Vec::new();
+    for msg in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            let get = |i: usize| row.get(i).unwrap_or("").to_owned();
+            let blocked_pid: i32 = get(0).parse().unwrap_or(0);
+            let blocked_user = get(1);
+            let blocked_db = get(2);
+            let blocking_pid: i32 = get(3).parse().unwrap_or(0);
+            let blocking_user = get(4);
+            let blocking_db = get(5);
+            let lock_type = get(6);
+            let lock_mode = get(7);
+            let relation = get(8);
+            let wait_secs: f64 = get(9).parse().unwrap_or(0.0);
+            let blocked_query = get(10);
+            let blocking_query = get(11);
+            let wait_duration = format_duration_secs(wait_secs);
+
+            edges.push(LockEdge {
+                blocked_pid,
+                blocked_user,
+                blocked_db,
+                blocking_pid,
+                blocking_user,
+                blocking_db,
+                lock_type,
+                lock_mode,
+                relation,
+                wait_duration,
+                blocked_query,
+                blocking_query,
+            });
+        }
+    }
+    edges
+}
+
+/// Format a duration given as fractional seconds into a short human string.
+///
+/// Examples: `"0.3s"`, `"5.2s"`, `"2m 14.0s"`.
+fn format_duration_secs(secs: f64) -> String {
+    if secs < 0.0 {
+        return "0.0s".to_owned();
+    }
+    if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        // Safe cast: secs >= 60.0 and floor(secs) fits in u64 for any
+        // realistic lock-wait duration.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let total_secs = secs.floor() as u64;
+        let mins = total_secs / 60;
+        // Safe: mins is a small u64, well within f64 mantissa precision.
+        #[allow(clippy::cast_precision_loss)]
+        let rem = secs - (mins as f64 * 60.0);
+        format!("{mins}m {rem:.1}s")
+    }
+}
+
+/// One node in the rendered lock tree.
+struct LockNode {
+    pid: i32,
+    user: String,
+    db: String,
+    /// Granted lock mode if this is a root (blocker), or requested mode if
+    /// this is a waiting child.
+    mode: String,
+    relation: String,
+    lock_type: String,
+    /// `None` for root nodes (blockers); `Some(duration)` for waiters.
+    wait_duration: Option<String>,
+    /// Query text (first 80 chars).
+    query: String,
+    /// PIDs that are waiting on this node.
+    children: Vec<LockNode>,
+}
+
+/// Build a forest of `LockNode` trees from the collected edges.
+///
+/// Roots are blocker PIDs that do not themselves appear as `blocked_pid`.
+/// Children are the sessions waiting on each root (recursively).
+fn build_lock_forest(edges: &[LockEdge]) -> Vec<LockNode> {
+    use std::collections::{HashMap, HashSet};
+
+    if edges.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect the set of all blocked PIDs.
+    let blocked_pids: HashSet<i32> = edges.iter().map(|e| e.blocked_pid).collect();
+
+    // Build a map: blocker_pid -> list of edges where that PID blocks.
+    let mut blocker_map: HashMap<i32, Vec<&LockEdge>> = HashMap::new();
+    for edge in edges {
+        blocker_map.entry(edge.blocking_pid).or_default().push(edge);
+    }
+
+    // Root blockers: appear as blocking_pid but NOT as blocked_pid.
+    // Use a BTreeMap for deterministic ordering by PID.
+    let mut root_pids: Vec<i32> = blocker_map
+        .keys()
+        .filter(|pid| !blocked_pids.contains(pid))
+        .copied()
+        .collect();
+    root_pids.sort_unstable();
+
+    // Gather blocker info from the first edge that mentions each root.
+    let root_nodes: Vec<LockNode> = root_pids
+        .into_iter()
+        .filter_map(|root_pid| {
+            let children_edges = blocker_map.get(&root_pid)?;
+            // Take identity from the first edge.
+            let first = children_edges[0];
+            // Determine the granted mode for the blocker: look for a
+            // granted lock in pg_locks. We don't have that here, so we
+            // display the mode the blocker holds as the conflicting mode
+            // of the first waiting child.
+            let mode = first.lock_mode.clone();
+            let relation = first.relation.clone();
+            let lock_type = first.lock_type.clone();
+
+            let children = build_children(root_pid, &blocker_map, &blocked_pids);
+
+            Some(LockNode {
+                pid: root_pid,
+                user: first.blocking_user.clone(),
+                db: first.blocking_db.clone(),
+                mode,
+                relation,
+                lock_type,
+                wait_duration: None,
+                query: first.blocking_query.clone(),
+                children,
+            })
+        })
+        .collect();
+
+    root_nodes
+}
+
+/// Recursively build child nodes for `parent_pid`.
+fn build_children(
+    parent_pid: i32,
+    blocker_map: &std::collections::HashMap<i32, Vec<&LockEdge>>,
+    blocked_pids: &std::collections::HashSet<i32>,
+) -> Vec<LockNode> {
+    let Some(edges) = blocker_map.get(&parent_pid) else {
+        return Vec::new();
+    };
+
+    // Deduplicate by blocked_pid (a session may appear multiple times due
+    // to multiple lock types being contested simultaneously).
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut children: Vec<LockNode> = Vec::new();
+
+    for edge in edges {
+        if seen.insert(edge.blocked_pid) {
+            let grandchildren = if blocked_pids.contains(&edge.blocked_pid) {
+                build_children(edge.blocked_pid, blocker_map, blocked_pids)
+            } else {
+                Vec::new()
+            };
+
+            children.push(LockNode {
+                pid: edge.blocked_pid,
+                user: edge.blocked_user.clone(),
+                db: edge.blocked_db.clone(),
+                mode: edge.lock_mode.clone(),
+                relation: edge.relation.clone(),
+                lock_type: edge.lock_type.clone(),
+                wait_duration: Some(edge.wait_duration.clone()),
+                query: edge.blocked_query.clone(),
+                children: grandchildren,
+            });
+        }
+    }
+
+    // Sort children by wait duration descending for visual clarity.
+    children.sort_by(|a, b| b.wait_duration.cmp(&a.wait_duration));
+
+    children
+}
+
+/// Render the lock forest to stdout with tree-drawing characters.
+///
+/// Example output:
+/// ```text
+/// PID 1234 (alice@mydb) GRANTED AccessExclusiveLock on users
+///   query: update users set ...
+/// ├─ PID 5678 (bob@mydb) WAITING 5.2s RowExclusiveLock on users
+/// │  query: insert into users ...
+/// │  └─ PID 9012 (eve@mydb) WAITING 3.1s AccessShareLock on users
+/// │     query: select * from users ...
+/// └─ PID 3456 (carol@mydb) WAITING 4.8s RowShareLock on users
+///    query: select * from users ...
+/// ```
+fn render_lock_forest(forest: &[LockNode]) {
+    if forest.is_empty() {
+        println!("No blocking locks detected.");
+        return;
+    }
+
+    for (i, root) in forest.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        render_node(root, "", true, true);
+    }
+}
+
+/// Render a single node and its subtree.
+///
+/// `prefix` is the leading string for all lines of this node's children.
+/// `is_root` means the node is a top-level blocker (no tree connector).
+/// `is_last` means this is the last child of its parent.
+fn render_node(node: &LockNode, prefix: &str, is_root: bool, is_last: bool) {
+    // Choose connector.
+    let connector = if is_root {
+        ""
+    } else if is_last {
+        "└─ "
+    } else {
+        "├─ "
+    };
+
+    let relation_part = if node.relation.is_empty() {
+        node.lock_type.clone()
+    } else {
+        format!("{} on {}", node.lock_type, node.relation)
+    };
+
+    if let Some(ref dur) = node.wait_duration {
+        println!(
+            "{prefix}{connector}PID {} ({}@{}) WAITING {} {} {}",
+            node.pid, node.user, node.db, dur, node.mode, relation_part
+        );
+    } else {
+        println!(
+            "{prefix}{connector}PID {} ({}@{}) GRANTED {} {}",
+            node.pid, node.user, node.db, node.mode, relation_part
+        );
+    }
+
+    // Query line — indented one extra level.
+    let query_prefix = if is_root {
+        "  ".to_owned()
+    } else if is_last {
+        format!("{prefix}   ")
+    } else {
+        format!("{prefix}│  ")
+    };
+    if !node.query.is_empty() {
+        println!("{query_prefix}query: {}", node.query);
+    }
+
+    // Render children.
+    let child_prefix = if is_root {
+        String::new()
+    } else if is_last {
+        format!("{prefix}   ")
+    } else {
+        format!("{prefix}│  ")
+    };
+
+    let n = node.children.len();
+    for (i, child) in node.children.iter().enumerate() {
+        let child_is_last = i + 1 == n;
+        render_node(child, &child_prefix, false, child_is_last);
+    }
+}
+
+/// `\dba locks` — display a lock tree visualization.
+async fn dba_locks(
+    client: &Client,
+    _verbose: bool,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
+) {
+    let edges = collect_lock_edges(client, capabilities).await;
+    let forest = build_lock_forest(&edges);
+    render_lock_forest(&forest);
 }
 
 async fn dba_bloat(client: &Client, _verbose: bool) {
@@ -1051,5 +1435,151 @@ mod tests {
         assert_eq!(c.idle, 1);
         assert_eq!(c.other, 1);
         assert_eq!(c.total(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Lock-tree helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_duration_secs_sub_minute() {
+        assert_eq!(format_duration_secs(5.2), "5.2s");
+        assert_eq!(format_duration_secs(0.3), "0.3s");
+        assert_eq!(format_duration_secs(59.9), "59.9s");
+    }
+
+    #[test]
+    fn format_duration_secs_over_minute() {
+        // 90 s → 1m 30.0s  (rounds to nearest second for minutes part)
+        let s = format_duration_secs(90.0);
+        assert!(s.starts_with("1m"), "expected 1m ..., got {s}");
+        assert!(s.contains("30.0s"), "expected 30.0s, got {s}");
+    }
+
+    #[test]
+    fn format_duration_secs_negative_is_zero() {
+        assert_eq!(format_duration_secs(-1.0), "0.0s");
+    }
+
+    #[test]
+    fn build_lock_forest_empty() {
+        let forest = build_lock_forest(&[]);
+        assert!(forest.is_empty());
+    }
+
+    /// Helper to build a minimal `LockEdge` for testing.
+    fn make_edge(
+        blocking_pid: i32,
+        blocking_user: &str,
+        blocked_pid: i32,
+        blocked_user: &str,
+        lock_mode: &str,
+        relation: &str,
+        wait_secs: f64,
+    ) -> LockEdge {
+        LockEdge {
+            blocked_pid,
+            blocked_user: blocked_user.to_owned(),
+            blocked_db: "testdb".to_owned(),
+            blocking_pid,
+            blocking_user: blocking_user.to_owned(),
+            blocking_db: "testdb".to_owned(),
+            lock_type: "relation".to_owned(),
+            lock_mode: lock_mode.to_owned(),
+            relation: relation.to_owned(),
+            wait_duration: format_duration_secs(wait_secs),
+            blocked_query: "select 1".to_owned(),
+            blocking_query: "update t set x=1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn build_lock_forest_single_edge() {
+        let edges = vec![make_edge(
+            1234,
+            "alice",
+            5678,
+            "bob",
+            "RowExclusiveLock",
+            "users",
+            5.2,
+        )];
+        let forest = build_lock_forest(&edges);
+        assert_eq!(forest.len(), 1, "expected one root node");
+        let root = &forest[0];
+        assert_eq!(root.pid, 1234);
+        assert!(root.wait_duration.is_none(), "root should be GRANTED");
+        assert_eq!(root.children.len(), 1);
+        let child = &root.children[0];
+        assert_eq!(child.pid, 5678);
+        assert!(child.wait_duration.is_some(), "child should be WAITING");
+    }
+
+    #[test]
+    fn build_lock_forest_chain() {
+        // 1234 blocks 5678 which blocks 9012
+        let edges = vec![
+            make_edge(1234, "alice", 5678, "bob", "AccessExclusiveLock", "t", 10.0),
+            make_edge(5678, "bob", 9012, "eve", "RowExclusiveLock", "t", 5.0),
+        ];
+        let forest = build_lock_forest(&edges);
+        assert_eq!(forest.len(), 1);
+        let root = &forest[0];
+        assert_eq!(root.pid, 1234);
+        assert_eq!(root.children.len(), 1);
+        let mid = &root.children[0];
+        assert_eq!(mid.pid, 5678);
+        assert_eq!(mid.children.len(), 1);
+        let leaf = &mid.children[0];
+        assert_eq!(leaf.pid, 9012);
+        assert!(leaf.children.is_empty());
+    }
+
+    #[test]
+    fn build_lock_forest_fan_out() {
+        // 1234 blocks both 5678 and 9012
+        let edges = vec![
+            make_edge(1234, "alice", 5678, "bob", "AccessExclusiveLock", "t", 5.0),
+            make_edge(1234, "alice", 9012, "eve", "RowExclusiveLock", "t", 3.0),
+        ];
+        let forest = build_lock_forest(&edges);
+        assert_eq!(forest.len(), 1);
+        let root = &forest[0];
+        assert_eq!(root.pid, 1234);
+        assert_eq!(root.children.len(), 2);
+        let pids: Vec<i32> = root.children.iter().map(|c| c.pid).collect();
+        assert!(pids.contains(&5678));
+        assert!(pids.contains(&9012));
+    }
+
+    #[test]
+    fn render_lock_forest_no_panic_empty() {
+        render_lock_forest(&[]);
+    }
+
+    #[test]
+    fn render_lock_forest_no_panic_with_data() {
+        let edges = vec![make_edge(
+            1234,
+            "alice",
+            5678,
+            "bob",
+            "RowExclusiveLock",
+            "users",
+            5.2,
+        )];
+        let forest = build_lock_forest(&edges);
+        // Should not panic.
+        render_lock_forest(&forest);
+    }
+
+    #[test]
+    fn render_lock_forest_no_panic_chain() {
+        let edges = vec![
+            make_edge(1234, "alice", 5678, "bob", "AccessExclusiveLock", "t", 10.0),
+            make_edge(5678, "bob", 9012, "eve", "RowExclusiveLock", "t", 5.0),
+        ];
+        let forest = build_lock_forest(&edges);
+        render_lock_forest(&forest);
     }
 }
