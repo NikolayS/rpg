@@ -876,8 +876,7 @@ pub struct SyncConfig {
 ///
 /// Channel names must match the variant tag used in the daemon's
 /// `--slack-webhook`, `--webhook-url`, etc. flags.  This config is
-/// evaluated at alert dispatch time; consumers not yet wired in v1
-/// treat an empty list as "send to all".
+/// evaluated at alert dispatch time; an empty list means "send to all".
 ///
 /// ```toml
 /// [notification_routing]

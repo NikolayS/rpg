@@ -13,7 +13,6 @@
 //! | Blocking chain | Factual | `pg_locks` + `pg_stat_activity` |
 //! | High session count | Heuristic | `pg_stat_activity` |
 
-// Phase 2/3 infrastructure — compiled but not yet wired into the main dispatch loop.
 #![allow(dead_code)]
 
 use crate::governance::{EvidenceClass, Severity};

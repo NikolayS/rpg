@@ -43,8 +43,6 @@ mod ssh_tunnel;
 mod statusline;
 mod vars;
 
-// Phase 2/3 infrastructure — compiled but not yet wired into the main
-// dispatch loop. Each module suppresses dead_code at the item level.
 mod aaa_commands;
 mod alert_delivery;
 mod anomaly;

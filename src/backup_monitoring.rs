@@ -14,8 +14,6 @@
 //! | Archiving disabled | Advisory | `archive_mode = off` |
 //! | Current WAL position | Factual | `pg_current_wal_lsn()` |
 
-// Phase 2/3 infrastructure — compiled but not yet wired into the main
-// dispatch loop. Items are exercised via unit tests.
 #![allow(dead_code)]
 
 use crate::governance::{EvidenceClass, Severity};

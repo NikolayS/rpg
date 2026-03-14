@@ -16,7 +16,6 @@
 //! [`BloatReport::pgstattuple_available`] for callers that want to
 //! offer a more precise follow-up query.
 
-// Phase 2 infrastructure — compiled but not yet wired into the main dispatch loop.
 #![allow(dead_code)]
 
 use crate::governance::{EvidenceClass, Severity};

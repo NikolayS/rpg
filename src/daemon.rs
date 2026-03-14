@@ -156,7 +156,7 @@ pub enum NotificationChannel {
     /// When `secret` is set, the payload is signed with HMAC-SHA256 and the
     /// signature is sent in the `X-Rpg-Signature-256` header.
     Webhook { url: String, secret: Option<String> },
-    /// Email (placeholder — not implemented in v1).
+    /// Email — not implemented in v1.0, see SPEC deferred items.
     #[allow(dead_code)]
     Email { to: String },
     /// `PagerDuty` Events API v2 routing key.
