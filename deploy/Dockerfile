@@ -1,18 +1,18 @@
-# Samo container image — Alpine-based, minimal footprint.
+# Rpg container image — Alpine-based, minimal footprint.
 #
 # Build:
-#   docker build -t samo:latest -f deploy/Dockerfile .
+#   docker build -t rpg:latest -f deploy/Dockerfile .
 #
 # Run:
 #   docker run --rm \
 #     -e PGHOST=host.docker.internal \
 #     -e PGPORT=5432 \
-#     -e PGUSER=samo \
+#     -e PGUSER=rpg \
 #     -e PGDATABASE=postgres \
-#     samo:latest daemon
+#     rpg:latest --daemon
 
 # --- Build stage ---
-FROM rust:1.82-alpine AS builder
+FROM rust:1.85-alpine AS builder
 
 RUN apk add --no-cache musl-dev git
 
@@ -25,11 +25,11 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates && \
-    adduser -D -H -s /sbin/nologin samo
+    adduser -D -H -s /sbin/nologin rpg
 
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/samo /usr/local/bin/samo
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/rpg /usr/local/bin/rpg
 
-USER samo
+USER rpg
 
-ENTRYPOINT ["samo"]
+ENTRYPOINT ["rpg"]
 CMD ["--help"]

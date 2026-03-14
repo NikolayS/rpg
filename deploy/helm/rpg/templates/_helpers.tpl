@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "samo.name" -}}
+{{- define "rpg.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "samo.fullname" -}}
+{{- define "rpg.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -24,9 +24,9 @@ Create a default fully qualified app name.
 {{/*
 Common labels.
 */}}
-{{- define "samo.labels" -}}
-helm.sh/chart: {{ include "samo.chart" . }}
-{{ include "samo.selectorLabels" . }}
+{{- define "rpg.labels" -}}
+helm.sh/chart: {{ include "rpg.chart" . }}
+{{ include "rpg.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -36,24 +36,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels.
 */}}
-{{- define "samo.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "samo.name" . }}
+{{- define "rpg.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "rpg.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Chart label.
 */}}
-{{- define "samo.chart" -}}
+{{- define "rpg.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Service account name.
 */}}
-{{- define "samo.serviceAccountName" -}}
+{{- define "rpg.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "samo.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "rpg.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
@@ -62,7 +62,7 @@ Service account name.
 {{/*
 Image reference.
 */}}
-{{- define "samo.image" -}}
+{{- define "rpg.image" -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}

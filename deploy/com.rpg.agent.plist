@@ -1,11 +1,11 @@
-<!-- Launchd plist for Samo daemon mode (macOS).
+<!-- Launchd plist for Rpg daemon mode (macOS).
 
 Installation:
-  1. Copy binary to /usr/local/bin/samo
-  2. Copy config to /usr/local/etc/samo/config.toml
+  1. Copy binary to /usr/local/bin/rpg
+  2. Copy config to /usr/local/etc/rpg/config.toml
   3. Copy this file to ~/Library/LaunchAgents/ (user) or
      /Library/LaunchDaemons/ (system-wide)
-  4. Load: launchctl load ~/Library/LaunchAgents/com.samo.agent.plist
+  4. Load: launchctl load ~/Library/LaunchAgents/com.rpg.agent.plist
 
 Environment variables:
   Set PGHOST, PGPORT, etc. in the EnvironmentVariables dict below,
@@ -16,14 +16,14 @@ Environment variables:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.samo.agent</string>
+    <string>com.rpg.agent</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/samo</string>
-        <string>daemon</string>
+        <string>/usr/local/bin/rpg</string>
+        <string>--daemon</string>
         <string>--config</string>
-        <string>/usr/local/etc/samo/config.toml</string>
+        <string>/usr/local/etc/rpg/config.toml</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -39,10 +39,10 @@ Environment variables:
     <integer>5</integer>
 
     <key>StandardOutPath</key>
-    <string>/usr/local/var/log/samo/stdout.log</string>
+    <string>/usr/local/var/log/rpg/stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/usr/local/var/log/samo/stderr.log</string>
+    <string>/usr/local/var/log/rpg/stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -52,7 +52,7 @@ Environment variables:
         <key>PGPORT</key>
         <string>5432</string>
         <key>PGUSER</key>
-        <string>samo</string>
+        <string>rpg</string>
         <key>PGDATABASE</key>
         <string>postgres</string>
         -->
