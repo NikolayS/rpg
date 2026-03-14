@@ -264,6 +264,40 @@ impl Default for AiConfig {
     }
 }
 
+impl AiConfig {
+    /// Infer `provider` from `api_key_env` when the provider is not set
+    /// explicitly.
+    ///
+    /// Checks whether the env-var name contains a well-known provider token
+    /// (case-insensitive) and fills in `provider` accordingly:
+    ///
+    /// - `OPENAI`    → `"openai"`
+    /// - `ANTHROPIC` → `"anthropic"`
+    /// - `OLLAMA`    → `"ollama"`
+    ///
+    /// Called as a post-load fixup so that a minimal config like
+    /// `api_key_env = "OPENAI_API_KEY"` works without an explicit
+    /// `provider` line.
+    pub fn infer_provider(&mut self) {
+        if self.provider.is_some() {
+            return;
+        }
+        let key_env = match self.api_key_env.as_deref() {
+            Some(s) => s.to_ascii_uppercase(),
+            None => return,
+        };
+        self.provider = if key_env.contains("OPENAI") {
+            Some("openai".to_owned())
+        } else if key_env.contains("ANTHROPIC") {
+            Some("anthropic".to_owned())
+        } else if key_env.contains("OLLAMA") {
+            Some("ollama".to_owned())
+        } else {
+            None
+        };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Logging / rotation settings
 // ---------------------------------------------------------------------------
@@ -621,6 +655,9 @@ pub fn load_config() -> (Config, Vec<String>) {
         }
     }
 
+    // Post-load fixup: infer provider from api_key_env when not explicit.
+    config.ai.infer_provider();
+
     (config, warnings)
 }
 
@@ -754,6 +791,9 @@ pub fn merge_project_config(mut base: Config, project: &ProjectConfig) -> Config
     base.ai
         .project_context_files
         .extend_from_slice(&project.ai.context_files);
+
+    // Post-merge fixup: infer provider from api_key_env when not explicit.
+    base.ai.infer_provider();
 
     base
 }
@@ -1406,6 +1446,67 @@ provider = "ollama"
         assert!(cfg.ai.api_key_env.is_none());
         assert!(cfg.ai.base_url.is_none());
         assert_eq!(cfg.ai.max_tokens, 4096);
+    }
+
+    // -- AiConfig::infer_provider -------------------------------------------
+
+    #[test]
+    fn infer_provider_openai() {
+        let mut ai = AiConfig {
+            api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.infer_provider();
+        assert_eq!(ai.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn infer_provider_anthropic() {
+        let mut ai = AiConfig {
+            api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.infer_provider();
+        assert_eq!(ai.provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn infer_provider_ollama() {
+        let mut ai = AiConfig {
+            api_key_env: Some("OLLAMA_API_KEY".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.infer_provider();
+        assert_eq!(ai.provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn infer_provider_no_match_leaves_none() {
+        let mut ai = AiConfig {
+            api_key_env: Some("MY_CUSTOM_LLM_KEY".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.infer_provider();
+        assert!(ai.provider.is_none());
+    }
+
+    #[test]
+    fn infer_provider_does_not_override_explicit() {
+        let mut ai = AiConfig {
+            provider: Some("ollama".to_owned()),
+            api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.infer_provider();
+        // Explicit provider is preserved; env name is not used to override.
+        assert_eq!(ai.provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn infer_provider_no_api_key_env_leaves_none() {
+        let mut ai = AiConfig::default();
+        ai.infer_provider();
+        assert!(ai.provider.is_none());
     }
 
     #[test]
