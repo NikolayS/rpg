@@ -48,6 +48,7 @@ mod anomaly;
 mod bloat;
 mod index_health;
 mod issues;
+mod query_optimization;
 mod rca_actions;
 mod vacuum;
 mod verification;
