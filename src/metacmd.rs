@@ -323,6 +323,19 @@ pub enum MetaCmd {
     /// `\f5` — toggle auto-EXPLAIN on/off (F5).
     ToggleAutoExplain,
 
+    // -- Query audit logging (FR-23) ---------------------------------------
+    /// `\log-file <path>` — start logging queries to `path` (append mode).
+    ///
+    /// `\log-file` with no argument closes the current log file.
+    ///
+    /// Each query entry written to the log looks like:
+    /// ```text
+    /// -- 2026-03-12 14:23:01 UTC | mydb | user=nik | duration=12ms
+    /// SELECT * FROM users WHERE id = 42;
+    /// -- (1 row)
+    /// ```
+    LogFile(Option<String>),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -936,8 +949,22 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse `\l [pattern]` — list databases.
+/// Parse `\l [pattern]`, `\log-file [path]` — list databases or manage audit log.
+///
+/// `\log-file <path>` starts appending an audit log to `path`.
+/// `\log-file` (no argument) stops the current audit log.
 fn parse_l(input: &str) -> ParsedMeta {
+    // `\log-file [path]` — must be checked before bare `\l` (longer prefix).
+    if let Some(rest) = input.strip_prefix("log-file") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let path = rest.trim();
+            return ParsedMeta::simple(MetaCmd::LogFile(if path.is_empty() {
+                None
+            } else {
+                Some(path.to_owned())
+            }));
+        }
+    }
     let Some(rest) = input.strip_prefix('l') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
@@ -3299,5 +3326,48 @@ mod tests {
     fn parse_field_sep_still_works_after_f_family_refactor() {
         assert_eq!(parse("\\f").cmd, MetaCmd::FieldSep(None));
         assert_eq!(parse("\\f ,").cmd, MetaCmd::FieldSep(Some(",".to_owned())));
+    }
+
+    // -- \log-file (FR-23) --------------------------------------------------
+
+    #[test]
+    fn parse_log_file_with_path() {
+        let m = parse("\\log-file foo.log");
+        assert_eq!(m.cmd, MetaCmd::LogFile(Some("foo.log".to_owned())));
+    }
+
+    #[test]
+    fn parse_log_file_with_absolute_path() {
+        let m = parse("\\log-file /tmp/queries.log");
+        assert_eq!(m.cmd, MetaCmd::LogFile(Some("/tmp/queries.log".to_owned())));
+    }
+
+    #[test]
+    fn parse_log_file_with_tilde_path() {
+        let m = parse("\\log-file ~/.local/share/samo/queries.log");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::LogFile(Some("~/.local/share/samo/queries.log".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_log_file_no_arg_stops_logging() {
+        let m = parse("\\log-file");
+        assert_eq!(m.cmd, MetaCmd::LogFile(None));
+    }
+
+    #[test]
+    fn parse_log_file_not_confused_with_list_databases() {
+        // `\l` must still work after `\log-file` is added.
+        assert_eq!(parse("\\l").cmd, MetaCmd::ListDatabases);
+        assert_eq!(parse("\\l mydb").cmd, MetaCmd::ListDatabases);
+    }
+
+    #[test]
+    fn parse_log_file_not_confused_with_list_databases_plus() {
+        assert_eq!(parse("\\l+").cmd, MetaCmd::ListDatabases);
+        let m = parse("\\l+");
+        assert!(m.plus);
     }
 }

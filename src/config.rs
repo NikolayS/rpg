@@ -240,6 +240,7 @@ impl Default for AiConfig {
 /// [logging]
 /// max_file_size_mb = 10
 /// max_files = 5
+/// audit_file = "~/.local/share/samo/queries.log"
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -252,6 +253,17 @@ pub struct LoggingConfig {
     ///
     /// Default: `5`.
     pub max_files: u32,
+    /// Optional path to the query audit log file (FR-23).
+    ///
+    /// When set, queries are appended to this file in human-readable format
+    /// at startup, equivalent to running `\log-file <path>` interactively.
+    /// Tilde (`~`) is expanded to the home directory.
+    ///
+    /// ```toml
+    /// [logging]
+    /// audit_file = "~/.local/share/samo/queries.log"
+    /// ```
+    pub audit_file: Option<String>,
 }
 
 impl Default for LoggingConfig {
@@ -259,6 +271,7 @@ impl Default for LoggingConfig {
         Self {
             max_file_size_mb: 10,
             max_files: 5,
+            audit_file: None,
         }
     }
 }
@@ -598,6 +611,7 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             } else {
                 overlay.logging.max_files
             },
+            audit_file: overlay.logging.audit_file.or(base.logging.audit_file),
         },
         connections: {
             let mut merged = base.connections;

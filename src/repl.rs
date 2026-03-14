@@ -1020,6 +1020,32 @@ pub struct ReplSettings {
     /// Set to `Some(...)` by the readline loop so that `\refresh` can
     /// update the same `Arc` that the completion helper holds.
     pub schema_cache: Option<Arc<RwLock<SchemaCache>>>,
+
+    // -- Query audit log (FR-23) -------------------------------------------
+    /// Open file handle for the query audit log (`\log-file`).
+    ///
+    /// When `Some`, each successfully-executed query is appended to the
+    /// file in a human-readable comment format after execution completes.
+    /// Never contains passwords or connection strings.
+    pub audit_log_file: Option<std::io::BufWriter<std::fs::File>>,
+    /// Path of the currently-open audit log file, for display purposes.
+    pub audit_log_path: Option<std::path::PathBuf>,
+    /// Database name used in audit log entries.
+    ///
+    /// Set from [`crate::connection::ConnParams::dbname`] at connect time
+    /// and after `\c` reconnects.
+    pub audit_dbname: String,
+    /// User name used in audit log entries.
+    ///
+    /// Set from [`crate::connection::ConnParams::user`] at connect time
+    /// and after `\c` reconnects.
+    pub audit_user: String,
+    /// Row count from the most-recently completed query, for audit entries.
+    ///
+    /// Set by `execute_query` / `execute_query_extended` after each
+    /// `CommandComplete` message; `None` when no query has completed yet
+    /// or the query produced no `CommandComplete` (e.g. error).
+    pub last_row_count: Option<u64>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1091,6 +1117,20 @@ impl std::fmt::Debug for ReplSettings {
                 "schema_cache",
                 &self.schema_cache.as_ref().map(|_| "<cache>"),
             )
+            .field(
+                "audit_log_file",
+                &self.audit_log_file.as_ref().map(|_| "<writer>"),
+            )
+            .field(
+                "audit_log_path",
+                &self
+                    .audit_log_path
+                    .as_deref()
+                    .map(|p| p.display().to_string()),
+            )
+            .field("audit_dbname", &self.audit_dbname)
+            .field("audit_user", &self.audit_user)
+            .field("last_row_count", &self.last_row_count)
             .finish()
     }
 }
@@ -1141,6 +1181,11 @@ impl Default for ReplSettings {
             query_count: 0,
             is_superuser: false,
             schema_cache: None,
+            audit_log_file: None,
+            audit_log_path: None,
+            audit_dbname: String::new(),
+            audit_user: String::new(),
+            last_row_count: None,
         }
     }
 }
@@ -1459,6 +1504,11 @@ pub async fn execute_query(
                             let _ = io::stdout().write_all(&out_buf);
                         }
 
+                        // Store row count for audit log entry.
+                        if result_set_index == 0 {
+                            settings.last_row_count = Some(n);
+                        }
+
                         result_set_index += 1;
                         col_names.clear();
                         rows.clear();
@@ -1677,6 +1727,9 @@ pub async fn execute_query_extended(
                     let _ = io::stdout().write_all(out_bytes);
                 }
             }
+
+            // Store row count for audit log entry.
+            settings.last_row_count = Some(rows.len() as u64);
 
             tx.update_from_sql(sql_to_send);
             true
@@ -1941,11 +1994,31 @@ async fn execute_query_interactive(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> bool {
+    // Record start time for audit log duration.
+    let audit_start = if settings.audit_log_file.is_some() {
+        Some(Instant::now())
+    } else {
+        None
+    };
+
     // Only intercept when pager is enabled and no output redirection is active.
     if !settings.pager_enabled || settings.output_target.is_some() {
         let ok = execute_query(client, sql, settings, tx).await;
         if ok && is_ddl_statement(sql) {
             auto_refresh_schema(client, settings).await;
+        }
+        if ok {
+            if let Some(start) = audit_start {
+                let entry = format_audit_entry(&AuditEntryCtx {
+                    sql,
+                    dbname: &settings.audit_dbname.clone(),
+                    user: &settings.audit_user.clone(),
+                    duration: start.elapsed(),
+                    row_count: settings.last_row_count,
+                    text2sql_prompt: None,
+                });
+                flush_audit_entry(settings, &entry);
+            }
         }
         return ok;
     }
@@ -1984,6 +2057,21 @@ async fn execute_query_interactive(
         auto_refresh_schema(client, settings).await;
     }
 
+    // Write audit log entry after output is delivered.
+    if ok {
+        if let Some(start) = audit_start {
+            let entry = format_audit_entry(&AuditEntryCtx {
+                sql,
+                dbname: &settings.audit_dbname.clone(),
+                user: &settings.audit_user.clone(),
+                duration: start.elapsed(),
+                row_count: settings.last_row_count,
+                text2sql_prompt: None,
+            });
+            flush_audit_entry(settings, &entry);
+        }
+    }
+
     ok
 }
 
@@ -1996,11 +2084,31 @@ async fn execute_query_extended_interactive(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> bool {
+    // Record start time for audit log duration.
+    let audit_start = if settings.audit_log_file.is_some() {
+        Some(Instant::now())
+    } else {
+        None
+    };
+
     // Only intercept when pager is enabled and no output redirection is active.
     if !settings.pager_enabled || settings.output_target.is_some() {
         let ok = execute_query_extended(client, sql, params, settings, tx).await;
         if ok && is_ddl_statement(sql) {
             auto_refresh_schema(client, settings).await;
+        }
+        if ok {
+            if let Some(start) = audit_start {
+                let entry = format_audit_entry(&AuditEntryCtx {
+                    sql,
+                    dbname: &settings.audit_dbname.clone(),
+                    user: &settings.audit_user.clone(),
+                    duration: start.elapsed(),
+                    row_count: settings.last_row_count,
+                    text2sql_prompt: None,
+                });
+                flush_audit_entry(settings, &entry);
+            }
         }
         return ok;
     }
@@ -2038,6 +2146,21 @@ async fn execute_query_extended_interactive(
         auto_refresh_schema(client, settings).await;
     }
 
+    // Write audit log entry after output is delivered.
+    if ok {
+        if let Some(start) = audit_start {
+            let entry = format_audit_entry(&AuditEntryCtx {
+                sql,
+                dbname: &settings.audit_dbname.clone(),
+                user: &settings.audit_user.clone(),
+                duration: start.elapsed(),
+                row_count: settings.last_row_count,
+                text2sql_prompt: None,
+            });
+            flush_audit_entry(settings, &entry);
+        }
+    }
+
     ok
 }
 
@@ -2049,6 +2172,141 @@ fn is_ddl_statement(sql: &str) -> bool {
         || upper.starts_with("ALTER")
         || upper.starts_with("DROP")
         || upper.starts_with("COMMENT")
+}
+
+// ---------------------------------------------------------------------------
+// Query audit log (FR-23)
+// ---------------------------------------------------------------------------
+
+/// Context for writing a single audit log entry.
+pub struct AuditEntryCtx<'a> {
+    /// The SQL statement that was executed.
+    pub sql: &'a str,
+    /// Database name at time of execution.
+    pub dbname: &'a str,
+    /// Connected user at time of execution.
+    pub user: &'a str,
+    /// Wall-clock duration of the execution.
+    pub duration: std::time::Duration,
+    /// Number of rows returned or affected (`None` when not available).
+    pub row_count: Option<u64>,
+    /// When `Some`, the query came from text2sql and this holds the
+    /// original natural-language prompt.
+    pub text2sql_prompt: Option<&'a str>,
+}
+
+/// Convert Unix seconds to a `"YYYY-MM-DD HH:MM:SS UTC"` string.
+///
+/// Uses only `std` (no `chrono`).  Implements the Gregorian calendar
+/// proleptic rules sufficient for dates from 1970 to ~2100.
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+fn format_utc_timestamp(secs: u64) -> String {
+    // Decompose into days + time-of-day.
+    let days_since_epoch = secs / 86_400;
+    let time_of_day = secs % 86_400;
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+
+    // Gregorian calendar from epoch (1970-01-01).
+    // Algorithm: cycles of 400, 100, 4, and 1 years.
+    let n = days_since_epoch as i64 + 719_468; // shift to 0000-03-01
+    let era = if n >= 0 {
+        n / 146_097
+    } else {
+        (n - 146_096) / 146_097
+    };
+    let doe = (n - era * 146_097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = y + i64::from(m <= 2);
+
+    format!("{year:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02} UTC")
+}
+
+/// Format and write a single audit log entry to `writer`.
+///
+/// Each entry is formatted as a SQL comment block so the log file can be
+/// fed back to psql:
+///
+///
+/// `text2sql` queries include the original prompt:
+///
+///
+/// Passwords and connection strings are never written.
+pub fn format_audit_entry(ctx: &AuditEntryCtx<'_>) -> String {
+    use std::fmt::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Format current UTC time as "YYYY-MM-DD HH:MM:SS UTC" using only std.
+    let secs_since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = format_utc_timestamp(secs_since_epoch);
+    let duration_ms = ctx.duration.as_secs_f64() * 1000.0;
+
+    let mut buf = String::new();
+
+    // Header comment line.
+    let source_tag = if ctx.text2sql_prompt.is_some() {
+        " | source=text2sql"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        buf,
+        "-- {ts} | {dbname} | user={user} | duration={duration_ms:.0}ms{source_tag}",
+        ts = ts,
+        dbname = ctx.dbname,
+        user = ctx.user,
+        duration_ms = duration_ms,
+        source_tag = source_tag,
+    );
+
+    // Optional prompt line for text2sql queries.
+    if let Some(prompt) = ctx.text2sql_prompt {
+        let _ = writeln!(buf, "-- prompt: {prompt:?}");
+    }
+
+    // The SQL itself, ensuring it ends with a semicolon.
+    let sql_trimmed = ctx.sql.trim();
+    if sql_trimmed.ends_with(';') {
+        let _ = writeln!(buf, "{sql_trimmed}");
+    } else {
+        let _ = writeln!(buf, "{sql_trimmed};");
+    }
+
+    // Row count footer.
+    match ctx.row_count {
+        Some(1) => {
+            let _ = writeln!(buf, "-- (1 row)");
+        }
+        Some(n) => {
+            let _ = writeln!(buf, "-- ({n} rows)");
+        }
+        None => {
+            let _ = writeln!(buf, "-- (ok)");
+        }
+    }
+
+    buf
+}
+
+/// Write  to the audit log file stored in .
+///
+/// Errors are silently ignored so a log-write failure never disrupts
+/// normal query output.
+fn flush_audit_entry(settings: &mut ReplSettings, entry_text: &str) {
+    if let Some(ref mut f) = settings.audit_log_file {
+        use std::io::Write as _;
+        let _ = f.write_all(entry_text.as_bytes());
+        let _ = f.flush();
+    }
 }
 
 /// Refresh the schema cache after a successful DDL statement.
@@ -4146,6 +4404,57 @@ async fn dispatch_io(
         MetaCmd::Parse(ref name) => Some(MetaResult::ParseStatement(name.clone())),
         MetaCmd::ClosePrepared(ref name) => Some(MetaResult::ClosePrepared(name.clone())),
 
+        MetaCmd::LogFile(ref path) => {
+            if let Some(raw_path) = path.as_deref() {
+                // Expand leading `~` to the home directory.
+                let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
+                    if let Some(home) = dirs::home_dir() {
+                        let suffix = raw_path.strip_prefix("~/").unwrap_or("");
+                        home.join(suffix)
+                    } else {
+                        std::path::PathBuf::from(raw_path)
+                    }
+                } else {
+                    std::path::PathBuf::from(raw_path)
+                };
+
+                // Create parent directories if needed.
+                if let Some(parent) = expanded.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            eprintln!("\\log-file: cannot create directory: {e}");
+                            return Some(MetaResult::Continue);
+                        }
+                    }
+                }
+
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&expanded)
+                {
+                    Ok(file) => {
+                        settings.audit_log_file = Some(std::io::BufWriter::new(file));
+                        settings.audit_log_path = Some(expanded.clone());
+                        if !settings.quiet {
+                            println!("Logging queries to \"{}\".", expanded.display());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\\log-file: cannot open \"{}\": {e}", expanded.display());
+                    }
+                }
+            } else {
+                // No path — close the current log file.
+                if let Some(ref path) = settings.audit_log_path.take() {
+                    if !settings.quiet {
+                        println!("Stopped logging to \"{}\".", path.display());
+                    }
+                }
+                settings.audit_log_file = None;
+            }
+            Some(MetaResult::Continue)
+        }
         _ => None,
     }
 }
@@ -4858,6 +5167,39 @@ pub async fn run_repl(
     let mut client = client;
     let mut params = params;
 
+    // Populate audit connection context from the resolved params.
+    settings.audit_dbname = params.dbname.clone();
+    settings.audit_user = params.user.clone();
+
+    // Open audit log file from config if one is configured.
+    if settings.audit_log_file.is_none() {
+        if let Some(ref raw_path) = settings.config.logging.audit_file.clone() {
+            let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
+                if let Some(home) = dirs::home_dir() {
+                    let suffix = raw_path.strip_prefix("~/").unwrap_or("");
+                    home.join(suffix)
+                } else {
+                    std::path::PathBuf::from(raw_path)
+                }
+            } else {
+                std::path::PathBuf::from(raw_path)
+            };
+            if let Some(parent) = expanded.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&expanded)
+            {
+                settings.audit_log_file = Some(std::io::BufWriter::new(file));
+                settings.audit_log_path = Some(expanded);
+            }
+        }
+    }
+
     // Auto-save current connection to session store (best-effort; non-fatal).
     session_store_auto_save(&params, &settings.session_id);
 
@@ -5089,6 +5431,9 @@ async fn run_readline_loop(
                         stmt_buf.clear();
                         // Re-detect superuser status for the new connection.
                         settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+                        // Update audit connection context for the new connection.
+                        settings.audit_dbname.clone_from(&params.dbname);
+                        settings.audit_user.clone_from(&params.user);
                     }
                     HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                 }
@@ -5178,6 +5523,9 @@ async fn run_dumb_loop(
                             // Re-detect superuser status for the new connection.
                             settings.is_superuser =
                                 crate::capabilities::detect_superuser(client).await;
+                            // Update audit connection context for the new connection.
+                            settings.audit_dbname.clone_from(&params.dbname);
+                            settings.audit_user.clone_from(&params.user);
                         }
                         HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
@@ -5206,6 +5554,9 @@ async fn run_dumb_loop(
                                 // Re-detect superuser status for the new connection.
                                 settings.is_superuser =
                                     crate::capabilities::detect_superuser(client).await;
+                                // Update audit connection context for the new connection.
+                                settings.audit_dbname.clone_from(&params.dbname);
+                                settings.audit_user.clone_from(&params.user);
                             }
                             HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                         }
@@ -10086,5 +10437,199 @@ mod tests {
         apply_fkey_toggle(FKeyAction::ViEmacs, &mut s);
         assert!(!s.vi_mode);
         assert!(!s.config.display.vi_mode);
+    }
+
+    // -- format_audit_entry (FR-23) -----------------------------------------
+
+    #[test]
+    fn audit_entry_contains_sql() {
+        let ctx = AuditEntryCtx {
+            sql: "select * from users where id = 42",
+            dbname: "mydb",
+            user: "nik",
+            duration: std::time::Duration::from_millis(12),
+            row_count: Some(1),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        // SQL is present in the entry (with trailing semicolon added).
+        assert!(
+            entry.contains("select * from users where id = 42;"),
+            "entry should contain the sql: {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_contains_header_fields() {
+        let ctx = AuditEntryCtx {
+            sql: "select 1",
+            dbname: "testdb",
+            user: "alice",
+            duration: std::time::Duration::from_millis(5),
+            row_count: Some(1),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        assert!(
+            entry.contains("| testdb |"),
+            "entry should contain dbname: {entry}"
+        );
+        assert!(
+            entry.contains("user=alice"),
+            "entry should contain user: {entry}"
+        );
+        assert!(
+            entry.contains("duration="),
+            "entry should contain duration: {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_row_count_singular() {
+        let ctx = AuditEntryCtx {
+            sql: "select 1",
+            dbname: "db",
+            user: "u",
+            duration: std::time::Duration::from_millis(1),
+            row_count: Some(1),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        assert!(
+            entry.contains("-- (1 row)"),
+            "entry should say '(1 row)': {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_row_count_plural() {
+        let ctx = AuditEntryCtx {
+            sql: "select * from users",
+            dbname: "db",
+            user: "u",
+            duration: std::time::Duration::from_millis(10),
+            row_count: Some(47),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        assert!(
+            entry.contains("-- (47 rows)"),
+            "entry should say '(47 rows)': {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_no_row_count_shows_ok() {
+        let ctx = AuditEntryCtx {
+            sql: "create table foo (id int)",
+            dbname: "db",
+            user: "u",
+            duration: std::time::Duration::from_millis(20),
+            row_count: None,
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        assert!(
+            entry.contains("-- (ok)"),
+            "entry should show '(ok)' for DDL: {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_text2sql_includes_source_and_prompt() {
+        let ctx = AuditEntryCtx {
+            sql: "select * from users where created_at >= date_trunc('week', current_date)",
+            dbname: "mydb",
+            user: "nik",
+            duration: std::time::Duration::from_millis(340),
+            row_count: Some(47),
+            text2sql_prompt: Some("show me users who signed up this week"),
+        };
+        let entry = format_audit_entry(&ctx);
+        assert!(
+            entry.contains("source=text2sql"),
+            "entry should contain source=text2sql: {entry}"
+        );
+        assert!(
+            entry.contains("-- prompt:"),
+            "entry should contain prompt line: {entry}"
+        );
+        assert!(
+            entry.contains("show me users who signed up this week"),
+            "entry should contain the prompt text: {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_no_password_or_connection_string() {
+        // Passwords must never appear in audit entries.
+        let ctx = AuditEntryCtx {
+            sql: "select current_user",
+            dbname: "db",
+            user: "u",
+            duration: std::time::Duration::from_millis(1),
+            row_count: Some(1),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        // The entry must not contain anything that looks like a password or
+        // connection string pattern.
+        assert!(
+            !entry.contains("password"),
+            "entry must not contain 'password': {entry}"
+        );
+        assert!(
+            !entry.contains("postgresql://"),
+            "entry must not contain connection string: {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_sql_without_trailing_semicolon_gets_one_added() {
+        let ctx = AuditEntryCtx {
+            sql: "select 1",
+            dbname: "db",
+            user: "u",
+            duration: std::time::Duration::from_millis(1),
+            row_count: Some(1),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        assert!(
+            entry.contains("select 1;"),
+            "missing semicolon should be added: {entry}"
+        );
+    }
+
+    #[test]
+    fn audit_entry_sql_with_trailing_semicolon_not_doubled() {
+        let ctx = AuditEntryCtx {
+            sql: "select 1;",
+            dbname: "db",
+            user: "u",
+            duration: std::time::Duration::from_millis(1),
+            row_count: Some(1),
+            text2sql_prompt: None,
+        };
+        let entry = format_audit_entry(&ctx);
+        // Should not have double semicolons.
+        assert!(
+            !entry.contains(";;"),
+            "semicolons should not be doubled: {entry}"
+        );
+    }
+
+    #[test]
+    fn format_utc_timestamp_epoch() {
+        // Unix epoch should produce 1970-01-01 00:00:00 UTC.
+        let ts = format_utc_timestamp(0);
+        assert_eq!(ts, "1970-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn format_utc_timestamp_known_date() {
+        // 2026-03-12 14:23:01 UTC = 1773325381 seconds.
+        let ts = format_utc_timestamp(1_773_325_381);
+        assert_eq!(ts, "2026-03-12 14:23:01 UTC");
     }
 }
