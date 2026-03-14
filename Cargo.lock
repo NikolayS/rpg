@@ -2990,6 +2990,7 @@ dependencies = [
  "libc",
  "ratatui",
  "reqwest",
+ "ring",
  "rpassword",
  "russh",
  "rustls",
@@ -3002,10 +3003,11 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
- "tokio-postgres-rustls",
+ "tokio-rustls",
  "toml",
  "unicode-width",
  "webpki-roots 0.26.11",
+ "x509-certificate",
 ]
 
 [[package]]
@@ -3916,20 +3918,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "whoami",
-]
-
-[[package]]
-name = "tokio-postgres-rustls"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04fb792ccd6bbcd4bba408eb8a292f70fc4a3589e5d793626f45190e6454b6ab"
-dependencies = [
- "ring",
- "rustls",
- "tokio",
- "tokio-postgres",
- "tokio-rustls",
- "x509-certificate",
 ]
 
 [[package]]

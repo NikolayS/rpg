@@ -2356,7 +2356,7 @@ pub enum MetaResult {
     /// Exit the REPL loop (`\q`).
     Quit,
     /// The connection was replaced: caller must swap client and params.
-    Reconnected(Box<tokio_postgres::Client>, ConnParams),
+    Reconnected(Box<tokio_postgres::Client>, Box<ConnParams>),
     /// Clear the query buffer (`\r`).
     ClearBuffer,
     /// Print the query buffer (`\p`).
@@ -2957,7 +2957,7 @@ async fn dispatch_meta(
                         &new_params,
                     );
                     println!("{msg}");
-                    return MetaResult::Reconnected(Box::new(new_client), new_params);
+                    return MetaResult::Reconnected(Box::new(new_client), Box::new(new_params));
                 }
                 Err(e) => eprintln!("\\c: {e}"),
             }
@@ -3359,7 +3359,10 @@ async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
                 &new_params,
             );
             println!("{msg}");
-            Some(MetaResult::Reconnected(Box::new(new_client), new_params))
+            Some(MetaResult::Reconnected(
+                Box::new(new_client),
+                Box::new(new_params),
+            ))
         }
         Err(e) => {
             eprintln!("\\session resume: {e}");
@@ -3985,7 +3988,7 @@ async fn handle_backslash_dumb(
     parsed.echo_hidden = settings.echo_hidden;
     match dispatch_meta(parsed, client, params, settings, tx).await {
         MetaResult::Quit => HandleLineResult::Quit,
-        MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, Box::new(p)),
+        MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
         MetaResult::ClearBuffer => {
             buf.clear();
             println!("Query buffer reset (empty).");
@@ -4284,7 +4287,7 @@ async fn handle_line(
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
-            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, Box::new(p)),
+            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::ClearBuffer => {
                 buf.clear();
                 stmt_buf.clear();
@@ -4534,7 +4537,7 @@ async fn handle_line(
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
-            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, Box::new(p)),
+            MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::ExecuteBuffer => {
                 let sql = buf.trim().to_owned();
                 buf.clear();
