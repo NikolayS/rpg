@@ -336,22 +336,14 @@ fn system_schema_filter(system: bool) -> &'static str {
 // \dt / \di / \ds / \dv / \dm / \dE  — list relations by relkind
 // ---------------------------------------------------------------------------
 
-/// Return the appropriate result-set title for a given set of relkinds.
+/// Return the result-set title for a given set of relkinds.
 ///
-/// psql uses the specific object type in the title (e.g. "List of tables",
-/// "List of views") rather than the generic "List of relations".  This must
-/// hold regardless of whether the `+` modifier is used — `\dt+` should still
-/// show "List of tables", not "List of relations".
-fn relation_title(relkinds: &[&str]) -> &'static str {
-    match relkinds {
-        ["r", "p"] | ["r" | "p"] => "List of tables",
-        ["i" | "I"] | ["i", "I"] => "List of indexes",
-        ["S"] => "List of sequences",
-        ["v"] => "List of views",
-        ["m"] => "List of materialized views",
-        ["f"] => "List of foreign tables",
-        _ => "List of relations",
-    }
+/// psql always uses "List of relations" as the heading for `\dt`, `\di`,
+/// `\dv`, `\ds`, `\dm` and their `+` variants, regardless of the relkind
+/// filter.  We match that behaviour exactly so golden-file compatibility
+/// tests pass.
+fn relation_title(_relkinds: &[&str]) -> &'static str {
+    "List of relations"
 }
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
@@ -2583,17 +2575,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // relation_title — title preserved for both plain and plus variants
+    // relation_title — always "List of relations" to match psql
     // -----------------------------------------------------------------------
 
-    /// Verify that `\dt` and `\dt+` both produce "List of tables".
-    /// Regression test: the + modifier was incorrectly showing "List of relations".
+    /// psql always shows "List of relations" for \dt, \di, \dv, \ds, \dm and
+    /// their + variants.  Verify that relation_title() matches this for all
+    /// relkind combinations.
     #[test]
     fn relation_title_tables() {
         assert_eq!(
             relation_title(&["r", "p"]),
-            "List of tables",
-            "\\dt and \\dt+ should show 'List of tables'"
+            "List of relations",
+            "\\dt and \\dt+ should show 'List of relations' to match psql"
         );
     }
 
@@ -2601,8 +2594,8 @@ mod tests {
     fn relation_title_indexes() {
         assert_eq!(
             relation_title(&["i"]),
-            "List of indexes",
-            "\\di and \\di+ should show 'List of indexes'"
+            "List of relations",
+            "\\di and \\di+ should show 'List of relations' to match psql"
         );
     }
 
@@ -2610,8 +2603,8 @@ mod tests {
     fn relation_title_sequences() {
         assert_eq!(
             relation_title(&["S"]),
-            "List of sequences",
-            "\\ds and \\ds+ should show 'List of sequences'"
+            "List of relations",
+            "\\ds and \\ds+ should show 'List of relations' to match psql"
         );
     }
 
@@ -2619,8 +2612,8 @@ mod tests {
     fn relation_title_views() {
         assert_eq!(
             relation_title(&["v"]),
-            "List of views",
-            "\\dv and \\dv+ should show 'List of views'"
+            "List of relations",
+            "\\dv and \\dv+ should show 'List of relations' to match psql"
         );
     }
 
@@ -2628,8 +2621,8 @@ mod tests {
     fn relation_title_matviews() {
         assert_eq!(
             relation_title(&["m"]),
-            "List of materialized views",
-            "\\dm and \\dm+ should show 'List of materialized views'"
+            "List of relations",
+            "\\dm and \\dm+ should show 'List of relations' to match psql"
         );
     }
 
@@ -2637,18 +2630,17 @@ mod tests {
     fn relation_title_foreign_tables() {
         assert_eq!(
             relation_title(&["f"]),
-            "List of foreign tables",
-            "\\dE and \\dE+ should show 'List of foreign tables'"
+            "List of relations",
+            "\\dE and \\dE+ should show 'List of relations' to match psql"
         );
     }
 
-    /// Multiple relkinds (generic \d) falls back to "List of relations".
     #[test]
-    fn relation_title_generic_falls_back() {
+    fn relation_title_generic() {
         assert_eq!(
             relation_title(&["r", "p", "v", "m"]),
             "List of relations",
-            "mixed relkinds should fall back to 'List of relations'"
+            "mixed relkinds should show 'List of relations'"
         );
     }
 
