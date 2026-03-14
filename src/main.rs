@@ -62,6 +62,7 @@ mod rca_actions;
 mod replication;
 mod report;
 mod security;
+mod update;
 mod vacuum;
 mod verification;
 
@@ -399,6 +400,16 @@ struct Cli {
     /// GitHub repository (owner/repo) for creating issues from findings.
     #[arg(long, value_name = "OWNER/REPO")]
     github_repo: Option<String>,
+
+    /// Check for a newer version of rpg, download and replace the binary,
+    /// then exit. No database connection is required.
+    #[arg(long)]
+    update: bool,
+
+    /// Check for a newer version of rpg and print the result, then exit.
+    /// Does not download or replace the binary.
+    #[arg(long)]
+    update_check: bool,
 }
 
 impl Cli {
@@ -677,6 +688,47 @@ async fn main() {
     // --compat: print psql compatibility report and exit (no DB connection).
     if cli.compat {
         compat::print_compat_report();
+        return;
+    }
+
+    // --update / --update-check: self-update logic (no DB connection needed).
+    if cli.update || cli.update_check {
+        let http = match reqwest::Client::builder().user_agent("rpg").build() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("rpg: failed to build HTTP client: {e}");
+                std::process::exit(2);
+            }
+        };
+
+        match update::check_latest_version(&http).await {
+            Ok(info) => {
+                let current = env!("CARGO_PKG_VERSION");
+                if info.version == current {
+                    println!("rpg is up to date ({current})");
+                } else {
+                    println!("rpg {} is available (current: {current})", info.version);
+                }
+                update::record_update_check();
+
+                if cli.update {
+                    println!("Downloading update from {}", info.download_url);
+                    match update::download_and_replace(&http, &info.download_url).await {
+                        Ok(()) => {
+                            println!("rpg updated to {} — please restart.", info.version);
+                        }
+                        Err(e) => {
+                            eprintln!("rpg: update failed: {e}");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("rpg: update check failed: {e}");
+                std::process::exit(2);
+            }
+        }
         return;
     }
 
