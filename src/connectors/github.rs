@@ -3,8 +3,6 @@
 //! Integrates with the GitHub REST API to fetch open issues as alerts
 //! and create/update issues in a GitHub repository.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -25,6 +23,7 @@ use crate::governance::Severity;
 ///
 /// Supports creating and updating issues, and fetching open issues as
 /// alerts. Does not provide metric data.
+#[allow(dead_code)]
 pub struct GitHubConnector {
     token: String,
     owner: String,
@@ -48,6 +47,7 @@ impl GitHubConnector {
     }
 
     /// Override the base URL (useful for GitHub Enterprise instances).
+    #[allow(dead_code)]
     pub fn with_base_url(mut self, url: String) -> Self {
         self.base_url = url;
         self
@@ -81,6 +81,7 @@ impl GitHubConnector {
 // Wire types — minimal shapes expected from the GitHub API
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssue {
     number: u64,
@@ -90,11 +91,13 @@ struct ApiIssue {
     html_url: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiLabel {
     name: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssueCreated {
     number: u64,
@@ -312,6 +315,7 @@ impl Connector for GitHubConnector {
 /// Checks for conventional label names: contains "critical", "info"
 /// (case-insensitive). Falls back to `Warning` when no matching label
 /// is found.
+#[allow(dead_code)]
 fn severity_from_labels(labels: &[String]) -> Severity {
     for label in labels {
         let lower = label.to_lowercase();

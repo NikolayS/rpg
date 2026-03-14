@@ -4,8 +4,6 @@
 //! connector issue IDs (GitHub, GitLab, Jira, etc.) and orchestrates
 //! cross-connector issue creation and updates.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::time::SystemTime;
 
 use super::{ConnectorError, IssueId, IssueRequest};
@@ -15,6 +13,7 @@ use super::{ConnectorError, IssueId, IssueRequest};
 // ---------------------------------------------------------------------------
 
 /// Direction of issue synchronisation between connectors.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncDirection {
     /// Local (`PostgresAI`) → remote connector.
@@ -40,6 +39,7 @@ impl std::fmt::Display for SyncDirection {
 // ---------------------------------------------------------------------------
 
 /// A single sync mapping between a local and a remote issue.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SyncRecord {
     /// `PostgresAI` issue ID (local side).
@@ -65,10 +65,12 @@ pub struct SyncRecord {
 /// provides lookup and registration helpers. Actual HTTP calls are
 /// delegated to connector implementations via the [`super::Connector`]
 /// trait; this struct only handles the bookkeeping side.
+#[allow(dead_code)]
 pub struct IssueSyncManager {
     records: Vec<SyncRecord>,
 }
 
+#[allow(dead_code)]
 impl IssueSyncManager {
     /// Create an empty sync manager.
     pub fn new() -> Self {

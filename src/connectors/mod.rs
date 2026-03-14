@@ -3,8 +3,6 @@
 //! All external connectors (Datadog, pganalyze, `CloudWatch`, etc.)
 //! implement the `Connector` trait defined here.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -37,6 +35,7 @@ pub type ConnectorId = String;
 pub type DatabaseId = String;
 
 /// Issue identifier returned by issue trackers.
+#[allow(dead_code)]
 pub type IssueId = String;
 
 // ---------------------------------------------------------------------------
@@ -46,6 +45,7 @@ pub type IssueId = String;
 #[derive(Debug)]
 pub enum ConnectorError {
     /// The requested operation is not supported by this connector.
+    #[allow(dead_code)]
     NotSupported(&'static str),
     /// Authentication failed.
     AuthError(String),
@@ -85,6 +85,7 @@ impl std::error::Error for ConnectorError {}
 // ---------------------------------------------------------------------------
 
 /// A single metric data point from an external source.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Metric {
     pub name: String,
@@ -96,6 +97,7 @@ pub struct Metric {
 }
 
 /// An alert from an external monitoring system.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Alert {
     pub id: String,
@@ -108,6 +110,7 @@ pub struct Alert {
     pub url: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertStatus {
     Active,
@@ -116,6 +119,7 @@ pub enum AlertStatus {
 }
 
 /// Request to create an issue in an external tracker.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct IssueRequest {
     pub title: String,
@@ -126,6 +130,7 @@ pub struct IssueRequest {
 }
 
 /// Update to an existing issue.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct IssueUpdate {
     pub title: Option<String>,
@@ -143,7 +148,7 @@ pub struct ConnectorHealth {
 }
 
 /// Capabilities advertised by a connector.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools, dead_code)]
 #[derive(Debug, Clone)]
 pub struct ConnectorCapabilities {
     pub can_fetch_metrics: bool,
@@ -158,6 +163,7 @@ pub struct ConnectorCapabilities {
 // Rate limiting
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     pub requests_per_second: f64,
@@ -167,6 +173,7 @@ pub struct RateLimitConfig {
     pub respect_retry_after: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BackoffConfig {
     pub initial_delay_ms: u64,
@@ -193,6 +200,7 @@ impl Default for BackoffConfig {
 // ---------------------------------------------------------------------------
 
 /// Normalized metric category — source-agnostic classification.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetricCategory {
     CpuUsage,
@@ -211,6 +219,7 @@ pub enum MetricCategory {
 }
 
 impl MetricCategory {
+    #[allow(dead_code)]
     pub fn label(&self) -> &str {
         match self {
             Self::CpuUsage => "cpu_usage",
@@ -231,6 +240,7 @@ impl MetricCategory {
 }
 
 /// Internal normalized metric — regardless of source connector.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct NormalizedMetric {
     pub category: MetricCategory,
@@ -257,6 +267,7 @@ pub struct TimeWindow {
 ///
 /// Concrete implementations (Datadog, pganalyze, `CloudWatch`, etc.)
 /// will be added in Phase 4.
+#[allow(dead_code)]
 #[async_trait]
 pub trait Connector: Send + Sync {
     fn id(&self) -> &str;
@@ -341,6 +352,7 @@ impl ConnectorRegistry {
     }
 
     /// Look up a connector by its [`Connector::id`].
+    #[allow(dead_code)]
     pub fn get(&self, id: &str) -> Option<&dyn Connector> {
         self.connectors
             .iter()

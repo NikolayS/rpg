@@ -3,8 +3,6 @@
 //! Integrates with the Atlassian Jira REST API v3 to fetch
 //! database-related issues as alerts and create/update issues.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -80,12 +78,14 @@ impl JiraConnector {
 // Wire types — minimal shapes expected from the Jira REST API v3
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct JiraSearchResult {
     #[serde(default)]
     issues: Vec<JiraIssue>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct JiraIssue {
     id: String,
@@ -94,6 +94,7 @@ struct JiraIssue {
     fields: JiraIssueFields,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct JiraIssueFields {
     summary: String,
@@ -101,12 +102,14 @@ struct JiraIssueFields {
     priority: Option<JiraPriority>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct JiraPriority {
     #[serde(default)]
     name: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct JiraCreatedIssue {
     id: String,
@@ -344,6 +347,7 @@ impl Connector for JiraConnector {
 // ---------------------------------------------------------------------------
 
 /// Map Jira priority names to `Severity`.
+#[allow(dead_code)]
 fn parse_priority(priority: Option<&str>) -> Severity {
     match priority {
         Some("Highest" | "Critical") => Severity::Critical,

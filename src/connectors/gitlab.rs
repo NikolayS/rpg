@@ -3,8 +3,6 @@
 //! Integrates with the GitLab API to fetch open issues as alerts
 //! and create/update issues in a GitLab project.
 
-#![allow(dead_code)] // Phase 4 infrastructure — consumers arrive later
-
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -25,6 +23,7 @@ use crate::governance::Severity;
 ///
 /// Supports creating and updating issues, and fetching open issues as
 /// alerts. Does not provide metric data.
+#[allow(dead_code)]
 pub struct GitLabConnector {
     token: String,
     project_id: String,
@@ -46,6 +45,7 @@ impl GitLabConnector {
     }
 
     /// Override the base URL (useful for self-hosted GitLab instances).
+    #[allow(dead_code)]
     pub fn with_base_url(mut self, url: String) -> Self {
         self.base_url = url;
         self
@@ -78,6 +78,7 @@ impl GitLabConnector {
 // Wire types — minimal shapes expected from the GitLab API
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssue {
     iid: u64,
@@ -88,6 +89,7 @@ struct ApiIssue {
     web_url: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ApiIssueCreated {
     iid: u64,
@@ -299,6 +301,7 @@ impl Connector for GitLabConnector {
 /// Checks for conventional label prefixes: `severity::critical`,
 /// `severity::warning`, `severity::info` (case-insensitive).
 /// Falls back to `Warning` when no matching label is found.
+#[allow(dead_code)]
 fn severity_from_labels(labels: &[String]) -> Severity {
     for label in labels {
         let lower = label.to_lowercase();

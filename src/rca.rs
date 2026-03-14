@@ -14,9 +14,6 @@
 //! 7. Stat correlation (`pg_stat_statements`)
 //! 8. Object state (table/index stats)
 
-// Many types are defined ahead of their consumers (Phase 3 integration).
-#![allow(dead_code)]
-
 use std::fmt::Write as _;
 
 use crate::governance::{EvidenceClass, FeatureArea, Severity};
@@ -78,6 +75,7 @@ impl DiagnosticSnapshot {
 // ---------------------------------------------------------------------------
 
 /// A structured RCA finding with three-tier mitigation.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RcaFinding {
     /// Brief title of the finding.
@@ -100,13 +98,14 @@ pub struct RcaFinding {
 
 impl RcaFinding {
     /// Feature area this finding belongs to.
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, dead_code)]
     pub fn feature_area(&self) -> FeatureArea {
         FeatureArea::Rca
     }
 }
 
 /// A complete RCA report.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct RcaReport {
     /// Findings from the investigation.
@@ -119,6 +118,7 @@ pub struct RcaReport {
 
 impl RcaReport {
     /// Format the report for terminal display.
+    #[allow(dead_code)]
     pub fn display(&self) -> String {
         let mut out = String::new();
 
@@ -168,6 +168,7 @@ impl RcaReport {
     }
 }
 
+#[allow(dead_code)]
 fn severity_icon(s: Severity) -> &'static str {
     match s {
         Severity::Info => "[i]",
