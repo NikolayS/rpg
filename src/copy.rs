@@ -1,9 +1,9 @@
-//! Client-side `\copy` implementation for Samo.
+//! Client-side `\copy` implementation for Rpg.
 //!
 //! Unlike the SQL `COPY` command (which reads/writes on the *server*),
 //! `\copy` transfers data between local files on the *client* machine and a
 //! `PostgreSQL` table or query result.  The wire-level exchange always uses
-//! `COPY … FROM STDIN` or `COPY … TO STDOUT`; Samo streams the file data.
+//! `COPY … FROM STDIN` or `COPY … TO STDOUT`; Rpg streams the file data.
 //!
 //! # Syntax
 //!
@@ -82,7 +82,7 @@ pub struct CopySpec {
 /// # Examples
 ///
 /// ```
-/// use samo::copy::parse_copy_args;
+/// use rpg::copy::parse_copy_args;
 /// let spec = parse_copy_args("my_table FROM '/tmp/data.csv' CSV HEADER").unwrap();
 /// ```
 pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {

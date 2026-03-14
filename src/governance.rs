@@ -5,7 +5,7 @@
 //! - **Actor**: executes approved actions within boundaries (no LLM)
 //! - **Auditor**: reviews proposals and outcomes (rule-based initially)
 //!
-//! Per-feature autonomy levels control how much Samo can do without
+//! Per-feature autonomy levels control how much Rpg can do without
 //! human approval.
 
 // Many types are defined ahead of their consumers (Phase 3 integration).

@@ -1,4 +1,4 @@
-//! Backslash (meta) command parser for Samo.
+//! Backslash (meta) command parser for Rpg.
 //!
 //! Provides a richer parser than the original [`crate::repl`] implementation.
 //! Key features:
@@ -253,7 +253,7 @@ pub enum MetaCmd {
     // -- Info commands ------------------------------------------------------
     /// `\copyright` — show `PostgreSQL` copyright and distribution terms.
     Copyright,
-    /// `\version` — show samo version and build information.
+    /// `\version` — show rpg version and build information.
     Version,
 
     // -- Diagnostic commands (#66) -----------------------------------------
@@ -3344,10 +3344,10 @@ mod tests {
 
     #[test]
     fn parse_log_file_with_tilde_path() {
-        let m = parse("\\log-file ~/.local/share/samo/queries.log");
+        let m = parse("\\log-file ~/.local/share/rpg/queries.log");
         assert_eq!(
             m.cmd,
-            MetaCmd::LogFile(Some("~/.local/share/samo/queries.log".to_owned()))
+            MetaCmd::LogFile(Some("~/.local/share/rpg/queries.log".to_owned()))
         );
     }
 

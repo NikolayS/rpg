@@ -1,4 +1,4 @@
-# Contributing to Samo
+# Contributing to Rpg
 
 ## Prerequisites
 
@@ -152,7 +152,7 @@ Integration tests require a running Postgres instance. Docker is used to spin up
 
 ## Cross-compilation
 
-Samo targets single-binary distribution. The `just cross` recipe uses
+Rpg targets single-binary distribution. The `just cross` recipe uses
 [cross](https://github.com/cross-rs/cross), which manages toolchains via
 Docker containers and therefore only supports **Linux** targets. macOS
 builds should use `just build` or `just build-release` natively.

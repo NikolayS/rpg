@@ -1,4 +1,4 @@
-//! SSH tunnel support for Samo (FR-22).
+//! SSH tunnel support for Rpg (FR-22).
 //!
 //! Establishes an SSH connection to a bastion/jump host and forwards a local
 //! TCP port to a remote Postgres host through it.  The forwarding loop runs

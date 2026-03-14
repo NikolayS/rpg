@@ -2978,6 +2978,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpg"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "crossterm",
+ "dirs",
+ "futures",
+ "libc",
+ "ratatui",
+ "reqwest",
+ "rpassword",
+ "russh",
+ "rustls",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "toml",
+ "unicode-width",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "rsa"
 version = "0.10.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3200,36 +3230,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97a22f5af31f73a954c10289c93e8a50cc23d971e80ee446f1f6f7137a088213"
 dependencies = [
  "cipher",
-]
-
-[[package]]
-name = "samo"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "bytes",
- "clap",
- "crossterm",
- "dirs",
- "futures",
- "libc",
- "ratatui",
- "reqwest",
- "rpassword",
- "russh",
- "rustls",
- "rustyline",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "toml",
- "unicode-width",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

@@ -1,36 +1,36 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "samo.fullname" . }}
+  name: {{ include "rpg.fullname" . }}
   labels:
-    {{- include "samo.labels" . | nindent 4 }}
+    {{- include "rpg.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "samo.selectorLabels" . | nindent 6 }}
+      {{- include "rpg.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
-        {{- include "samo.selectorLabels" . | nindent 8 }}
+        {{- include "rpg.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "samo.serviceAccountName" . }}
+      serviceAccountName: {{ include "rpg.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: samo
-          image: {{ include "samo.image" . }}
+        - name: rpg
+          image: {{ include "rpg.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - daemon
             - --config
-            - /etc/samo/config.toml
+            - /etc/rpg/config.toml
           {{- if gt (int .Values.daemon.healthPort) 0 }}
           ports:
             - name: health
@@ -55,7 +55,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts:
             - name: config
-              mountPath: /etc/samo
+              mountPath: /etc/rpg
               readOnly: true
           env:
             {{- if and .Values.postgres.existingSecret (not .Values.postgres.connectionString) }}
@@ -66,7 +66,7 @@ spec:
                   key: {{ .Values.postgres.existingSecretKey }}
             {{- end }}
             {{- if and .Values.notifications.slack.enabled .Values.notifications.slack.existingSecret }}
-            - name: SAMO_SLACK_WEBHOOK_URL
+            - name: RPG_SLACK_WEBHOOK_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.notifications.slack.existingSecret }}
@@ -78,7 +78,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "samo.fullname" . }}
+            name: {{ include "rpg.fullname" . }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

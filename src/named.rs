@@ -1,7 +1,7 @@
 //! Named query storage and retrieval.
 //!
 //! Named queries are stored in a TOML file at
-//! `~/.config/samo/named_queries.toml`.
+//! `~/.config/rpg/named_queries.toml`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ impl NamedQueries {
     }
 
     fn file_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("samo").join("named_queries.toml"))
+        dirs::config_dir().map(|d| d.join("rpg").join("named_queries.toml"))
     }
 
     /// Save a named query. Overwrites if name already exists.

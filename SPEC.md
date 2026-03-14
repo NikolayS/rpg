@@ -1,10 +1,10 @@
-# Samo — Specification
+# Rpg — Specification
 
 ## 1. Vision
 
 **The best terminal for diagnosing and fixing Postgres production issues — a single Rust binary with an AI brain that can observe, analyze, act, and learn.**
 
-The world's most popular database deserves a terminal built for 2026, not 1996. Samo is:
+The world's most popular database deserves a terminal built for 2026, not 1996. Rpg is:
 
 - A **self-driving Postgres agent** that can detect, diagnose, and resolve database issues at configurable autonomy levels
 - A **diagnostic powerhouse** with built-in DBA tooling and root cause analysis
@@ -28,16 +28,16 @@ The end state: a DBA-in-a-box that any engineer can use, and any DBA can trust. 
 
 ### Compatibility Policy
 
-Anyone fluent in psql — human or AI agent — should be immediately productive in Samo. The goal is not to replace psql in existing scripts, but to ensure that psql knowledge transfers directly:
+Anyone fluent in psql — human or AI agent — should be immediately productive in Rpg. The goal is not to replace psql in existing scripts, but to ensure that psql knowledge transfers directly:
 
 - **psql muscle memory works:** the commands, flags, and workflows that psql users know carry over without relearning
-- **AI agents that know psql work too:** LLMs trained on psql documentation and examples can drive Samo effectively
+- **AI agents that know psql work too:** LLMs trained on psql documentation and examples can drive Rpg effectively
 - **Interactive daily use:** target parity with the top 50 psql commands (see Appendix K for ranking)
 - **Scripted automation:** only documented-compatible flags/commands are guaranteed
 - **Unsupported psql behavior:** fails loudly, never silently — users always know when they hit an edge case. Error format:
   ```
-  ERROR: \crosstabview is not yet supported in Samo v0.1
-  HINT: See 'samo --compat' for full compatibility status.
+  ERROR: \crosstabview is not yet supported in Rpg v0.1
+  HINT: See 'rpg --compat' for full compatibility status.
   ```
 
 ### Non-Goals (for v1)
@@ -135,7 +135,7 @@ The following are architecturally planned but will **not** ship in v1.0:
 **Connection string formats:**
 - URI: `postgresql://user:pass@host:port/db?sslmode=require&options=-csearch_path%3Dmyschema`
 - Key-value: `host=localhost port=5432 dbname=mydb sslmode=require options='-c search_path=myschema'`
-- Positional: `samo dbname user host port`
+- Positional: `rpg dbname user host port`
 
 **Service file support:**
 - `~/.pg_service.conf` and `PGSERVICEFILE`
@@ -256,7 +256,7 @@ The following are architecturally planned but will **not** ship in v1.0:
 - `-t` — tuples only
 - `-P option=value` — set pset option
 - `-o file` — output to file
-- Stdin/stdout piping: `echo "SELECT 1" | samo`
+- Stdin/stdout piping: `echo "SELECT 1" | rpg`
 - ON_ERROR_STOP, ON_ERROR_ROLLBACK
 - AUTOCOMMIT
 - Exit code: 0 on success, 1 on error, 2 on connection failure
@@ -322,7 +322,7 @@ Autonomy is **not a single global knob**. It's configured **per feature area**, 
 
 ##### Three Autonomy Levels (per feature)
 
-**Important:** Autonomy levels govern Samo's **agentic actions only**, not the human operator's manual SQL. A human can always run `DROP TABLE` manually regardless of autonomy settings — autonomy controls what the AAA system does, not what the human types. For enforcing read-only access for the human too, use a read-only connection profile (e.g., `samo @production-ro`).
+**Important:** Autonomy levels govern Rpg's **agentic actions only**, not the human operator's manual SQL. A human can always run `DROP TABLE` manually regardless of autonomy settings — autonomy controls what the AAA system does, not what the human types. For enforcing read-only access for the human too, use a read-only connection profile (e.g., `rpg @production-ro`).
 
 | Level | Name | What it means |
 |-------|------|---------------|
@@ -411,10 +411,10 @@ security = "observe"             # max level: supervised
 
 **Presets for quick configuration:**
 ```bash
-samo --autonomy all:observe          # everything in observe mode (default, safest)
-samo --autonomy all:supervised         # everything needs approval
-samo --autonomy all:auto            # full auto (use with caution)
-samo --autonomy vacuum:auto,bloat:auto,query_optimization:supervised  # granular
+rpg --autonomy all:observe          # everything in observe mode (default, safest)
+rpg --autonomy all:supervised         # everything needs approval
+rpg --autonomy all:auto            # full auto (use with caution)
+rpg --autonomy vacuum:auto,bloat:auto,query_optimization:supervised  # granular
 ```
 
 **CLI and runtime:**
@@ -430,7 +430,7 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│              Samo AAA Architecture (Governance)               │
+│              Rpg AAA Architecture (Governance)               │
 │                                                              │
 │                    ┌──────────────┐                          │
 │                    │  ANALYZER    │                          │
@@ -467,7 +467,7 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 
 | Level | Analyzer | Actor | Auditor |
 |-------|----------|-------|---------|
-| **Observe** | Diagnoses, reports | Inactive (zero writes) | Reviews proposals. Also reviews outcomes of actions *the human took* based on Samo's reports. |
+| **Observe** | Diagnoses, reports | Inactive (zero writes) | Reviews proposals. Also reviews outcomes of actions *the human took* based on Rpg's reports. |
 | **Supervised** | Proposes action | Executes after human approval | Reviews proposal *before* human sees it (pre-action audit). Reviews action results *after* execution (post-action audit). |
 | **Auto** | Proposes action | Executes per policy | Reviews proposal (pre-action). Reviews action results (post-action). Triggers circuit breaker if outcomes degrade. |
 
@@ -480,7 +480,7 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 
 **2. ACTOR**
 - **Role:** Execute approved actions within strictly defined boundaries.
-- **Can:** Execute only the specific operations it has been granted (via `samo_ops` wrapper functions). Only acts on plans that have been approved (by human in Supervised mode, or by policy in Auto mode).
+- **Can:** Execute only the specific operations it has been granted (via `rpg_ops` wrapper functions). Only acts on plans that have been approved (by human in Supervised mode, or by policy in Auto mode).
 - **Cannot:** Decide what to do. It has no intelligence — it's a constrained executor.
 - **Implementation:** A thin execution layer. Receives a structured action request, validates it against the permission model (DB-level GRANTs + wrapper functions), executes, reports result. No LLM, no decision-making.
 - **Key constraint:** The Actor is **a different component** from the Analyzer. They don't share memory or state. The Actor cannot be tricked by prompt injection because it doesn't process natural language — it only accepts structured, validated action requests.
@@ -501,7 +501,7 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 
   **B. Actions (from Actor or human):**
   - **Post-action audit:** After execution, the Auditor verifies outcomes: did bloat actually decrease? Did the index improve query performance? Did the config change have the expected effect?
-  - In **Observe** mode: Samo doesn't act, but the human might. If Samo reported "idx_orders_legacy is unused, safe to drop" and the human dropped it, the Auditor monitors whether queries regressed after the drop. This closes the feedback loop even in read-only mode.
+  - In **Observe** mode: Rpg doesn't act, but the human might. If Rpg reported "idx_orders_legacy is unused, safe to drop" and the human dropped it, the Auditor monitors whether queries regressed after the drop. This closes the feedback loop even in read-only mode.
   - In **Supervised/Auto** mode: the Auditor monitors the Actor's execution results and triggers rollback recommendations if outcomes degrade.
 
   **C. Learning loop:**
@@ -515,7 +515,7 @@ The autonomy system is built on the **AAA Architecture** (Analyzer/Actor/Auditor
 **Why the AAA triangle matters:**
 - **Prompt injection defense:** Even if an attacker crafts a malicious query result that tricks the Analyzer into recommending `DROP TABLE`, the Auditor flags it as abnormal before anyone acts, and the Actor validates against DB-level permissions (can't drop).
 - **Trust building:** Users see the Auditor's independent assessment alongside the Analyzer's recommendation. Two opinions, not one.
-- **Observe mode isn't passive:** Even in read-only, the Auditor tracks whether human actions based on Samo's reports had good outcomes. This is how the system learns and earns trust before being promoted to Supervised.
+- **Observe mode isn't passive:** Even in read-only, the Auditor tracks whether human actions based on Rpg's reports had good outcomes. This is how the system learns and earns trust before being promoted to Supervised.
 - **Learning loop:** The Auditor's post-action verification creates a feedback cycle that improves recommendations over time — regardless of who executed the action (human or Actor).
 - **Compliance:** Three-way separation of concerns with cross-cutting audit is an auditor's dream for SOC2/ISO27001.
 
@@ -556,19 +556,19 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 
 **How it works:**
 
-1. **Dedicated database role** — the tool connects as a purpose-built role (e.g., `samo_agent`), not as a superuser, not as the application owner.
+1. **Dedicated database role** — the tool connects as a purpose-built role (e.g., `rpg_agent`), not as a superuser, not as the application owner.
 
 2. **Fine-grained GRANTs** — the DBA grants exactly what the tool is allowed to do:
    ```sql
-   GRANT pg_stat_scan_tables TO samo_agent;
-   GRANT USAGE ON SCHEMA public TO samo_agent;
-   GRANT SELECT ON ALL TABLES IN SCHEMA public TO samo_agent;
+   GRANT pg_stat_scan_tables TO rpg_agent;
+   GRANT USAGE ON SCHEMA public TO rpg_agent;
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO rpg_agent;
    -- But NOT: CREATE, DROP, ALTER, TRUNCATE, DELETE, INSERT, UPDATE
    ```
 
 3. **PL/pgSQL wrapper functions with SECURITY DEFINER** — for operations that need elevated privileges but should be constrained:
    ```sql
-   CREATE OR REPLACE FUNCTION samo_ops.reindex_concurrently(p_index regclass)
+   CREATE OR REPLACE FUNCTION rpg_ops.reindex_concurrently(p_index regclass)
    RETURNS void
    LANGUAGE plpgsql
    SECURITY DEFINER
@@ -583,22 +583,22 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
        (SELECT relname FROM pg_class WHERE oid = p_index));
    END;
    $$;
-   GRANT EXECUTE ON FUNCTION samo_ops.reindex_concurrently(regclass) TO samo_agent;
+   GRANT EXECUTE ON FUNCTION rpg_ops.reindex_concurrently(regclass) TO rpg_agent;
    ```
 
-4. **Non-transactional operations** — VACUUM, REINDEX/CREATE INDEX CONCURRENTLY execute directly on the Actor's dedicated connection (outside transaction blocks). On PG 16+, `pg_maintain` role eliminates the need for wrapper functions. On PG 14-15, `samo_ops` SECURITY DEFINER wrappers provide the necessary privileges.
+4. **Non-transactional operations** — VACUUM, REINDEX/CREATE INDEX CONCURRENTLY execute directly on the Actor's dedicated connection (outside transaction blocks). On PG 16+, `pg_maintain` role eliminates the need for wrapper functions. On PG 14-15, `rpg_ops` SECURITY DEFINER wrappers provide the necessary privileges.
 
 5. **Dynamic wrapper generation:**
    ```
-   samo setup --features index_health,vacuum --level auto --generate-wrappers
-   -- Outputs SQL to create samo_ops schema, role, wrapper functions, and GRANTs
+   rpg setup --features index_health,vacuum --level auto --generate-wrappers
+   -- Outputs SQL to create rpg_ops schema, role, wrapper functions, and GRANTs
    -- DBA reviews and applies
    ```
 
 6. **Permission introspection:**
    ```
-   samo=> \permissions
-   Role: samo_agent
+   rpg=> \permissions
+   Role: rpg_agent
    Database: production
 
    Feature            | Autonomy | DB Permissions     | Effective
@@ -612,7 +612,7 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
    major_upgrade      | observe  | N/A                | observe
 
    ⚠ 2 features downgraded due to missing DB permissions.
-   Run 'samo setup --features index_health --generate-wrappers'
+   Run 'rpg setup --features index_health --generate-wrappers'
    ```
 
 7. **Autonomy clamping** — if the config says Auto but the DB role lacks permissions, the effective level is downgraded and the user is warned.
@@ -698,7 +698,7 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 - `\echo`, `\qecho` still work for scripted output
 
 **Daemon mode:**
-- `samo daemon --config config.toml`
+- `rpg daemon --config config.toml`
 - Runs headless, no REPL, no stdin
 - Continuous monitoring loop
 - Reports via configured channels (Slack webhook, email, GitHub issues)
@@ -717,7 +717,7 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 **Debug flag:**
 - `--debug` / `-D` — enable debug mode
 - `\set DEBUG on|off` — toggle at runtime in interactive mode
-- `SAMO_DEBUG=1` environment variable
+- `RPG_DEBUG=1` environment variable
 - Default: off
 
 **What debug mode does:**
@@ -733,7 +733,7 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 **Log destinations:**
 - **stderr** — when `--debug` is used in interactive mode, debug output goes to stderr (doesn't pollute query results on stdout)
 - **Log file** — `--log-file path` or config `logging.file` — always append, never truncate
-- **Default log location:** `~/.local/share/samo/debug.log` (when log file enabled)
+- **Default log location:** `~/.local/share/rpg/debug.log` (when log file enabled)
 - **Structured format:** `[timestamp] [level] [component] message`
 
 **Log levels:**
@@ -747,20 +747,20 @@ The Actor (FR-11) can only execute what the **Postgres privilege system** allows
 ```toml
 [logging]
 level = "info"                              # stderr threshold (interactive)
-file = "~/.local/share/samo/debug.log"     # log file path (empty = disabled)
+file = "~/.local/share/rpg/debug.log"     # log file path (empty = disabled)
 file_level = "debug"                        # log file threshold
-action_log = "~/.local/share/samo/actions.log"  # agent action audit log (separate)
+action_log = "~/.local/share/rpg/actions.log"  # agent action audit log (separate)
 max_file_size_mb = 100                      # rotate at this size
 max_files = 5                               # keep N rotated files
 ```
 
 **CLI flags:**
 ```bash
-samo --debug                    # debug to stderr
-samo --debug --log-file out.log # debug to stderr + file
-samo --log-file out.log         # info to file, no debug on stderr
-samo --log-level trace          # maximum verbosity
-samo -D -E                      # debug mode + echo hidden queries (psql -E compat)
+rpg --debug                    # debug to stderr
+rpg --debug --log-file out.log # debug to stderr + file
+rpg --log-file out.log         # info to file, no debug on stderr
+rpg --log-level trace          # maximum verbosity
+rpg -D -E                      # debug mode + echo hidden queries (psql -E compat)
 ```
 
 **Interaction with psql flags:**
@@ -786,7 +786,7 @@ Borrowed from Claude Code and OpenClaw. Long-running database work needs session
 - `\session resume [id]` — resume a previous session (reconnects, restores variables and history)
 - `\session save [name]` — save current session with a name
 - `\session delete [id]` — delete a session
-- Storage: SQLite database at `~/.local/share/samo/sessions.db`
+- Storage: SQLite database at `~/.local/share/rpg/sessions.db`
 
 **Context compaction (from Claude Code / OpenClaw):**
 - AI conversation context grows over a session — queries, results, explanations accumulate
@@ -841,7 +841,7 @@ Borrowed from pgcli. Save frequently used queries with short names.
 \n top_tables seq_scan 10
 ```
 
-- Stored in `~/.config/samo/named_queries.toml` (portable, shareable)
+- Stored in `~/.config/rpg/named_queries.toml` (portable, shareable)
 - Support positional parameters (`$1`, `$2`, ...)
 - Tab-completion for query names
 - Can be shared across team via version-controlled config
@@ -851,7 +851,7 @@ Borrowed from pgcli. Save frequently used queries with short names.
 Borrowed from pgcli. Warn before executing dangerous statements.
 
 ```
-samo=> DROP TABLE users;
+rpg=> DROP TABLE users;
 WARNING: This is a destructive operation.
 Are you sure you want to execute: DROP TABLE users? [y/N]
 ```
@@ -940,9 +940,9 @@ Enhanced autocomplete beyond basic schema objects. Borrowed from pgcli with addi
 
 Borrowed from Claude Code (CLAUDE.md/AGENTS.md) and OpenCode (/init).
 
-**`.samo.toml`** — project-level configuration, checked into git:
+**`.rpg.toml`** — project-level configuration, checked into git:
 ```toml
-# .samo.toml — project-level config (lives in repo root)
+# .rpg.toml — project-level config (lives in repo root)
 [connection]
 default_database = "myapp_development"
 default_host = "localhost"
@@ -976,7 +976,7 @@ This is a Rails 7 application using PostgreSQL 16.
 ```
 
 - AI reads these files on connect (if present in current directory or home)
-- `/init` command: AI analyzes the connected database and generates `.samo.toml` and `POSTGRES.md`
+- `/init` command: AI analyzes the connected database and generates `.rpg.toml` and `POSTGRES.md`
 
 #### FR-21: Multi-line Mode
 
@@ -1002,10 +1002,10 @@ Borrowed from pgcli. Built-in SSH tunnel for remote databases.
 
 ```bash
 # Connect through SSH tunnel
-samo --ssh-tunnel user@bastion:22 -h db-host -p 5432 -d mydb
+rpg --ssh-tunnel user@bastion:22 -h db-host -p 5432 -d mydb
 
 # Using config
-samo -h mydb@production   # resolves from named connections with tunnel config
+rpg -h mydb@production   # resolves from named connections with tunnel config
 ```
 
 **Configuration:**
@@ -1046,7 +1046,7 @@ SELECT * FROM users WHERE created_at >= date_trunc('week', current_date);
 -- 2026-03-12 14:24:02 UTC | mydb | user=nik | duration=2100ms | source=agent:index_health:auto
 -- action: REINDEX CONCURRENTLY idx_orders_created_at
 -- justification: Index bloat at 34%, threshold 25%
-SELECT samo_ops.reindex_concurrently('idx_orders_created_at'::regclass);
+SELECT rpg_ops.reindex_concurrently('idx_orders_created_at'::regclass);
 -- OK
 ```
 
@@ -1080,7 +1080,7 @@ severity_threshold = "warning"   # only send warning+ severity
 [alerts.email]
 smtp_host = "smtp.example.com"
 smtp_port = 587
-from = "samo@example.com"
+from = "rpg@example.com"
 to = ["dba@example.com"]
 severity_threshold = "critical"  # only critical alerts via email
 
@@ -1130,10 +1130,10 @@ statusline = "{host}:{port}/{db} | {mode} | {autonomy} | {tx_state} | {last_dura
 Borrowed from pgcli's F5 feature. When enabled, automatically prepends EXPLAIN to every query.
 
 ```
-samo=> \set EXPLAIN on
+rpg=> \set EXPLAIN on
 -- Explain mode ON. All queries will show execution plan.
 
-samo=> SELECT * FROM users WHERE email = 'test@example.com';
+rpg=> SELECT * FROM users WHERE email = 'test@example.com';
                           QUERY PLAN
 --------------------------------------------------------------
  Index Scan using idx_users_email on users  (cost=0.42..8.44 rows=1 width=128)
@@ -1172,7 +1172,7 @@ autonomy = "all:observe"   # all features observe-only on staging
 host = "10.0.1.5"
 port = 5432
 database = "myapp"
-user = "samo_agent"
+user = "rpg_agent"
 sslmode = "verify-full"
 sslrootcert = "~/.ssl/rds-ca.pem"
 autonomy = "vacuum:auto,index_health:auto,query_optimization:supervised"
@@ -1181,8 +1181,8 @@ ssh_tunnel = { host = "bastion.prod.example.com", user = "deploy" }
 
 **Usage:**
 ```
-samo @local          # connect using 'local' profile
-samo @production     # connect using 'production' profile (with SSH tunnel)
+rpg @local          # connect using 'local' profile
+rpg @production     # connect using 'production' profile (with SSH tunnel)
 \c @staging           # switch to staging profile mid-session
 ```
 
@@ -1198,27 +1198,27 @@ Installation must be trivially easy on all platforms. Upgrading must be effortle
 
 ```bash
 # One-liner install (Linux, macOS)
-curl -sL https://get.samo.dev | sh
+curl -sL https://get.rpg.dev | sh
 
 # Homebrew (macOS, Linux)
-brew install samo
+brew install rpg
 
 # Windows — native installer
-winget install samo
+winget install rpg
 # or
-choco install samo
+choco install rpg
 # or
-scoop install samo
+scoop install rpg
 
 # npm/bun (if TypeScript)
-npm install -g samo-cli
-bun install -g samo-cli
+npm install -g rpg-cli
+bun install -g rpg-cli
 
 # Cargo (if Rust)
-cargo install samo-cli
+cargo install rpg-cli
 
 # Docker
-docker run -it ghcr.io/nikolays/samo
+docker run -it ghcr.io/nikolays/rpg
 
 # Direct binary download
 # GitHub Releases with platform-specific binaries
@@ -1227,17 +1227,17 @@ docker run -it ghcr.io/nikolays/samo
 **Install script behavior:**
 - Detects OS and architecture automatically
 - Downloads correct binary from GitHub Releases
-- Installs to `~/.local/bin` (Linux), `/usr/local/bin` (macOS), or `%LOCALAPPDATA%\samo` (Windows)
+- Installs to `~/.local/bin` (Linux), `/usr/local/bin` (macOS), or `%LOCALAPPDATA%\rpg` (Windows)
 - Adds to PATH if needed (with user confirmation)
 - Verifies checksum (SHA256)
 - Shows version after install
-- Non-interactive mode for CI: `curl -sL https://get.samo.dev | sh -s -- --yes`
+- Non-interactive mode for CI: `curl -sL https://get.rpg.dev | sh -s -- --yes`
 
 **Auto-update:**
-- `samo update` — check for and install latest version
-- `samo update --check` — check only, don't install
+- `rpg update` — check for and install latest version
+- `rpg update --check` — check only, don't install
 - Background update check: on startup, check for new version (async, non-blocking, max 1 check per 24h)
-- Notification: `A new version is available (v0.3.0 → v0.4.0). Run 'samo update' to upgrade.`
+- Notification: `A new version is available (v0.3.0 → v0.4.0). Run 'rpg update' to upgrade.`
 - Auto-update mode (opt-in): automatically download and apply updates
   ```toml
   [update]
@@ -1247,15 +1247,15 @@ docker run -it ghcr.io/nikolays/samo
   channel = "stable"         # stable | beta | nightly
   ```
 - Update channels: stable (default), beta (pre-release), nightly (CI builds)
-- Rollback: `samo update --rollback` — revert to previous version (keeps one previous binary)
+- Rollback: `rpg update --rollback` — revert to previous version (keeps one previous binary)
 - Update mechanism:
   - Self-replacing binary (download new binary, replace old, restart)
   - On Windows: download to temp, schedule replace on next launch (can't replace running binary)
   - Respects package manager: if installed via brew/cargo/npm, suggest using that manager instead
 
 **Version management:**
-- `samo --version` — show version, build info, platform
-- `samo version` — detailed: version, commit hash, build date, platform, linked libraries
+- `rpg --version` — show version, build info, platform
+- `rpg version` — detailed: version, commit hash, build date, platform, linked libraries
 - Version string embedded at compile time
 
 ### 3.2 Non-Functional Requirements
@@ -1284,7 +1284,7 @@ docker run -it ghcr.io/nikolays/samo
 - Autonomy actions: logged, auditable, reversible where possible
 - Daemon mode: drop privileges, chroot-able
 - No telemetry without explicit opt-in
-- `SAMO_OFFLINE=1` — global kill switch that severs all non-Postgres outbound network requests (no auto-update checks, no AI API calls, no connector calls). Critical for air-gapped and restricted VPC environments.
+- `RPG_OFFLINE=1` — global kill switch that severs all non-Postgres outbound network requests (no auto-update checks, no AI API calls, no connector calls). Critical for air-gapped and restricted VPC environments.
 
 #### NFR-4: Compatibility
 - Postgres 14-18 (and upcoming versions). PG 12 (EOL Nov 2024) and PG 13 (EOL Nov 2025) are not supported — maintaining version guards for EOL releases adds technical debt with no commercial value.
@@ -1306,7 +1306,7 @@ docker run -it ghcr.io/nikolays/samo
 #### NFR-5: Threat Model
 - Prompt injection via schema names, column names, comments, and query results — LLM context includes user-controlled data
 - Credential handling: never store plaintext passwords, API keys only via env vars or 600-permission config files
-- `samo_ops` wrapper functions: all dynamic SQL uses `format()` with `%I`/`%L` specifiers only (no string concatenation)
+- `rpg_ops` wrapper functions: all dynamic SQL uses `format()` with `%I`/`%L` specifiers only (no string concatenation)
 - Audit log integrity: append-only, Actor cannot modify or delete past entries
 - Network: enforce SSL for all connector API calls, validate certificates
 - pg_audit integration: recommend `pgaudit` extension for compliance environments to get independent audit trail
@@ -1528,9 +1528,9 @@ _The original recommendation leaned TypeScript/Bun for development velocity. Aft
 
 **Hierarchy (lowest to highest priority):**
 1. Compiled defaults
-2. `/etc/samo/config.toml` (system)
-3. `~/.config/samo/config.toml` (user)
-4. `SAMO_*` environment variables
+2. `/etc/rpg/config.toml` (system)
+3. `~/.config/rpg/config.toml` (user)
+4. `RPG_*` environment variables
 5. Command-line flags
 6. `\set` commands (session only)
 
@@ -1575,14 +1575,14 @@ default_repo = ""
 
 [logging]
 level = "info"
-file = "~/.local/share/samo/samo.log"
-action_log = "~/.local/share/samo/actions.log"
+file = "~/.local/share/rpg/rpg.log"
+action_log = "~/.local/share/rpg/actions.log"
 ```
 
 ### 4.8 Project Structure
 
 ```
-samo/
+rpg/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── src/
@@ -1680,9 +1680,9 @@ samo/
 
 ### Implementation Principles
 
-**psql as the reference implementation.** PostgreSQL's source code is BSD-licensed and has been refined for 25+ years. Samo must leverage it, not reinvent it:
+**psql as the reference implementation.** PostgreSQL's source code is BSD-licensed and has been refined for 25+ years. Rpg must leverage it, not reinvent it:
 
-1. **Catalog queries**: Use `psql -E` (`ECHO_HIDDEN`) to capture the exact SQL psql generates for each `\d` command on each supported PG version (14–18). Adapt those queries for Samo — do not write them from scratch. Reference: `src/bin/psql/describe.c`.
+1. **Catalog queries**: Use `psql -E` (`ECHO_HIDDEN`) to capture the exact SQL psql generates for each `\d` command on each supported PG version (14–18). Adapt those queries for Rpg — do not write them from scratch. Reference: `src/bin/psql/describe.c`.
 
 2. **Behavioral logic**: Connection state machines, transaction tracking (via `ReadyForQuery` status byte), error handling, variable interpolation, and backslash command semantics must follow psql's implementation. Reference: `src/bin/psql/command.c`, `src/bin/psql/common.c`, `src/bin/psql/variables.c`.
 
@@ -1712,7 +1712,7 @@ samo/
 **Verifiable gate:**
 - `cargo build --release --target x86_64-unknown-linux-musl` succeeds
 - CI passes on all 6 targets
-- `./samo --version` prints `samo 0.1.0-dev (<commit>)` on Linux, macOS, Windows
+- `./rpg --version` prints `rpg 0.1.0-dev (<commit>)` on Linux, macOS, Windows
 - Binary size < 30MB (stripped, musl)
 
 **Depends on:** nothing
@@ -1728,7 +1728,7 @@ samo/
 - [ ] Connection parameter parsing (all libpq-compatible):
   - [ ] URI format: `postgresql://user:pass@host:port/db?sslmode=require&options=...`
   - [ ] Key-value format: `host=localhost port=5432 dbname=mydb`
-  - [ ] Positional arguments: `samo dbname user host port`
+  - [ ] Positional arguments: `rpg dbname user host port`
 - [ ] All libpq environment variables:
   - [ ] Core: PGHOST, PGHOSTADDR, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGPASSFILE
   - [ ] SSL: PGSSLMODE, PGSSLCERT, PGSSLKEY, PGSSLROOTCERT, PGSSLCRL, PGSSLCRLDIR, PGSSLSNI, PGSSLNEGOTIATION, PGSSLMINPROTOCOLVERSION, PGSSLMAXPROTOCOLVERSION
@@ -1766,7 +1766,7 @@ samo/
 - [ ] Ctrl-C cancels a `pg_sleep(60)` within 1s
 
 **Verifiable gate:**
-- `samo -h localhost -U postgres -d testdb -c "SELECT 1"` returns formatted output matching psql
+- `rpg -h localhost -U postgres -d testdb -c "SELECT 1"` returns formatted output matching psql
 - All 13 integration tests pass against PG 16
 - `.pgpass` and `pg_service.conf` resolve correctly
 - SSL connection to PG with `sslmode=require` succeeds
@@ -1801,14 +1801,14 @@ samo/
 - [ ] Multi-line: `SELECT\n  1;` executes as single query
 - [ ] History persists across sessions (write, exit, relaunch, search)
 - [ ] Ctrl-C during `pg_sleep(60)` cancels and returns to prompt
-- [ ] `echo "SELECT 1" | samo -h localhost -d testdb` returns result and exits
+- [ ] `echo "SELECT 1" | rpg -h localhost -d testdb` returns result and exits
 - [ ] `-c "SELECT 1"` returns result, exit code 0
 - [ ] `-c "SELEC 1"` returns error, exit code 1
 - [ ] `-f nonexistent.sql` returns exit code 3
 
 **Verifiable gate:**
 - Interactive session: connect, type multi-line query, get result, Ctrl-R finds it, Ctrl-D exits
-- Pipe mode: `echo "SELECT version();" | samo ...` produces output, exits 0
+- Pipe mode: `echo "SELECT version();" | rpg ...` produces output, exits 0
 - Transaction prompt shows `*` inside BEGIN, `!` after error
 
 **Depends on:** S-0.2
@@ -1859,7 +1859,7 @@ samo/
 - [ ] PG version detection: adapt `\d` queries for PG 14-18 catalog differences
 
 **Compatibility tests (golden file):**
-- [ ] Run each `\d` variant in both psql and samo against identical schema, diff output
+- [ ] Run each `\d` variant in both psql and rpg against identical schema, diff output
 - [ ] Test schema: tables with various column types, indexes (btree, hash, gin, gist), views, functions, sequences, foreign tables, domains, extensions (pg_stat_statements, pgcrypto)
 - [ ] Pattern matching: `\dt public.*`, `\dt *orders*`, `\dt *.migrations`
 - [ ] PG version matrix: at least PG 14, 16, 17 in CI
@@ -1962,20 +1962,20 @@ samo/
 - [ ] `--json` — JSON output mode
 - [ ] `-D` / `--debug` — debug mode (wire protocol logging to stderr)
 - [ ] `.psqlrc` execution on startup (standard paths, PSQLRC env var)
-- [ ] Stdin piping: `echo "SELECT 1" | samo -h localhost`
+- [ ] Stdin piping: `echo "SELECT 1" | rpg -h localhost`
 - [ ] Conditional commands: `\if`, `\elif`, `\else`, `\endif`
 
 **Tests:**
-- [ ] `samo -A -t -c "SELECT 1"` outputs `1` (no headers, no footer, unaligned)
-- [ ] `samo --csv -c "SELECT 1 AS a, 2 AS b"` outputs `a,b\n1,2`
-- [ ] `samo -f test.sql -1` wraps in transaction
-- [ ] `samo -v FOO=bar -c "SELECT :'FOO'"` outputs `bar`
+- [ ] `rpg -A -t -c "SELECT 1"` outputs `1` (no headers, no footer, unaligned)
+- [ ] `rpg --csv -c "SELECT 1 AS a, 2 AS b"` outputs `a,b\n1,2`
+- [ ] `rpg -f test.sql -1` wraps in transaction
+- [ ] `rpg -v FOO=bar -c "SELECT :'FOO'"` outputs `bar`
 - [ ] `\if` / `\elif` / `\else` / `\endif` conditional execution
 - [ ] `.psqlrc` runs on startup, `-X` skips it
-- [ ] `echo "SELECT 1; SELECT 2;" | samo ...` outputs both results
+- [ ] `echo "SELECT 1; SELECT 2;" | rpg ...` outputs both results
 
 **Verifiable gate:**
-- `test-compat.sh`: run 20 representative `-c` commands through both psql and samo, diff outputs, divergence < 5%
+- `test-compat.sh`: run 20 representative `-c` commands through both psql and rpg, diff outputs, divergence < 5%
 - All CLI flags accepted and functional
 - Conditional scripting: `\if true` / `\else` / `\endif` selects correct branch
 
@@ -2077,7 +2077,7 @@ samo/
 **Phase 0 Milestone:** A solid Postgres terminal compatible with common psql workflows. All top-50 commands work. Builds and runs on all 6 platform targets. Tab completion, syntax highlighting, persistent history, full CLI flags. No AI, no extras — just a great terminal for Postgres.
 
 **Phase 0 verification:**
-- [ ] `test-compat.sh`: 50 representative commands, samo vs psql output diff < 5%
+- [ ] `test-compat.sh`: 50 representative commands, rpg vs psql output diff < 5%
 - [ ] CI green on all 6 targets for PG {14, 16, 17}
 - [ ] Binary size < 30MB (stripped, musl)
 - [ ] Startup to first prompt < 100ms
@@ -2088,7 +2088,7 @@ samo/
 
 ### Phase 1: Beyond psql — Diagnostics & UX
 
-**Goal:** Everything psql can't do. This is where Samo becomes clearly better.
+**Goal:** Everything psql can't do. This is where Rpg becomes clearly better.
 
 ---
 
@@ -2186,7 +2186,7 @@ samo/
 **Goal:** TOML config files, named connection profiles, named queries, destructive warnings.
 
 **Tasks:**
-- [ ] Config file loading hierarchy: `/etc/samo/config.toml` → `~/.config/samo/config.toml` → `SAMO_*` env vars → CLI flags → `\set`
+- [ ] Config file loading hierarchy: `/etc/rpg/config.toml` → `~/.config/rpg/config.toml` → `RPG_*` env vars → CLI flags → `\set`
 - [ ] Config schema: `[connection]`, `[display]`, `[keybindings]`, `[safety]`, `[logging]`
 - [ ] Named connection profiles in config:
   ```toml
@@ -2195,12 +2195,12 @@ samo/
   port = 5432
   sslmode = "verify-full"
   ```
-- [ ] `samo @production` syntax to connect via profile
+- [ ] `rpg @production` syntax to connect via profile
 - [ ] `\c @profile` to switch mid-session
 - [ ] `\profiles` to list configured profiles
 - [ ] Tab completion for profile names
 - [ ] Named queries (`\ns name query`, `\n name`, `\n+`, `\nd name`, `\np name`)
-- [ ] Named query storage: `~/.config/samo/named_queries.toml`
+- [ ] Named query storage: `~/.config/rpg/named_queries.toml`
 - [ ] Named query parameters: `\ns top_tables SELECT * FROM pg_stat_user_tables ORDER BY $1 DESC LIMIT $2;` then `\n top_tables seq_scan 10`
 - [ ] Destructive statement protection:
   - [ ] Warn on: DROP TABLE/DATABASE/SCHEMA, TRUNCATE, DELETE/UPDATE without WHERE, ALTER TABLE DROP COLUMN
@@ -2212,13 +2212,13 @@ samo/
 - [ ] `\set EXPLAIN on|analyze|verbose` — auto-EXPLAIN mode
 
 **Tests:**
-- [ ] `samo @production` connects with profile settings
+- [ ] `rpg @production` connects with profile settings
 - [ ] `\ns` saves query, `\n` executes it, `\nd` deletes it
 - [ ] `DROP TABLE users;` triggers confirmation prompt
 - [ ] Config file values override defaults, CLI flags override config
 
 **Verifiable gate:**
-- Connection profiles work: `samo @production` connects, `\c @staging` switches
+- Connection profiles work: `rpg @production` connects, `\c @staging` switches
 - Named queries with parameters: save, execute with args, list, delete
 - Destructive warning fires for `DROP TABLE`, suppressed with `[safety] destructive_warning = false`
 - Vi mode: Esc enters normal mode, `i` enters insert, `^`/`$`/`w`/`b` navigate
@@ -2232,20 +2232,20 @@ samo/
 **Goal:** Sessions persist in SQLite. Debug/audit logging works.
 
 **Tasks:**
-- [ ] SQLite session store: `~/.local/share/samo/sessions.db`
+- [ ] SQLite session store: `~/.local/share/rpg/sessions.db`
 - [ ] Each session: unique ID, connection params, timestamp, query count, duration
 - [ ] `\session list` — recent sessions with timestamps, database, duration
 - [ ] `\session resume [id]` — reconnect, restore variables and history context
 - [ ] `\session save [name]` — save with friendly name
 - [ ] `\session delete [id]` — delete session
 - [ ] Debug logging:
-  - [ ] `--debug` / `-D` flag, `SAMO_DEBUG=1` env var, `\set DEBUG on`
+  - [ ] `--debug` / `-D` flag, `RPG_DEBUG=1` env var, `\set DEBUG on`
   - [ ] Logs wire protocol messages, SQL queries, auth negotiation, command dispatch
   - [ ] Log to stderr (interactive) and/or file (`--log-file path`)
   - [ ] Log levels: error, warn, info, debug, trace
   - [ ] Structured format: `[timestamp] [level] [component] message`
 - [ ] `-e` / `--echo-queries` and `-E` / `--echo-hidden` integration with log levels
-- [ ] Action audit log: `~/.local/share/samo/actions.log` (separate from debug)
+- [ ] Action audit log: `~/.local/share/rpg/actions.log` (separate from debug)
 - [ ] Log rotation: `max_file_size_mb`, `max_files` config
 - [ ] Security: never log passwords/API keys, mask credentials in connection strings
 - [ ] SSH tunnel support:
@@ -2409,7 +2409,7 @@ samo/
   - [ ] Never executes write/DDL
   - [ ] Produces structured plan document (markdown)
   - [ ] `[Y/n/edit/save]` to execute, skip, edit, or save plan
-  - [ ] Plans saved to `~/.local/share/samo/plans/`
+  - [ ] Plans saved to `~/.local/share/rpg/plans/`
 - [ ] YOLO mode (`\yolo`):
   - [ ] AI auto-executes within configured autonomy level
   - [ ] Shows what it's doing in real-time
@@ -2541,7 +2541,7 @@ Actions: 6 recommendations. Run '\autonomy index_health supervised' to enable ap
 - For unused: `DROP INDEX CONCURRENTLY` (with grace period confirmation — "this index has been unused for 90 days, confirm drop?")
 - For redundant: `DROP INDEX CONCURRENTLY` on the shorter/redundant one
 - For invalid: `DROP INDEX` + `CREATE INDEX CONCURRENTLY` (reissue)
-- For bloat: `REINDEX CONCURRENTLY` (via `samo_ops` wrapper)
+- For bloat: `REINDEX CONCURRENTLY` (via `rpg_ops` wrapper)
 - For missing: `CREATE INDEX CONCURRENTLY` (with estimated creation time and lock impact)
 
 **Auto mode — what it auto-does:**
@@ -2707,7 +2707,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - In Auto mode: auto-investigates anomalies, auto-applies safe immediate mitigations (cancel/terminate root blockers, ANALYZE, VACUUM), auto-proposes GUC changes, escalates app-level issues to configured channels
 
 **pg_ash integration details:**
-- Samo auto-detects pg_ash presence on connect (`SELECT * FROM ash.status()`)
+- Rpg auto-detects pg_ash presence on connect (`SELECT * FROM ash.status()`)
 - If pg_ash is not installed, offers to install it (`\i` the SQL file)
 - All `ash.*` functions are available as first-class `\dba ash *` commands
 - RCA investigation chain is the Analyzer's primary workflow for performance issues
@@ -2729,7 +2729,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - [ ] RCA Supervised: propose immediate mitigation (cancel/terminate blockers), wait for approval
 - [ ] RCA Supervised: propose GUC changes (idle_in_transaction_session_timeout, lock_timeout, statement_timeout)
 - [ ] Actor component: isolated executor with DB permission validation
-- [ ] `samo_ops` wrapper generation for cancel/terminate + config changes
+- [ ] `rpg_ops` wrapper generation for cancel/terminate + config changes
 - [ ] Index health Analyzer: detect unused, redundant, invalid, bloated, missing indexes
 - [ ] Index health report generation (structured output)
 
@@ -2830,7 +2830,7 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 - PG version matrix: 14, 15, 16, 17, 18
 
 ### Compatibility Tests
-- Run the same commands in psql and Samo, diff the output
+- Run the same commands in psql and Rpg, diff the output
 - Scripted test suite: `test-compat.sh` runs `-c` commands in both and compares
 - Target: < 5% divergence in output formatting for common commands
 
@@ -2851,26 +2851,26 @@ Each step's output determines what to ask next. The LLM doesn't follow a rigid s
 
 ### Binary Releases
 - GitHub Releases with pre-built binaries for all 6 targets:
-  - `samo-linux-x86_64` (static, musl)
-  - `samo-linux-aarch64` (static, musl)
-  - `samo-darwin-x86_64`
-  - `samo-darwin-aarch64`
-  - `samo-windows-x86_64.exe`
-  - `samo-windows-aarch64.exe`
+  - `rpg-linux-x86_64` (static, musl)
+  - `rpg-linux-aarch64` (static, musl)
+  - `rpg-darwin-x86_64`
+  - `rpg-darwin-aarch64`
+  - `rpg-windows-x86_64.exe`
+  - `rpg-windows-aarch64.exe`
 - Checksums (SHA256) and signatures
 - All targets built and tested in CI from Phase 0
 
 ### Package Managers
-- `brew install samo` (Homebrew tap)
-- `cargo install samo` (crates.io, if Rust)
-- `npm install -g samo-cli` / `bun install -g samo-cli` (if TypeScript/Bun)
-- `winget install samo` / `choco install samo` / `scoop install samo` (Windows)
+- `brew install rpg` (Homebrew tap)
+- `cargo install rpg` (crates.io, if Rust)
+- `npm install -g rpg-cli` / `bun install -g rpg-cli` (if TypeScript/Bun)
+- `winget install rpg` / `choco install rpg` / `scoop install rpg` (Windows)
 - `.deb` and `.rpm` packages (Phase 4)
-- Docker: `ghcr.io/nikolays/samo:latest`
+- Docker: `ghcr.io/nikolays/rpg:latest`
 
 ### Install Script
 ```bash
-curl -sL https://get.samo.dev | sh
+curl -sL https://get.rpg.dev | sh
 ```
 
 See FR-28 for full install and auto-update specification.
@@ -2890,9 +2890,9 @@ The terminal has two fundamental input modes, switchable with a single keystroke
 The classic psql experience. Input is treated as SQL or backslash commands.
 
 ```
-samo=> SELECT * FROM users WHERE id = 42;
-samo=> \dt public.*
-samo=> \dba bloat
+rpg=> SELECT * FROM users WHERE id = 42;
+rpg=> \dt public.*
+rpg=> \dba bloat
 ```
 
 - Default prompt: `dbname=>`
@@ -2907,7 +2907,7 @@ samo=> \dba bloat
 Input is treated as natural language. The AI translates intent into SQL, shows it, and optionally executes.
 
 ```
-samo text2sql> show me the 10 biggest tables
+rpg text2sql> show me the 10 biggest tables
 -- Generating SQL...
 SELECT schemaname, tablename, 
        pg_total_relation_size(schemaname || '.' || tablename) AS total_size
@@ -2916,19 +2916,19 @@ ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC
 LIMIT 10;
 -- Run this query? [Y/n/edit]
 
-samo text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
+rpg text2sql> why is this query slow: SELECT * FROM orders WHERE created_at > now() - interval '1 day'
 -- Analyzing...
 -- The orders table has 12M rows but no index on created_at.
 -- Currently doing a sequential scan (cost: 847291).
 -- Recommendation: CREATE INDEX CONCURRENTLY idx_orders_created_at ON orders(created_at);
 -- Create this index? [Y/n] (requires index_creation: supervised+)
 
-samo text2sql> fix index bloat on the orders table
+rpg text2sql> fix index bloat on the orders table
 -- Checking orders table indexes...
 -- idx_orders_created_at: 34% bloat (450MB → should be ~300MB)
 -- idx_orders_customer_id: 12% bloat (OK)
 -- Plan:
---   1. SELECT samo_ops.reindex_concurrently('idx_orders_created_at'::regclass);
+--   1. SELECT rpg_ops.reindex_concurrently('idx_orders_created_at'::regclass);
 -- Execute? [Y/n/edit]
 ```
 
@@ -2967,7 +2967,7 @@ Orthogonal to input mode — these control *how much the AI can do without askin
 The AI always shows what it wants to do and asks for confirmation before executing anything that changes state.
 
 ```
-samo ai> add an index on users.email
+rpg ai> add an index on users.email
 -- I'd like to run:
 --   CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
 -- This is a safe operation (CONCURRENTLY, no locks).
@@ -2984,7 +2984,7 @@ samo ai> add an index on users.email
 The AI analyzes, plans, but does NOT execute. Produces a plan document.
 
 ```
-samo plan> our API is timing out on the /orders endpoint, database seems slow
+rpg plan> our API is timing out on the /orders endpoint, database seems slow
 
 -- Entering plan mode. I'll investigate and produce a plan.
 -- [1/5] Checking pg_stat_activity for long-running queries...
@@ -3009,7 +3009,7 @@ Actions (in order):
    recommend 50 based on active sessions)
 
 Execute this plan? [Y/n/edit/save]
--- Saved to: ~/.local/share/samo/plans/2026-03-12-orders-perf.md
+-- Saved to: ~/.local/share/rpg/plans/2026-03-12-orders-perf.md
 ```
 
 - AI can run read-only queries to gather information
@@ -3024,7 +3024,7 @@ Execute this plan? [Y/n/edit/save]
 The AI executes within its autonomy level without asking. For power users who trust the agent.
 
 ```
-samo yolo> fix the bloat on the orders table
+rpg yolo> fix the bloat on the orders table
 -- Running: ANALYZE orders; ✓
 -- Running: REINDEX CONCURRENTLY orders_pkey; ✓
 -- Running: REINDEX CONCURRENTLY idx_orders_created_at; ✓
@@ -3044,7 +3044,7 @@ samo yolo> fix the bloat on the orders table
 Read-only. The AI watches and reports but never executes anything. For learning and auditing.
 
 ```
-samo observe> watch the database for 5 minutes
+rpg observe> watch the database for 5 minutes
 -- Observing...
 -- 13:04:12 | 247 active connections (pool: 85% utilized)
 -- 13:04:12 | Top wait event: LWLock:BufferContent (23% of samples)
@@ -3116,10 +3116,10 @@ mydb [3O/5S/2A] yolo>    -- text2sql + YOLO, autonomy summary
 ### 8.6 CLI Flags
 
 ```bash
-samo --text2sql         # start in text2sql mode
-samo --plan             # start in plan mode
-samo --yolo --autonomy vacuum:auto,index_health:auto  # YOLO with specific features in auto
-samo --observe 30m      # observe for 30 minutes, then exit
+rpg --text2sql         # start in text2sql mode
+rpg --plan             # start in plan mode
+rpg --yolo --autonomy vacuum:auto,index_health:auto  # YOLO with specific features in auto
+rpg --observe 30m      # observe for 30 minutes, then exit
 ```
 
 ### 8.7 Context Awareness Across Modes
@@ -3138,7 +3138,7 @@ When switching modes, context carries over. A plan generated in plan mode can be
 
 ## 9. Open Questions
 
-1. **Name:** Samo (CLI component of the [Samo](https://samo.sh) platform).
+1. **Name:** Rpg (CLI component of the [Rpg](https://rpg.sh) platform).
 2. **License:** Apache 2.0.
 3. **Wire protocol:** Fork `tokio-postgres` or build from scratch? Start with tokio-postgres, evaluate after Phase 0.
 4. **pgBouncer transaction mode:** How to handle features that require session-level state (prepared statements, temp tables) through poolers?
@@ -3166,7 +3166,7 @@ The decision was close and the SPEC's preliminary lean toward TypeScript/Bun was
 
 2. **Bun startup is ~11 ms cold** on this Linux x86_64 box — well within the 100 ms budget, so this is not a disqualifier. But Rust startup (< 10 ms) remains faster.
 
-3. **Wire protocol control matters for this project specifically.** Samo is a psql replacement, which means it needs COPY sub-protocol, CancelRequest, LISTEN/NOTIFY, extended query protocol, and eventually logical replication. `tokio-postgres` covers all of these in a battle-tested way. porsager/postgres is excellent but it is a query-centric library — COPY, CancelRequest, and connection parameter negotiation (GSS, SCRAM-SHA-256 with channel binding) require lower-level control than it exposes.
+3. **Wire protocol control matters for this project specifically.** Rpg is a psql replacement, which means it needs COPY sub-protocol, CancelRequest, LISTEN/NOTIFY, extended query protocol, and eventually logical replication. `tokio-postgres` covers all of these in a battle-tested way. porsager/postgres is excellent but it is a query-centric library — COPY, CancelRequest, and connection parameter negotiation (GSS, SCRAM-SHA-256 with channel binding) require lower-level control than it exposes.
 
 4. **DBA audience credibility.** Surveys of DBA and Postgres community sentiment consistently show that infrastructure tooling written in Rust or C carries significantly more trust than JavaScript-based equivalents. For a tool that touches production databases with autonomy, this perception matters for early adoption.
 
@@ -3189,9 +3189,9 @@ All 6 required targets are supported by `bun build --compile`:
 
 **Key finding:** Windows ARM64 support is confirmed present. The SPEC concern was valid at the time of writing but has been resolved upstream. However, Bun's Windows ARM64 target is newer and less battle-tested than the others — CI validation is essential before relying on it.
 
-**Bun binary size (measured):** 98 MB standalone executable for a minimal `process.exit(0)` program. This is the fixed cost of bundling the Bun runtime regardless of application code. A full Samo binary would be ~100-105 MB.
+**Bun binary size (measured):** 98 MB standalone executable for a minimal `process.exit(0)` program. This is the fixed cost of bundling the Bun runtime regardless of application code. A full Rpg binary would be ~100-105 MB.
 
-**Comparison for Rust:** targeting musl, stripped: estimated 18-22 MB for the full Samo binary including all features.
+**Comparison for Rust:** targeting musl, stripped: estimated 18-22 MB for the full Rpg binary including all features.
 
 ### A.3 porsager/postgres Wire Protocol Completeness
 
@@ -3275,12 +3275,12 @@ cargo build --target aarch64-apple-darwin --release
 
 # Combine into universal binary
 lipo -create \
-  target/x86_64-apple-darwin/release/samo \
-  target/aarch64-apple-darwin/release/samo \
-  -output target/universal/samo
+  target/x86_64-apple-darwin/release/rpg \
+  target/aarch64-apple-darwin/release/rpg \
+  -output target/universal/rpg
 ```
 
-A universal macOS binary (`samo-darwin-universal`) is worth shipping alongside the arch-specific ones — installer scripts detect architecture, but power users appreciate `curl | sh` working with a universal binary.
+A universal macOS binary (`rpg-darwin-universal`) is worth shipping alongside the arch-specific ones — installer scripts detect architecture, but power users appreciate `curl | sh` working with a universal binary.
 
 #### Windows: MSVC vs GNU Toolchain
 
@@ -3306,29 +3306,29 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
-            artifact: samo-linux-x86_64
+            artifact: rpg-linux-x86_64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
-            artifact: samo-linux-aarch64
+            artifact: rpg-linux-aarch64
           # macOS (native runners)
           - target: x86_64-apple-darwin
             os: macos-13
             use_cross: false
-            artifact: samo-darwin-x86_64
+            artifact: rpg-darwin-x86_64
           - target: aarch64-apple-darwin
             os: macos-14
             use_cross: false
-            artifact: samo-darwin-aarch64
+            artifact: rpg-darwin-aarch64
           # Windows (native runners, MSVC)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             use_cross: false
-            artifact: samo-windows-x86_64.exe
+            artifact: rpg-windows-x86_64.exe
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
             use_cross: false
-            artifact: samo-windows-aarch64.exe
+            artifact: rpg-windows-aarch64.exe
 ```
 
 #### Workflow Stages
@@ -3377,7 +3377,7 @@ Tag push (v*.*.*):
 **Compatibility tests** (psql diff):
 ```bash
 # scripts/test-compat.sh
-# Runs same commands in psql and samo, diffs output
+# Runs same commands in psql and rpg, diffs output
 # Target: < 5% divergence on common commands
 COMMANDS=(
   "\dt"
@@ -3388,19 +3388,19 @@ COMMANDS=(
   "\conninfo"
 )
 for cmd in "${COMMANDS[@]}"; do
-  diff <(psql -c "$cmd") <(samo -c "$cmd")
+  diff <(psql -c "$cmd") <(rpg -c "$cmd")
 done
 ```
 
 **Release artifacts per version:**
 ```
-samo-linux-x86_64          (static musl binary)
-samo-linux-aarch64         (static musl binary)
-samo-darwin-x86_64         (dynamic binary)
-samo-darwin-aarch64        (dynamic binary)
-samo-darwin-universal      (fat binary, both arches)
-samo-windows-x86_64.exe    (MSVC binary)
-samo-windows-aarch64.exe   (MSVC binary)
+rpg-linux-x86_64          (static musl binary)
+rpg-linux-aarch64         (static musl binary)
+rpg-darwin-x86_64         (dynamic binary)
+rpg-darwin-aarch64        (dynamic binary)
+rpg-darwin-universal      (fat binary, both arches)
+rpg-windows-x86_64.exe    (MSVC binary)
+rpg-windows-aarch64.exe   (MSVC binary)
 SHA256SUMS                 (SHA256 of all above)
 SHA256SUMS.sig             (cosign signature)
 ```
@@ -3520,7 +3520,7 @@ The Supervised mode approval experience must work in three distinct contexts.
 │  idx_orders_created_at — 34% bloat (450 MB → ~300 MB)           │
 │                                                                  │
 │  PROPOSED ACTION:                                               │
-│  SELECT samo_ops.reindex_concurrently(                           │
+│  SELECT rpg_ops.reindex_concurrently(                           │
 │    'idx_orders_created_at'::regclass                            │
 │  );                                                             │
 │                                                                  │
@@ -3547,7 +3547,7 @@ In daemon mode, approvals are delivered and responded to via configured channels
 
 **Slack approval flow:**
 ```
-[Samo] 🔒 Supervised approval needed
+[Rpg] 🔒 Supervised approval needed
 
 Database: production (db-01.example.com:5432)
 Feature: index_health
@@ -3567,15 +3567,15 @@ Auditor: ✅ High confidence. Non-blocking. ~5 min.
 
 **Email approval:**
 ```
-Subject: [Samo Supervised] Approval needed: REINDEX idx_orders_created_at (production)
+Subject: [Rpg Supervised] Approval needed: REINDEX idx_orders_created_at (production)
 
 Finding: idx_orders_created_at — 34% bloat (450MB → ~300MB after reindex)
-Action: REINDEX CONCURRENTLY via samo_ops wrapper
+Action: REINDEX CONCURRENTLY via rpg_ops wrapper
 Risk: Low — non-blocking, ~5 minutes
 Confidence: High (pgstattuple confirmed)
 
-Approve: https://samo.production.internal/approve?token=abc123&action=reindex_1234
-Reject:  https://samo.production.internal/reject?token=abc123&action=reindex_1234
+Approve: https://rpg.production.internal/approve?token=abc123&action=reindex_1234
+Reject:  https://rpg.production.internal/reject?token=abc123&action=reindex_1234
 
 This link expires in 4 hours.
 ```
@@ -3593,10 +3593,10 @@ This link expires in 4 hours.
 When the daemon accumulates multiple pending approvals, they are presented as a queue:
 
 ```bash
-samo approvals          # list pending approvals
-samo approvals --approve 1234  # approve specific action
-samo approvals --reject 1234   # reject specific action
-samo approvals --approve-all   # approve everything pending (use with caution)
+rpg approvals          # list pending approvals
+rpg approvals --approve 1234  # approve specific action
+rpg approvals --reject 1234   # reject specific action
+rpg approvals --approve-all   # approve everything pending (use with caution)
 ```
 
 ### B.3 Auto Mode Safety Rails
@@ -3632,7 +3632,7 @@ When a circuit breaker trips:
 1. Feature drops from Auto → Observe mode automatically (not Supervised — we want zero action, not approval-gated action, until the issue is understood)
 2. Alert sent to all configured channels
 3. Logged with full context of what triggered it
-4. Requires explicit `samo reset-circuit index_health` to re-enable Auto
+4. Requires explicit `rpg reset-circuit index_health` to re-enable Auto
 
 #### Rollback on Failure
 
@@ -3659,7 +3659,7 @@ maintenance_window = "02:00-06:00"
 maintenance_window_tz = "UTC"
 
 # Auto mode pauses if error rate on the *database* exceeds threshold
-# (not just Samo's actions — something else may be wrong)
+# (not just Rpg's actions — something else may be wrong)
 pause_on_db_error_rate_threshold = 0.05  # >5% query error rate → pause all auto
 
 # Maximum actions per hour per feature (rate limiting)
@@ -3676,7 +3676,7 @@ rca = 100               # RCA is read-heavy, higher limit
 Any Auto feature can be run in dry-run mode to preview what it would do without executing:
 
 ```bash
-samo --autonomy all:auto --dry-run   # show what Auto would do, don't execute
+rpg --autonomy all:auto --dry-run   # show what Auto would do, don't execute
 \autonomy vacuum dry-run              # dry-run for vacuum only
 ```
 
@@ -3711,7 +3711,7 @@ trust_score = (
 
 **Trust score display:**
 ```
-samo=> \trust
+rpg=> \trust
 Feature            | Level   | Trust Score | Actions | Accuracy | Notes
 -------------------|---------|-------------|---------|----------|------------------
 index_health       | auto    | 0.94 ★★★★★ | 47      | 97%      | Strong track record
@@ -3723,17 +3723,17 @@ rca                | observe | 0.52 ★★★☆☆ | 0       | N/A      | No ac
 
 #### Trust-Based Autonomy Promotion
 
-Samo can suggest autonomy level increases when trust is earned:
+Rpg can suggest autonomy level increases when trust is earned:
 
 ```
-[Samo] Trust calibration update:
+[Rpg] Trust calibration update:
   index_health has maintained 0.94 trust score over 47 actions (90-day window)
   This exceeds the Supervised → Auto promotion threshold (0.85, 30 actions).
 
   Current: index_health = supervised
   Suggested: index_health = auto
 
-  Promote? [Y/n] (or 'samo autonomy index_health auto' to set manually)
+  Promote? [Y/n] (or 'rpg autonomy index_health auto' to set manually)
 ```
 
 **Promotion thresholds (defaults, configurable):**
@@ -3772,16 +3772,16 @@ The concern: if all three branches run in the same process, can the isolation be
 
 2. **Schema-validated action requests.** The Actor accepts only typed, validated `ActionRequest` structs (not strings, not LLM output directly). The Analyzer's LLM output is parsed into structured types before the Actor sees it — malformed or unexpected outputs are rejected at the parsing boundary.
 
-3. **DB-level enforcement.** Even if process isolation is compromised, the Actor connects to Postgres as `samo_agent` which has only the permissions explicitly granted. The DB is the hard enforcement layer.
+3. **DB-level enforcement.** Even if process isolation is compromised, the Actor connects to Postgres as `rpg_agent` which has only the permissions explicitly granted. The DB is the hard enforcement layer.
 
 4. **Auditor runs after every action.** If the Actor executes something unexpected, the Auditor detects it in post-action verification (unexpected state changes, unexpected metric movements) and alerts.
 
 **The process-level concern:** In the same process, a sufficiently clever prompt injection could theoretically cause the LLM to output a `ActionRequest` that passes schema validation but does something harmful within the Actor's permissions. This is mitigated by:
-- `samo_ops` wrapper functions having hard-coded safety checks (e.g., `reindex_concurrently` validates the OID is actually an index before executing)
+- `rpg_ops` wrapper functions having hard-coded safety checks (e.g., `reindex_concurrently` validates the OID is actually an index before executing)
 - The Actor logs every action to the audit log before execution — if the log is monitored, anomalous actions are visible
 - Rate limits (Auto constraints above) limit blast radius
 
-**Future hardening:** If Samo matures to the point where it manages Auto mode across many critical databases, the architecture should evolve to separate processes (or even separate machines for the Actor) with a narrow IPC channel between Analyzer and Actor. For Phase 3, same-process isolation with schema validation and DB-level enforcement is sufficient.
+**Future hardening:** If Rpg matures to the point where it manages Auto mode across many critical databases, the architecture should evolve to separate processes (or even separate machines for the Actor) with a narrow IPC channel between Analyzer and Actor. For Phase 3, same-process isolation with schema validation and DB-level enforcement is sufficient.
 
 ### B.6 Multi-Database Autonomy Configuration
 
@@ -3804,7 +3804,7 @@ index_health = "auto"
 index_health_trust_override = true  # skip trust threshold, I know what I'm doing
 ```
 
-**Autonomy is per-(database, feature) — not global.** A single Samo daemon can monitor multiple databases with completely different autonomy configurations. This is the right design: production databases warrant human oversight; dev/staging databases can run more autonomously to build trust scores before promoting production.
+**Autonomy is per-(database, feature) — not global.** A single Rpg daemon can monitor multiple databases with completely different autonomy configurations. This is the right design: production databases warrant human oversight; dev/staging databases can run more autonomously to build trust scores before promoting production.
 
 ---
 
@@ -3915,15 +3915,15 @@ pub struct IssueRequest {
 | **Slack (alerts)** | Incoming webhook URL (no user auth) | `SLACK_WEBHOOK_URL` env var |
 | **PagerDuty** | Integration routing key | `PAGERDUTY_ROUTING_KEY` env var |
 | **Telegram (alerts)** | Bot token + chat ID | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` env vars |
-| **pg_ash** | Postgres connection (same connection as Samo) | Same as DB connection |
+| **pg_ash** | Postgres connection (same connection as Rpg) | Same as DB connection |
 
 **Credential storage rules:**
-1. Never store credentials in `~/.config/samo/config.toml` in plaintext — only store env var names
+1. Never store credentials in `~/.config/rpg/config.toml` in plaintext — only store env var names
 2. If a credential must be in config (e.g., in Docker without env var access), require `600` file permissions and encrypt at rest using system keychain where available
 3. System keychain support: macOS Keychain, Linux `libsecret` (GNOME Keyring/KWallet), Windows Credential Manager — via the `keyring` crate
 4. Credentials are never logged (masked in debug output as `****`)
 
-**AWS auth:** Use the standard AWS SDK credential chain — this means IAM roles work transparently in EC2/ECS/Lambda environments without any configuration. Samo should never encourage hardcoding AWS credentials.
+**AWS auth:** Use the standard AWS SDK credential chain — this means IAM roles work transparently in EC2/ECS/Lambda environments without any configuration. Rpg should never encourage hardcoding AWS credentials.
 
 ### C.3 Rate Limiting Strategy
 
@@ -3989,7 +3989,7 @@ Connector call:
       disable connector until reconfigured
 ```
 
-**Graceful degradation:** If a connector is unavailable, Samo continues operating. The RCA investigation chain simply skips that data source and notes the gap:
+**Graceful degradation:** If a connector is unavailable, Rpg continues operating. The RCA investigation chain simply skips that data source and notes the gap:
 
 ```
 RCA report [2026-03-12T14:23:00Z]:
@@ -4044,7 +4044,7 @@ When multiple connectors provide the same `MetricCategory`, the Analyzer uses th
 
 ### C.6 pg_ash — Native Connector Pattern
 
-pg_ash is different from external connectors: it's a Postgres extension running inside the monitored database. It's accessed via the same database connection as Samo, not a separate HTTP API.
+pg_ash is different from external connectors: it's a Postgres extension running inside the monitored database. It's accessed via the same database connection as Rpg, not a separate HTTP API.
 
 ```rust
 pub struct PgAshConnector {
@@ -4059,7 +4059,7 @@ pub struct PgAshConnector {
 
 **Auto-detection on connect:**
 ```sql
--- Samo runs this on connect to check pg_ash availability
+-- Rpg runs this on connect to check pg_ash availability
 SELECT extversion FROM pg_extension WHERE extname = 'pg_ash';
 -- If returns a row: pg_ash is available, record version
 -- If no row: pg_ash not installed
@@ -4072,7 +4072,7 @@ SELECT extversion FROM pg_extension WHERE extname = 'pg_ash';
 - `ash.top_queries_with_text()` → `pg_stat_statements` only (no per-session attribution)
 - `ash.query_waits()` → not available without pg_ash
 
-Samo notes in all outputs when running in degraded mode and offers to install pg_ash.
+Rpg notes in all outputs when running in degraded mode and offers to install pg_ash.
 
 ### C.7 Alert Channel Reliability
 
@@ -4080,7 +4080,7 @@ Samo notes in all outputs when running in degraded mode and offers to install pg
 - Alerts are persisted to SQLite before delivery attempt
 - Delivery attempts are retried (with backoff) until acknowledged
 - Each alert has a state machine: `pending` → `delivering` → `delivered` | `failed`
-- Failed alerts are surfaced in `samo status` output
+- Failed alerts are surfaced in `rpg status` output
 
 **Deduplication:**
 - Each alert has a `fingerprint` (SHA256 of: database + check_name + finding_key)
@@ -4099,14 +4099,14 @@ info = ["slack_info_channel"]
 ```
 
 **Webhook security (incoming webhooks for Slack approvals):**
-- Each webhook endpoint has a shared secret (configured during `samo setup`)
+- Each webhook endpoint has a shared secret (configured during `rpg setup`)
 - All incoming webhooks verify HMAC-SHA256 signature before processing
 - Webhook endpoints are only bound to localhost by default — external access requires explicit `--listen 0.0.0.0` and is discouraged in favor of reverse proxy
 - TLS termination handled by the reverse proxy (nginx/caddy in front of the daemon HTTP server)
 
 ### C.8 Plugin System for Custom Connectors
 
-Connectors can be added without modifying Samo's source code via two mechanisms:
+Connectors can be added without modifying Rpg's source code via two mechanisms:
 
 #### Config-Driven Connectors (Simple)
 
@@ -4143,7 +4143,7 @@ For connectors that need custom logic, a script interface is provided:
 [connectors.custom_connector]
 type = "script"
 name = "Custom Internal System"
-command = ["python3", "/etc/samo/connectors/internal.py"]
+command = ["python3", "/etc/rpg/connectors/internal.py"]
 timeout_seconds = 30
 rate_limit_rps = 1.0
 ```
@@ -4151,7 +4151,7 @@ rate_limit_rps = 1.0
 The script is invoked with a JSON payload on stdin and must return JSON to stdout:
 
 ```json
-// stdin (from Samo)
+// stdin (from Rpg)
 {
   "action": "fetch_metrics",
   "database_id": "production",
@@ -4169,9 +4169,9 @@ The script is invoked with a JSON payload on stdin and must return JSON to stdou
 ]
 ```
 
-The script is sandboxed: run with `nice`, `timeout`, and (optionally) in a limited filesystem namespace. Script connectors are isolated — a crashing script doesn't affect Samo.
+The script is sandboxed: run with `nice`, `timeout`, and (optionally) in a limited filesystem namespace. Script connectors are isolated — a crashing script doesn't affect Rpg.
 
-**Security considerations:** Script connectors run with Samo's user privileges. Users are responsible for auditing scripts they configure. Samo should warn on first use: "This connector runs an external script. Review it before enabling."
+**Security considerations:** Script connectors run with Rpg's user privileges. Users are responsible for auditing scripts they configure. Rpg should warn on first use: "This connector runs an external script. Review it before enabling."
 
 #### Native Plugin Connectors (Future)
 
@@ -4179,11 +4179,11 @@ Phase 4+: a stable shared library interface (Rust `dylib`) for maximum performan
 
 ### C.9 PostgresAI Issues Connector
 
-Special handling for the bidirectional sync between Samo findings and PostgresAI's issue tracker:
+Special handling for the bidirectional sync between Rpg findings and PostgresAI's issue tracker:
 
 **Issue creation from RCA finding:**
 ```rust
-// When RCA completes, Samo creates a PostgresAI issue
+// When RCA completes, Rpg creates a PostgresAI issue
 let issue = IssueRequest {
     title: format!("[RCA] {}: {}", incident_type, database.name()),
     body: render_rca_markdown(&rca_result),
@@ -4196,7 +4196,7 @@ let issue = IssueRequest {
         "database_id" => database.id(),
         "investigation_steps" => json!(rca_result.steps),
         "confidence" => rca_result.confidence.to_string(),
-        "samo_action_ids" => json!(rca_result.action_ids),
+        "rpg_action_ids" => json!(rca_result.action_ids),
     },
 };
 postgresai_connector.create_issue(&issue).await?;
@@ -4246,14 +4246,14 @@ _Resolves Issue #10 — Distribution & Auto-Update_
 
 ### D.1 Install Script Security
 
-The `curl | sh` install pattern has real risks. Samo mitigates them:
+The `curl | sh` install pattern has real risks. Rpg mitigates them:
 
 ```bash
-# get.samo.dev/install.sh — served over HTTPS only
+# get.rpg.dev/install.sh — served over HTTPS only
 #!/bin/sh
 set -eu
 
-SAMO_VERSION="${SAMO_VERSION:-latest}"
+RPG_VERSION="${RPG_VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect platform
@@ -4266,24 +4266,24 @@ case "$ARCH" in
 esac
 
 # Resolve latest version via GitHub API
-if [ "$SAMO_VERSION" = "latest" ]; then
-  SAMO_VERSION=$(curl -sf https://api.github.com/repos/NikolayS/samo/releases/latest \
+if [ "$RPG_VERSION" = "latest" ]; then
+  RPG_VERSION=$(curl -sf https://api.github.com/repos/NikolayS/rpg/releases/latest \
     | grep '"tag_name"' | cut -d'"' -f4)
 fi
 
-BINARY="samo-${OS}-${ARCH}"
-BASE_URL="https://github.com/NikolayS/samo/releases/download/${SAMO_VERSION}"
+BINARY="rpg-${OS}-${ARCH}"
+BASE_URL="https://github.com/NikolayS/rpg/releases/download/${RPG_VERSION}"
 
 # Download binary
-curl -sfL "${BASE_URL}/${BINARY}" -o /tmp/samo-download
+curl -sfL "${BASE_URL}/${BINARY}" -o /tmp/rpg-download
 
 # Verify SHA256 checksum (REQUIRED — script fails if mismatch)
 EXPECTED=$(curl -sfL "${BASE_URL}/SHA256SUMS" \
   | grep "${BINARY}" | awk '{print $1}')
-ACTUAL=$(sha256sum /tmp/samo-download | awk '{print $1}')
+ACTUAL=$(sha256sum /tmp/rpg-download | awk '{print $1}')
 if [ "$EXPECTED" != "$ACTUAL" ]; then
   echo "ERROR: checksum mismatch — download may be corrupt or tampered"
-  rm /tmp/samo-download
+  rm /tmp/rpg-download
   exit 1
 fi
 
@@ -4292,21 +4292,21 @@ if command -v cosign >/dev/null 2>&1; then
   cosign verify-blob \
     --certificate "${BASE_URL}/${BINARY}.pem" \
     --signature "${BASE_URL}/${BINARY}.sig" \
-    --certificate-identity-regexp "https://github.com/NikolayS/samo" \
+    --certificate-identity-regexp "https://github.com/NikolayS/rpg" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    /tmp/samo-download || {
+    /tmp/rpg-download || {
     echo "ERROR: cosign signature verification failed"
-    rm /tmp/samo-download
+    rm /tmp/rpg-download
     exit 1
   }
 fi
 
 # Install
 mkdir -p "$INSTALL_DIR"
-mv /tmp/samo-download "$INSTALL_DIR/samo"
-chmod +x "$INSTALL_DIR/samo"
+mv /tmp/rpg-download "$INSTALL_DIR/rpg"
+chmod +x "$INSTALL_DIR/rpg"
 
-echo "✓ Samo ${SAMO_VERSION} installed to ${INSTALL_DIR}/samo"
+echo "✓ Rpg ${RPG_VERSION} installed to ${INSTALL_DIR}/rpg"
 ```
 
 **Security properties:**
@@ -4315,10 +4315,10 @@ echo "✓ Samo ${SAMO_VERSION} installed to ${INSTALL_DIR}/samo"
 - cosign/sigstore verification is attempted if cosign is available (optional but strongly encouraged)
 - Temporary file cleaned up on failure
 - No `sudo` by default — installs to `~/.local/bin`
-- Non-interactive mode: `SAMO_VERSION=v0.3.0 INSTALL_DIR=/usr/local/bin curl -sL https://get.samo.dev | sh`
+- Non-interactive mode: `RPG_VERSION=v0.3.0 INSTALL_DIR=/usr/local/bin curl -sL https://get.rpg.dev | sh`
 
 **Transport security for the install script itself:**
-- `get.samo.dev` must serve over HTTPS with HSTS
+- `get.rpg.dev` must serve over HTTPS with HSTS
 - The install script is also checksummed and signed — users can verify the installer itself via the GitHub releases page
 
 ### D.2 Binary Signing
@@ -4333,30 +4333,30 @@ Required for macOS 10.15+ (Gatekeeper blocks unsigned binaries):
 # 1. Sign with Developer ID
 codesign --sign "Developer ID Application: Nikolay Samokhvalov (TEAM_ID)" \
   --options runtime \
-  --entitlements samo.entitlements \
-  samo-darwin-aarch64
+  --entitlements rpg.entitlements \
+  rpg-darwin-aarch64
 
 # 2. Create zip for notarization (notarytool requires zip/pkg/dmg)
-zip samo-darwin-aarch64.zip samo-darwin-aarch64
+zip rpg-darwin-aarch64.zip rpg-darwin-aarch64
 
 # 3. Submit to Apple Notary Service
-xcrun notarytool submit samo-darwin-aarch64.zip \
+xcrun notarytool submit rpg-darwin-aarch64.zip \
   --apple-id "$APPLE_ID" \
   --team-id "$TEAM_ID" \
   --password "$NOTARIZATION_PASSWORD" \
   --wait
 
 # 4. Staple notarization ticket to binary
-xcrun stapler staple samo-darwin-aarch64
+xcrun stapler staple rpg-darwin-aarch64
 
 # 5. Verify
-codesign --verify --deep --strict samo-darwin-aarch64
-spctl --assess --type exec samo-darwin-aarch64
+codesign --verify --deep --strict rpg-darwin-aarch64
+spctl --assess --type exec rpg-darwin-aarch64
 ```
 
 **entitlements file** (minimal — only what's needed):
 ```xml
-<!-- samo.entitlements -->
+<!-- rpg.entitlements -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -4367,7 +4367,7 @@ spctl --assess --type exec samo-darwin-aarch64
   <key>com.apple.security.network.client</key><true/>
   <!-- keychain access for credential storage -->
   <key>com.apple.security.keychain-access-groups</key>
-  <array><string>dev.samo.samo</string></array>
+  <array><string>dev.rpg.rpg</string></array>
 </dict>
 </plist>
 ```
@@ -4383,20 +4383,20 @@ spctl --assess --type exec samo-darwin-aarch64
 # Azure Trusted Signing: no hardware token, cloud-native, works in CI
 az trustedsigning sign \
   --endpoint "https://eus.codesigning.azure.net" \
-  --account "samo-signing" \
-  --certificate-profile "samo-production" \
+  --account "rpg-signing" \
+  --certificate-profile "rpg-production" \
   --file-digest sha256 \
   --timestamp-rfc3161 "http://timestamp.acs.microsoft.com" \
   --timestamp-digest sha256 \
-  samo-windows-x86_64.exe
+  rpg-windows-x86_64.exe
 
 # Verify
-signtool verify /pa /v samo-windows-x86_64.exe
+signtool verify /pa /v rpg-windows-x86_64.exe
 ```
 
 **Alternative:** EV code signing certificate from a CA (DigiCert, Sectigo). More expensive, requires hardware token or HSM. Azure Trusted Signing is the modern, CI-friendly approach as of 2024.
 
-**Note on Windows SmartScreen:** New publishers see SmartScreen warnings even with valid Authenticode signatures. SmartScreen reputation is built over time (downloads + no malware reports). Communicate this to early users: "If you see a SmartScreen warning, click 'More info' → 'Run anyway'. This warning disappears after Samo builds reputation."
+**Note on Windows SmartScreen:** New publishers see SmartScreen warnings even with valid Authenticode signatures. SmartScreen reputation is built over time (downloads + no malware reports). Communicate this to early users: "If you see a SmartScreen warning, click 'More info' → 'Run anyway'. This warning disappears after Rpg builds reputation."
 
 #### Linux: GPG + cosign/sigstore
 
@@ -4406,53 +4406,53 @@ signtool verify /pa /v samo-windows-x86_64.exe
 # Primary: cosign keyless signing (Sigstore)
 # No key management — uses OIDC identity from GitHub Actions
 cosign sign-blob \
-  --output-certificate samo-linux-x86_64.pem \
-  --output-signature samo-linux-x86_64.sig \
-  samo-linux-x86_64
+  --output-certificate rpg-linux-x86_64.pem \
+  --output-signature rpg-linux-x86_64.sig \
+  rpg-linux-x86_64
 
 # Secondary: GPG signing (for users who prefer traditional verification)
 echo "$GPG_PRIVATE_KEY" | gpg --import --batch --passphrase "$GPG_PASSPHRASE"
 gpg --detach-sign --armor \
-  --local-user "samo@samokhvalov.com" \
-  samo-linux-x86_64
-# Produces: samo-linux-x86_64.asc
+  --local-user "rpg@samokhvalov.com" \
+  rpg-linux-x86_64
+# Produces: rpg-linux-x86_64.asc
 ```
 
-**Verification instructions published at:** `https://samo.sh/verify`
+**Verification instructions published at:** `https://rpg.sh/verify`
 
 ```bash
 # Verify with cosign (no key needed — verifies against OIDC identity)
 cosign verify-blob \
-  --certificate samo-linux-x86_64.pem \
-  --signature samo-linux-x86_64.sig \
-  --certificate-identity-regexp "https://github.com/NikolayS/samo" \
+  --certificate rpg-linux-x86_64.pem \
+  --signature rpg-linux-x86_64.sig \
+  --certificate-identity-regexp "https://github.com/NikolayS/rpg" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  samo-linux-x86_64
+  rpg-linux-x86_64
 
 # Verify with GPG (traditional)
-gpg --verify samo-linux-x86_64.asc samo-linux-x86_64
+gpg --verify rpg-linux-x86_64.asc rpg-linux-x86_64
 ```
 
 ### D.3 Install Paths and PATH Management
 
 | Platform | Default Install Path | PATH strategy |
 |----------|---------------------|---------------|
-| Linux | `~/.local/bin/samo` | Add to `~/.profile` / `~/.bashrc` / `~/.zshrc` if not already in PATH |
-| macOS | `/usr/local/bin/samo` | Always in PATH on macOS with Homebrew or XCode CLI tools installed |
-| Windows | `%LOCALAPPDATA%\samo\samo.exe` | Add to user PATH via `[Environment]::SetEnvironmentVariable` in PowerShell |
+| Linux | `~/.local/bin/rpg` | Add to `~/.profile` / `~/.bashrc` / `~/.zshrc` if not already in PATH |
+| macOS | `/usr/local/bin/rpg` | Always in PATH on macOS with Homebrew or XCode CLI tools installed |
+| Windows | `%LOCALAPPDATA%\rpg\rpg.exe` | Add to user PATH via `[Environment]::SetEnvironmentVariable` in PowerShell |
 
-**Coexistence with psql:** Samo does not replace or modify the system `psql` binary. Users who want `alias psql=samo` set it themselves. The install script warns if it detects a `samo` binary already in PATH at a different location.
+**Coexistence with psql:** Rpg does not replace or modify the system `psql` binary. Users who want `alias psql=rpg` set it themselves. The install script warns if it detects a `rpg` binary already in PATH at a different location.
 
 **System-wide install (sudo/admin):**
 ```bash
 # Linux system-wide
-INSTALL_DIR=/usr/local/bin curl -sL https://get.samo.dev | sudo sh
+INSTALL_DIR=/usr/local/bin curl -sL https://get.rpg.dev | sudo sh
 
 # macOS via Homebrew (recommended for system-wide)
-brew install samo
+brew install rpg
 
 # Windows system-wide (admin PowerShell)
-winget install samo
+winget install rpg
 ```
 
 ### D.4 Auto-Update Mechanism
@@ -4475,32 +4475,32 @@ pub async fn apply_update(new_binary: &Path, current_binary: &Path) -> Result<()
 
     // 4. Exec new binary with same args (seamless restart)
     // On daemon restart: daemon manager (systemd) handles restart
-    println!("Update applied. Restart samo to use the new version.");
+    println!("Update applied. Restart rpg to use the new version.");
 
     Ok(())
 }
 ```
 
-**Atomic update:** Write to `samo.new` in the same directory, then `rename()` (atomic on POSIX). The old binary is kept as `samo.backup` until the new version successfully starts.
+**Atomic update:** Write to `rpg.new` in the same directory, then `rename()` (atomic on POSIX). The old binary is kept as `rpg.backup` until the new version successfully starts.
 
-**Rollback:** `samo update --rollback` restores `samo.backup` if present.
+**Rollback:** `rpg update --rollback` restores `rpg.backup` if present.
 
 #### Windows: Deferred Replace Strategy
 
 Windows cannot replace a running binary (file locked by the OS):
 
 ```
-1. Download samo-new.exe to %LOCALAPPDATA%\samo\
+1. Download rpg-new.exe to %LOCALAPPDATA%\rpg\
 2. Verify checksum and signature
-3. Write update manifest: { "pending": "samo-new.exe", "replace": "samo.exe", "at_version": "0.3.0" }
-4. Print: "Update downloaded. Restart samo to apply."
-5. On next samo launch:
+3. Write update manifest: { "pending": "rpg-new.exe", "replace": "rpg.exe", "at_version": "0.3.0" }
+4. Print: "Update downloaded. Restart rpg to apply."
+5. On next rpg launch:
    a. Check for pending update manifest
-   b. If found: run helper (samo-updater.exe) via `ShellExecuteEx`
-   c. samo-updater.exe: waits for samo.exe process to exit (or kills it after timeout)
-   d. samo-updater.exe: renames samo.exe → samo-backup.exe, renames samo-new.exe → samo.exe
-   e. samo-updater.exe: launches samo.exe with original args
-   f. samo-updater.exe exits
+   b. If found: run helper (rpg-updater.exe) via `ShellExecuteEx`
+   c. rpg-updater.exe: waits for rpg.exe process to exit (or kills it after timeout)
+   d. rpg-updater.exe: renames rpg.exe → rpg-backup.exe, renames rpg-new.exe → rpg.exe
+   e. rpg-updater.exe: launches rpg.exe with original args
+   f. rpg-updater.exe exits
 ```
 
 Alternatively: the Windows installer approach (winget/choco/scoop) handles the replace problem at the package manager level — prefer this for Windows.
@@ -4519,26 +4519,26 @@ tokio::spawn(async move {
 });
 ```
 
-- Check runs at most once per 24 hours (cached in `~/.local/share/samo/version_cache.json`)
+- Check runs at most once per 24 hours (cached in `~/.local/share/rpg/version_cache.json`)
 - Check is async, non-blocking — never delays startup or query execution
-- Notification shown at next prompt: `[update available: v0.3.0 → v0.4.0  run 'samo update']`
-- Disabled with `[update] auto_check = false` in config or `SAMO_NO_UPDATE_CHECK=1` env var
+- Notification shown at next prompt: `[update available: v0.3.0 → v0.4.0  run 'rpg update']`
+- Disabled with `[update] auto_check = false` in config or `RPG_NO_UPDATE_CHECK=1` env var
 
 ### D.5 First-Run Experience
 
-The first time `samo` is run without arguments, it detects a fresh install and starts a guided setup:
+The first time `rpg` is run without arguments, it detects a fresh install and starts a guided setup:
 
 ```
-Welcome to Samo v0.1.0 — the AI-native Postgres terminal.
+Welcome to Rpg v0.1.0 — the AI-native Postgres terminal.
 
-It looks like this is your first time running Samo.
+It looks like this is your first time running Rpg.
 Let's get you connected in 30 seconds.
 
 ? Database connection string or host:
   > postgresql://localhost/mydb
   (or press Enter to use PGHOST/PGDATABASE environment variables)
 
-? AI provider (optional — enhances Samo with natural language features):
+? AI provider (optional — enhances Rpg with natural language features):
   > [1] Anthropic (Claude)  [2] OpenAI (GPT)  [3] Ollama (local)  [4] Skip
   > 4
 
@@ -4549,12 +4549,12 @@ mydb=>
 ```
 
 **First-run behaviors:**
-1. Detect if this is the first run (no `~/.config/samo/config.toml` exists)
+1. Detect if this is the first run (no `~/.config/rpg/config.toml` exists)
 2. Offer connection wizard (or skip and accept psql environment variables / args)
-3. Offer AI provider setup (or skip — Samo is fully functional without AI)
+3. Offer AI provider setup (or skip — Rpg is fully functional without AI)
 4. Check for pg_ash and offer to install if not found
 5. Show quick reference: `Type SQL to query, /ask to use AI, \? for help`
-6. Create `~/.config/samo/config.toml` with sensible defaults
+6. Create `~/.config/rpg/config.toml` with sensible defaults
 
 **Non-interactive first run** (detected via `!isatty(stdin)`):
 - Skip the wizard entirely
@@ -4585,23 +4585,23 @@ channel = "stable"   # stable | beta | nightly
 | Platform | Priority | Notes |
 |----------|----------|-------|
 | Linux | `curl \| sh`, `.deb`, `.rpm` | Homebrew on Linux is also supported |
-| macOS | Homebrew (primary), direct binary | `brew install samo` is the recommended path |
-| Windows | winget (primary), direct installer | `winget install samo` — built-in on Windows 11 |
-| All | Docker | `docker run -it ghcr.io/nikolays/samo` for sandboxed use |
-| Rust users | `cargo install samo` | Must build from source — slower but familiar |
+| macOS | Homebrew (primary), direct binary | `brew install rpg` is the recommended path |
+| Windows | winget (primary), direct installer | `winget install rpg` — built-in on Windows 11 |
+| All | Docker | `docker run -it ghcr.io/nikolays/rpg` for sandboxed use |
+| Rust users | `cargo install rpg` | Must build from source — slower but familiar |
 
 **Homebrew tap:**
-- `brew tap nikolays/samo && brew install samo`
-- Or after submission to homebrew-core: `brew install samo`
+- `brew tap nikolays/rpg && brew install rpg`
+- Or after submission to homebrew-core: `brew install rpg`
 - Homebrew formula: downloads the pre-built binary (not a source build) — faster for users
 
 **Docker multi-arch image:**
 ```dockerfile
 # Alpine-based, minimal
 FROM alpine:3.20
-COPY --from=builder /app/samo /usr/local/bin/samo
+COPY --from=builder /app/rpg /usr/local/bin/rpg
 RUN apk add --no-cache ca-certificates
-ENTRYPOINT ["samo"]
+ENTRYPOINT ["rpg"]
 ```
 - Multi-arch manifest: `linux/amd64` + `linux/arm64`
 - Target size: ~20 MB (static musl binary + Alpine base)
@@ -4612,27 +4612,27 @@ For air-gapped environments:
 
 ```bash
 # Download tarball (includes binary + checksums + signature)
-curl -L https://github.com/NikolayS/samo/releases/download/v0.3.0/samo-linux-x86_64.tar.gz \
-  -o samo.tar.gz
+curl -L https://github.com/NikolayS/rpg/releases/download/v0.3.0/rpg-linux-x86_64.tar.gz \
+  -o rpg.tar.gz
 
 # Verify (offline, using pre-downloaded signature file)
 sha256sum -c SHA256SUMS  # verify checksum
-gpg --verify samo-linux-x86_64.asc samo-linux-x86_64  # verify GPG sig
+gpg --verify rpg-linux-x86_64.asc rpg-linux-x86_64  # verify GPG sig
 
 # Install
-tar -xzf samo.tar.gz
-cp samo-linux-x86_64 /usr/local/bin/samo
-chmod +x /usr/local/bin/samo
+tar -xzf rpg.tar.gz
+cp rpg-linux-x86_64 /usr/local/bin/rpg
+chmod +x /usr/local/bin/rpg
 ```
 
 **Tarball contents:**
 ```
-samo-linux-x86_64.tar.gz:
-  samo-linux-x86_64      (the binary)
+rpg-linux-x86_64.tar.gz:
+  rpg-linux-x86_64      (the binary)
   SHA256SUMS             (checksum file)
-  samo-linux-x86_64.asc  (GPG signature)
-  samo-linux-x86_64.pem  (cosign certificate)
-  samo-linux-x86_64.sig  (cosign signature)
+  rpg-linux-x86_64.asc  (GPG signature)
+  rpg-linux-x86_64.pem  (cosign certificate)
+  rpg-linux-x86_64.sig  (cosign signature)
   INSTALL.md             (offline install instructions)
 ```
 
@@ -4714,7 +4714,7 @@ SELECT pg_cancel_backend(14523);
 SELECT pg_terminate_backend(14523);
 ```
 
-Permission required: `pg_cancel_backend` / `pg_terminate_backend` granted to `samo_agent`, or via wrapper function.
+Permission required: `pg_cancel_backend` / `pg_terminate_backend` granted to `rpg_agent`, or via wrapper function.
 
 **Mid-term GUCs (prevent recurrence):**
 ```sql
@@ -5063,7 +5063,7 @@ SELECT pg_reload_conf();
 ```sql
 -- PG 14-15: all columns in pg_stat_bgwriter
 -- PG 16+: checkpointer columns moved to pg_stat_checkpointer
--- Samo must use the correct view based on server_version_num
+-- Rpg must use the correct view based on server_version_num
 
 -- PG 14-15:
 SELECT 
@@ -5148,7 +5148,7 @@ High `temp_blks` = queries spilling sorts/hash joins to disk due to insufficient
 
 **External check:** `pg_stat_activity` for sessions in `IO:DataFileRead` + `temp_file` in `wait_event`. Also check `pg_stat_bgwriter.buffers_backend` — high rate means shared_buffers is too small (buffers being allocated directly by backends without bgwriter).
 
-**Expected findings:** Either (a) `work_mem` too small causing sort/hash join disk spill, (b) `shared_buffers` too small (low cache hit ratio), or (c) total RAM exhaustion (requires OS-level investigation — Samo can suggest but can't confirm without external metrics).
+**Expected findings:** Either (a) `work_mem` too small causing sort/hash join disk spill, (b) `shared_buffers` too small (low cache hit ratio), or (c) total RAM exhaustion (requires OS-level investigation — Rpg can suggest but can't confirm without external metrics).
 
 #### Three-Tier Mitigation
 
@@ -5385,9 +5385,9 @@ Recommended approach:
   5. [long-term] Review delete/update patterns — consider batching large deletes
 ```
 
-### E.13 Comparison: Samo RCA vs. Commercial Tools
+### E.13 Comparison: Rpg RCA vs. Commercial Tools
 
-| Capability | Samo (pg_ash) | pganalyze | Datadog APM | Human DBA |
+| Capability | Rpg (pg_ash) | pganalyze | Datadog APM | Human DBA |
 |------------|---------------|-----------|-------------|-----------|
 | Historical wait analysis | ✅ (pg_ash) | ✅ | ✅ | ❌ (manual) |
 | Real-time lock tree | ✅ | ✅ | ⚠️ Limited | ✅ |
@@ -5400,8 +5400,8 @@ Recommended approach:
 | Confidence scoring | ✅ | ❌ | ❌ | Implicit |
 | Runs without internet | ✅ (pg_ash + Ollama) | ❌ | ❌ | ✅ |
 
-**Samo's differentiators:**
-1. **Act, not just alert** — Samo can cancel the blocker and apply GUC changes; commercial tools only observe
+**Rpg's differentiators:**
+1. **Act, not just alert** — Rpg can cancel the blocker and apply GUC changes; commercial tools only observe
 2. **Causal chain reasoning** — LLM connects the dots across multiple symptoms
 3. **Confidence scoring** — explicit uncertainty quantifies when the system doesn't know
 4. **Runs in the terminal** — same interface as psql; no separate dashboard to open during an incident
@@ -5414,7 +5414,7 @@ Recommended approach:
 
 ### D.1 Three-Context Coexistence: REPL ↔ Pager ↔ Status Bar
 
-The hardest UX integration challenge in Samo is that three distinct rendering contexts must coexist on the same terminal without interfering with each other:
+The hardest UX integration challenge in Rpg is that three distinct rendering contexts must coexist on the same terminal without interfering with each other:
 
 1. **REPL** — rustyline-managed line editor at the bottom of the screen
 2. **TUI Pager** — ratatui full-screen widget that takes over the display
@@ -5536,14 +5536,14 @@ For long AI responses that exceed terminal height, offer to open in pager: `[pre
 
 ### D.2 Rustyline Customization
 
-rustyline exposes four traits for customization. Samo implements all four:
+rustyline exposes four traits for customization. Rpg implements all four:
 
-| Trait | Purpose | Samo Implementation |
+| Trait | Purpose | Rpg Implementation |
 |-------|---------|---------------------|
-| `Completer` | Tab completion | `SamoCompleter` — schema-aware, fuzzy |
-| `Highlighter` | Syntax coloring | `SamoHighlighter` — syntect-based |
-| `Hinter` | Ghost-text hints | `SamoHinter` — history-based + SQL hint |
-| `Validator` | Multi-line detection | `SamoValidator` — incomplete SQL detection |
+| `Completer` | Tab completion | `RpgCompleter` — schema-aware, fuzzy |
+| `Highlighter` | Syntax coloring | `RpgHighlighter` — syntect-based |
+| `Hinter` | Ghost-text hints | `RpgHinter` — history-based + SQL hint |
+| `Validator` | Multi-line detection | `RpgValidator` — incomplete SQL detection |
 
 **Key rustyline constraints to design around:**
 - rustyline runs in its own thread (or blocking call); it is **not async-native**. Wire it into tokio via `spawn_blocking`.
@@ -5556,9 +5556,9 @@ Main tokio runtime
     │
     ├── spawn_blocking → rustyline event loop (blocking, on threadpool)
     │       │
-    │       ├── SamoCompleter (Arc<RwLock<SchemaCache>>)
-    │       ├── SamoHighlighter (Arc<RwLock<SyntaxCache>>)
-    │       └── SamoValidator
+    │       ├── RpgCompleter (Arc<RwLock<SchemaCache>>)
+    │       ├── RpgHighlighter (Arc<RwLock<SyntaxCache>>)
+    │       └── RpgValidator
     │
     ├── tokio task → schema cache refresh (async)
     ├── tokio task → AI streaming (async)
@@ -5829,12 +5829,12 @@ Terminal multiplexers intercept some escape sequences:
 
 **Known conflicts:**
 - `\x1b[?1049h` (alternate screen): works in tmux, but `tmux save-buffer` may not capture alternate-screen content. Document this limitation.
-- Mouse reporting: tmux has its own mouse handling (`set -g mouse on`). When tmux's mouse mode is enabled, it captures events before passing them to the application. Samo's pager mouse support requires `set -g mouse off` or tmux 3.3+ which passes through mouse events correctly.
-- `\x1b]` (OSC sequences for window title): tmux blocks these by default. Window title updates (`\x1b]0;samo - mydb\x07`) are optional; degrade gracefully.
+- Mouse reporting: tmux has its own mouse handling (`set -g mouse on`). When tmux's mouse mode is enabled, it captures events before passing them to the application. Rpg's pager mouse support requires `set -g mouse off` or tmux 3.3+ which passes through mouse events correctly.
+- `\x1b]` (OSC sequences for window title): tmux blocks these by default. Window title updates (`\x1b]0;rpg - mydb\x07`) are optional; degrade gracefully.
 - 256-color support: tmux may rewrite color codes. Use `$TERM=tmux-256color` when inside tmux (detected via `$TMUX` env var).
-- `Ctrl-B` (tmux prefix): conflicts if user presses it in Samo. Not a Samo binding, so no conflict — tmux intercepts it before Samo sees it.
+- `Ctrl-B` (tmux prefix): conflicts if user presses it in Rpg. Not a Rpg binding, so no conflict — tmux intercepts it before Rpg sees it.
 
-**Status bar in tmux:** tmux has its own status bar. Samo's bottom-row status bar may overlap visually. Mitigation: detect tmux (`$TMUX` non-empty), optionally disable Samo's status bar (`\set STATUSLINE off`) and instead update tmux's window title via `printf '\ePtmux;\e\e]0;%s\007\e\\' "samo - $dbname"`.
+**Status bar in tmux:** tmux has its own status bar. Rpg's bottom-row status bar may overlap visually. Mitigation: detect tmux (`$TMUX` non-empty), optionally disable Rpg's status bar (`\set STATUSLINE off`) and instead update tmux's window title via `printf '\ePtmux;\e\e]0;%s\007\e\\' "rpg - $dbname"`.
 
 #### D.5.4 Terminal Capability Matrix
 
@@ -5853,7 +5853,7 @@ Terminal multiplexers intercept some escape sequences:
 \** requires `tmux >= 3.3` and `set -g mouse on` + passthrough  
 \*** tmux blocks OSC by default; can configure to allow
 
-**Degradation strategy:** Samo detects terminal capabilities at startup via `$TERM`, `$COLORTERM`, and `tput` queries. Features degrade gracefully:
+**Degradation strategy:** Rpg detects terminal capabilities at startup via `$TERM`, `$COLORTERM`, and `tput` queries. Features degrade gracefully:
 - No color support → monochrome output
 - No alternate screen → pager becomes scrolling inline output
 - No mouse → keyboard-only pager navigation
@@ -6244,7 +6244,7 @@ impl CostTracker {
     pub fn record(&mut self, usage: &TokenUsage, model: &str) {
         // Update session and monthly totals
         // Calculate USD cost using pricing table
-        // Persist monthly total to ~/.local/share/samo/usage.db
+        // Persist monthly total to ~/.local/share/rpg/usage.db
     }
     
     pub fn check_budget(&self) -> BudgetStatus {
@@ -6278,7 +6278,7 @@ All prompts use a structured template system. Templates are versioned and testab
 #### E.4.1 System Prompt (all commands)
 
 ```
-You are Samo, an AI-powered PostgreSQL terminal assistant.
+You are Rpg, an AI-powered PostgreSQL terminal assistant.
 
 RULES:
 1. Generate valid PostgreSQL SQL only (not MySQL, SQLite, etc.)
@@ -6402,7 +6402,7 @@ Maximum 3 recommendations, ordered by expected impact.
 #### E.5.1 SQLite Session Schema
 
 ```sql
--- Sessions database: ~/.local/share/samo/sessions.db
+-- Sessions database: ~/.local/share/rpg/sessions.db
 
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,          -- UUID
@@ -6577,7 +6577,7 @@ LLM Provider                    TUI Layer                    User
 ```rust
 async fn stream_to_terminal(
     stream: impl Stream<Item = StreamEvent>,
-    readline: &mut Editor<SamoHelper>,
+    readline: &mut Editor<RpgHelper>,
     status_bar: &StatusBar,
 ) -> Result<String, LlmError> {
     // 1. Clear current readline prompt
@@ -6740,9 +6740,9 @@ impl SessionState {
 #### F.1.3 AI API Keys
 
 - API keys are read from environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) or from config file
-- **Config file security:** `~/.config/samo/config.toml` created with `0600` permissions. If the file has broader permissions, warn the user.
+- **Config file security:** `~/.config/rpg/config.toml` created with `0600` permissions. If the file has broader permissions, warn the user.
 - API keys are never written to log files, debug output, or session storage
-- In config TOML, the field is `api_key_env = "VAR_NAME"` (points to env var name) — the key itself is not in the config file. Alternatively, `api_key = "sk-..."` is allowed but Samo warns: `API key in config file; recommend using environment variable instead.`
+- In config TOML, the field is `api_key_env = "VAR_NAME"` (points to env var name) — the key itself is not in the config file. Alternatively, `api_key = "sk-..."` is allowed but Rpg warns: `API key in config file; recommend using environment variable instead.`
 - Stored in `SecretString` (zeroized on drop)
 
 #### F.1.4 Connector Credentials (Datadog, AWS, GitHub, etc.)
@@ -6776,7 +6776,7 @@ The AAA Architecture (Analyzer/Actor/Auditor separation) is the core security ar
        "estimated_duration_s": 45
      }
      ```
-  5. The Actor maps `action_type: "reindex_index"` to a call to `samo_ops.reindex_concurrently($1)` with the target as the parameter — no LLM-generated SQL is ever executed directly.
+  5. The Actor maps `action_type: "reindex_index"` to a call to `rpg_ops.reindex_concurrently($1)` with the target as the parameter — no LLM-generated SQL is ever executed directly.
 
 **Attack 2: Analyzer → Actor direct communication bypass**
 - Vector: Bug in Analyzer that generates Actor calls without Auditor seeing them
@@ -6797,8 +6797,8 @@ The AAA Architecture (Analyzer/Actor/Auditor separation) is the core security ar
 **Attack 4: Actor exceeds permissions**
 - Vector: Actor executes operations not authorized by the permission model
 - Defense:
-  1. Actor connects with the `samo_agent` role, which has only EXECUTE on `samo_ops.*` functions — no direct DML/DDL
-  2. `samo_ops` wrapper functions validate their inputs and only perform the specific operation they're designed for (parameterized, no dynamic SQL construction from actor inputs beyond validated object references)
+  1. Actor connects with the `rpg_agent` role, which has only EXECUTE on `rpg_ops.*` functions — no direct DML/DDL
+  2. `rpg_ops` wrapper functions validate their inputs and only perform the specific operation they're designed for (parameterized, no dynamic SQL construction from actor inputs beyond validated object references)
   3. Database-level GRANT enforcement is independent of application code — even a completely compromised application cannot exceed what the database role permits
 
 **Attack 5: Auto mode runaway**
@@ -6807,7 +6807,7 @@ The AAA Architecture (Analyzer/Actor/Auditor separation) is the core security ar
   1. Per-feature action rate limits: e.g., index_health can run at most N REINDEX CONCURRENTLY operations per hour
   2. Action budget: configurable maximum number of actions per monitoring cycle
   3. Anomaly detection in Auditor: if post-action state is worse than pre-action state (bloat increased after reindex), automatically suspend that feature's Auto mode and alert
-  4. Kill switch: `SAMO_EMERGENCY_STOP=1` environment variable or `samo stop` command immediately halts all Auto operations
+  4. Kill switch: `RPG_EMERGENCY_STOP=1` environment variable or `rpg stop` command immediately halts all Auto operations
 
 #### F.2.2 Governance Architecture Implementation
 
@@ -6841,7 +6841,7 @@ pub enum ActionType {
 
 /// The Actor: thin executor, no intelligence
 pub struct Actor {
-    conn: Arc<DatabaseConnection>,  // samo_agent role
+    conn: Arc<DatabaseConnection>,  // rpg_agent role
     action_log: Arc<ActionLog>,
 }
 
@@ -6861,13 +6861,13 @@ impl Actor {
         let outcome = match &request.action_type {
             ActionType::ReindexIndex => {
                 self.conn.execute(
-                    "SELECT samo_ops.reindex_concurrently($1::regclass)",
+                    "SELECT rpg_ops.reindex_concurrently($1::regclass)",
                     &[&request.target.object_oid()]
                 ).await?
             }
             ActionType::CancelQuery { pid } => {
                 self.conn.execute(
-                    "SELECT samo_ops.cancel_query($1)",
+                    "SELECT rpg_ops.cancel_query($1)",
                     &[pid]
                 ).await?
             }
@@ -6886,7 +6886,7 @@ impl Actor {
 
 ### F.3 SECURITY DEFINER Wrapper Functions: Attack Surface
 
-`samo_ops` functions use `SECURITY DEFINER` to execute with higher privileges than `samo_agent`. This is a common pattern but requires careful implementation.
+`rpg_ops` functions use `SECURITY DEFINER` to execute with higher privileges than `rpg_agent`. This is a common pattern but requires careful implementation.
 
 #### F.3.1 SQL Injection in Dynamic Queries
 
@@ -6894,7 +6894,7 @@ All dynamic SQL in wrapper functions **must** use `format()` with `%I` (identifi
 
 **Correct:**
 ```sql
-CREATE OR REPLACE FUNCTION samo_ops.reindex_concurrently(p_index regclass)
+CREATE OR REPLACE FUNCTION rpg_ops.reindex_concurrently(p_index regclass)
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -6932,9 +6932,9 @@ The `regclass` input type provides a level of validation (must be a valid OID), 
 
 Without `SET search_path = pg_catalog`, a malicious user could:
 1. Create a schema named `public` (already exists) and put malicious objects there
-2. Or in environments where `samo_agent` can create schemas, create a fake schema that shadows `pg_catalog`
+2. Or in environments where `rpg_agent` can create schemas, create a fake schema that shadows `pg_catalog`
 
-**Fix:** All `samo_ops` functions include:
+**Fix:** All `rpg_ops` functions include:
 ```sql
 SET search_path = pg_catalog, pg_temp
 ```
@@ -6947,7 +6947,7 @@ VACUUM and `CREATE/REINDEX INDEX CONCURRENTLY` cannot run inside a transaction b
 
 **Preferred: Direct execution via Actor's connection (all PG versions)**
 
-The Actor maintains a dedicated database connection as `samo_agent`. For operations that can't run in a transaction block, the Actor simply executes them directly on its own connection **outside of any BEGIN/COMMIT wrapper**. This is cleaner than the dblink approach and avoids its problems (credential management, connection pool competition, poor error propagation).
+The Actor maintains a dedicated database connection as `rpg_agent`. For operations that can't run in a transaction block, the Actor simply executes them directly on its own connection **outside of any BEGIN/COMMIT wrapper**. This is cleaner than the dblink approach and avoids its problems (credential management, connection pool competition, poor error propagation).
 
 ```rust
 // Actor's non-transactional execution path
@@ -6961,23 +6961,23 @@ actor_conn.execute(
 **PG 16+: `pg_maintain` role eliminates wrapper functions entirely**
 
 ```sql
--- PG 16+ setup: no samo_ops wrappers needed for maintenance operations
-GRANT pg_maintain TO samo_agent;
+-- PG 16+ setup: no rpg_ops wrappers needed for maintenance operations
+GRANT pg_maintain TO rpg_agent;
 
--- samo_agent can now directly execute:
+-- rpg_agent can now directly execute:
 --   VACUUM, ANALYZE, REINDEX, CLUSTER, REFRESH MATERIALIZED VIEW, LOCK TABLE
 -- without SUPERUSER and without wrapper functions.
 ```
 
-When Samo detects PG 16+, it should prefer `pg_maintain` over `samo_ops` wrappers for maintenance operations. `samo setup` should detect the PG version and use the appropriate approach.
+When Rpg detects PG 16+, it should prefer `pg_maintain` over `rpg_ops` wrappers for maintenance operations. `rpg setup` should detect the PG version and use the appropriate approach.
 
-**Legacy (PG 14-15): `samo_ops` wrapper functions still needed**
+**Legacy (PG 14-15): `rpg_ops` wrapper functions still needed**
 
-For PG versions before 16, `samo_ops` SECURITY DEFINER wrapper functions are still required for operations where `samo_agent` lacks direct privileges. These wrappers use the same `format('%I', ...)` safety pattern documented in F.3.1.
+For PG versions before 16, `rpg_ops` SECURITY DEFINER wrapper functions are still required for operations where `rpg_agent` lacks direct privileges. These wrappers use the same `format('%I', ...)` safety pattern documented in F.3.1.
 
 ```sql
 -- Example: PG 14-15 only (on PG 16+, use pg_maintain instead)
-CREATE OR REPLACE FUNCTION samo_ops.vacuum_table(p_table regclass)
+CREATE OR REPLACE FUNCTION rpg_ops.vacuum_table(p_table regclass)
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -7002,20 +7002,20 @@ $$;
 ```
 
 **Note:** The previous design used `dblink` inside SECURITY DEFINER functions. This has been replaced because:
-- **Credential management risk** — `samo_ops.dblink_connstr` GUC is readable via `SHOW`
+- **Credential management risk** — `rpg_ops.dblink_connstr` GUC is readable via `SHOW`
 - **Connection pool competition** — dblink opens a separate connection, competing with the application pool
 - **Poor error propagation** — dblink errors are wrapped and lose context
 - **Unnecessary complexity** — the Actor already has a dedicated connection that can execute outside transaction blocks
 
 #### F.3.4 Permission Escalation Checklist
 
-For each `samo_ops` function, before deployment:
+For each `rpg_ops` function, before deployment:
 - [ ] Uses `SECURITY DEFINER` and `SET search_path = pg_catalog, pg_temp`
 - [ ] Input validated against `pg_catalog` (object exists, is the right type)
 - [ ] Dynamic SQL uses `format('%I', ...)` or `format('%L', ...)` only — no concatenation
 - [ ] EXECUTE only reaches the specific operation, not general SQL execution
-- [ ] Granted only to `samo_agent`, not PUBLIC
-- [ ] Revoked from PUBLIC explicitly: `REVOKE ALL ON FUNCTION samo_ops.* FROM PUBLIC`
+- [ ] Granted only to `rpg_agent`, not PUBLIC
+- [ ] Revoked from PUBLIC explicitly: `REVOKE ALL ON FUNCTION rpg_ops.* FROM PUBLIC`
 
 ---
 
@@ -7077,13 +7077,13 @@ The action log must be tamper-evident: the Actor should not be able to delete or
 **Option A: OS-level append-only file (recommended for most deployments)**
 ```bash
 # Set append-only flag (Linux)
-chattr +a ~/.local/share/samo/actions.log
+chattr +a ~/.local/share/rpg/actions.log
 
 # This prevents even root from deleting entries (only immutable flag or removing +a can undo this)
-# samo_agent running as non-root cannot remove +a
+# rpg_agent running as non-root cannot remove +a
 ```
 
-Samo's setup script applies `chattr +a` to the action log file. The `samo_agent` OS user (when running as daemon) does not have the `CAP_LINUX_IMMUTABLE` capability needed to remove the flag.
+Rpg's setup script applies `chattr +a` to the action log file. The `rpg_agent` OS user (when running as daemon) does not have the `CAP_LINUX_IMMUTABLE` capability needed to remove the flag.
 
 **Option B: SQLite WAL + checksums (for SQLite-based action log)**
 ```sql
@@ -7099,7 +7099,7 @@ CREATE TABLE action_log (
     pre_state_hash TEXT,     -- hash of observed state before action
     post_state_hash TEXT,    -- hash of observed state after action
     outcome TEXT NOT NULL,   -- 'success' | 'failure' | 'partial'
-    actor_version TEXT NOT NULL,  -- samo version
+    actor_version TEXT NOT NULL,  -- rpg version
     chain_hash TEXT NOT NULL  -- SHA256(prev_chain_hash || this_row_data)
 );
 ```
@@ -7107,19 +7107,19 @@ CREATE TABLE action_log (
 `chain_hash` creates a hash chain: each entry's hash depends on the previous entry. Tampering with any entry invalidates all subsequent hashes. Auditing is: recalculate the chain and verify all hashes match.
 
 **Option C: PostgreSQL audit table (for production deployments with `pgaudit`)**
-- Write action log to a dedicated PostgreSQL table that `samo_agent` has INSERT but not DELETE/UPDATE access to
+- Write action log to a dedicated PostgreSQL table that `rpg_agent` has INSERT but not DELETE/UPDATE access to
 - `pgaudit` extension logs all DML to PostgreSQL logs independently of the application
 - Provides two independent audit trails that can be cross-referenced
 
 #### F.5.2 Log Integrity Verification
 
 ```
-samo=> \audit verify
+rpg=> \audit verify
 Verifying action log integrity...
 Checking chain hashes for 1,247 entries...
 ✓ All entries valid. Last entry: 2026-03-12 14:23:01 UTC
 ✓ Append-only flag: set (chattr +a)
-✓ Log file owner: samo_agent (matches expected)
+✓ Log file owner: rpg_agent (matches expected)
 ✓ Log file permissions: 644 (readable, append-only via +a)
 ```
 
@@ -7191,7 +7191,7 @@ Each connector uses a separate credential — never share credentials between co
 
 **For production deployments:**
 
-1. **Run samo_agent as a dedicated OS user** with minimal privileges (no sudo, no shell, no home directory write except action log)
+1. **Run rpg_agent as a dedicated OS user** with minimal privileges (no sudo, no shell, no home directory write except action log)
 2. **Apply `chattr +a` to action log** on the OS level during setup
 3. **Use `sslmode=verify-full`** with proper CA certificate for database connection
 4. **Enable `pgaudit`** extension on the database for independent audit trail
@@ -7213,7 +7213,7 @@ Each connector uses a separate credential — never share credentials between co
 
 ### A.1 Overview
 
-This appendix captures a systematic gap analysis of the PostgreSQL wire protocol requirements for Samo, comparing what `tokio-postgres` provides out-of-the-box versus what requires custom implementation. It also documents the connection state machine, pooler edge cases, and version-specific protocol behaviors.
+This appendix captures a systematic gap analysis of the PostgreSQL wire protocol requirements for Rpg, comparing what `tokio-postgres` provides out-of-the-box versus what requires custom implementation. It also documents the connection state machine, pooler edge cases, and version-specific protocol behaviors.
 
 ---
 
@@ -7247,7 +7247,7 @@ This appendix captures a systematic gap analysis of the PostgreSQL wire protocol
 | Parameter encoding/decoding | ✅ Full | Via `postgres-types` |
 | Connection parameters | ✅ Full | Via `Config` builder |
 | .pgpass file | ⚠️ Partial | Not built-in; must parse manually |
-| pg_service.conf | ❌ Not provided | Samo must implement |
+| pg_service.conf | ❌ Not provided | Rpg must implement |
 | sslmode levels (6 levels) | ⚠️ Partial | Supported but rustls path needs verification of `verify-ca` vs `verify-full` distinction |
 | GSS encryption (GSSAPI) | ❌ Not provided | tokio-postgres has no GSSAPI support |
 | Kerberos (krb5) | ❌ Not provided | |
@@ -7268,11 +7268,11 @@ The following must be built on top of tokio-postgres or alongside it:
 
 2. **`pg_service.conf` parser** — Locate service file (PGSERVICEFILE, `~/.pg_service.conf`, sysconfdir), parse INI-style sections, merge service params with explicit params (explicit wins).
 
-3. **GSSAPI/Kerberos** — If Samo targets enterprise on-prem, this is needed. Recommend: detect at compile time via feature flag (`--features gss`), link against GSSAPI when available.
+3. **GSSAPI/Kerberos** — If Rpg targets enterprise on-prem, this is needed. Recommend: detect at compile time via feature flag (`--features gss`), link against GSSAPI when available.
 
 4. **channel_binding** — SCRAM-SHA-256-PLUS requires reading TLS channel info. Requires integration with TLS layer. Low priority for v1, but required for `require_auth=scram-sha-256-plus` environments.
 
-5. **target_session_attrs** — Samo must iterate hosts (from `host=h1,h2,h3`), connect, run `SELECT pg_is_in_recovery()`, compare against desired attrs, disconnect and try next if mismatch.
+5. **target_session_attrs** — Rpg must iterate hosts (from `host=h1,h2,h3`), connect, run `SELECT pg_is_in_recovery()`, compare against desired attrs, disconnect and try next if mismatch.
 
 6. **load_balance_hosts** — Shuffle host list before attempting connections.
 
@@ -7280,7 +7280,7 @@ The following must be built on top of tokio-postgres or alongside it:
 
 8. **Large object streaming** — `lo_read`/`lo_write` in a loop with configurable chunk size. Needed for `\lo_import` and `\lo_export` commands.
 
-9. **COPY text format parsing** — The COPY sub-protocol is covered by tokio-postgres byte streams, but Samo needs a higher-level abstraction that handles text format quoting, binary format, CSV mode with headers.
+9. **COPY text format parsing** — The COPY sub-protocol is covered by tokio-postgres byte streams, but Rpg needs a higher-level abstraction that handles text format quoting, binary format, CSV mode with headers.
 
 10. **Connection state tracking for poolers** — See Section A.4.
 
@@ -7462,7 +7462,7 @@ The following state machine covers a complete connection lifecycle, including al
   │  After LISTEN channel_name:
   │  At any ReadyForQuery or async: server may send NotificationResponse
   │  (pid, channel, payload) at any time
-  │  Samo polls for notifications between queries
+  │  Rpg polls for notifications between queries
 
 [DISCONNECT]
   │  Send: Terminate
@@ -7490,7 +7490,7 @@ When `host=h1,h2,h3` is specified:
 
 #### A.4.1 Transaction Mode Limitations
 
-Connection poolers operating in **transaction mode** reset session state between transactions. This breaks several psql/Samo features:
+Connection poolers operating in **transaction mode** reset session state between transactions. This breaks several psql/Rpg features:
 
 | Feature | Transaction Mode Impact | Mitigation |
 |---|---|---|
@@ -7507,13 +7507,13 @@ Connection poolers operating in **transaction mode** reset session state between
 | Large objects | ❌ Broken — LO operations must be in one transaction | Wrap in explicit transaction |
 | `pg_backend_pid()` | ⚠️ Returns pooler connection PID, not original server PID | CancelRequest won't work |
 
-**Detection strategy:** Query `SHOW pool_mode` if available, or detect by attempting `SET application_name = 'samo_probe'` and checking if it persists across a transaction boundary.
+**Detection strategy:** Query `SHOW pool_mode` if available, or detect by attempting `SET application_name = 'rpg_probe'` and checking if it persists across a transaction boundary.
 
 #### A.4.2 pgBouncer Specifics
 
 - Version 1.18+: supports `SCRAM-SHA-256` pass-through authentication
 - Older versions: only MD5 or plain password (SCRAM requires pgBouncer to have the password, or use `auth_type=scram-sha-256` with local auth)
-- `PREPARE` in transaction mode: pgBouncer 1.21+ supports server-side prepared statement caching via `max_prepared_statements` parameter. Without it, Samo must detect pgBouncer and fall back to simple query protocol.
+- `PREPARE` in transaction mode: pgBouncer 1.21+ supports server-side prepared statement caching via `max_prepared_statements` parameter. Without it, Rpg must detect pgBouncer and fall back to simple query protocol.
 - Protocol 3.0 only — no protocol version negotiation issues
 - `application_name` in session mode: passed through. In transaction mode: not reliable.
 - `SHOW CLIENTS`, `SHOW POOLS`: admin console available on admin_port (usually 6432), not on data port
@@ -7532,8 +7532,8 @@ SHOW server_version;  -- pgBouncer returns its own version string, not PG versio
 - Supports transaction mode and session mode
 - Mirror mode: routes queries to multiple backends (useful for zero-downtime upgrades)
 - `SCRAM-SHA-256`: supported in recent versions
-- Shard routing: `SET shard = 0` to route to specific shard — Samo should not conflict
-- Health checks: PgCat sends `SELECT 1` to backends; Samo queries shouldn't interfere
+- Shard routing: `SET shard = 0` to route to specific shard — Rpg should not conflict
+- Health checks: PgCat sends `SELECT 1` to backends; Rpg queries shouldn't interfere
 - `pg_catalog` passthrough: PgCat may intercept some `SHOW` commands
 
 #### A.4.4 Supavisor Specifics
@@ -7549,7 +7549,7 @@ SHOW server_version;  -- pgBouncer returns its own version string, not PG versio
 
 **Supavisor detection:** Username contains `.` separator or connection is to port 6543.
 
-#### A.4.5 Samo Pooler Compatibility Strategy
+#### A.4.5 Rpg Pooler Compatibility Strategy
 
 1. **Auto-detect pooler at connect time:**
    - Send `SHOW server_version` — parse response for pgBouncer/PgCat signatures
@@ -7575,7 +7575,7 @@ SHOW server_version;  -- pgBouncer returns its own version string, not PG versio
 
 #### A.5.1 Protocol-Level Changes
 
-| Version | Change | Impact on Samo |
+| Version | Change | Impact on Rpg |
 |---|---|---|
 | PG 12 | `SCRAM-SHA-256-PLUS` (channel binding) added to protocol | Implement SCRAM-SHA-256-PLUS for `channel_binding=require` |
 | PG 13 | `sslpassword` connection parameter added | Add to connection param handling |
@@ -7586,18 +7586,18 @@ SHOW server_version;  -- pgBouncer returns its own version string, not PG versio
 | PG 16 | Enhanced `target_session_attrs` values: `primary`, `standby`, `prefer-standby` | Implement new attrs |
 | PG 17 | `sslnegotiation=direct` fully stabilized — skip SSLRequest, direct TLS | Direct TLS path in state machine |
 | PG 17 | Protocol version negotiation: server can propose alternative version | Handle NegotiateProtocolVersion message |
-| PG 17 | `client_connection_check_interval` GUC — server detects dead clients faster | No protocol change; Samo benefits from faster error detection |
+| PG 17 | `client_connection_check_interval` GUC — server detects dead clients faster | No protocol change; Rpg benefits from faster error detection |
 | PG 18 | Protocol v3.1 proposed changes (TBD — track PG18 release notes) | Monitor and adapt |
 
 #### A.5.2 NegotiateProtocolVersion Handling
 
-Since PG 12+, if the client requests a protocol minor version the server doesn't support, the server sends `NegotiateProtocolVersion`. Samo must handle this gracefully:
+Since PG 12+, if the client requests a protocol minor version the server doesn't support, the server sends `NegotiateProtocolVersion`. Rpg must handle this gracefully:
 
 ```rust
 // After sending StartupMessage with protocol 3.0:
 // Server may respond with NegotiateProtocolVersion before AuthenticationOk
 // Message format: 'v' + minor_version + num_unrecognized_options + option_names[]
-// Samo should log a debug warning and continue (we don't use minor versions yet)
+// Rpg should log a debug warning and continue (we don't use minor versions yet)
 ```
 
 #### A.5.3 pg_catalog Schema Changes Affecting Connection Handling
@@ -7613,7 +7613,7 @@ Since PG 12+, if the client requests a protocol minor version the server doesn't
 ### A.6 Wire Protocol Abstraction Layer — Recommended Design
 
 ```rust
-// samo/src/protocol/mod.rs
+// rpg/src/protocol/mod.rs
 
 pub struct ConnectionConfig {
     pub hosts: Vec<Host>,          // multi-host support
@@ -7633,7 +7633,7 @@ pub struct ConnectionConfig {
     // ... all other libpq params
 }
 
-pub struct SamoConnection {
+pub struct RpgConnection {
     inner: tokio_postgres::Client,
     config: ConnectionConfig,
     pub server_version: u32,       // parsed from ParameterStatus
@@ -7651,7 +7651,7 @@ pub enum PoolerInfo {
     Unknown { detected_by: String },
 }
 
-impl SamoConnection {
+impl RpgConnection {
     pub async fn connect(config: ConnectionConfig) -> Result<Self, ConnectError>;
     pub async fn cancel(&self) -> Result<(), Error>;  // sends CancelRequest
     pub async fn is_alive(&self) -> bool;             // lightweight ping
@@ -7659,7 +7659,7 @@ impl SamoConnection {
 }
 ```
 
-**Key design decision:** Samo wraps `tokio_postgres::Client` rather than reimplementing the protocol. Custom features (GSSAPI, pgpass, service files, pooler detection) layer on top. This minimizes risk while allowing gradual migration to a custom protocol implementation if tokio-postgres becomes a limitation.
+**Key design decision:** Rpg wraps `tokio_postgres::Client` rather than reimplementing the protocol. Custom features (GSSAPI, pgpass, service files, pooler detection) layer on top. This minimizes risk while allowing gradual migration to a custom protocol implementation if tokio-postgres becomes a limitation.
 
 ---
 
@@ -7701,7 +7701,7 @@ SELECT
     END AS state_age,
     -- PG 14+ only: query_id (parallel query correlation)
     CASE WHEN current_setting('server_version_num')::int >= 140000
-        THEN NULL  -- query_id added in PG14; use dynamic SQL in Samo code
+        THEN NULL  -- query_id added in PG14; use dynamic SQL in Rpg code
         ELSE NULL
     END AS query_id,
     left(query, 80) AS query_snippet
@@ -7810,7 +7810,7 @@ WHERE pg_relation_size(indexrelid) > 1024 * 1024  -- >1MB indexes
     AND schemaname NOT IN ('pg_catalog', 'information_schema')
 ORDER BY pg_relation_size(indexrelid) DESC;
 
--- Recommended action query (shown by Samo when bloat is detected):
+-- Recommended action query (shown by Rpg when bloat is detected):
 -- VACUUM VERBOSE table_name;                    -- for table bloat
 -- REINDEX INDEX CONCURRENTLY index_name;        -- for index bloat (PG 12+)
 -- SELECT pgstattuple('table_name');             -- exact measurement (if extension available)
@@ -7938,11 +7938,11 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
     AND pg_relation_size(indexrelid) > 8 * 1024  -- skip tiny indexes (<8KB)
 ORDER BY pg_relation_size(indexrelid) DESC;
 
--- Drop candidate script (generated by Samo, requires DBA approval):
+-- Drop candidate script (generated by Rpg, requires DBA approval):
 -- DROP INDEX CONCURRENTLY schema.index_name;  -- PG 12+: safe concurrent drop
 ```
 
-**Caveats Samo should surface:**
+**Caveats Rpg should surface:**
 1. Stats reset since last `pg_stat_reset()` — check `stats_reset` column. If reset recently, scans may be artificially low.
 2. Unique/PK indexes may have zero scans but are still required for constraint enforcement.
 3. Indexes used for `ORDER BY` optimization may show no `idx_scan` but still provide value.
@@ -7981,7 +7981,7 @@ ORDER BY seq_tup_read DESC, seq_scan DESC
 LIMIT 25;
 ```
 
-**DBA insight Samo should add:** If `avg_rows_per_seq_scan` is high (many rows scanned per seq scan), a missing index is likely. If it's low (few rows per scan), the table is small and seq scans are appropriate.
+**DBA insight Rpg should add:** If `avg_rows_per_seq_scan` is high (many rows scanned per seq scan), a missing index is likely. If it's low (few rows per scan), the table is small and seq scans are appropriate.
 
 ---
 
@@ -8076,7 +8076,7 @@ SELECT
     age(relfrozenxid) AS xid_age,
     pg_size_pretty(pg_relation_size(relid)) AS table_size,
     -- PG 14+: n_ins_since_vacuum
-    -- (added dynamically by Samo based on server_version_num)
+    -- (added dynamically by Rpg based on server_version_num)
     autovacuum_count,
     analyze_count
 FROM pg_stat_user_tables
@@ -8112,7 +8112,7 @@ ORDER BY xid_age DESC;
 ```
 
 **Version notes:**
-- `n_ins_since_vacuum`: added PG 14. Guards needed in Samo.
+- `n_ins_since_vacuum`: added PG 14. Guards needed in Rpg.
 - `last_seq_scan`, `last_idx_scan`: added PG 13.
 - Autovacuum for insert-heavy workloads (PG 13+): `autovacuum_vacuum_insert_threshold`, `autovacuum_vacuum_insert_scale_factor`.
 
@@ -8161,7 +8161,7 @@ SELECT
     restart_lsn,
     confirmed_flush_lsn,
     pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal_size,
-    -- PG 14+ columns (guard with version check in Samo):
+    -- PG 14+ columns (guard with version check in Rpg):
     -- wal_status: 'reserved', 'extended', 'unreserved', 'lost'
     -- safe_wal_size: bytes of WAL remaining before slot goes 'unreserved'
     -- PG 15+ columns:
@@ -8187,7 +8187,7 @@ SELECT
         pg_current_wal_lsn(),
         (SELECT lsn FROM w)
     ) / GREATEST(EXTRACT(EPOCH FROM (now() - (SELECT ts FROM w))), 1)) || '/s' AS wal_rate
--- NOTE: Run twice 5s apart for meaningful rate. Samo should sample over time.
+-- NOTE: Run twice 5s apart for meaningful rate. Rpg should sample over time.
 FROM w;
 ```
 
@@ -8376,7 +8376,7 @@ ORDER BY name;
 -- Compatible: PG 14-18
 -- For historical wait analysis: requires pg_stat_statements or pg_ash extension
 -- NOTE: This is a point-in-time snapshot. For true ASH, sample pg_stat_activity
--- repeatedly (Samo daemon mode can maintain this rolling sample)
+-- repeatedly (Rpg daemon mode can maintain this rolling sample)
 
 -- Current wait event distribution:
 SELECT
@@ -8431,7 +8431,7 @@ LIMIT 15;
 - `jit_*` columns: added PG 11.
 - `toplevel` column (distinguishes top-level vs nested calls): added PG 14.
 - `total_exec_time`, `mean_exec_time` (renamed from `total_time`, `mean_time`): PG 13+. PG 12 uses old names.
-- In PG 12, use `total_time` and `mean_time`; Samo must branch on `server_version_num`.
+- In PG 12, use `total_time` and `mean_time`; Rpg must branch on `server_version_num`.
 
 ---
 
@@ -8452,7 +8452,7 @@ LIMIT 15;
 | **Fly.io Postgres** | ✅ Available | Standard PostgreSQL; configure via `postgresql.conf`. Full superuser access. |
 | **Railway Postgres** | ✅ Available | Standard PostgreSQL with full access. |
 
-**Samo detection strategy:**
+**Rpg detection strategy:**
 ```sql
 -- Check if pg_stat_statements is loaded:
 SELECT count(*) > 0 AS available
@@ -8488,10 +8488,10 @@ WHERE table_schema = 'public' AND table_name = 'pg_stat_statements';
 | `pg_wait_events` | (new view) | PG 17 | Documents all wait event names |
 | `pg_stat_activity` | `query_id` from core | PG 14 | Now in core (was extension-only) |
 
-**Implementation note:** Samo's `\dba` queries should use `current_setting('server_version_num')::int` to branch at runtime. Prefer a version-check helper:
+**Implementation note:** Rpg's `\dba` queries should use `current_setting('server_version_num')::int` to branch at runtime. Prefer a version-check helper:
 
 ```rust
-// In Samo's query builder:
+// In Rpg's query builder:
 fn dba_query(feature: DbaFeature, version: u32) -> &'static str {
     match (feature, version) {
         (DbaFeature::Activity, v) if v >= 140000 => ACTIVITY_QUERY_PG14,
@@ -8507,7 +8507,7 @@ fn dba_query(feature: DbaFeature, version: u32) -> &'static str {
 
 ### C.1 Defining "95% Daily Use"
 
-The spec claims "a user should be able to `alias psql=samo` and not notice for 95% of their workflow." This section makes that claim concrete and testable.
+The spec claims "a user should be able to `alias psql=rpg` and not notice for 95% of their workflow." This section makes that claim concrete and testable.
 
 #### C.1.1 Methodology
 
@@ -8597,14 +8597,14 @@ This translates to the following must-have Phase 0 requirements:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│               Samo-vs-psql Compatibility Test Suite              │
+│               Rpg-vs-psql Compatibility Test Suite              │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────┐      ┌─────────────────────────────┐
 │   Test Case Database    │      │    Test Runner (Rust/shell)   │
 │                         │      │                               │
 │  - Input: command/SQL   │─────►│  1. Run in psql (real)       │
-│  - Expected behavior    │      │  2. Run in samo               │
+│  - Expected behavior    │      │  2. Run in rpg               │
 │  - Comparison mode      │      │  3. Diff outputs              │
 │  - PG version range     │      │  4. Record pass/fail          │
 └─────────────────────────┘      └─────────────────────────────┘
@@ -8623,11 +8623,11 @@ This translates to the following must-have Phase 0 requirements:
 
 ```bash
 #!/usr/bin/env bash
-# samo-compat-test.sh
-# Core test runner for psql vs samo comparison
+# rpg-compat-test.sh
+# Core test runner for psql vs rpg comparison
 
 PSQL=${PSQL:-psql}
-SAMO=${SAMO:-samo}
+RPG=${RPG:-rpg}
 PG_DSN=${PG_DSN:-"postgres://test:test@localhost/compat_test"}
 PASS=0
 FAIL=0
@@ -8650,26 +8650,26 @@ run_test() {
     fi
 
     # Run in both
-    local psql_out samo_out
+    local psql_out rpg_out
     psql_out=$(echo "$input" | $PSQL "$PG_DSN" --no-psqlrc 2>&1)
-    samo_out=$(echo "$input" | $SAMO "$PG_DSN" --no-psqlrc 2>&1)
+    rpg_out=$(echo "$input" | $RPG "$PG_DSN" --no-psqlrc 2>&1)
 
     # Compare based on mode
     local match=false
     case "$compare_mode" in
         exact)
-            [[ "$psql_out" == "$samo_out" ]] && match=true
+            [[ "$psql_out" == "$rpg_out" ]] && match=true
             ;;
         normalized)
             # Normalize: collapse whitespace, remove trailing spaces
             local p_norm s_norm
             p_norm=$(echo "$psql_out" | sed 's/[[:space:]]\+/ /g; s/ *$//g' | sort)
-            s_norm=$(echo "$samo_out" | sed 's/[[:space:]]\+/ /g; s/ *$//g' | sort)
+            s_norm=$(echo "$rpg_out" | sed 's/[[:space:]]\+/ /g; s/ *$//g' | sort)
             [[ "$p_norm" == "$s_norm" ]] && match=true
             ;;
         regex)
-            # samo_out should match the pattern in $compare_mode_arg
-            [[ "$samo_out" =~ $5 ]] && match=true
+            # rpg_out should match the pattern in $compare_mode_arg
+            [[ "$rpg_out" =~ $5 ]] && match=true
             ;;
         ignore)
             match=true  # just run without error check
@@ -8682,9 +8682,9 @@ run_test() {
     else
         echo "FAIL: $name"
         echo "  PSQL: $(echo "$psql_out" | head -3)"
-        echo "  SAMO: $(echo "$samo_out" | head -3)"
+        echo "  RPG: $(echo "$rpg_out" | head -3)"
         echo "  DIFF:"
-        diff <(echo "$psql_out") <(echo "$samo_out") | head -20
+        diff <(echo "$psql_out") <(echo "$rpg_out") | head -20
         ((FAIL++))
     fi
 }
@@ -8831,12 +8831,12 @@ run_test "backtick_expand" "\\set mydate \`date -I\`\nSELECT :'mydate';" regex "
 # ON_ERROR_STOP
 run_test_cli "on_error_stop" \
     "-v ON_ERROR_STOP=1 -c 'SELECT 1; SELECT broken_syntax; SELECT 3'" \
-    normalized  # samo should stop at second command
+    normalized  # rpg should stop at second command
 
 # Exit codes
 test_exit_code() {
     local cmd="$1" expected_code="$2"
-    $SAMO "$PG_DSN" $cmd 2>/dev/null
+    $RPG "$PG_DSN" $cmd 2>/dev/null
     local actual_code=$?
     [[ "$actual_code" == "$expected_code" ]] && echo "PASS: exit code $expected_code" || echo "FAIL: expected $expected_code got $actual_code"
 }
@@ -8851,7 +8851,7 @@ run_test "copy_from_csv" \
     exact
 
 run_test "copy_to_csv" \
-    "\\copy (SELECT 1 AS id, 'hello' AS val) TO '/tmp/samo_copy_out.csv' CSV HEADER" \
+    "\\copy (SELECT 1 AS id, 'hello' AS val) TO '/tmp/rpg_copy_out.csv' CSV HEADER" \
     ignore  # just check it runs without error; validate file content separately
 ```
 
@@ -8965,7 +8965,7 @@ jobs:
         run: |
           sudo apt-get install -y postgresql-client-${{ matrix.pg_version }}
       
-      - name: Build samo
+      - name: Build rpg
         run: cargo build --release
       
       - name: Setup test database
@@ -8976,7 +8976,7 @@ jobs:
         env:
           PG_DSN: "postgres://postgres:test@localhost/compat_test"
           PSQL: "psql"
-          SAMO: "./target/release/samo"
+          RPG: "./target/release/rpg"
         run: |
           bash tests/compat/run-all.sh
           
@@ -9013,7 +9013,7 @@ Not all output differences are bugs. The following differences are **acceptable*
 The test suite must report a compatibility score:
 
 ```
-Samo Compatibility Report — PG 16.4
+Rpg Compatibility Report — PG 16.4
 =====================================
 Total tests:           247
 Passed (exact):        189  (76.5%)
@@ -9046,7 +9046,7 @@ Phase 0 target: ≥ 90% passing. Phase 1 target: ≥ 95% passing (the spec headl
 
 ### C.4 .psqlrc Compatibility
 
-Samo must load `.psqlrc` (unless `-X` is passed) in the same order as psql:
+Rpg must load `.psqlrc` (unless `-X` is passed) in the same order as psql:
 1. `$PSQLRC` environment variable (if set)
 2. `~/.psqlrc` (Linux/macOS)
 3. `%APPDATA%\postgresql\psqlrc.conf` (Windows)
@@ -9069,7 +9069,7 @@ Samo must load `.psqlrc` (unless `-X` is passed) in the same order as psql:
 
 ### C.5 Exit Code Verification
 
-psql exit codes (Samo must match exactly):
+psql exit codes (Rpg must match exactly):
 
 | Condition | Exit Code | Notes |
 |---|---|---|
@@ -9078,7 +9078,7 @@ psql exit codes (Samo must match exactly):
 | Connection failure | 2 | Could not connect to server |
 | Fatal/OS error | 3 | Rare; file not found, permission error |
 
-With `-v ON_ERROR_STOP=1`: stop at first error and return exit code 3 (note: psql 16+ returns 3 for this, earlier returned 1 — Samo should match behavior of the connected server's expected client version, or always return 3 for ON_ERROR_STOP).
+With `-v ON_ERROR_STOP=1`: stop at first error and return exit code 3 (note: psql 16+ returns 3 for this, earlier returned 1 — Rpg should match behavior of the connected server's expected client version, or always return 3 for ON_ERROR_STOP).
 
 ---
 

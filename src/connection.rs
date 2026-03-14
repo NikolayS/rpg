@@ -121,7 +121,7 @@ impl Default for ConnParams {
             dbname: String::new(), // filled in by resolve — set to user
             password: None,
             sslmode: SslMode::default(),
-            application_name: "samo".to_owned(),
+            application_name: "rpg".to_owned(),
             connect_timeout: None,
             tls_in_use: false,
         }
@@ -366,7 +366,7 @@ fn resolve_app_name(
         .and_then(|u| u.application_name.clone())
         .or_else(|| conninfo.and_then(|c| c.get("application_name").cloned()))
         .or_else(|| env::var("PGAPPNAME").ok())
-        .unwrap_or_else(|| "samo".to_owned());
+        .unwrap_or_else(|| "rpg".to_owned());
 }
 
 // ---------------------------------------------------------------------------
@@ -833,7 +833,7 @@ async fn connect_plain(
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("samo: connection error: {e}");
+            eprintln!("rpg: connection error: {e}");
         }
     });
 
@@ -855,7 +855,7 @@ async fn connect_tls(
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("samo: connection error: {e}");
+            eprintln!("rpg: connection error: {e}");
         }
     });
 
@@ -950,7 +950,7 @@ pub fn connection_info(params: &ConnParams) -> String {
 /// and always prepends a version banner when the server version is known.
 ///
 /// ```text
-/// samo 0.2.0 (...) (server PostgreSQL 17.7)
+/// rpg 0.2.0 (...) (server PostgreSQL 17.7)
 /// You are now connected to database "mydb" as user "alice" on host "h"
 /// at port "5432".
 /// ```
@@ -962,13 +962,13 @@ pub fn connection_info(params: &ConnParams) -> String {
 /// connected line, matching psql behaviour:
 ///
 /// ```text
-/// samo 0.2.0 (...) (server PostgreSQL 17.7)
+/// rpg 0.2.0 (...) (server PostgreSQL 17.7)
 /// You are now connected to database "mydb" as user "alice" on host "h"
 /// at port "5432".
 /// SSL connection (protocol: TLS, compression: off)
 /// ```
 ///
-/// `client_version` is samo's own version string (from [`crate::version_string`]).
+/// `client_version` is rpg's own version string (from [`crate::version_string`]).
 /// `server_version` is the server's version string from `SHOW server_version`.
 /// `new_params` is the newly established connection.
 ///
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(params.port, 5432);
         // dbname defaults to user
         assert_eq!(params.dbname, params.user);
-        assert_eq!(params.application_name, "samo");
+        assert_eq!(params.application_name, "rpg");
         assert_eq!(params.sslmode, SslMode::Prefer);
         assert!(params.password.is_none());
     }
@@ -1347,11 +1347,11 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_application_name_defaults_to_samo() {
+    fn test_application_name_defaults_to_rpg() {
         let _guard = EnvGuard::new(&["PGAPPNAME"]);
         let opts = CliConnOpts::default();
         let params = resolve_params(&opts).unwrap();
-        assert_eq!(params.application_name, "samo");
+        assert_eq!(params.application_name, "rpg");
     }
 
     // -- Flags override URI -------------------------------------------------
@@ -1459,8 +1459,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
-            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
+            "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"localhost\" at port \"5432\".",
         );
@@ -1477,8 +1477,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", Some("16.3"), &new),
-            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("16.3"), &new),
+            "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".",
         );
@@ -1495,8 +1495,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", Some("15.6"), &new),
-            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 15.6)\n\
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("15.6"), &new),
+            "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 15.6)\n\
              You are now connected to database \"mydb\" as user \"postgres\" \
              on host \"localhost\" at port \"5433\".",
         );
@@ -1513,8 +1513,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
-            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
+            "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              via socket in \"/var/run/postgresql\" at port \"5432\".",
         );
@@ -1531,7 +1531,7 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", None, &new),
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", None, &new),
             "You are now connected to database \"postgres\" as user \"postgres\" \
              on host \"other.host\" at port \"5432\".",
         );
@@ -1587,8 +1587,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
-            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
+            "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"localhost\" at port \"5432\".\n\
              SSL connection (protocol: TLS, compression: off)",
@@ -1607,8 +1607,8 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("samo 0.2.0 (abc1234, built 2026-01-01)", Some("16.3"), &new),
-            "samo 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
+            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("16.3"), &new),
+            "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".\n\
              SSL connection (protocol: TLS, compression: off)",
