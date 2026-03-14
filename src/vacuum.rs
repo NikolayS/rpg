@@ -596,6 +596,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_precision_loss)]
     fn xid_age_critical_at_80_pct() {
         let xid_age = 160_000_000_i64;
         let freeze_max = 200_000_000_i64;
@@ -609,6 +610,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_precision_loss)]
     fn xid_age_warning_at_60_pct() {
         let xid_age = 120_000_000_i64;
         let freeze_max = 200_000_000_i64;
