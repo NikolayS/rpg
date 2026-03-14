@@ -6730,9 +6730,7 @@ fn extract_last_sql_block(text: &str) -> Option<&str> {
         let open_abs = search_from + open_pos;
         let after_open = &text[open_abs + 3..];
         // Skip optional language tag (e.g. "sql\n") on the opening fence line.
-        let body_start_rel = after_open
-            .find('\n')
-            .map_or(after_open.len(), |i| i + 1);
+        let body_start_rel = after_open.find('\n').map_or(after_open.len(), |i| i + 1);
         let body_text = &after_open[body_start_rel..];
         if let Some(close_pos) = body_text.find("```") {
             let body = body_text[..close_pos].trim();
