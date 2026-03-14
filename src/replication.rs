@@ -145,6 +145,57 @@ impl ReplicationReport {
         }
         out
     }
+
+    /// Collect all actionable proposals from this report.
+    ///
+    /// Returns one [`crate::governance::ActionProposal`] for each finding that
+    /// has a concrete suggested action (i.e. `InactiveSlot` findings only).
+    /// Purely informational findings (slot lag, replica lag, WAL sender count)
+    /// return `None` from [`ReplicationFinding::to_proposal`] and are omitted.
+    #[allow(dead_code)]
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(ReplicationFinding::to_proposal)
+            .collect()
+    }
+}
+
+impl ReplicationFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`].
+    ///
+    /// Returns `Some` only for `InactiveSlot` — the one finding kind where
+    /// Rpg can suggest a concrete, low-risk SQL action.  All other kinds are
+    /// informational and return `None`.
+    #[allow(dead_code)]
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        match self.kind {
+            ReplicationFindingKind::InactiveSlot => {
+                let slot_name = &self.table;
+                Some(crate::governance::ActionProposal {
+                    feature: crate::governance::FeatureArea::Replication,
+                    severity: self.severity,
+                    evidence_class: self.evidence_class,
+                    finding: self.description.clone(),
+                    proposed_action: format!("select pg_drop_replication_slot('{slot_name}')"),
+                    expected_outcome: format!(
+                        "Drop inactive replication slot '{slot_name}' \
+                         to stop WAL accumulation and free disk space"
+                    ),
+                    risk: "Dropping a replication slot is irreversible. \
+                           Verify the slot consumer is truly gone before \
+                           proceeding. If the consumer reconnects it will \
+                           need to re-establish replication from scratch."
+                        .to_owned(),
+                    created_at: std::time::SystemTime::now(),
+                })
+            }
+            // Informational only — no concrete action to propose.
+            ReplicationFindingKind::SlotLag
+            | ReplicationFindingKind::ReplicaLag
+            | ReplicationFindingKind::WalSenderCount => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -640,5 +691,164 @@ mod tests {
             format_bytes(lag_bytes),
         );
         assert!(desc.contains("MiB"), "expected MiB in: {desc}");
+    }
+
+    // -----------------------------------------------------------------------
+    // to_proposal / to_proposals tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal `ReplicationFinding` for testing.
+    fn make_finding(
+        kind: ReplicationFindingKind,
+        table: &str,
+        severity: Severity,
+    ) -> ReplicationFinding {
+        ReplicationFinding {
+            kind,
+            schema: "replication".to_owned(),
+            table: table.to_owned(),
+            description: format!("test finding for {table}"),
+            severity,
+            evidence_class: EvidenceClass::Heuristic,
+            suggested_action: None,
+        }
+    }
+
+    #[test]
+    fn inactive_slot_produces_proposal() {
+        let f = make_finding(
+            ReplicationFindingKind::InactiveSlot,
+            "my_slot",
+            Severity::Warning,
+        );
+        let proposal = f
+            .to_proposal()
+            .expect("InactiveSlot should produce a proposal");
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::Replication
+        );
+        assert_eq!(proposal.severity, Severity::Warning);
+        // SQL must target the correct slot name.
+        assert!(
+            proposal.proposed_action.contains("my_slot"),
+            "proposed_action should contain slot name: {}",
+            proposal.proposed_action,
+        );
+        assert!(
+            proposal
+                .proposed_action
+                .contains("pg_drop_replication_slot"),
+            "proposed_action should call pg_drop_replication_slot: {}",
+            proposal.proposed_action,
+        );
+        // Risk text must warn about irreversibility.
+        assert!(
+            proposal.risk.contains("irreversible"),
+            "risk should mention irreversibility: {}",
+            proposal.risk,
+        );
+    }
+
+    #[test]
+    fn slot_lag_produces_no_proposal() {
+        let f = make_finding(
+            ReplicationFindingKind::SlotLag,
+            "lagging_slot",
+            Severity::Critical,
+        );
+        assert!(
+            f.to_proposal().is_none(),
+            "SlotLag is informational and should not produce a proposal"
+        );
+    }
+
+    #[test]
+    fn replica_lag_produces_no_proposal() {
+        let f = make_finding(
+            ReplicationFindingKind::ReplicaLag,
+            "standby1",
+            Severity::Warning,
+        );
+        assert!(
+            f.to_proposal().is_none(),
+            "ReplicaLag is informational and should not produce a proposal"
+        );
+    }
+
+    #[test]
+    fn wal_sender_count_produces_no_proposal() {
+        let f = ReplicationFinding {
+            kind: ReplicationFindingKind::WalSenderCount,
+            schema: String::new(),
+            table: String::new(),
+            description: "2 WAL sender(s) currently active".to_owned(),
+            severity: Severity::Info,
+            evidence_class: EvidenceClass::Factual,
+            suggested_action: None,
+        };
+        assert!(
+            f.to_proposal().is_none(),
+            "WalSenderCount is informational and should not produce a proposal"
+        );
+    }
+
+    #[test]
+    fn to_proposals_returns_only_actionable() {
+        let report = ReplicationReport {
+            findings: vec![
+                make_finding(
+                    ReplicationFindingKind::InactiveSlot,
+                    "slot_a",
+                    Severity::Warning,
+                ),
+                make_finding(
+                    ReplicationFindingKind::SlotLag,
+                    "slot_b",
+                    Severity::Critical,
+                ),
+                make_finding(
+                    ReplicationFindingKind::ReplicaLag,
+                    "replica1",
+                    Severity::Warning,
+                ),
+                ReplicationFinding {
+                    kind: ReplicationFindingKind::WalSenderCount,
+                    schema: String::new(),
+                    table: String::new(),
+                    description: "1 WAL sender".to_owned(),
+                    severity: Severity::Info,
+                    evidence_class: EvidenceClass::Factual,
+                    suggested_action: None,
+                },
+            ],
+        };
+        let proposals = report.to_proposals();
+        // Only the InactiveSlot finding should yield a proposal.
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].proposed_action.contains("slot_a"));
+    }
+
+    #[test]
+    fn to_proposals_empty_for_no_inactive_slots() {
+        let report = ReplicationReport {
+            findings: vec![
+                make_finding(
+                    ReplicationFindingKind::SlotLag,
+                    "lagging",
+                    Severity::Critical,
+                ),
+                make_finding(
+                    ReplicationFindingKind::ReplicaLag,
+                    "replica",
+                    Severity::Warning,
+                ),
+            ],
+        };
+        let proposals = report.to_proposals();
+        assert!(
+            proposals.is_empty(),
+            "no inactive slots → no proposals expected"
+        );
     }
 }

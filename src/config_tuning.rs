@@ -98,6 +98,12 @@ pub struct ConfigFinding {
     pub evidence_class: EvidenceClass,
     /// Suggested remediation (Observe mode: informational only).
     pub suggested_action: Option<String>,
+    /// Recommended value for the GUC as a `PostgreSQL`-format string (e.g.
+    /// `"0.9"`, `"4MB"`).  `None` when no single concrete value applies.
+    pub recommended_value: Option<String>,
+    /// Whether applying this change requires a full server restart.
+    /// `true` when the GUC's context is `"postmaster"`.
+    pub requires_restart: bool,
 }
 
 /// Complete config tuning report.
@@ -165,6 +171,65 @@ impl ConfigTuningReport {
             out.push('\n');
         }
         out
+    }
+
+    /// Collect all actionable proposals from this report.
+    ///
+    /// Returns one [`crate::governance::ActionProposal`] for each finding that
+    /// has a concrete `recommended_value` **and** does not require a server
+    /// restart.  Restart-required and purely advisory findings return `None`
+    /// from [`ConfigFinding::to_proposal`] and are omitted.
+    #[allow(dead_code)]
+    pub fn to_proposals(&self) -> Vec<crate::governance::ActionProposal> {
+        self.findings
+            .iter()
+            .filter_map(ConfigFinding::to_proposal)
+            .collect()
+    }
+}
+
+impl ConfigFinding {
+    /// Convert this finding into an [`crate::governance::ActionProposal`].
+    ///
+    /// Returns `Some` when:
+    /// - `recommended_value` is set (a concrete target value is known), **and**
+    /// - `requires_restart` is `false` (the change is reload-safe via
+    ///   `select pg_reload_conf()`).
+    ///
+    /// Returns `None` for restart-required GUCs and advisory findings without
+    /// a single concrete recommended value.
+    #[allow(dead_code)]
+    pub fn to_proposal(&self) -> Option<crate::governance::ActionProposal> {
+        // Only propose when we have a concrete value and no restart is needed.
+        let recommended = self.recommended_value.as_ref()?;
+        if self.requires_restart {
+            return None;
+        }
+
+        let guc = &self.parameter;
+        let proposed_action =
+            format!("alter system set {guc} = '{recommended}'; select pg_reload_conf()");
+        let expected_outcome = format!(
+            "Set {guc} to {recommended} and reload PostgreSQL configuration \
+             without a server restart"
+        );
+        let risk = format!(
+            "alter system set writes to postgresql.auto.conf. \
+             Verify the new value is appropriate for your workload before \
+             applying. The change takes effect immediately after \
+             pg_reload_conf() — no restart needed for {guc}."
+        );
+
+        Some(crate::governance::ActionProposal {
+            feature: crate::governance::FeatureArea::ConfigTuning,
+            severity: self.severity,
+            evidence_class: self.evidence_class,
+            finding: self.description.clone(),
+            proposed_action,
+            expected_outcome,
+            risk,
+            created_at: std::time::SystemTime::now(),
+        })
     }
 }
 
@@ -378,6 +443,8 @@ fn check_shared_buffers(
             "Set shared_buffers = '{recommended_mib}MB' in postgresql.conf \
              (requires restart)"
         )),
+        recommended_value: Some(format!("{recommended_mib}MB")),
+        requires_restart: guc.requires_restart(),
     });
 }
 
@@ -425,6 +492,8 @@ fn check_effective_cache_size(
             "Set effective_cache_size = '{recommended_mib}MB' in postgresql.conf \
              (reload-safe: SELECT pg_reload_conf())"
         )),
+        recommended_value: Some(format!("{recommended_mib}MB")),
+        requires_restart: false,
     });
 }
 
@@ -463,6 +532,8 @@ fn check_work_mem(gucs: &[GucRow], findings: &mut Vec<ConfigFinding>) {
             "Set work_mem = '4MB' in postgresql.conf (reload-safe: SELECT pg_reload_conf())"
                 .to_owned(),
         ),
+        recommended_value: Some("4MB".to_owned()),
+        requires_restart: false,
     });
 }
 
@@ -496,6 +567,8 @@ fn check_maintenance_work_mem(gucs: &[GucRow], findings: &mut Vec<ConfigFinding>
              (reload-safe: SELECT pg_reload_conf())"
                 .to_owned(),
         ),
+        recommended_value: Some("64MB".to_owned()),
+        requires_restart: false,
     });
 }
 
@@ -529,6 +602,8 @@ fn check_checkpoint_completion_target(gucs: &[GucRow], findings: &mut Vec<Config
              (reload-safe: SELECT pg_reload_conf())"
                 .to_owned(),
         ),
+        recommended_value: Some("0.9".to_owned()),
+        requires_restart: false,
     });
 }
 
@@ -566,6 +641,9 @@ fn check_random_page_cost(gucs: &[GucRow], findings: &mut Vec<ConfigFinding>) {
              (reload-safe: SELECT pg_reload_conf())"
                 .to_owned(),
         ),
+        // Advisory — cannot confirm storage type; no concrete proposal.
+        recommended_value: None,
+        requires_restart: false,
     });
 }
 
@@ -597,6 +675,8 @@ fn check_idle_in_transaction_timeout(gucs: &[GucRow], findings: &mut Vec<ConfigF
              (reload-safe: SELECT pg_reload_conf())"
                 .to_owned(),
         ),
+        recommended_value: Some("5min".to_owned()),
+        requires_restart: false,
     });
 }
 
@@ -628,6 +708,9 @@ fn check_statement_timeout(gucs: &[GucRow], findings: &mut Vec<ConfigFinding>) {
              (reload-safe: SELECT pg_reload_conf())"
                 .to_owned(),
         ),
+        // Advisory — workload-specific; no single concrete value to propose.
+        recommended_value: None,
+        requires_restart: false,
     });
 }
 
@@ -670,6 +753,9 @@ fn check_restart_required_gucs(
                  (requires restart)"
                     .to_owned(),
             ),
+            // No concrete recommended value — depends on the workload.
+            recommended_value: None,
+            requires_restart: true,
         });
     }
 
@@ -699,6 +785,8 @@ fn check_restart_required_gucs(
                         "Set wal_buffers = '{recommended_mib}MB' in postgresql.conf \
                          (requires restart)"
                     )),
+                    recommended_value: Some(format!("{recommended_mib}MB")),
+                    requires_restart: true,
                 });
             }
         }
@@ -1206,6 +1294,8 @@ mod tests {
                 severity: Severity::Warning,
                 evidence_class: EvidenceClass::Heuristic,
                 suggested_action: Some("Set work_mem = '4MB'".to_owned()),
+                recommended_value: Some("4MB".to_owned()),
+                requires_restart: false,
             }],
         };
         let prompt = report.to_prompt();
@@ -1227,6 +1317,8 @@ mod tests {
                     severity: Severity::Warning,
                     evidence_class: EvidenceClass::Advisory,
                     suggested_action: None,
+                    recommended_value: None,
+                    requires_restart: false,
                 },
                 ConfigFinding {
                     kind: ConfigFindingKind::IdleInTransactionTimeoutDisabled,
@@ -1236,6 +1328,8 @@ mod tests {
                     severity: Severity::Critical,
                     evidence_class: EvidenceClass::Advisory,
                     suggested_action: None,
+                    recommended_value: None,
+                    requires_restart: false,
                 },
                 ConfigFinding {
                     kind: ConfigFindingKind::RestartRequiredGuc,
@@ -1245,6 +1339,8 @@ mod tests {
                     severity: Severity::Info,
                     evidence_class: EvidenceClass::Heuristic,
                     suggested_action: None,
+                    recommended_value: None,
+                    requires_restart: true,
                 },
             ],
         };
@@ -1272,5 +1368,249 @@ mod tests {
     #[test]
     fn guc_query_sql_selects_context() {
         assert!(GUC_QUERY_SQL.contains("context"));
+    }
+
+    // -----------------------------------------------------------------------
+    // to_proposal / to_proposals tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a minimal `ConfigFinding` for testing.
+    fn make_config_finding(
+        kind: ConfigFindingKind,
+        parameter: &str,
+        recommended_value: Option<&str>,
+        requires_restart: bool,
+        severity: Severity,
+        evidence_class: EvidenceClass,
+    ) -> ConfigFinding {
+        ConfigFinding {
+            kind,
+            parameter: parameter.to_owned(),
+            current_value: "old_value".to_owned(),
+            description: format!("test finding for {parameter}"),
+            severity,
+            evidence_class,
+            suggested_action: None,
+            recommended_value: recommended_value.map(ToOwned::to_owned),
+            requires_restart,
+        }
+    }
+
+    #[test]
+    fn reload_safe_finding_with_recommended_value_produces_proposal() {
+        let f = make_config_finding(
+            ConfigFindingKind::WorkMemTooLow,
+            "work_mem",
+            Some("4MB"),
+            false,
+            Severity::Warning,
+            EvidenceClass::Heuristic,
+        );
+        let proposal = f
+            .to_proposal()
+            .expect("reload-safe + recommended_value should yield a proposal");
+        assert_eq!(
+            proposal.feature,
+            crate::governance::FeatureArea::ConfigTuning
+        );
+        assert_eq!(proposal.severity, Severity::Warning);
+        // SQL must use lowercase keywords and reference the GUC.
+        assert!(
+            proposal.proposed_action.contains("alter system set"),
+            "proposed_action should contain 'alter system set': {}",
+            proposal.proposed_action,
+        );
+        assert!(
+            proposal.proposed_action.contains("work_mem"),
+            "proposed_action should contain GUC name: {}",
+            proposal.proposed_action,
+        );
+        assert!(
+            proposal.proposed_action.contains("4MB"),
+            "proposed_action should contain recommended value: {}",
+            proposal.proposed_action,
+        );
+        assert!(
+            proposal.proposed_action.contains("pg_reload_conf"),
+            "proposed_action should call pg_reload_conf: {}",
+            proposal.proposed_action,
+        );
+    }
+
+    #[test]
+    fn restart_required_finding_produces_no_proposal() {
+        let f = make_config_finding(
+            ConfigFindingKind::RestartRequiredGuc,
+            "wal_buffers",
+            Some("16MB"),
+            true, // requires restart
+            Severity::Info,
+            EvidenceClass::Heuristic,
+        );
+        assert!(
+            f.to_proposal().is_none(),
+            "restart-required GUC should not produce a proposal"
+        );
+    }
+
+    #[test]
+    fn finding_without_recommended_value_produces_no_proposal() {
+        // random_page_cost is Advisory with no concrete recommended_value.
+        let f = make_config_finding(
+            ConfigFindingKind::RandomPageCostTooHigh,
+            "random_page_cost",
+            None, // no concrete recommended value
+            false,
+            Severity::Critical,
+            EvidenceClass::Advisory,
+        );
+        assert!(
+            f.to_proposal().is_none(),
+            "no recommended_value should yield no proposal"
+        );
+    }
+
+    #[test]
+    fn idle_in_transaction_timeout_produces_proposal() {
+        let f = make_config_finding(
+            ConfigFindingKind::IdleInTransactionTimeoutDisabled,
+            "idle_in_transaction_session_timeout",
+            Some("5min"),
+            false,
+            Severity::Critical,
+            EvidenceClass::Advisory,
+        );
+        let proposal = f.to_proposal().expect(
+            "idle_in_transaction_session_timeout with recommended value should yield a proposal",
+        );
+        assert!(
+            proposal
+                .proposed_action
+                .contains("idle_in_transaction_session_timeout"),
+            "proposed_action should reference GUC: {}",
+            proposal.proposed_action,
+        );
+        assert!(
+            proposal.proposed_action.contains("5min"),
+            "proposed_action should include recommended value: {}",
+            proposal.proposed_action,
+        );
+        assert_eq!(proposal.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn checkpoint_completion_target_produces_proposal() {
+        let f = make_config_finding(
+            ConfigFindingKind::CheckpointCompletionTargetLow,
+            "checkpoint_completion_target",
+            Some("0.9"),
+            false,
+            Severity::Warning,
+            EvidenceClass::Heuristic,
+        );
+        let proposal = f
+            .to_proposal()
+            .expect("checkpoint_completion_target should yield a proposal");
+        assert!(
+            proposal
+                .proposed_action
+                .contains("checkpoint_completion_target"),
+            "proposed_action should reference GUC: {}",
+            proposal.proposed_action,
+        );
+        assert!(
+            proposal.proposed_action.contains("0.9"),
+            "proposed_action should include recommended value: {}",
+            proposal.proposed_action,
+        );
+    }
+
+    #[test]
+    fn to_proposals_filters_out_restart_and_no_value() {
+        let report = ConfigTuningReport {
+            findings: vec![
+                // Reload-safe, has value → should appear.
+                make_config_finding(
+                    ConfigFindingKind::WorkMemTooLow,
+                    "work_mem",
+                    Some("4MB"),
+                    false,
+                    Severity::Warning,
+                    EvidenceClass::Heuristic,
+                ),
+                // Requires restart → should be excluded.
+                make_config_finding(
+                    ConfigFindingKind::RestartRequiredGuc,
+                    "wal_buffers",
+                    Some("16MB"),
+                    true,
+                    Severity::Info,
+                    EvidenceClass::Heuristic,
+                ),
+                // No recommended value → should be excluded.
+                make_config_finding(
+                    ConfigFindingKind::RandomPageCostTooHigh,
+                    "random_page_cost",
+                    None,
+                    false,
+                    Severity::Critical,
+                    EvidenceClass::Advisory,
+                ),
+                // Reload-safe, has value → should appear.
+                make_config_finding(
+                    ConfigFindingKind::CheckpointCompletionTargetLow,
+                    "checkpoint_completion_target",
+                    Some("0.9"),
+                    false,
+                    Severity::Warning,
+                    EvidenceClass::Heuristic,
+                ),
+            ],
+        };
+        let proposals = report.to_proposals();
+        assert_eq!(proposals.len(), 2, "expected 2 actionable proposals");
+        let actions: Vec<_> = proposals
+            .iter()
+            .map(|p| p.proposed_action.as_str())
+            .collect();
+        assert!(
+            actions.iter().any(|a| a.contains("work_mem")),
+            "work_mem proposal should be present"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| a.contains("checkpoint_completion_target")),
+            "checkpoint_completion_target proposal should be present"
+        );
+    }
+
+    #[test]
+    fn to_proposals_empty_when_all_restart_required() {
+        let report = ConfigTuningReport {
+            findings: vec![
+                make_config_finding(
+                    ConfigFindingKind::RestartRequiredGuc,
+                    "max_connections",
+                    None,
+                    true,
+                    Severity::Info,
+                    EvidenceClass::Heuristic,
+                ),
+                make_config_finding(
+                    ConfigFindingKind::RestartRequiredGuc,
+                    "wal_buffers",
+                    Some("16MB"),
+                    true,
+                    Severity::Info,
+                    EvidenceClass::Heuristic,
+                ),
+            ],
+        };
+        let proposals = report.to_proposals();
+        assert!(
+            proposals.is_empty(),
+            "all restart-required findings → no proposals"
+        );
     }
 }
