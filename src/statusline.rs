@@ -169,7 +169,6 @@ impl StatusLine {
             },
             ExecMode::Plan => "plan",
             ExecMode::Yolo => "yolo",
-            ExecMode::Observe => "observe",
         };
 
         // Transaction state label.

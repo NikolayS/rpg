@@ -6,7 +6,6 @@
 use clap::Parser;
 
 // Core modules.
-mod actor;
 mod ai;
 mod capabilities;
 mod compat;
@@ -16,10 +15,8 @@ mod config;
 mod connection;
 mod copy;
 mod crosstab;
-mod daemon;
 mod dba;
 mod describe;
-mod governance;
 mod highlight;
 mod init;
 mod io;
@@ -28,45 +25,20 @@ mod logging;
 mod markdown;
 mod metacmd;
 mod named;
-mod observe;
 mod output;
 mod pager;
 mod pattern;
 mod query;
-mod rca;
 mod repl;
+mod report;
 mod safety;
 mod session;
 mod session_store;
 mod setup;
 mod ssh_tunnel;
 mod statusline;
-mod vars;
-
-mod aaa_commands;
-mod alert_delivery;
-mod anomaly;
-mod audit_persistence;
-mod backup_monitoring;
-mod bloat;
-mod check;
-mod config_tuning;
-mod connection_management;
-mod connectors;
-mod dispatcher;
-mod health_check_commands;
-mod health_checks;
-mod index_health;
-mod issues;
-mod llm_auditor;
-mod query_optimization;
-mod rca_actions;
-mod replication;
-mod report;
-mod security;
 mod update;
-mod vacuum;
-mod verification;
+mod vars;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("RPG_GIT_HASH");
@@ -93,133 +65,6 @@ pub fn version_string() -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Autonomy flag parsing (rpg-specific)
-// ---------------------------------------------------------------------------
-
-/// Parsed result of the `--autonomy` CLI flag.
-///
-/// Two syntaxes are accepted:
-/// - Global level: `observe` / `supervised` / `auto` — applies to all features.
-/// - Per-feature: `vacuum:auto,index_health:supervised` — comma-separated
-///   `feature:level` pairs; unspecified features keep their config default.
-#[derive(Debug, Clone)]
-enum AutonomyArg {
-    /// Single level applied to all feature areas.
-    Global(governance::AutonomyLevel),
-    /// Per-feature overrides; unspecified features are left at their default.
-    PerFeature(Vec<(governance::FeatureArea, governance::AutonomyLevel)>),
-}
-
-/// Valid feature names (for error messages).
-const VALID_FEATURES: &[&str] = &[
-    "vacuum",
-    "bloat",
-    "index_health",
-    "query_optimization",
-    "config_tuning",
-    "connection_management",
-    "replication",
-    "backup_monitoring",
-    "security",
-    "rca",
-];
-
-/// Valid level names (for error messages).
-const VALID_LEVELS: &[&str] = &["observe", "supervised", "auto"];
-
-/// Parse the `--autonomy` flag value.
-///
-/// Accepts two syntaxes:
-/// - A single level (`observe`, `supervised`, `auto`) — sets all features.
-/// - Comma-separated `feature:level` pairs — sets individual features.
-///
-/// Feature names and level names are case-insensitive.
-///
-/// Returns `Ok(AutonomyArg)` on success, `Err(message)` with a clear
-/// human-readable error on failure.
-fn parse_autonomy(s: &str) -> Result<AutonomyArg, String> {
-    let s = s.trim();
-
-    // If the value contains no colon it must be a plain global level.
-    if !s.contains(':') {
-        return governance::AutonomyLevel::from_str(s)
-            .map(AutonomyArg::Global)
-            .ok_or_else(|| {
-                format!(
-                    "invalid autonomy level \"{s}\"; \
-                     valid levels: {}",
-                    VALID_LEVELS.join(", ")
-                )
-            });
-    }
-
-    // Per-feature syntax: comma-separated `feature:level` pairs.
-    let mut pairs = Vec::new();
-    for token in s.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        let (feat_str, level_str) = token.split_once(':').ok_or_else(|| {
-            format!(
-                "invalid autonomy token \"{token}\"; \
-                 expected `feature:level` (e.g. `vacuum:auto`)"
-            )
-        })?;
-        let feat_str = feat_str.trim();
-        let level_str = level_str.trim();
-
-        let feature = governance::FeatureArea::from_str(feat_str).ok_or_else(|| {
-            format!(
-                "unknown feature area \"{feat_str}\"; \
-                 valid features: {}",
-                VALID_FEATURES.join(", ")
-            )
-        })?;
-
-        let level = governance::AutonomyLevel::from_str(level_str).ok_or_else(|| {
-            format!(
-                "invalid autonomy level \"{level_str}\" for feature \"{feat_str}\"; \
-                 valid levels: {}",
-                VALID_LEVELS.join(", ")
-            )
-        })?;
-
-        pairs.push((feature, level));
-    }
-
-    if pairs.is_empty() {
-        return Err(format!(
-            "empty autonomy specification \"{s}\"; \
-             expected a level (e.g. `auto`) or feature:level pairs \
-             (e.g. `vacuum:auto,index_health:supervised`)"
-        ));
-    }
-
-    Ok(AutonomyArg::PerFeature(pairs))
-}
-
-/// Apply a parsed [`AutonomyArg`] to a [`config::GovernanceConfig`].
-///
-/// For `Global`, every feature area is set to the given level.
-/// For `PerFeature`, only the listed features are updated; the rest
-/// retain whatever value they already have (from the config file).
-fn apply_autonomy(governance: &mut config::GovernanceConfig, arg: &AutonomyArg) {
-    match arg {
-        AutonomyArg::Global(level) => {
-            for feature in governance::FeatureArea::all() {
-                governance.set_autonomy(*feature, *level);
-            }
-        }
-        AutonomyArg::PerFeature(pairs) => {
-            for (feature, level) in pairs {
-                governance.set_autonomy(*feature, *level);
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
 
@@ -230,8 +75,7 @@ fn long_version() -> &'static str {
 
 /// Rpg — modern Postgres terminal with built-in diagnostics and AI assistant.
 ///
-/// A psql-compatible interface with built-in AI and autonomous
-/// database health management.
+/// A psql-compatible interface with built-in AI and database diagnostics.
 #[derive(Parser, Debug)]
 #[command(
     name = "rpg",
@@ -427,40 +271,6 @@ struct Cli {
     #[arg(long)]
     plan: bool,
 
-    /// Skip confirmation prompts for AI-generated queries (use with care).
-    #[arg(long)]
-    yolo: bool,
-
-    /// Bypass autonomy level checks in YOLO mode (dangerous).
-    ///
-    /// When combined with `--yolo`, write queries are auto-executed
-    /// regardless of the configured autonomy level. Use only when you
-    /// fully understand the consequences.
-    #[arg(long)]
-    i_know_what_im_doing: bool,
-
-    /// Launch in observe mode. Optionally accepts a duration (e.g. `30m`, `2h`).
-    /// With no value: observe indefinitely. With a value: observe then exit.
-    #[arg(long, value_name = "DURATION", default_missing_value = "", num_args = 0..=1)]
-    observe: Option<String>,
-
-    /// Set agent autonomy level.
-    ///
-    /// Accepts a single global level (`observe`, `supervised`, `auto`) or
-    /// comma-separated per-feature overrides (`vacuum:auto,index_health:supervised`).
-    /// Per-feature syntax sets only the listed features; others keep their
-    /// config-file defaults.  Level names are case-insensitive.
-    #[arg(
-        long,
-        value_name = "LEVEL|FEATURE:LEVEL,...",
-        default_value = "observe"
-    )]
-    autonomy: String,
-
-    /// Run health check, exit with code reflecting severity (FR-13).
-    #[arg(long)]
-    check: bool,
-
     /// Generate a full diagnostic report. Optionally specify format (text, json).
     #[arg(long, value_name = "FORMAT", default_missing_value = "text", num_args = 0..=1)]
     report: Option<String>,
@@ -476,49 +286,6 @@ struct Cli {
     /// Generate `rpg_ops` wrapper SQL and exit. Specify PG version (e.g. 14, 16).
     #[arg(long, value_name = "PG_VERSION", default_missing_value = "16", num_args = 0..=1)]
     generate_wrappers: Option<String>,
-
-    /// Run in daemon mode (headless continuous monitoring).
-    #[arg(long)]
-    daemon: bool,
-
-    /// Port for HTTP health check endpoint in daemon mode.
-    #[arg(long, value_name = "PORT")]
-    health_port: Option<u16>,
-
-    /// Slack webhook URL for daemon notifications.
-    #[arg(long, value_name = "URL")]
-    slack_webhook: Option<String>,
-
-    /// Generic webhook URL for daemon notifications (POSTs JSON).
-    #[arg(long, value_name = "URL")]
-    webhook_url: Option<String>,
-
-    /// HMAC-SHA256 signing secret for the generic webhook.
-    ///
-    /// When set, each webhook POST includes an `X-Rpg-Signature-256` header
-    /// with the hex-encoded HMAC-SHA256 signature of the request body.
-    #[arg(long, value_name = "SECRET")]
-    webhook_secret: Option<String>,
-
-    /// `PagerDuty` Events API v2 routing key for daemon notifications.
-    #[arg(long, value_name = "KEY")]
-    pagerduty_key: Option<String>,
-
-    /// Telegram bot token for daemon notifications.
-    #[arg(long, value_name = "TOKEN")]
-    telegram_bot_token: Option<String>,
-
-    /// Telegram chat ID for daemon notifications.
-    #[arg(long, value_name = "ID")]
-    telegram_chat_id: Option<String>,
-
-    /// Path to PID file for daemon mode.
-    #[arg(long, value_name = "PATH")]
-    pid_file: Option<String>,
-
-    /// GitHub repository (owner/repo) for creating issues from findings.
-    #[arg(long, value_name = "OWNER/REPO")]
-    github_repo: Option<String>,
 
     /// Check for a newer version of rpg, download and replace the binary,
     /// then exit. No database connection is required.
@@ -716,13 +483,6 @@ fn build_settings(
     // Pager min-lines threshold from config; 0 means always page (default).
     let pager_min_lines = cfg.display.pager_min_lines.unwrap_or(0);
 
-    // Build the governance dispatcher, optionally loading prior persisted
-    // entries when `governance.audit_log_path` is set in the config.
-    let dispatcher = match cfg.governance.audit_log_path.clone() {
-        Some(path) => dispatcher::Dispatcher::new_with_path(path),
-        None => dispatcher::Dispatcher::new(),
-    };
-
     repl::ReplSettings {
         echo_hidden: cli.echo_hidden,
         expanded,
@@ -745,15 +505,8 @@ fn build_settings(
         safety_enabled,
         vi_mode,
         config: cfg.clone(),
-        exec_mode: if cli.yolo {
-            repl::ExecMode::Yolo
-        } else {
-            repl::ExecMode::default()
-        },
-        i_know_what_im_doing: cli.i_know_what_im_doing,
         project_context: project.postgres_md.clone(),
         ai_context_files: cfg.ai.project_context_files.clone(),
-        dispatcher,
         ..Default::default()
     }
 }
@@ -874,20 +627,7 @@ async fn async_main() {
 
     // Load project config (.rpg.toml) and merge it on top of user config.
     let project_result = config::load_project_config();
-    let mut cfg = config::merge_project_config(base_cfg, &project_result.config);
-
-    // --autonomy: parse and apply to the governance config.
-    // CLI always overrides the config file, so we apply after merging.
-    {
-        let autonomy_str = cli.autonomy.as_str();
-        match parse_autonomy(autonomy_str) {
-            Ok(arg) => apply_autonomy(&mut cfg.governance, &arg),
-            Err(e) => {
-                eprintln!("rpg: --autonomy: {e}");
-                std::process::exit(2);
-            }
-        }
-    }
+    let cfg = config::merge_project_config(base_cfg, &project_result.config);
 
     // Print project config startup messages (suppressed by --quiet).
     if !cli.quiet {
@@ -1029,15 +769,9 @@ async fn async_main() {
 
             let mut settings = build_settings(&cli, &cfg, &project_result);
 
-            // Capability detection: in non-interactive mode (-c, -f, piped
-            // input) we skip the pg_ash / pooler / managed-provider probes
-            // since those results are only used for the interactive banner,
-            // the statusline, and governance decisions.  We still fetch the
-            // server version so that logging and daemon mode have it.
-            //
-            // In interactive mode we run the full detect() so the banner,
-            // pg_ash statusline, and governance framework all work.
-            settings.db_capabilities = if is_interactive || cli.daemon {
+            // Detect server version for logging; skip heavier capability
+            // probes in non-interactive mode.
+            settings.db_capabilities = if is_interactive {
                 capabilities::detect(&client).await
             } else {
                 // Lightweight path: only the server version query.
@@ -1071,102 +805,28 @@ async fn async_main() {
 
             // Detect whether the connected role is a superuser so the prompt
             // can show `#` instead of `>`.  Only needed for the interactive
-            // prompt; skip in scripting / piped / daemon mode.
+            // prompt; skip in scripting / piped mode.
             settings.is_superuser = if is_interactive {
                 capabilities::detect_superuser(&client).await
             } else {
                 false
             };
 
-            // --check: run all analyzers once, print summary, exit with
-            // severity code (0=healthy, 1=warning, 2=critical).
-            if cli.check {
-                let exit_code = check::run_health_check(&client).await;
-                std::process::exit(exit_code);
-            }
-
             // --report [format]: run all analyzers, print detailed report,
             // exit with severity code (0=healthy, 1=warning, 2=critical).
-            if let Some(ref format) = cli.report {
-                let report_registry = {
-                    let connectors_cfg = cfg.connectors.clone().unwrap_or_default();
-                    connectors::build_connector_registry(&connectors_cfg)
-                };
-                let exit_code = report::run_report(&client, format, &report_registry).await;
-                std::process::exit(exit_code);
-            }
-
-            let exit_code = if cli.daemon {
-                // Daemon mode: headless continuous monitoring.
-                let pid_path = cli
-                    .pid_file
-                    .as_ref()
-                    .map_or_else(daemon::default_pid_path, std::path::PathBuf::from);
-
-                if let Some(existing) = daemon::check_existing_pid(&pid_path) {
-                    eprintln!("rpg: daemon already running (PID {existing})");
-                    std::process::exit(1);
-                }
-                if let Err(e) = daemon::write_pid_file(&pid_path) {
-                    eprintln!("rpg: could not write PID file: {e}");
-                    std::process::exit(2);
-                }
-
-                let mut channels = vec![daemon::NotificationChannel::Stderr];
-                if let Some(ref url) = cli.slack_webhook {
-                    channels.push(daemon::NotificationChannel::Slack {
-                        webhook_url: url.clone(),
-                    });
-                }
-                if let Some(ref url) = cli.webhook_url {
-                    channels.push(daemon::NotificationChannel::Webhook {
-                        url: url.clone(),
-                        secret: cli.webhook_secret.clone(),
-                    });
-                }
-                if let Some(ref key) = cli.pagerduty_key {
-                    channels.push(daemon::NotificationChannel::PagerDuty {
-                        routing_key: key.clone(),
-                    });
-                }
-                if let (Some(ref token), Some(ref chat_id)) =
-                    (&cli.telegram_bot_token, &cli.telegram_chat_id)
-                {
-                    channels.push(daemon::NotificationChannel::Telegram {
-                        bot_token: token.clone(),
-                        chat_id: chat_id.clone(),
-                    });
-                }
-
-                let connector_registry = {
-                    let connectors_cfg = cfg.connectors.clone().unwrap_or_default();
-                    connectors::build_connector_registry(&connectors_cfg)
-                };
-
-                daemon::run(
-                    &client,
-                    &cfg,
-                    &resolved.dbname,
-                    &channels,
-                    cli.health_port,
-                    cli.github_repo.as_deref(),
-                    &connector_registry,
-                )
-                .await;
-
-                daemon::remove_pid_file(&pid_path);
-                0
+            let exit_code = if let Some(ref format) = cli.report {
+                report::run_report(&client, format).await
             } else if !cli.command.is_empty() {
                 // -c CMD [--c CMD ...]: execute commands in order and exit.
                 // Mirror psql: stop on first non-zero exit and propagate it.
-                let mut exit_code = 0i32;
+                let mut code = 0i32;
                 for cmd in &cli.command {
-                    exit_code = repl::exec_command(&client, cmd, &mut settings, &resolved).await;
-                    if exit_code != 0 {
+                    code = repl::exec_command(&client, cmd, &mut settings, &resolved).await;
+                    if code != 0 {
                         break;
                     }
                 }
-                exit_code
+                code
             } else if let Some(ref path) = cli.file {
                 // -f file: execute file and exit.
                 repl::exec_file(&client, path, &mut settings, &resolved).await
@@ -1185,198 +845,6 @@ async fn async_main() {
         Err(e) => {
             eprintln!("rpg: {e}");
             std::process::exit(2);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use governance::{AutonomyLevel, FeatureArea};
-
-    // -- parse_autonomy -------------------------------------------------------
-
-    #[test]
-    fn parse_global_observe() {
-        let result = parse_autonomy("observe").unwrap();
-        assert!(matches!(
-            result,
-            AutonomyArg::Global(AutonomyLevel::Observe)
-        ));
-    }
-
-    #[test]
-    fn parse_global_supervised() {
-        let result = parse_autonomy("supervised").unwrap();
-        assert!(matches!(
-            result,
-            AutonomyArg::Global(AutonomyLevel::Supervised)
-        ));
-    }
-
-    #[test]
-    fn parse_global_auto() {
-        let result = parse_autonomy("auto").unwrap();
-        assert!(matches!(result, AutonomyArg::Global(AutonomyLevel::Auto)));
-    }
-
-    #[test]
-    fn parse_global_case_insensitive() {
-        let result = parse_autonomy("AUTO").unwrap();
-        assert!(matches!(result, AutonomyArg::Global(AutonomyLevel::Auto)));
-        let result = parse_autonomy("Supervised").unwrap();
-        assert!(matches!(
-            result,
-            AutonomyArg::Global(AutonomyLevel::Supervised)
-        ));
-    }
-
-    #[test]
-    fn parse_global_invalid_level() {
-        let err = parse_autonomy("turbo").unwrap_err();
-        assert!(err.contains("invalid autonomy level"));
-        assert!(err.contains("turbo"));
-        assert!(err.contains("observe"));
-    }
-
-    #[test]
-    fn parse_per_feature_single() {
-        let result = parse_autonomy("vacuum:auto").unwrap();
-        let AutonomyArg::PerFeature(pairs) = result else {
-            panic!("expected PerFeature");
-        };
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, FeatureArea::Vacuum);
-        assert_eq!(pairs[0].1, AutonomyLevel::Auto);
-    }
-
-    #[test]
-    fn parse_per_feature_multiple() {
-        let result = parse_autonomy("vacuum:auto,index_health:supervised,bloat:observe").unwrap();
-        let AutonomyArg::PerFeature(pairs) = result else {
-            panic!("expected PerFeature");
-        };
-        assert_eq!(pairs.len(), 3);
-        assert_eq!(pairs[0], (FeatureArea::Vacuum, AutonomyLevel::Auto));
-        assert_eq!(
-            pairs[1],
-            (FeatureArea::IndexHealth, AutonomyLevel::Supervised)
-        );
-        assert_eq!(pairs[2], (FeatureArea::Bloat, AutonomyLevel::Observe));
-    }
-
-    #[test]
-    fn parse_per_feature_case_insensitive() {
-        let result = parse_autonomy("VACUUM:AUTO").unwrap();
-        let AutonomyArg::PerFeature(pairs) = result else {
-            panic!("expected PerFeature");
-        };
-        assert_eq!(pairs[0], (FeatureArea::Vacuum, AutonomyLevel::Auto));
-    }
-
-    #[test]
-    fn parse_per_feature_whitespace_tolerant() {
-        let result = parse_autonomy(" vacuum : auto , index_health : supervised ").unwrap();
-        let AutonomyArg::PerFeature(pairs) = result else {
-            panic!("expected PerFeature");
-        };
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(pairs[0], (FeatureArea::Vacuum, AutonomyLevel::Auto));
-        assert_eq!(
-            pairs[1],
-            (FeatureArea::IndexHealth, AutonomyLevel::Supervised)
-        );
-    }
-
-    #[test]
-    fn parse_per_feature_all_valid_features() {
-        let all_features = "vacuum:auto,bloat:auto,index_health:auto,\
-            query_optimization:auto,config_tuning:auto,\
-            connection_management:auto,replication:auto,\
-            backup_monitoring:auto,security:auto,rca:auto";
-        let result = parse_autonomy(all_features).unwrap();
-        let AutonomyArg::PerFeature(pairs) = result else {
-            panic!("expected PerFeature");
-        };
-        assert_eq!(pairs.len(), 10);
-    }
-
-    #[test]
-    fn parse_per_feature_invalid_feature_name() {
-        let err = parse_autonomy("frobnicator:auto").unwrap_err();
-        assert!(err.contains("unknown feature area"));
-        assert!(err.contains("frobnicator"));
-        assert!(err.contains("vacuum"));
-    }
-
-    #[test]
-    fn parse_per_feature_invalid_level() {
-        let err = parse_autonomy("vacuum:turbo").unwrap_err();
-        assert!(err.contains("invalid autonomy level"));
-        assert!(err.contains("turbo"));
-        assert!(err.contains("vacuum"));
-        assert!(err.contains("observe"));
-    }
-
-    #[test]
-    fn parse_per_feature_missing_level() {
-        // "vacuum:" has a colon but empty level string.
-        let err = parse_autonomy("vacuum:").unwrap_err();
-        assert!(err.contains("invalid autonomy level"));
-    }
-
-    // -- apply_autonomy -------------------------------------------------------
-
-    #[test]
-    fn apply_global_sets_all_features() {
-        let mut gov = config::GovernanceConfig::default();
-        // Confirm the default is Observe.
-        assert_eq!(gov.vacuum, AutonomyLevel::Observe);
-
-        apply_autonomy(&mut gov, &AutonomyArg::Global(AutonomyLevel::Auto));
-
-        for &feature in governance::FeatureArea::all() {
-            assert_eq!(
-                gov.autonomy_for(feature),
-                AutonomyLevel::Auto,
-                "feature {feature:?} not set to Auto"
-            );
-        }
-    }
-
-    #[test]
-    fn apply_per_feature_only_updates_listed() {
-        let mut gov = config::GovernanceConfig::default();
-        let pairs = vec![
-            (FeatureArea::Vacuum, AutonomyLevel::Auto),
-            (FeatureArea::IndexHealth, AutonomyLevel::Supervised),
-        ];
-        apply_autonomy(&mut gov, &AutonomyArg::PerFeature(pairs));
-
-        assert_eq!(gov.autonomy_for(FeatureArea::Vacuum), AutonomyLevel::Auto);
-        assert_eq!(
-            gov.autonomy_for(FeatureArea::IndexHealth),
-            AutonomyLevel::Supervised
-        );
-        // Unlisted features remain at Observe.
-        assert_eq!(gov.autonomy_for(FeatureArea::Bloat), AutonomyLevel::Observe);
-        assert_eq!(
-            gov.autonomy_for(FeatureArea::Security),
-            AutonomyLevel::Observe
-        );
-    }
-
-    #[test]
-    fn apply_global_observe_is_idempotent() {
-        let mut gov = config::GovernanceConfig::default();
-        apply_autonomy(&mut gov, &AutonomyArg::Global(AutonomyLevel::Observe));
-        // Should still all be Observe.
-        for &feature in governance::FeatureArea::all() {
-            assert_eq!(gov.autonomy_for(feature), AutonomyLevel::Observe);
         }
     }
 }

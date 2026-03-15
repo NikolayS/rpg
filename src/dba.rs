@@ -16,7 +16,6 @@ use tokio_postgres::Client;
 ///
 /// `subcommand` is the first word after `\dba` (e.g. `"activity"`, `"locks"`).
 /// `verbose` is `true` when the `+` modifier was specified.
-/// `governance` is used for Supervised mode checks (index health proposals).
 /// `capabilities` provides version-gated feature detection.
 ///
 /// Returns optional text for AI interpretation (e.g. `\dba waits+`).
@@ -25,7 +24,6 @@ pub async fn execute(
     client: &Client,
     subcommand: &str,
     verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
 ) -> Option<String> {
     match subcommand {
@@ -38,19 +36,11 @@ pub async fn execute(
             None
         }
         "bloat" => {
-            dba_bloat(client, verbose, governance).await;
-            None
-        }
-        "bloat-analyze" | "bla" => {
-            dba_bloat_analyze(client, governance).await;
+            dba_bloat(client, verbose).await;
             None
         }
         "vacuum" | "vac" => {
-            dba_vacuum(client, verbose, governance).await;
-            None
-        }
-        "vacuum-analyze" | "va" => {
-            dba_vacuum_analyze(client, governance).await;
+            dba_vacuum(client, verbose).await;
             None
         }
         "tablesize" | "ts" => {
@@ -58,11 +48,7 @@ pub async fn execute(
             None
         }
         "connections" | "conn" => {
-            dba_connections(client, verbose, governance).await;
-            None
-        }
-        "connection-analyze" | "ca" => {
-            dba_connection_analyze(client, governance).await;
+            dba_connections(client, verbose).await;
             None
         }
         "unused-idx" | "unused" => {
@@ -78,50 +64,20 @@ pub async fn execute(
             None
         }
         "replication" | "repl" => {
-            dba_replication(client, verbose, governance).await;
-            None
-        }
-        "replication-analyze" | "ra" => {
-            dba_replication_analyze(client, governance).await;
+            dba_replication(client, verbose).await;
             None
         }
         "config" | "conf" => {
-            dba_config(client, verbose, governance).await;
-            None
-        }
-        "config-analyze" | "cfa" => {
-            dba_config_analyze(client, governance).await;
+            dba_config(client, verbose).await;
             None
         }
         "waits" | "wait" => dba_waits(client, verbose).await,
-        "indexes" | "idx" => {
-            dba_indexes(client, verbose, governance).await;
-            None
-        }
         "progress" | "prog" => {
             dba_progress(client, None).await;
             None
         }
         "io" => {
             dba_io(client, verbose, capabilities).await;
-            None
-        }
-        "backup-analyze" | "ba" => {
-            dba_backup_analyze(client).await;
-            None
-        }
-        "rca" => {
-            let pg_ash_available = capabilities.is_some_and(|c| c.pg_ash.is_available());
-            let snapshot = crate::rca::collect_snapshot(client, pg_ash_available).await;
-            eprintln!("{}", snapshot.to_prompt());
-            None
-        }
-        "security" | "sec" => {
-            dba_security_analyze(client, governance).await;
-            None
-        }
-        "query-optimize" | "qo" => {
-            dba_query_optimize(client, governance).await;
             None
         }
         "" | "help" => {
@@ -287,58 +243,21 @@ fn print_dba_help() {
     );
     println!("  \\dba locks       Lock tree (blocked/blocking)");
     println!("  \\dba waits       Wait event breakdown (+ for AI interpretation)");
-    println!("  \\dba bloat       Table bloat estimates (+ for analyzer)");
-    println!(
-        "  \\dba bloat-analyze  Structured bloat health findings \
-         (dead tuples, bloated tables)"
-    );
-    println!("  \\dba vacuum      Vacuum status and dead tuples (+ for analyzer)");
-    println!(
-        "  \\dba vacuum-analyze  Structured vacuum health findings \
-         (dead tuples, XID age, stale tables)"
-    );
+    println!("  \\dba bloat       Table bloat estimates (dead tuples)");
+    println!("  \\dba vacuum      Vacuum status and dead tuples");
     println!("  \\dba tablesize   Largest tables");
-    println!("  \\dba connections Connection counts by state (+ for analyzer)");
-    println!(
-        "  \\dba connection-analyze  Structured connection health findings \
-         (saturation, idle, long-idle, distribution)"
-    );
-    println!("  \\dba indexes     Index health report (unused, redundant, invalid, bloated)");
-    println!("  \\dba unused-idx  Unused indexes (simple view)");
+    println!("  \\dba connections Connection counts by state");
+    println!("  \\dba unused-idx  Unused indexes");
     println!("  \\dba seq-scans   Tables with high sequential scan ratio");
     println!("  \\dba cache-hit   Buffer cache hit ratios");
-    println!("  \\dba replication Replication slot status (+ for analyzer)");
-    println!(
-        "  \\dba replication-analyze  Structured replication health findings \
-         (slot lag, inactive slots, replica lag)"
-    );
-    println!("  \\dba config      Non-default configuration parameters (+ for analyzer)");
-    println!(
-        "  \\dba config-analyze  Structured config tuning findings \
-         (memory, autovacuum, connections, WAL)"
-    );
+    println!("  \\dba replication Replication slot status");
+    println!("  \\dba config      Non-default configuration parameters");
     println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
     println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
-    println!(
-        "  \\dba backup-analyze  Backup monitoring: WAL archiving failures, \
-         archive lag, WAL file accumulation"
-    );
-    println!(
-        "  \\dba rca          Root cause analysis snapshot \
-         (diagnostic data collection)"
-    );
-    println!(
-        "  \\dba security        Security audit: superuser roles, password policy, \
-         weak hashes, trust auth (PG 15+)"
-    );
-    println!(
-        "  \\dba query-optimize  Query optimization findings \
-         (slow queries, missing indexes, sequential scans)"
-    );
     println!();
     println!(
-        "Aliases: act, lock, wait, vac, va, ts, conn, ca, idx, \
-         unused, seq, cache, repl, ra, conf, cfa, prog, ba, rca, sec, bla, qo"
+        "Aliases: act, lock, wait, vac, ts, conn, \
+         unused, seq, cache, repl, conf, prog"
     );
     println!();
     println!("Progress sub-commands:");
@@ -921,11 +840,7 @@ async fn dba_locks(
     render_lock_forest(&forest);
 }
 
-async fn dba_bloat(
-    client: &Client,
-    verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
+async fn dba_bloat(client: &Client, _verbose: bool) {
     // pg_stat_user_tables uses `relname`, not `tablename`.
     let sql = "select \
         schemaname, \
@@ -943,39 +858,9 @@ async fn dba_bloat(
     order by n_dead_tup desc \
     limit 20";
     run_and_print(client, sql).await;
-
-    // Structured analysis via BloatAnalyzer when verbose (`\dba+ bloat`).
-    if verbose {
-        dba_bloat_analyze(client, governance).await;
-    }
 }
 
-/// Run the `BloatAnalyzer` and display structured findings.
-///
-/// Called directly from `\dba bloat-analyze` / `\dba bla`, or automatically
-/// when `\dba+ bloat` (verbose) is used.
-async fn dba_bloat_analyze(client: &Client, governance: Option<&crate::config::GovernanceConfig>) {
-    let report = crate::bloat::BloatAnalyzer::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::Bloat)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
-}
-
-async fn dba_vacuum(
-    client: &Client,
-    verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
+async fn dba_vacuum(client: &Client, _verbose: bool) {
     // Raw vacuum status table (psql-style tabular output).
     let sql = "select \
         s.schemaname, \
@@ -1000,63 +885,6 @@ async fn dba_vacuum(
     order by s.n_dead_tup desc \
     limit 30";
     run_and_print(client, sql).await;
-
-    // Structured analysis via VacuumAnalyzer when verbose (`\dba+ vacuum`).
-    if verbose {
-        dba_vacuum_analyze(client, governance).await;
-    }
-}
-
-/// Run the `VacuumAnalyzer` and display structured findings.
-///
-/// Called directly from `\dba vacuum-analyze` / `\dba va`, or automatically
-/// when `\dba+ vacuum` (verbose) is used.
-async fn dba_vacuum_analyze(client: &Client, governance: Option<&crate::config::GovernanceConfig>) {
-    let report = crate::vacuum::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::Vacuum)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
-}
-
-/// Run the `BackupMonitoringAnalyzer` and display structured findings.
-///
-/// Called directly from `\dba backup-analyze` / `\dba ba`.
-async fn dba_backup_analyze(client: &Client) {
-    let report = crate::backup_monitoring::BackupMonitoringAnalyzer::analyze(client).await;
-    report.display();
-}
-
-/// Run the `SecurityAnalyzer` and display structured findings.
-///
-/// Called directly from `\dba security` / `\dba sec`.
-async fn dba_security_analyze(
-    client: &Client,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
-    let report = crate::security::SecurityAnalyzer::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::Security)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
 }
 
 async fn dba_tablesize(client: &Client, _verbose: bool) {
@@ -1081,11 +909,7 @@ async fn dba_tablesize(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_connections(
-    client: &Client,
-    verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
+async fn dba_connections(client: &Client, _verbose: bool) {
     let sql = "select \
         state, \
         usename, \
@@ -1097,36 +921,6 @@ async fn dba_connections(
     group by state, usename, datname, application_name \
     order by count desc";
     run_and_print(client, sql).await;
-
-    // Structured analysis via ConnectionManagementAnalyzer when verbose
-    // (`\dba+ connections`).
-    if verbose {
-        dba_connection_analyze(client, governance).await;
-    }
-}
-
-/// Run the `ConnectionManagementAnalyzer` and display structured findings.
-///
-/// Called directly from `\dba connection-analyze` / `\dba ca`, or
-/// automatically when `\dba+ connections` (verbose) is used.
-async fn dba_connection_analyze(
-    client: &Client,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
-    let report = crate::connection_management::ConnectionManagementAnalyzer::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::ConnectionManagement)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
 }
 
 async fn dba_unused_indexes(client: &Client, _verbose: bool) {
@@ -1180,11 +974,7 @@ async fn dba_cache_hit(client: &Client, _verbose: bool) {
     run_and_print(client, sql).await;
 }
 
-async fn dba_replication(
-    client: &Client,
-    verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
+async fn dba_replication(client: &Client, _verbose: bool) {
     let sql = "select \
         slot_name, \
         slot_type, \
@@ -1196,35 +986,6 @@ async fn dba_replication(
     from pg_replication_slots \
     order by slot_name";
     run_and_print(client, sql).await;
-
-    // Structured analysis via ReplicationAnalyzer when verbose (`\dba+ replication`).
-    if verbose {
-        dba_replication_analyze(client, governance).await;
-    }
-}
-
-/// Run the `ReplicationAnalyzer` and display structured findings.
-///
-/// Called directly from `\dba replication-analyze` / `\dba ra`, or
-/// automatically when `\dba+ replication` (verbose) is used.
-async fn dba_replication_analyze(
-    client: &Client,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
-    let report = crate::replication::ReplicationAnalyzer::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::Replication)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
 }
 
 /// Returns AI context text when `verbose` is true.
@@ -1270,27 +1031,6 @@ async fn dba_waits(client: &Client, verbose: bool) -> Option<String> {
         None
     } else {
         Some(lines.join("\n"))
-    }
-}
-
-async fn dba_indexes(
-    client: &Client,
-    _verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
-    let report = crate::index_health::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::IndexHealth)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
     }
 }
 
@@ -1545,11 +1285,7 @@ async fn dba_io(
 // Configuration
 // ---------------------------------------------------------------------------
 
-async fn dba_config(
-    client: &Client,
-    verbose: bool,
-    governance: Option<&crate::config::GovernanceConfig>,
-) {
+async fn dba_config(client: &Client, _verbose: bool) {
     let sql = "select \
         name, \
         setting, \
@@ -1561,52 +1297,6 @@ async fn dba_config(
       and source != 'override' \
     order by name";
     run_and_print(client, sql).await;
-
-    // Structured analysis via ConfigTuning when verbose (`\dba+ config`).
-    if verbose {
-        dba_config_analyze(client, governance).await;
-    }
-}
-
-/// Run the `ConfigTuning` analyzer and display structured findings.
-///
-/// Called directly from `\dba config-analyze` / `\dba cfa`, or automatically
-/// when `\dba+ config` (verbose) is used.
-async fn dba_config_analyze(client: &Client, governance: Option<&crate::config::GovernanceConfig>) {
-    let report = crate::config_tuning::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::ConfigTuning)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
-}
-
-/// Run the `QueryOptimization` analyzer and display structured findings.
-///
-/// Called directly from `\dba query-optimize` / `\dba qo`.
-async fn dba_query_optimize(client: &Client, governance: Option<&crate::config::GovernanceConfig>) {
-    let report = crate::query_optimization::analyze(client).await;
-    report.display();
-
-    // In Supervised mode, offer to execute proposed remediation actions.
-    let autonomy = governance.map_or(crate::governance::AutonomyLevel::Observe, |g| {
-        g.autonomy_for(crate::governance::FeatureArea::QueryOptimization)
-    });
-    if autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = report.to_proposals();
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -310,7 +310,6 @@ pub fn build_prompt(
     let mode_tag = match exec_mode {
         ExecMode::Plan => " plan",
         ExecMode::Yolo => " yolo",
-        ExecMode::Observe => " observe",
         ExecMode::Interactive => match input_mode {
             InputMode::Text2Sql => " text2sql",
             InputMode::Sql => "",
@@ -534,12 +533,6 @@ pub enum ExecMode {
     Plan,
     /// AI auto-executes within configured autonomy level.
     Yolo,
-    /// Pure read-only observation — AI watches and reports.
-    ///
-    /// Currently used only for prompt display; `\observe` triggers a
-    /// one-shot observation loop rather than setting a persistent mode.
-    #[allow(dead_code)]
-    Observe,
 }
 
 // ---------------------------------------------------------------------------
@@ -930,11 +923,6 @@ pub struct ReplSettings {
     /// Tracks total input + output tokens consumed.  When a `token_budget`
     /// is configured, AI calls are refused once this exceeds the budget.
     pub tokens_used: u64,
-    /// Action audit log for the governance framework.
-    ///
-    /// Records every action proposed, executed, vetoed, or skipped
-    /// during this session.  Never LLM-summarized (FIFO-evicted only).
-    pub audit_log: crate::governance::AuditLog,
     /// Detected database capabilities (extensions, version).
     ///
     /// Populated at connect time by [`crate::capabilities::detect`].
@@ -1041,18 +1029,6 @@ pub struct ReplSettings {
     /// hint is suppressed for any error produced by the fixed query,
     /// avoiding suggestion loops.  Cleared after each query execution.
     pub last_was_fix: bool,
-    /// Health check registry for `\health` commands.
-    ///
-    /// Pre-populated with the built-in default checks at session start.
-    /// Checks can be enabled or disabled at runtime via
-    /// `\health enable <name>` / `\health disable <name>`.
-    pub health_checks: crate::health_checks::HealthCheckRegistry,
-    /// Governance dispatcher for `\aaa` commands (#518).
-    ///
-    /// Owns the circuit breakers, veto tracker, promotion tracker, and
-    /// audit log used by the AAA governance subsystem.  Shared between
-    /// the REPL display commands and future action-execution paths.
-    pub dispatcher: crate::dispatcher::Dispatcher,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1112,7 +1088,6 @@ impl std::fmt::Debug for ReplSettings {
                 ),
             )
             .field("tokens_used", &self.tokens_used)
-            .field("audit_log", &format!("{} entries", self.audit_log.len()))
             .field("db_capabilities", &self.db_capabilities)
             .field("i_know_what_im_doing", &self.i_know_what_im_doing)
             .field("verbose_errors", &self.verbose_errors)
@@ -1148,14 +1123,6 @@ impl std::fmt::Debug for ReplSettings {
             .field("last_query_duration_ms", &self.last_query_duration_ms)
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
-            .field(
-                "health_checks",
-                &format!("{} checks", self.health_checks.len()),
-            )
-            .field(
-                "dispatcher",
-                &format!("{} audit entries", self.dispatcher.audit_log().len()),
-            )
             .finish()
     }
 }
@@ -1196,7 +1163,6 @@ impl Default for ReplSettings {
             last_error: None,
             conversation: ConversationContext::new(),
             tokens_used: 0,
-            audit_log: crate::governance::AuditLog::new(),
             db_capabilities: crate::capabilities::DbCapabilities::default(),
             i_know_what_im_doing: false,
             verbose_errors: false,
@@ -1217,8 +1183,6 @@ impl Default for ReplSettings {
             last_query_duration_ms: None,
             auto_suggest_fix: true,
             last_was_fix: false,
-            health_checks: crate::health_checks::HealthCheckRegistry::with_defaults(),
-            dispatcher: crate::dispatcher::Dispatcher::new(),
         }
     }
 }
@@ -1312,7 +1276,6 @@ pub async fn exec_command(
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
                     ExecMode::Yolo => "yolo",
-                    ExecMode::Observe => "observe",
                 };
                 eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             }
@@ -1330,7 +1293,6 @@ pub async fn exec_command(
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
                     ExecMode::Yolo => "yolo",
-                    ExecMode::Observe => "observe",
                 };
                 eprintln!("Execution mode: {label}");
             }
@@ -2873,10 +2835,6 @@ async fn dispatch_meta(
         MetaCmd::YoloMode => {
             return MetaResult::SetExecMode(ExecMode::Yolo);
         }
-        MetaCmd::Observe(duration_secs) => {
-            crate::observe::run_observe(client, duration_secs).await;
-            return MetaResult::Continue;
-        }
         MetaCmd::InteractiveMode => {
             return MetaResult::SetExecMode(ExecMode::Interactive);
         }
@@ -3046,7 +3004,6 @@ async fn dispatch_meta(
                 client,
                 subcommand,
                 parsed.plus,
-                Some(&settings.config.governance),
                 Some(&settings.db_capabilities),
             )
             .await;
@@ -3173,18 +3130,6 @@ async fn dispatch_meta(
                 return result;
             }
         }
-        // AAA governance commands (#518).
-        MetaCmd::Aaa(ref sub) => {
-            dispatch_aaa(sub, &settings.dispatcher);
-        }
-        // Health check commands (#514).
-        MetaCmd::HealthCheck(ref args) => {
-            dispatch_health(args, settings);
-        }
-        // Autonomy control (#386).
-        MetaCmd::Autonomy(ref area, ref level) => {
-            dispatch_autonomy(area, level, settings);
-        }
         // Large object commands (#400).
         MetaCmd::LoImport(ref filename, ref comment) => {
             let filename = filename.clone();
@@ -3209,182 +3154,6 @@ async fn dispatch_meta(
     }
 
     MetaResult::Continue
-}
-
-// ---------------------------------------------------------------------------
-// AAA governance commands (#518)
-// ---------------------------------------------------------------------------
-
-/// Handle `\aaa [status | audit [N] | vetoes | breaker]`.
-///
-/// - `\aaa` / `\aaa status` — governance overview (all feature areas).
-/// - `\aaa audit [N]` — show last N audit log entries (default 20).
-/// - `\aaa vetoes` — show active veto patterns.
-/// - `\aaa breaker` — show circuit breaker status per feature.
-fn dispatch_aaa(sub: &str, dispatcher: &crate::dispatcher::Dispatcher) {
-    use crate::governance::AutonomyLevel;
-    use std::collections::HashMap;
-
-    let mut parts = sub.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("").trim();
-    let arg = parts.next().map_or("", str::trim);
-
-    match cmd {
-        "" | "status" => {
-            // Build a default all-Observe level map as a display baseline.
-            let levels: HashMap<crate::governance::FeatureArea, AutonomyLevel> =
-                crate::governance::FeatureArea::all()
-                    .iter()
-                    .map(|&f| (f, AutonomyLevel::Observe))
-                    .collect();
-            let output = crate::aaa_commands::format_aaa_status(dispatcher, &levels);
-            print!("{output}");
-        }
-        "audit" | "log" => {
-            let count: usize = if arg.is_empty() {
-                20
-            } else if let Ok(n) = arg.parse::<usize>() {
-                n
-            } else {
-                eprintln!("\\aaa audit: expected a number, got \"{arg}\"");
-                return;
-            };
-            // Show persistence path when configured so users know entries
-            // are being written to (and loaded from) a file.
-            if let Some(path) = dispatcher.audit_log_path() {
-                println!("Persisting to: {}", path.display());
-            }
-            let output = crate::aaa_commands::format_audit_log(dispatcher.audit_log(), count);
-            print!("{output}");
-        }
-        "vetoes" => {
-            let output = crate::aaa_commands::format_vetoes(dispatcher.veto_tracker(), None);
-            print!("{output}");
-        }
-        "breaker" => {
-            let output = crate::aaa_commands::format_breaker_status(dispatcher);
-            print!("{output}");
-        }
-        other => {
-            eprintln!(
-                "\\aaa: unknown subcommand \"{other}\". \
-                 Valid: status, audit [N], vetoes, breaker"
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Health check commands (#514)
-// ---------------------------------------------------------------------------
-
-/// Handle `\health [list | show <name> | enable <name> | disable <name>]`.
-fn dispatch_health(args: &str, settings: &mut ReplSettings) {
-    let mut parts = args.splitn(2, char::is_whitespace);
-    let sub = parts.next().unwrap_or("").trim();
-    let name = parts.next().map_or("", str::trim);
-
-    match sub {
-        "" | "list" => {
-            let output = crate::health_check_commands::format_health_list(&settings.health_checks);
-            print!("{output}");
-        }
-        "show" => {
-            if name.is_empty() {
-                eprintln!("\\health show: check name required");
-            } else {
-                let output =
-                    crate::health_check_commands::format_health_show(&settings.health_checks, name);
-                print!("{output}");
-            }
-        }
-        "enable" => {
-            if name.is_empty() {
-                eprintln!("\\health enable: check name required");
-            } else {
-                match crate::health_check_commands::toggle_health_check(
-                    &mut settings.health_checks,
-                    name,
-                    true,
-                ) {
-                    Ok(()) => println!("Health check \"{name}\" enabled."),
-                    Err(e) => eprintln!("\\health enable: {e}"),
-                }
-            }
-        }
-        "disable" => {
-            if name.is_empty() {
-                eprintln!("\\health disable: check name required");
-            } else {
-                match crate::health_check_commands::toggle_health_check(
-                    &mut settings.health_checks,
-                    name,
-                    false,
-                ) {
-                    Ok(()) => println!("Health check \"{name}\" disabled."),
-                    Err(e) => eprintln!("\\health disable: {e}"),
-                }
-            }
-        }
-        other => {
-            eprintln!(
-                "\\health: unknown subcommand \"{other}\". \
-                 Valid: list, show <name>, enable <name>, disable <name>"
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Autonomy control (#386)
-// ---------------------------------------------------------------------------
-
-/// Handle `\autonomy [area level | all level]`.
-///
-/// - No args: print a table of all feature areas and their current levels.
-/// - `area level`: set one feature area's autonomy level.
-/// - `all level`: set all feature areas to the given level.
-fn dispatch_autonomy(area: &str, level: &str, settings: &mut ReplSettings) {
-    use crate::governance::{AutonomyLevel, FeatureArea};
-
-    if area.is_empty() {
-        // Display table.
-        println!("{:<22}  Autonomy", "Feature area");
-        println!("{}  {}", "-".repeat(22), "-".repeat(10));
-        for &feature in FeatureArea::all() {
-            let current = settings.config.governance.autonomy_for(feature);
-            println!("{:<22}  {}", feature.label(), current.label());
-        }
-        return;
-    }
-
-    // Parse the level.
-    let Some(new_level) = AutonomyLevel::from_str(level) else {
-        eprintln!(
-            "\\autonomy: unknown level \"{level}\". \
-             Valid levels: observe, supervised, auto"
-        );
-        return;
-    };
-
-    if area == "all" {
-        for &feature in FeatureArea::all() {
-            settings.config.governance.set_autonomy(feature, new_level);
-        }
-        println!("all autonomy set to {}.", new_level.label());
-        return;
-    }
-
-    let Some(feature) = FeatureArea::from_str(area) else {
-        eprintln!(
-            "\\autonomy: unknown feature area \"{area}\". \
-             Use \\autonomy (no args) to list valid areas."
-        );
-        return;
-    };
-
-    settings.config.governance.set_autonomy(feature, new_level);
-    println!("{} autonomy set to {}.", feature.label(), new_level.label());
 }
 
 // ---------------------------------------------------------------------------
@@ -4391,7 +4160,6 @@ async fn handle_backslash_dumb(
                 ExecMode::Interactive => "interactive",
                 ExecMode::Plan => "plan",
                 ExecMode::Yolo => "yolo",
-                ExecMode::Observe => "observe",
             };
             eprintln!("Execution mode: {label}");
             HandleLineResult::Continue
@@ -4405,7 +4173,6 @@ async fn handle_backslash_dumb(
                 ExecMode::Interactive => "interactive",
                 ExecMode::Plan => "plan",
                 ExecMode::Yolo => "yolo",
-                ExecMode::Observe => "observe",
             };
             eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             HandleLineResult::Continue
@@ -4500,9 +4267,6 @@ async fn handle_line(
                 }
                 ExecMode::Interactive | ExecMode::Yolo => {
                     handle_ai_ask(client, trimmed, settings, params, tx).await;
-                }
-                ExecMode::Observe => {
-                    eprintln!("Observe mode is read-only. Use \\interactive to switch back.");
                 }
             }
         }
@@ -4716,7 +4480,6 @@ async fn handle_line(
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
                     ExecMode::Yolo => "yolo",
-                    ExecMode::Observe => "observe",
                 };
                 eprintln!("Execution mode: {label}");
                 HandleLineResult::Continue
@@ -4730,7 +4493,6 @@ async fn handle_line(
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
                     ExecMode::Yolo => "yolo",
-                    ExecMode::Observe => "observe",
                 };
                 eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
                 HandleLineResult::Continue
@@ -5422,20 +5184,6 @@ mod tests {
         assert_eq!(
             build_prompt("mydb", TxState::Idle, false, InputMode::Sql, ExecMode::Yolo),
             "mydb yolo=> "
-        );
-    }
-
-    #[test]
-    fn prompt_observe_mode() {
-        assert_eq!(
-            build_prompt(
-                "mydb",
-                TxState::Idle,
-                false,
-                InputMode::Sql,
-                ExecMode::Observe
-            ),
-            "mydb observe=> "
         );
     }
 
@@ -6758,58 +6506,6 @@ mod tests {
     fn tokens_used_default_is_zero() {
         let s = ReplSettings::default();
         assert_eq!(s.tokens_used, 0);
-    }
-
-    // -- parse_duration --------------------------------------------------------
-
-    #[test]
-    fn parse_duration_seconds() {
-        assert_eq!(
-            parse_duration("30s"),
-            Some(std::time::Duration::from_secs(30))
-        );
-    }
-
-    #[test]
-    fn parse_duration_minutes() {
-        assert_eq!(
-            parse_duration("5m"),
-            Some(std::time::Duration::from_secs(300))
-        );
-    }
-
-    #[test]
-    fn parse_duration_hours() {
-        assert_eq!(
-            parse_duration("1h"),
-            Some(std::time::Duration::from_secs(3600))
-        );
-    }
-
-    #[test]
-    fn parse_duration_bare_number() {
-        assert_eq!(
-            parse_duration("60"),
-            Some(std::time::Duration::from_secs(60))
-        );
-    }
-
-    #[test]
-    fn parse_duration_empty() {
-        assert_eq!(parse_duration(""), None);
-    }
-
-    #[test]
-    fn parse_duration_invalid() {
-        assert_eq!(parse_duration("abc"), None);
-    }
-
-    #[test]
-    fn parse_duration_whitespace_trimmed() {
-        assert_eq!(
-            parse_duration("  10s  "),
-            Some(std::time::Duration::from_secs(10))
-        );
     }
 
     // -- resolve_api_key -------------------------------------------------------

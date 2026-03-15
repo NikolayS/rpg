@@ -20,7 +20,6 @@ name = "rpg"
 path = "src/main.rs"
 
 [dependencies]
-async-trait = "0.1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -51,7 +50,6 @@ anyhow = "1"
 serial_test = "3"
 tempfile = "3"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
-wiremock = "0.6"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

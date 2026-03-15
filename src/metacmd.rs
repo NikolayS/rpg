@@ -289,12 +289,6 @@ pub enum MetaCmd {
     PlanMode,
     /// `\yolo` — enter YOLO mode.
     YoloMode,
-    /// `\observe [duration]` — run analyzers and print a summary.
-    ///
-    /// The optional duration argument is parsed from strings like `"30s"`,
-    /// `"5m"`, `"1h"` and stored here as seconds.  `None` means observe
-    /// indefinitely until the user presses Ctrl-C.
-    Observe(Option<u64>),
     /// `\interactive` — return to interactive mode.
     InteractiveMode,
 
@@ -340,44 +334,6 @@ pub enum MetaCmd {
     /// -- (1 row)
     /// ```
     LogFile(Option<String>),
-
-    // -- Autonomy control (#386) -------------------------------------------
-    /// `\autonomy [<area> <level> | all <level>]` — view or set per-feature
-    /// autonomy levels.
-    ///
-    /// - `\autonomy` — display a table of all feature areas and their levels.
-    /// - `\autonomy <area> <level>` — set one feature area's autonomy level.
-    /// - `\autonomy all <level>` — set all feature areas to the given level.
-    ///
-    /// Valid levels: `observe` (O), `supervised` (S), `auto` (A).
-    ///
-    /// Payload: `(area, level)` when both args are given; `("", "")` when bare
-    /// (display mode).  `area` is `"all"` for the bulk-set variant.
-    Autonomy(String, String),
-
-    // -- AAA governance commands (#518) ------------------------------------
-    /// `\aaa [status | audit [N] | vetoes | breaker]`
-    ///
-    /// - `\aaa` / `\aaa status` — governance overview.
-    /// - `\aaa audit [N]` — show last N audit log entries.
-    /// - `\aaa vetoes` — show active veto patterns.
-    /// - `\aaa breaker` — show circuit breaker status.
-    ///
-    /// The raw argument string (everything after `\aaa `) is stored here
-    /// for dispatch-time parsing.
-    Aaa(String),
-
-    // -- Health check commands (#514) --------------------------------------
-    /// `\health [list | show <name> | enable <name> | disable <name>]`
-    ///
-    /// - `\health` / `\health list` — list all health checks.
-    /// - `\health show <name>` — show details for a named check.
-    /// - `\health enable <name>` — enable a named check.
-    /// - `\health disable <name>` — disable a named check.
-    ///
-    /// The raw argument string (everything after `\health `) is stored here
-    /// for dispatch-time parsing.
-    HealthCheck(String),
 
     // -- Large object commands (#400) --------------------------------------
     /// `\lo_import <filename> [<comment>]` — import a file as a large object.
@@ -575,29 +531,6 @@ pub fn parse(input: &str) -> ParsedMeta {
 
 /// Parse `\a` (toggle align), `\aaa [sub]`, or `\autonomy [area level]`.
 fn parse_a_family(input: &str) -> ParsedMeta {
-    // `\aaa` — governance commands; must be checked before `\autonomy` and
-    // bare `\a` (longer prefix wins).
-    if let Some(rest) = input.strip_prefix("aaa") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ParsedMeta::simple(MetaCmd::Aaa(rest.trim().to_owned()));
-        }
-    }
-
-    // `\autonomy` — must be checked before bare `\a` (longer prefix).
-    if let Some(rest) = input.strip_prefix("autonomy") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let rest = rest.trim();
-            if rest.is_empty() {
-                // Bare `\autonomy` — display table.
-                return ParsedMeta::simple(MetaCmd::Autonomy(String::new(), String::new()));
-            }
-            // Parse `area level` or `all level`.
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            let area = parts.next().unwrap_or("").to_owned();
-            let level = parts.next().map_or("", str::trim).to_owned();
-            return ParsedMeta::simple(MetaCmd::Autonomy(area, level));
-        }
-    }
     // Bare `\a` — toggle aligned/unaligned output.
     parse_simple_or_unknown(input, "a", MetaCmd::ToggleAlign)
 }
@@ -1009,13 +942,6 @@ fn parse_c_family(input: &str) -> ParsedMeta {
 /// treated as the topic argument, so `\h SELECT` passes `"SELECT"` and plain
 /// `\h` passes `None`.
 fn parse_h(input: &str) -> ParsedMeta {
-    // `\health` — health check commands (check before bare `\h`)
-    if let Some(rest) = input.strip_prefix("health") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ParsedMeta::simple(MetaCmd::HealthCheck(rest.trim().to_owned()));
-        }
-    }
-
     let Some(rest) = input.strip_prefix('h') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
@@ -1320,42 +1246,8 @@ fn parse_i_family(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
 }
 
-/// Parse a duration string like `"30s"`, `"5m"`, `"1h"` into seconds.
-///
-/// A bare number (no suffix) is treated as seconds.  Returns `None` when
-/// the string is empty or cannot be parsed.
-fn parse_observe_duration(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('s') {
-        (n, 1u64)
-    } else if let Some(n) = s.strip_suffix('m') {
-        (n, 60u64)
-    } else if let Some(n) = s.strip_suffix('h') {
-        (n, 3600u64)
-    } else {
-        (s, 1u64)
-    };
-    let num: u64 = num_str.parse().ok()?;
-    Some(num.saturating_mul(multiplier))
-}
-
-/// Parse `\o [file]` and `\observe [duration]`.
+/// Parse `\o [file]`.
 fn parse_o(input: &str) -> ParsedMeta {
-    // `\observe [duration]` — enter observe execution mode.
-    if let Some(rest) = input.strip_prefix("observe") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let arg = rest.trim();
-            let duration_secs = if arg.is_empty() {
-                None
-            } else {
-                parse_observe_duration(arg)
-            };
-            return ParsedMeta::simple(MetaCmd::Observe(duration_secs));
-        }
-    }
     let Some(rest) = input.strip_prefix('o') else {
         return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
     };
@@ -3431,36 +3323,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_observe_mode() {
-        assert_eq!(parse("\\observe").cmd, MetaCmd::Observe(None));
-        assert!(parse("\\observe").pattern.is_none());
-    }
-
-    #[test]
-    fn parse_observe_mode_with_duration() {
-        let parsed = parse("\\observe 30s");
-        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(30)));
-    }
-
-    #[test]
-    fn parse_observe_mode_with_minutes() {
-        let parsed = parse("\\observe 5m");
-        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(300)));
-    }
-
-    #[test]
-    fn parse_observe_duration_hours() {
-        let parsed = parse("\\observe 1h");
-        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(3600)));
-    }
-
-    #[test]
-    fn parse_observe_bare_number() {
-        let parsed = parse("\\observe 60");
-        assert_eq!(parsed.cmd, MetaCmd::Observe(Some(60)));
-    }
-
-    #[test]
     fn parse_interactive_mode() {
         assert_eq!(parse("\\interactive").cmd, MetaCmd::InteractiveMode);
     }
@@ -3472,8 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_observe_does_not_steal_o() {
-        // Bare \o should still be Output, not ObserveMode
+    fn parse_o_bare_is_output() {
         assert_eq!(parse("\\o").cmd, MetaCmd::Output);
     }
 
