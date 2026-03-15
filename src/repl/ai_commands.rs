@@ -324,7 +324,6 @@ pub(super) async fn stream_completion(
 /// - `/fix` — explain and fix the last error
 /// - `/explain [query]` — explain query plan with AI interpretation
 /// - `/optimize [query]` — suggest query optimizations
-/// - `/rca` — root cause analysis of current database state
 pub(super) async fn dispatch_ai_command(
     input: &str,
     client: &Client,
@@ -380,14 +379,12 @@ pub(super) async fn dispatch_ai_command(
         }
     } else if input == "/budget" {
         handle_ai_budget(settings);
-    } else if input == "/rca" || input.starts_with("/rca ") {
-        handle_ai_rca(client, settings, params).await;
     } else if input == "/init" {
         handle_init(client, settings, params).await;
     } else {
         eprintln!(
             "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize, /describe, /rca, \
+             Available: /ask, /fix, /explain, /optimize, /describe, \
              /init, /clear, /compact, /budget"
         );
     }
@@ -697,17 +694,7 @@ pub(super) async fn handle_ai_ask(
                     if settings.i_know_what_im_doing {
                         YoloWriteAction::Execute
                     } else {
-                        let autonomy = settings
-                            .config
-                            .governance
-                            .autonomy_for(crate::governance::FeatureArea::Rca);
-                        match autonomy {
-                            crate::governance::AutonomyLevel::Observe => YoloWriteAction::Block,
-                            crate::governance::AutonomyLevel::Supervised => {
-                                YoloWriteAction::WarnThenExecute
-                            }
-                            crate::governance::AutonomyLevel::Auto => YoloWriteAction::Execute,
-                        }
+                        YoloWriteAction::WarnThenExecute
                     }
                 } else {
                     YoloWriteAction::Execute
@@ -879,32 +866,20 @@ pub(super) async fn handle_ai_plan(
         }
     };
 
-    // Collect live diagnostic data (read-only queries) for richer context.
-    eprintln!("-- Plan mode: collecting diagnostics...");
-    let pg_ash = settings.db_capabilities.pg_ash.is_available();
-    let diagnostics = crate::rca::collect_snapshot(client, pg_ash).await;
-    let diag_steps = diagnostics.steps.iter().filter(|s| s.has_data).count();
-    let diag_context = diagnostics.to_prompt();
-    eprintln!("-- Collected {diag_steps} diagnostic steps");
-
     let system_content = format!(
         "You are a PostgreSQL expert. \
          The user has asked you to investigate and produce an action plan.\n\
          Database: {dbname}\n\n\
          Schema:\n{schema}\n\n\
-         Live diagnostics (read-only queries just collected):\n{diagnostics}\n\n\
          Rules:\n\
          - Produce a structured plan in markdown format\n\
          - Each action should include the SQL command and a safety assessment\n\
          - Mark actions as [safe], [caution], or [dangerous]\n\
          - Order actions from safest to most impactful\n\
          - Include estimated duration where possible\n\
-         - Start with a brief root-cause analysis based on the live diagnostics above\n\
-         - Reference specific data from the diagnostics to support your analysis\n\
          - Do NOT execute anything — only plan",
         dbname = params.dbname,
         schema = schema_ctx,
-        diagnostics = diag_context,
     );
 
     let messages = vec![
@@ -1734,114 +1709,8 @@ fn format_tokens(n: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// /rca — Root Cause Analysis
+// /rca — Root Cause Analysis (removed)
 // ---------------------------------------------------------------------------
-
-/// Handle the `/rca` command: collect diagnostic snapshot and analyze.
-pub(super) async fn handle_ai_rca(
-    client: &Client,
-    settings: &mut ReplSettings,
-    params: &ConnParams,
-) {
-    // Check whether AI is configured; if not, still show raw diagnostic data.
-    let ai_configured = settings
-        .config
-        .ai
-        .provider
-        .as_deref()
-        .is_some_and(|p| !p.is_empty());
-
-    if !ai_configured {
-        // Without AI, still collect and display the diagnostic snapshot.
-        eprintln!("AI not configured — collecting raw diagnostic data only.");
-        let pg_ash = settings
-            .config
-            .governance
-            .autonomy_for(crate::governance::FeatureArea::Rca);
-        let _ = pg_ash; // autonomy level not used in Observe mode yet
-        let snapshot = crate::rca::collect_snapshot(client, false).await;
-        print!("{}", snapshot.to_prompt());
-        return;
-    }
-
-    eprintln!("Collecting diagnostic data...");
-
-    // Detect pg_ash availability from capabilities (set at connect time).
-    let pg_ash_available = settings.db_capabilities.pg_ash.is_available();
-
-    let snapshot = crate::rca::collect_snapshot(client, pg_ash_available).await;
-
-    // Show raw data summary.
-    let data_steps = snapshot.steps.iter().filter(|s| s.has_data).count();
-    let total_steps = snapshot.steps.len();
-    eprintln!("Collected {data_steps}/{total_steps} steps with data. Analyzing...\n");
-
-    let provider = match get_ai_provider(settings) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("AI error: {e}");
-            return;
-        }
-    };
-
-    // Build schema context for richer analysis.
-    let schema_ctx = match crate::ai::context::build_schema_context(client).await {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("Schema context error: {e}");
-            String::new()
-        }
-    };
-
-    let system_content = crate::rca::rca_system_prompt(&schema_ctx);
-    let user_content = format!(
-        "Database: {dbname}\n\n{snapshot}",
-        dbname = params.dbname,
-        snapshot = snapshot.to_prompt(),
-    );
-
-    let messages = vec![
-        crate::ai::Message {
-            role: crate::ai::Role::System,
-            content: system_content,
-        },
-        crate::ai::Message {
-            role: crate::ai::Role::User,
-            content: user_content,
-        },
-    ];
-
-    let options = crate::ai::CompletionOptions {
-        model: settings.config.ai.model.clone().unwrap_or_default(),
-        max_tokens: settings.config.ai.max_tokens,
-        temperature: 0.0,
-    };
-
-    match stream_completion(
-        provider.as_ref(),
-        &messages,
-        &options,
-        settings.no_highlight,
-    )
-    .await
-    {
-        Ok(result) => record_token_usage(settings, &result),
-        Err(e) => eprintln!("AI error: {e}"),
-    }
-
-    // In Supervised mode, propose actionable mitigations after analysis.
-    let rca_autonomy = settings
-        .config
-        .governance
-        .autonomy_for(crate::governance::FeatureArea::Rca);
-    if rca_autonomy == crate::governance::AutonomyLevel::Supervised {
-        let proposals = crate::rca_actions::propose_mitigations(client).await;
-        if !proposals.is_empty() {
-            let mut audit_log = crate::governance::AuditLog::new();
-            crate::rca_actions::run_supervised_flow(client, &proposals, &mut audit_log).await;
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // /init — generate starter files
