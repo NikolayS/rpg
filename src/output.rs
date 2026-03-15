@@ -59,6 +59,8 @@ pub struct OutputConfig {
     /// Show verbose error detail including SQLSTATE.
     /// psql does not show SQLSTATE by default; set this for `\set VERBOSITY verbose`.
     pub verbose_errors: bool,
+    /// Whether to emit ANSI color codes in error output.
+    pub color_errors: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -629,8 +631,10 @@ pub fn format_pg_error(
     let mut out = String::new();
 
     if let Some(db_err) = err.as_db_error() {
-        // Severity line.
-        let _ = writeln!(out, "{}:  {}", db_err.severity(), db_err.message());
+        // Severity line — colorized when color is enabled.
+        let severity = db_err.severity();
+        let (prefix_start, prefix_end) = error_label_ansi(severity, cfg.color_errors);
+        let _ = writeln!(out, "{prefix_start}{severity}{prefix_end}:  {}", db_err.message());
 
         // Position marker.
         if let Some(pos) = db_err.position() {
@@ -641,12 +645,14 @@ pub fn format_pg_error(
 
         // DETAIL line.
         if let Some(detail) = db_err.detail() {
-            let _ = writeln!(out, "DETAIL:  {detail}");
+            let (ls, le) = error_label_ansi("DETAIL", cfg.color_errors);
+            let _ = writeln!(out, "{ls}DETAIL{le}:  {detail}");
         }
 
         // HINT line.
         if let Some(hint) = db_err.hint() {
-            let _ = writeln!(out, "HINT:  {hint}");
+            let (ls, le) = error_label_ansi("HINT", cfg.color_errors);
+            let _ = writeln!(out, "{ls}HINT{le}:  {hint}");
         }
 
         // SQLSTATE: only shown in verbose mode (psql default: hidden).
@@ -655,10 +661,32 @@ pub fn format_pg_error(
         }
     } else {
         // Non-server error (I/O, protocol, …).
-        let _ = writeln!(out, "ERROR:  {err}");
+        let (ls, le) = error_label_ansi("ERROR", cfg.color_errors);
+        let _ = writeln!(out, "{ls}ERROR{le}:  {err}");
     }
 
     out
+}
+
+/// Return `(start_escape, reset_escape)` ANSI sequences for an error label.
+///
+/// - `ERROR` / `FATAL` / `PANIC` → bold red
+/// - `WARNING`                    → bold yellow
+/// - `NOTICE` / `INFO` / `LOG`   → bold cyan
+/// - `DETAIL` / `HINT`           → bold (no color change)
+///
+/// Returns `("", "")` when `color` is `false`.
+fn error_label_ansi(label: &str, color: bool) -> (&'static str, &'static str) {
+    if !color {
+        return ("", "");
+    }
+    let start = match label {
+        "WARNING"                  => "\x1b[1;33m", // bold yellow
+        "NOTICE" | "INFO" | "LOG" => "\x1b[1;36m", // bold cyan
+        "DETAIL" | "HINT"         => "\x1b[1m",     // bold only
+        _                          => "\x1b[1;31m", // ERROR/FATAL/PANIC and unknown: bold red
+    };
+    (start, "\x1b[0m")
 }
 
 /// Print a `tokio_postgres::Error` to stderr in psql style.
@@ -668,8 +696,10 @@ pub fn format_pg_error(
 /// (used to render the position marker); pass `None` when unavailable.
 /// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
 pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool) {
+    use std::io::IsTerminal;
     let cfg = OutputConfig {
         verbose_errors: verbose,
+        color_errors: std::io::stderr().is_terminal(),
         ..OutputConfig::default()
     };
     let msg = format_pg_error(err, sql, &cfg);
