@@ -634,7 +634,11 @@ pub fn format_pg_error(
         // Severity line — colorized when color is enabled.
         let severity = db_err.severity();
         let (prefix_start, prefix_end) = error_label_ansi(severity, cfg.color_errors);
-        let _ = writeln!(out, "{prefix_start}{severity}{prefix_end}:  {}", db_err.message());
+        let _ = writeln!(
+            out,
+            "{prefix_start}{severity}{prefix_end}:  {}",
+            db_err.message()
+        );
 
         // Position marker.
         if let Some(pos) = db_err.position() {
@@ -681,10 +685,10 @@ fn error_label_ansi(label: &str, color: bool) -> (&'static str, &'static str) {
         return ("", "");
     }
     let start = match label {
-        "WARNING"                  => "\x1b[1;33m", // bold yellow
+        "WARNING" => "\x1b[1;33m",                 // bold yellow
         "NOTICE" | "INFO" | "LOG" => "\x1b[1;36m", // bold cyan
-        "DETAIL" | "HINT"         => "\x1b[1m",     // bold only
-        _                          => "\x1b[1;31m", // ERROR/FATAL/PANIC and unknown: bold red
+        "DETAIL" | "HINT" => "\x1b[1m",            // bold only
+        _ => "\x1b[1;31m",                         // ERROR/FATAL/PANIC and unknown: bold red
     };
     (start, "\x1b[0m")
 }
