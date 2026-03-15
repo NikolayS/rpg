@@ -563,7 +563,7 @@ mod tests {
 
     // -- known_hosts parsing -------------------------------------------------
 
-    /// Helper: write a known_hosts file in a temp dir and return the path.
+    /// Helper: write a `known_hosts` file in a temp dir and return the path.
     fn write_known_hosts(dir: &tempfile::TempDir, content: &str) -> PathBuf {
         let path = dir.path().join("known_hosts");
         std::fs::write(&path, content).unwrap();

@@ -2460,7 +2460,7 @@ mod tests {
             selected: 0,
             scroll_offset: 0,
             word_start: 14,
-            prefix: "".to_owned(),
+            prefix: String::new(),
             prompt_width: 7,
         };
         let rendered = dd.render();
@@ -2613,7 +2613,7 @@ mod tests {
     // Bug #552 regression tests
     // -----------------------------------------------------------------------
 
-    /// Bug 1 — select_next/select_prev report the correct candidate so the
+    /// Bug 1 — `select_next/select_prev` report the correct candidate so the
     /// caller can replace the buffer text.
     #[test]
     fn test_dropdown_select_next_returns_correct_candidate() {
@@ -2655,7 +2655,7 @@ mod tests {
         );
     }
 
-    /// Bug 2 — dismiss() sets active to false so the next readline call does
+    /// Bug 2 — `dismiss()` sets active to false so the next readline call does
     /// not intercept Up-arrow for history navigation.
     #[test]
     fn test_dismiss_deactivates_dropdown() {
@@ -2679,7 +2679,7 @@ mod tests {
         );
     }
 
-    /// Bug 2 — a second dismiss() call (idempotent) must not panic.
+    /// Bug 2 — a second `dismiss()` call (idempotent) must not panic.
     #[test]
     fn test_dismiss_is_idempotent() {
         let mut dd = DropdownState::default();
@@ -2687,7 +2687,7 @@ mod tests {
         assert!(!dd.active);
     }
 
-    /// Bug 3 — DropdownKey::Enter variant must be defined and distinct.
+    /// Bug 3 — `DropdownKey::Enter` variant must be defined and distinct.
     #[test]
     fn test_dropdown_key_enter_variant_exists() {
         let key = DropdownKey::Enter;
@@ -2697,7 +2697,7 @@ mod tests {
         assert_ne!(key, DropdownKey::Escape);
     }
 
-    /// Bug 3 — when the dropdown is active, the current() helper returns the
+    /// Bug 3 — when the dropdown is active, the `current()` helper returns the
     /// right candidate so Enter can use it.
     #[test]
     fn test_dropdown_current_after_navigation() {

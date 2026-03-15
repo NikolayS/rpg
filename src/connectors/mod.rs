@@ -389,7 +389,7 @@ mod tests {
     fn backoff_config_defaults() {
         let cfg = BackoffConfig::default();
         assert_eq!(cfg.initial_delay_ms, 1000);
-        assert_eq!(cfg.multiplier, 2.0);
+        assert!((cfg.multiplier - 2.0).abs() < f64::EPSILON);
         assert_eq!(cfg.max_delay_ms, 60_000);
         assert!(cfg.jitter);
         assert_eq!(cfg.max_retries, 5);
@@ -651,7 +651,7 @@ mod tests {
             raw_name: "system.cpu.user".to_string(),
         };
         assert_eq!(m.category, MetricCategory::CpuUsage);
-        assert_eq!(m.value, 42.5);
+        assert!((m.value - 42.5).abs() < f64::EPSILON);
         assert_eq!(m.unit, "percent");
         assert_eq!(m.database.as_deref(), Some("mydb"));
         assert_eq!(m.source, "datadog");
@@ -668,11 +668,11 @@ mod tests {
 
         #[async_trait]
         impl Connector for MetricStub {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "metric-stub"
             }
 
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "Metric Stub"
             }
 
@@ -744,7 +744,7 @@ mod tests {
             nm.category,
             MetricCategory::Custom("pg.connections".to_string())
         );
-        assert_eq!(nm.value, 17.0);
+        assert!((nm.value - 17.0).abs() < f64::EPSILON);
         assert_eq!(nm.unit, "count");
         assert_eq!(nm.database.as_deref(), Some("testdb"));
         assert_eq!(nm.source, "metric-stub");
@@ -757,11 +757,11 @@ mod tests {
 
         #[async_trait]
         impl Connector for NoUnitStub {
-            fn id(&self) -> &str {
+            fn id(&self) -> &'static str {
                 "no-unit-stub"
             }
 
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "No Unit Stub"
             }
 

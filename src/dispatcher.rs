@@ -787,7 +787,7 @@ mod tests {
         }
         let cb = d.circuit_breakers.get(&FeatureArea::Rca);
         assert!(
-            cb.map_or(true, |c| !c.is_tripped(FeatureArea::Rca)),
+            cb.is_none_or(|c| !c.is_tripped(FeatureArea::Rca)),
             "All-success history must not trip the circuit breaker"
         );
     }
