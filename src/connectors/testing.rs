@@ -400,7 +400,7 @@ mod tests {
             .unwrap();
         assert_eq!(metrics.len(), 2);
         assert_eq!(metrics[0].name, "cpu");
-        assert_eq!(metrics[0].value, 55.0);
+        assert!((metrics[0].value - 55.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
@@ -613,7 +613,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].value, 12.5);
+        assert!((metrics[0].value - 12.5).abs() < f64::EPSILON);
     }
 
     // ------------------------------------------------------------------
@@ -624,7 +624,7 @@ mod tests {
     fn test_metric_helper() {
         let m = test_metric("connections", 42.0);
         assert_eq!(m.name, "connections");
-        assert_eq!(m.value, 42.0);
+        assert!((m.value - 42.0).abs() < f64::EPSILON);
         assert_eq!(m.source, "test");
         assert!(m.unit.is_none());
         assert!(m.tags.is_empty());

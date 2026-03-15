@@ -925,8 +925,7 @@ mod tests {
         let auth = headers
             .iter()
             .find(|(k, _)| k == "authorization")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
 
         assert!(
             auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"),
@@ -945,8 +944,7 @@ mod tests {
         let amz = headers
             .iter()
             .find(|(k, _)| k == "x-amz-date")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
         assert_eq!(amz, "20230601T120000Z");
     }
 
@@ -980,8 +978,7 @@ mod tests {
         let auth = headers
             .iter()
             .find(|(k, _)| k == "authorization")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
         assert!(
             auth.contains("x-amz-security-token"),
             "security token not in signed headers: {auth}"
@@ -1065,7 +1062,7 @@ mod tests {
 
     #[test]
     fn parse_metric_data_response_basic() {
-        let xml = r#"
+        let xml = r"
 <GetMetricDataResponse>
   <GetMetricDataResult>
     <MetricDataResults>
@@ -1082,7 +1079,7 @@ mod tests {
       </member>
     </MetricDataResults>
   </GetMetricDataResult>
-</GetMetricDataResponse>"#;
+</GetMetricDataResponse>";
 
         let metrics = parse_metric_data_response(xml, "mydb", "cloudwatch");
         assert_eq!(metrics.len(), 1);
@@ -1090,14 +1087,17 @@ mod tests {
         assert!((metrics[0].value - 42.5).abs() < f64::EPSILON);
         assert_eq!(metrics[0].source, "cloudwatch");
         assert_eq!(
-            metrics[0].tags.get("db_instance").map(|s| s.as_str()),
+            metrics[0]
+                .tags
+                .get("db_instance")
+                .map(std::string::String::as_str),
             Some("mydb")
         );
     }
 
     #[test]
     fn parse_metric_data_response_multiple_points() {
-        let xml = r#"
+        let xml = r"
 <GetMetricDataResponse><GetMetricDataResult><MetricDataResults>
   <member>
     <Label>FreeableMemory</Label>
@@ -1110,7 +1110,7 @@ mod tests {
       <member>2048.0</member>
     </Values>
   </member>
-</MetricDataResults></GetMetricDataResult></GetMetricDataResponse>"#;
+</MetricDataResults></GetMetricDataResult></GetMetricDataResponse>";
 
         let metrics = parse_metric_data_response(xml, "db", "cloudwatch");
         assert_eq!(metrics.len(), 2);
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn parse_describe_alarms_response_active_alarm() {
-        let xml = r#"
+        let xml = r"
 <DescribeAlarmsResponse>
   <DescribeAlarmsResult>
     <MetricAlarms>
@@ -1140,7 +1140,7 @@ mod tests {
       </member>
     </MetricAlarms>
   </DescribeAlarmsResult>
-</DescribeAlarmsResponse>"#;
+</DescribeAlarmsResponse>";
 
         let alerts = parse_describe_alarms_response(xml, "prod-pg", "cloudwatch");
         assert_eq!(alerts.len(), 1);
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn parse_describe_alarms_response_ok_state_resolves() {
-        let xml = r#"
+        let xml = r"
 <DescribeAlarmsResponse><DescribeAlarmsResult><MetricAlarms>
   <member>
     <AlarmName>prod-pg-LowMemory</AlarmName>
@@ -1161,7 +1161,7 @@ mod tests {
     <StateUpdatedTimestamp>2023-06-01T10:00:00Z</StateUpdatedTimestamp>
     <AlarmArn></AlarmArn>
   </member>
-</MetricAlarms></DescribeAlarmsResult></DescribeAlarmsResponse>"#;
+</MetricAlarms></DescribeAlarmsResult></DescribeAlarmsResponse>";
 
         let alerts = parse_describe_alarms_response(xml, "prod-pg", "cloudwatch");
         assert_eq!(alerts.len(), 1);

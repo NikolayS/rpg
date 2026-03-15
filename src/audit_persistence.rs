@@ -192,13 +192,13 @@ mod tests {
 
     #[test]
     fn load_skips_corrupt_lines() {
+        use std::io::Write as IoWrite;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         // Write two good entries, one corrupt line, one more good.
         persist_entry(&path, &make_entry(0)).unwrap();
         persist_entry(&path, &make_entry(1)).unwrap();
         // Inject a corrupt line.
-        use std::io::Write as _;
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(f, "{{not valid json}}").unwrap();
         drop(f);

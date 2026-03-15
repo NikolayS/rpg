@@ -1343,8 +1343,7 @@ mod tests {
             assert_eq!(
                 gov.autonomy_for(feature),
                 AutonomyLevel::Auto,
-                "feature {:?} not set to Auto",
-                feature
+                "feature {feature:?} not set to Auto"
             );
         }
     }

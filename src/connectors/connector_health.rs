@@ -173,11 +173,11 @@ mod tests {
 
     #[async_trait]
     impl Connector for ErrConnector {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "failing"
         }
 
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "Failing Connector"
         }
 

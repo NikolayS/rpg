@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn conn_stats_empty_avg() {
         let s = ConnStats::default();
-        assert_eq!(s.avg_active(), 0.0);
+        assert!((s.avg_active() - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
