@@ -610,6 +610,38 @@ pub fn format_command_tag(out: &mut String, ct: &CommandTag) {
 // Error formatter
 // ---------------------------------------------------------------------------
 
+// ANSI escape constants used for severity prefix coloring.
+const ANSI_RESET: &str = "\x1b[0m";
+/// Bold red — ERROR, FATAL, PANIC
+const ANSI_BOLD_RED: &str = "\x1b[1;31m";
+/// Yellow — WARNING
+const ANSI_YELLOW: &str = "\x1b[33m";
+/// Cyan — NOTICE
+const ANSI_CYAN: &str = "\x1b[36m";
+/// Dim/gray — INFO, DEBUG, LOG
+const ANSI_DIM: &str = "\x1b[2m";
+
+/// Return the colored form of a `PostgreSQL` severity prefix, e.g. `"ERROR"`.
+///
+/// The returned string has the ANSI color applied and ends with the reset code
+/// so that only the keyword itself is colored, not the message that follows.
+/// Stdout/stderr coloring is unconditional here; callers that write to a file
+/// or non-TTY should strip colors before writing (future work).
+fn color_severity(severity: &str) -> String {
+    let color = match severity {
+        "ERROR" | "FATAL" | "PANIC" => ANSI_BOLD_RED,
+        "WARNING" => ANSI_YELLOW,
+        "NOTICE" => ANSI_CYAN,
+        "INFO" | "DEBUG" | "LOG" => ANSI_DIM,
+        _ => "",
+    };
+    if color.is_empty() {
+        severity.to_owned()
+    } else {
+        format!("{color}{severity}{ANSI_RESET}")
+    }
+}
+
 /// Format a `tokio_postgres::Error` in psql style.
 ///
 /// ```text
@@ -629,8 +661,9 @@ pub fn format_pg_error(
     let mut out = String::new();
 
     if let Some(db_err) = err.as_db_error() {
-        // Severity line.
-        let _ = writeln!(out, "{}:  {}", db_err.severity(), db_err.message());
+        // Severity line — color the severity keyword.
+        let colored = color_severity(db_err.severity());
+        let _ = writeln!(out, "{}:  {}", colored, db_err.message());
 
         // Position marker.
         if let Some(pos) = db_err.position() {
@@ -655,7 +688,8 @@ pub fn format_pg_error(
         }
     } else {
         // Non-server error (I/O, protocol, …).
-        let _ = writeln!(out, "ERROR:  {err}");
+        let colored = color_severity("ERROR");
+        let _ = writeln!(out, "{colored}:  {err}");
     }
 
     out
@@ -675,6 +709,30 @@ pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: 
     let msg = format_pg_error(err, sql, &cfg);
     // format_pg_error always ends with a newline; use eprint! to avoid double.
     eprint!("{msg}");
+}
+
+/// Format a `PostgreSQL` notice (from `tokio_postgres::error::DbError`) in psql
+/// style, with a colored severity prefix.
+///
+/// Used to display `NOTICE`, `WARNING`, `INFO`, etc. messages that `PostgreSQL`
+/// sends during query execution (delivered as `AsyncMessage::Notice`).
+pub fn format_pg_notice(notice: &tokio_postgres::error::DbError) -> String {
+    let colored = color_severity(notice.severity());
+    let mut out = format!("{colored}:  {}\n", notice.message());
+    if let Some(detail) = notice.detail() {
+        let _ = writeln!(out, "DETAIL:  {detail}");
+    }
+    if let Some(hint) = notice.hint() {
+        let _ = writeln!(out, "HINT:  {hint}");
+    }
+    out
+}
+
+/// Print a `PostgreSQL` notice to stderr with a colored severity prefix.
+///
+/// Convenience wrapper around [`format_pg_notice`].
+pub fn eprint_pg_notice(notice: &tokio_postgres::error::DbError) {
+    eprint!("{}", format_pg_notice(notice));
 }
 
 /// Write the `LINE N: …` context and the `^` position marker.
@@ -1648,6 +1706,25 @@ mod tests {
     // format_pg_error — non-db-error path
     // -----------------------------------------------------------------------
 
+    /// Strip ANSI escape sequences for assertion helpers.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Skip everything up to and including the 'm' terminator.
+                for ch in chars.by_ref() {
+                    if ch == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     /// Construct a `tokio_postgres::Error` from an I/O error so we can test
     /// the non-`DbError` branch of `format_pg_error` without a live database.
     fn make_io_pg_error() -> tokio_postgres::Error {
@@ -1660,9 +1737,28 @@ mod tests {
         let e = make_io_pg_error();
         let cfg = OutputConfig::default();
         let out = format_pg_error(&e, None, &cfg);
+        // Strip ANSI color codes before checking the prefix, since the
+        // severity keyword is now colored.
+        let plain = strip_ansi(&out);
         assert!(
-            out.starts_with("ERROR:  "),
+            plain.starts_with("ERROR:  "),
             "non-db error should start with ERROR:  — got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_pg_error_severity_colored() {
+        // The raw output must contain the bold-red ANSI code for ERROR.
+        let e = make_io_pg_error();
+        let cfg = OutputConfig::default();
+        let out = format_pg_error(&e, None, &cfg);
+        assert!(
+            out.contains("\x1b[1;31m"),
+            "ERROR prefix should be bold-red: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b[0m"),
+            "output should contain ANSI reset after severity: {out:?}"
         );
     }
 
