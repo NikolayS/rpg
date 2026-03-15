@@ -223,23 +223,28 @@ impl StatusLine {
     fn write_status_row(&self, content: &str) {
         let row = self.term_rows;
         let mut stderr = io::stderr();
-        // \x1b[s       — save cursor position
-        // \x1b[{row};0H — move to last row, column 1
-        // \x1b[7m      — reverse video
-        // {content}    — status string padded to width
-        // \x1b[0m      — reset attributes
-        // \x1b[u       — restore cursor position
-        let _ = write!(stderr, "\x1b[s\x1b[{row};0H\x1b[7m{content}\x1b[0m\x1b[u");
+        // \x1b[s         — save cursor position
+        // \x1b[{row};1H  — move to last row, column 1 (1-based)
+        // \x1b[7m        — reverse video (background fills to end of line)
+        // {content}      — status string (already padded to terminal width)
+        // \x1b[K         — erase to end of line with current attributes,
+        //                   ensuring the background extends to the right edge
+        //                   even when the terminal width changes mid-render
+        // \x1b[0m        — reset attributes
+        // \x1b[u         — restore cursor position
+        let _ = write!(
+            stderr,
+            "\x1b[s\x1b[{row};1H\x1b[7m{content}\x1b[K\x1b[0m\x1b[u"
+        );
         let _ = stderr.flush();
     }
 
     /// Erase the status bar row without disturbing the cursor.
     fn clear_row(&self) {
         let row = self.term_rows;
-        let width = self.term_cols as usize;
-        let blank = " ".repeat(width);
         let mut stderr = io::stderr();
-        let _ = write!(stderr, "\x1b[s\x1b[{row};0H{blank}\x1b[u");
+        // \x1b[2K erases the entire line; no need to manually write blanks.
+        let _ = write!(stderr, "\x1b[s\x1b[{row};1H\x1b[2K\x1b[u");
         let _ = stderr.flush();
     }
 }
