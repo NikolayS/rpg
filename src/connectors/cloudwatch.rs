@@ -1087,7 +1087,10 @@ mod tests {
         assert!((metrics[0].value - 42.5).abs() < f64::EPSILON);
         assert_eq!(metrics[0].source, "cloudwatch");
         assert_eq!(
-            metrics[0].tags.get("db_instance").map(std::string::String::as_str),
+            metrics[0]
+                .tags
+                .get("db_instance")
+                .map(std::string::String::as_str),
             Some("mydb")
         );
     }
