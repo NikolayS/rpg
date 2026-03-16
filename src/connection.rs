@@ -2021,6 +2021,38 @@ async fn check_session_attrs(
     }
 }
 
+/// Drive a tokio-postgres `Connection` to completion, printing any `PostgreSQL`
+/// notice messages (`NOTICE`, `WARNING`, `INFO`, etc.) to stderr as they
+/// arrive.
+///
+/// This replaces the simple `connection.await` pattern so that server-side
+/// notices are displayed to the user with colored severity prefixes rather
+/// than being silently discarded (the tokio-postgres default only logs them
+/// via `tracing::info!`).
+async fn drive_connection<S, T>(
+    mut connection: tokio_postgres::Connection<S, T>,
+) -> Result<(), tokio_postgres::Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use std::future::poll_fn;
+    use tokio_postgres::AsyncMessage;
+
+    loop {
+        match poll_fn(|cx| connection.poll_message(cx)).await {
+            Some(Ok(AsyncMessage::Notice(notice))) => {
+                crate::output::eprint_pg_notice(&notice);
+            }
+            Some(Ok(_)) => {
+                // Notifications (LISTEN/NOTIFY) — ignore for now.
+            }
+            Some(Err(e)) => return Err(e),
+            None => return Ok(()),
+        }
+    }
+}
+
 /// Connect without TLS.
 async fn connect_plain(
     pg_config: &tokio_postgres::Config,
@@ -2032,7 +2064,7 @@ async fn connect_plain(
         .map_err(|e| map_connect_error(&e, params))?;
 
     tokio::spawn(async move {
-        if let Err(e) = connection.await {
+        if let Err(e) = drive_connection(connection).await {
             eprintln!("rpg: connection error: {e}");
         }
     });
@@ -2066,7 +2098,7 @@ async fn connect_tls_with_config(
         .map_err(|e| map_connect_error(&e, params))?;
 
     tokio::spawn(async move {
-        if let Err(e) = connection.await {
+        if let Err(e) = drive_connection(connection).await {
             eprintln!("rpg: connection error: {e}");
         }
     });
