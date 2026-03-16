@@ -19,7 +19,7 @@ pub enum TokenKind {
     Comment,
     /// Backslash command (`\dt`, `\l`, etc.)
     BackslashCmd,
-    /// Operator (`+`, `-`, `*`, `/`, `=`, `<`, `>`, etc.)
+    /// Operator or punctuation (`+`, `-`, `=`, `AND`, `OR`, `,`, `;`, etc.)
     Operator,
     /// Schema object (table or column name known from the cache).
     SchemaObject,
@@ -43,12 +43,14 @@ pub struct Token {
 ///
 /// IMPORTANT: This array **must** remain in ascending lexicographic order so
 /// that `binary_search` works correctly.
+///
+/// Logical/boolean operators (`AND`, `OR`, `NOT`) are intentionally excluded;
+/// they are classified as `TokenKind::Operator` via `SQL_LOGICAL_OPS_UPPER`.
 static SQL_KEYWORDS_UPPER: &[&str] = &[
     "ABORT",
     "ALL",
     "ALTER",
     "ANALYZE",
-    "AND",
     "ANY",
     "AS",
     "ASC",
@@ -126,13 +128,11 @@ static SQL_KEYWORDS_UPPER: &[&str] = &[
     "LOAD",
     "LOCK",
     "MOVE",
-    "NOT",
     "NOTIFY",
     "NULL",
     "NUMERIC",
     "OFFSET",
     "ON",
-    "OR",
     "ORDER",
     "OUTER",
     "OVER",
@@ -185,11 +185,30 @@ static SQL_KEYWORDS_UPPER: &[&str] = &[
     "XML",
 ];
 
+/// Sorted uppercase logical/boolean SQL operators for binary search.
+///
+/// These are classified as `TokenKind::Operator` (dim) rather than
+/// `TokenKind::Keyword` (bold blue) so that `AND`, `OR`, and `NOT` visually
+/// recede and let the structural keywords stand out.
+///
+/// IMPORTANT: Must remain in ascending lexicographic order.
+static SQL_LOGICAL_OPS_UPPER: &[&str] = &["AND", "NOT", "OR"];
+
 /// Check if `word` is a SQL keyword (case-insensitive).
 pub fn is_sql_keyword(word: &str) -> bool {
     // Fast path: avoid allocation when word is already ASCII uppercase.
     let upper = word.to_uppercase();
     SQL_KEYWORDS_UPPER.binary_search(&upper.as_str()).is_ok()
+}
+
+/// Check if `word` is a SQL logical/boolean operator (`AND`, `OR`, `NOT`).
+///
+/// These words are rendered with the `Operator` style (dim) rather than the
+/// `Keyword` style (bold blue) so they visually recede next to structural
+/// keywords like `SELECT`, `FROM`, and `WHERE`.
+pub fn is_sql_logical_op(word: &str) -> bool {
+    let upper = word.to_uppercase();
+    SQL_LOGICAL_OPS_UPPER.binary_search(&upper.as_str()).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +223,7 @@ fn ansi_color(kind: TokenKind) -> &'static str {
         TokenKind::Number => "\x1b[33m",         // yellow
         TokenKind::Comment => "\x1b[2;37m",      // dim gray
         TokenKind::BackslashCmd => "\x1b[1;35m", // bold magenta
-        TokenKind::Operator => "\x1b[36m",       // cyan
+        TokenKind::Operator => "\x1b[2m",        // dim (operators recede)
         TokenKind::SchemaObject => "\x1b[1;33m", // bold yellow (table/column names)
         TokenKind::Normal => "",                 // no color
     }
@@ -459,7 +478,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
 
         // ------------------------------------------------------------------
-        // Identifier or keyword
+        // Identifier, keyword, or logical operator
         // ------------------------------------------------------------------
         if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
             let start = pos;
@@ -469,7 +488,11 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 pos += 1;
             }
             let word = &input[start..pos];
-            let kind = if is_sql_keyword(word) {
+            // Logical operators (AND, OR, NOT) are rendered dim like symbolic
+            // operators so structural keywords (SELECT, FROM, …) stand out.
+            let kind = if is_sql_logical_op(word) {
+                TokenKind::Operator
+            } else if is_sql_keyword(word) {
                 TokenKind::Keyword
             } else {
                 TokenKind::Normal
@@ -483,7 +506,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
 
         // ------------------------------------------------------------------
-        // Operators and punctuation
+        // Symbolic operators and punctuation
         // ------------------------------------------------------------------
         // Multi-character operators first.
         let op_end = consume_operator(bytes, pos);
@@ -497,9 +520,20 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             continue;
         }
 
+        // Single-character punctuation that acts as an operator.
+        if matches!(bytes[pos], b',' | b';' | b'(' | b')' | b'[' | b']') {
+            tokens.push(Token {
+                kind: TokenKind::Operator,
+                start: pos,
+                end: pos + 1,
+            });
+            pos += 1;
+            continue;
+        }
+
         // ------------------------------------------------------------------
         // Fallback: consume one character as Normal (may be multi-byte UTF-8)
-        // e.g. '(', ')', ',', ';', or Cyrillic/CJK/emoji characters.
+        // e.g. Cyrillic/CJK/emoji characters.
         // ------------------------------------------------------------------
         let ch_len = input[pos..].chars().next().map_or(1, char::len_utf8);
         tokens.push(Token {
@@ -967,6 +1001,105 @@ mod tests {
         assert!(!is_sql_keyword("users"));
         assert!(!is_sql_keyword("foobar"));
         assert!(!is_sql_keyword(""));
+        // Logical operators are NOT in the keyword table — they get Operator.
+        assert!(!is_sql_keyword("AND"));
+        assert!(!is_sql_keyword("OR"));
+        assert!(!is_sql_keyword("NOT"));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_sql_logical_op tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_sql_logical_op_upper() {
+        assert!(is_sql_logical_op("AND"));
+        assert!(is_sql_logical_op("OR"));
+        assert!(is_sql_logical_op("NOT"));
+    }
+
+    #[test]
+    fn test_is_sql_logical_op_lower() {
+        assert!(is_sql_logical_op("and"));
+        assert!(is_sql_logical_op("or"));
+        assert!(is_sql_logical_op("not"));
+    }
+
+    #[test]
+    fn test_is_sql_logical_op_mixed_case() {
+        assert!(is_sql_logical_op("And"));
+        assert!(is_sql_logical_op("nOt"));
+    }
+
+    #[test]
+    fn test_is_sql_logical_op_false() {
+        assert!(!is_sql_logical_op("SELECT"));
+        assert!(!is_sql_logical_op("WHERE"));
+        assert!(!is_sql_logical_op("NOTIFY")); // starts with NOT but not NOT
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-category coloring tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tokenize_and_is_operator() {
+        // AND, OR, NOT must resolve to Operator (dim), not Keyword (bold blue).
+        let tokens = token_kinds("a AND b");
+        let and_tok = tokens.iter().find(|(_, t)| t.eq_ignore_ascii_case("and"));
+        assert_eq!(
+            and_tok.unwrap().0,
+            TokenKind::Operator,
+            "AND must be Operator, not Keyword"
+        );
+    }
+
+    #[test]
+    fn test_tokenize_or_is_operator() {
+        let tokens = token_kinds("x OR y");
+        let tok = tokens.iter().find(|(_, t)| t.eq_ignore_ascii_case("or"));
+        assert_eq!(tok.unwrap().0, TokenKind::Operator);
+    }
+
+    #[test]
+    fn test_tokenize_not_is_operator() {
+        let tokens = token_kinds("NOT NULL");
+        let tok = tokens.iter().find(|(_, t)| t.eq_ignore_ascii_case("not"));
+        assert_eq!(tok.unwrap().0, TokenKind::Operator);
+    }
+
+    #[test]
+    fn test_tokenize_notify_is_keyword() {
+        // NOTIFY shares prefix with NOT but is a keyword, not a logical op.
+        let tokens = token_kinds("NOTIFY");
+        assert_eq!(tokens[0].0, TokenKind::Keyword);
+    }
+
+    #[test]
+    fn test_highlight_sql_operator_color_is_dim() {
+        // Operators should now be rendered with dim escape, not cyan.
+        let result = highlight_sql("a = b", None);
+        assert!(
+            result.contains("\x1b[2m"),
+            "expected dim ANSI code for operator"
+        );
+        assert!(
+            !result.contains("\x1b[36m"),
+            "cyan ANSI code must not appear for operators"
+        );
+    }
+
+    #[test]
+    fn test_highlight_sql_and_is_dim_not_blue() {
+        // AND must be rendered dim, not bold blue.
+        let result = highlight_sql("a AND b", None);
+        let stripped = strip_ansi(result.as_ref());
+        assert_eq!(stripped, "a AND b");
+        // No bold-blue keyword escape for AND.
+        assert!(
+            !result.contains("\x1b[1;34mAND"),
+            "AND must not be colored as keyword"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -974,19 +1107,37 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_tokenize_semicolon_is_normal() {
+    fn test_tokenize_semicolon_is_operator() {
+        // Semicolons are now classified as Operator (dim) so they recede.
         let tokens = token_kinds("SELECT 1;");
         let last = tokens.last().unwrap();
-        assert_eq!(last.0, TokenKind::Normal);
+        assert_eq!(last.0, TokenKind::Operator);
         assert_eq!(last.1, ";");
     }
 
     #[test]
-    fn test_tokenize_paren_is_normal() {
+    fn test_tokenize_paren_is_operator() {
+        // Parentheses are classified as Operator (dim).
         let tokens = token_kinds("count(*)");
-        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.0).collect();
-        // '(' and ')' and '*' should all appear.
-        assert!(kinds.contains(&TokenKind::Normal));
+        let open = tokens.iter().find(|(_, t)| *t == "(");
+        let close = tokens.iter().find(|(_, t)| *t == ")");
+        assert_eq!(open.unwrap().0, TokenKind::Operator, "'(' must be Operator");
+        assert_eq!(
+            close.unwrap().0,
+            TokenKind::Operator,
+            "')' must be Operator"
+        );
+    }
+
+    #[test]
+    fn test_tokenize_comma_is_operator() {
+        let tokens = token_kinds("a, b");
+        let comma = tokens.iter().find(|(_, t)| *t == ",");
+        assert_eq!(
+            comma.unwrap().0,
+            TokenKind::Operator,
+            "',' must be Operator"
+        );
     }
 
     #[test]
