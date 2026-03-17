@@ -310,7 +310,7 @@ pub(super) async fn stream_completion(
 
     // Render markdown on the fully-collected content and print.
     let content = buf.lock().map(|b| b.clone()).unwrap_or_default();
-    let rendered = crate::markdown::render_markdown(&content, false);
+    let rendered = crate::markdown::render_markdown(&content, no_highlight);
     print!("{rendered}");
     let _ = io::stdout().flush();
 
