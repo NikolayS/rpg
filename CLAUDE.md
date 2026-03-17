@@ -2,7 +2,7 @@
 
 ## Project
 
-Rpg — modern Postgres terminal with built-in diagnostics and AI assistant. Repo: NikolayS/project-alpha.
+rpg — modern Postgres terminal with built-in diagnostics and AI assistant. Repo: NikolayS/rpg.
 
 ## Style rules
 
@@ -93,6 +93,20 @@ timeout 10 kubectl exec pod-name -n namespace -- \
 - Exception: PostgreSQL config values use PG format (`shared_buffers = '32GB'`)
 - Dynamic UI: relative timestamps with ISO 8601 hover tooltip
 - Static content: absolute timestamps `YYYY-MM-DD HH:mm:ss UTC`
+
+## PR workflow (mandatory for all agents)
+
+Every PR must go through this sequence before merge — no exceptions:
+
+1. **CI green** — all GitHub Actions checks pass
+2. **REV review** — run `/review-mr <PR-URL>` and get no BLOCKING issues
+   - REV is the parallel AI review system: https://gitlab.com/postgres-ai/rev/
+   - For GitHub PRs: fetch diff with `gh pr diff <number> --repo NikolayS/rpg`, then run the review agents (security, bugs, tests, guidelines, docs) and post the report as a PR comment
+   - A review with only NON-BLOCKING / POTENTIAL / INFO findings is a **pass**
+   - Any BLOCKING finding must be fixed first, then re-review
+3. **Merge** — squash merge: `gh pr merge <number> --squash --repo NikolayS/rpg`
+
+**Copyright:** always `Copyright 2026` — never a year range like `2024-2026`.
 
 ## Architecture
 
