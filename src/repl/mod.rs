@@ -1782,7 +1782,7 @@ fn print_profiles(config: &crate::config::Config) {
 fn print_copyright(server_version: Option<&str>) {
     println!(
         "rpg — modern Postgres terminal
-Copyright (c) 2026, Nikolay Samokhvalov and contributors
+Copyright (c) 2024-2026, Nikolay Samokhvalov and contributors
 https://github.com/NikolayS/rpg
 
 Licensed under the Apache License, Version 2.0."
