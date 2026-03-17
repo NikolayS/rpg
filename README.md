@@ -62,6 +62,19 @@ explain select * from orders where status = 'pending';
 /optimize
 ```
 
+### \text2sql — natural language to SQL
+
+```
+postgres=# \text2sql
+Input mode: text2sql
+postgres=#
+postgres=# what is DB size?
+ db_size
+---------
+ 58 MB
+(1 row)
+```
+
 ### /fix — auto-correct errors
 
 ```
