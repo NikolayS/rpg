@@ -1171,9 +1171,7 @@ pub(super) async fn handle_ai_fix(
     // (below) whether the suggestion itself failed.  This prevents the AI
     // from looping on the same wrong fix.
     settings.conversation.push_user(user_content);
-    settings
-        .conversation
-        .push_assistant(result.content.clone());
+    settings.conversation.push_assistant(result.content.clone());
 
     // If the response contains a corrected SQL block, offer to execute it.
     if let Some(fix_sql) = extract_last_sql_block(&result.content) {
