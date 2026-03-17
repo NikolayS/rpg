@@ -82,13 +82,6 @@ postgres=# \set AI_PROVIDER anthropic
 postgres=# \set AI_MODEL claude-sonnet-4-20250514
 ```
 
-## Health checks and reports
-
-```bash
-rpg --check    # run all health checks and exit
-rpg --report   # generate a full diagnostic report
-```
-
 ## SSH tunnel
 
 Connect through an SSH bastion with no extra tooling:
@@ -102,7 +95,7 @@ rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 - **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
 - **DBA diagnostics** — 15+ `\dba` commands for activity, locks, bloat, indexes
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
-- **pgcli-style completion** — dropdown with arrow navigation, schema-aware
+- **Schema-aware completion** — tab completion for tables, columns, keywords
 - **TUI pager** — scrollable pager for large result sets
 - **Syntax highlighting** — SQL keywords, strings, schema objects
 - **Named queries** — save and recall frequent queries
