@@ -24,7 +24,7 @@ use super::*;
 pub(super) fn print_result_set_pset(
     writer: &mut dyn io::Write,
     col_names: &[String],
-    rows: &[Vec<String>],
+    rows: &[Vec<Option<String>>],
     is_select: bool,
     rows_affected: u64,
     is_first: bool,
@@ -34,16 +34,6 @@ pub(super) fn print_result_set_pset(
     use crate::query::{ColumnMeta, RowSet};
 
     if is_select && !col_names.is_empty() {
-        // simple_query returns NULL as empty string; we wrap every cell
-        // in Some to distinguish "empty string" from "NULL" at the pset
-        // formatting layer (which uses null_display).  The distinction
-        // is lost at this protocol level; a future migration to the
-        // extended query protocol (issue #21) will fix this.
-        let row_data: Vec<Vec<Option<String>>> = rows
-            .iter()
-            .map(|r| r.iter().map(|v| Some(v.clone())).collect())
-            .collect();
-
         // Heuristic: psql right-aligns numeric columns using type OIDs from
         // the wire protocol.  The simple query protocol does not expose OIDs,
         // so we infer numeric columns by inspecting cell values.  A column is
@@ -55,7 +45,7 @@ pub(super) fn print_result_set_pset(
             .enumerate()
             .map(|(col_idx, n)| {
                 let mut has_value = false;
-                let is_numeric = row_data.iter().all(|row| {
+                let is_numeric = rows.iter().all(|row| {
                     match row.get(col_idx).and_then(|v| v.as_deref()) {
                         None | Some("") => true, // NULL or empty: skip, don't disqualify
                         Some(val) => {
@@ -73,7 +63,7 @@ pub(super) fn print_result_set_pset(
 
         let rs = RowSet {
             columns,
-            rows: row_data,
+            rows: rows.to_vec(),
         };
 
         let mut out = String::new();
@@ -199,7 +189,7 @@ pub async fn execute_query(
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
-            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
             // `is_select` is set to true when we receive a RowDescription
             // message (or any Row message).  This distinguishes an empty
             // SELECT (zero rows but column headers) from a DML command.
@@ -228,8 +218,8 @@ pub async fn execute_query(
                                 })
                                 .collect();
                         }
-                        let vals: Vec<String> = (0..row.len())
-                            .map(|i| row.get(i).unwrap_or("").to_owned())
+                        let vals: Vec<Option<String>> = (0..row.len())
+                            .map(|i| row.get(i).map(str::to_owned))
                             .collect();
                         rows.push(vals);
                     }
@@ -239,8 +229,7 @@ pub async fn execute_query(
                         if auto_explain_active && result_set_index == 0 {
                             let plan_text: String = rows
                                 .iter()
-                                .filter_map(|r| r.first())
-                                .cloned()
+                                .filter_map(|r| r.first().and_then(|v| v.as_deref()).map(str::to_owned))
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             if !plan_text.is_empty() {
