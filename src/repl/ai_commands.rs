@@ -736,12 +736,11 @@ pub(super) async fn handle_ai_ask(
                 // Decide whether to prompt before executing.
                 let read_only = !is_write_query(sql);
                 let choice = if text2sql_show {
-                    // text2sql interactive: SQL box was shown; read-only defaults
-                    // yes, write queries default no to avoid accidental mutation.
+                    // text2sql interactive: SQL box was shown; always default yes.
                     if read_only {
                         ask_yne_prompt("Execute? [Y/n/e] ", true)
                     } else {
-                        ask_yne_prompt("Execute write query? [y/N/e] ", false)
+                        ask_yne_prompt("Execute write query? [Y/n/e] ", true)
                     }
                 } else if yolo {
                     // Yolo: auto-execute; warn on write queries.
@@ -754,8 +753,8 @@ pub(super) async fn handle_ai_ask(
                     }
                     AskChoice::Yes
                 } else if !read_only {
-                    // /ask interactive mode, write query: require explicit yes.
-                    ask_yne_prompt("Execute (write query)? [y/N/e] ", false)
+                    // /ask interactive mode, write query: default yes.
+                    ask_yne_prompt("Execute (write query)? [Y/n/e] ", true)
                 } else {
                     // /ask interactive mode, read-only: auto-execute.
                     AskChoice::Yes
@@ -942,7 +941,7 @@ pub(super) async fn handle_ai_plan(
     record_token_usage(settings, &result);
 
     // Offer to save the plan.
-    if ask_yn_prompt("Save this plan? [y/N] ", false) {
+    if ask_yn_prompt("Save this plan? [Y/n] ", true) {
         let plans_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("rpg")
