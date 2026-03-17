@@ -506,7 +506,11 @@ pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
                 // Enter — use the default.
                 (KeyCode::Enter, _) => {
                     let _ = write!(io::stderr(), "\r\n");
-                    break if default_yes { AskChoice::Yes } else { AskChoice::No };
+                    break if default_yes {
+                        AskChoice::Yes
+                    } else {
+                        AskChoice::No
+                    };
                 }
                 (KeyCode::Char('y') | KeyCode::Char('Y'), _) => {
                     let _ = write!(io::stderr(), "y\r\n");
