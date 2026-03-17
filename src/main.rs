@@ -454,6 +454,9 @@ fn build_settings(
     // timing the config default applies when the corresponding CLI override
     // has not been set.
     let no_highlight = cli.no_highlight || !cfg.display.highlight;
+    // Sync into pset so NULL-cell dim rendering is also suppressed when
+    // highlighting is disabled via CLI flag or config.
+    pset.no_highlight = no_highlight;
     let pager_enabled = cfg.display.pager;
     let timing = cfg.display.timing;
     let safety_enabled = cfg.safety.destructive_warning;

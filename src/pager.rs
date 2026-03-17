@@ -158,12 +158,18 @@ pub fn run_pager(content: &str) -> io::Result<()> {
 
 /// Pipe `content` to an external pager command.
 ///
-/// Spawns `cmd` as a child process, writes all of `content` to its stdin,
-/// drops stdin (signalling EOF), and waits for the child to exit.
+/// Spawns `cmd` as a child process via `sh -c`, writes all of `content` to
+/// its stdin, drops stdin (signalling EOF), and waits for the child to exit.
 ///
-/// Returns `Ok(())` if the child was spawned and exited (any exit code is
-/// treated as success from the caller's perspective — the pager ran).
-/// Returns an `Err` if the child could not be spawned.
+/// After the child exits, emits a minimal set of ANSI reset sequences so
+/// that pagers which use the alternate screen buffer (e.g. pspg, less without
+/// `-X`) do not leave the terminal in a damaged state.
+///
+/// # Errors
+///
+/// Returns an `Err` with `ErrorKind::NotFound` when the shell exits with
+/// code 127 (command not found).  Returns other `Err` variants when the
+/// child process cannot be spawned.
 pub fn run_pager_external(cmd: &str, content: &str) -> io::Result<()> {
     let mut child = Command::new("sh")
         .args(["-c", cmd])
@@ -176,7 +182,28 @@ pub fn run_pager_external(cmd: &str, content: &str) -> io::Result<()> {
         let _ = stdin.write_all(content.as_bytes());
     }
 
-    child.wait()?;
+    let status = child.wait()?;
+
+    // Exit code 127 means the shell could not find the pager binary.
+    // Surface this as NotFound so the caller can show a helpful message
+    // and fall back to printing directly to stdout.
+    if status.code() == Some(127) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "pager command not found (shell exited 127)",
+        ));
+    }
+
+    // Reset any terminal state the external pager may have left behind:
+    //   \x1b[?1049l — exit alternate screen buffer (no-op if not active)
+    //   \x1b[?25h   — ensure cursor is visible
+    //   \x1b[r      — reset scroll region to full terminal
+    //   \x1b[m      — reset character attributes
+    // Written to stderr so these sequences don't appear in redirected output.
+    let mut stderr = io::stderr();
+    let _ = stderr.write_all(b"\x1b[?1049l\x1b[?25h\x1b[r\x1b[m");
+    let _ = stderr.flush();
+
     Ok(())
 }
 

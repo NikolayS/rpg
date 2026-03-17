@@ -1885,9 +1885,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "ECHO_HIDDEN" {
         settings.echo_hidden = value == "on";
     }
-    // Mirror HIGHLIGHT into the settings flag.
+    // Mirror HIGHLIGHT into the settings flag and pset config.
     if name == "HIGHLIGHT" {
         settings.no_highlight = value == "off";
+        settings.pset.no_highlight = settings.no_highlight;
     }
     // Mirror PAGER into pager_enabled / pager_command.
     if name == "PAGER" {
@@ -2045,6 +2046,11 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
         // Mirror TEXT2SQL_SHOW_SQL.
         if name == "TEXT2SQL_SHOW_SQL" {
             settings.text2sql_show_sql = true;
+        }
+        // Mirror HIGHLIGHT (unsetting re-enables highlighting).
+        if name == "HIGHLIGHT" {
+            settings.no_highlight = false;
+            settings.pset.no_highlight = false;
         }
     } else {
         eprintln!("\\unset: variable {name} was not set");

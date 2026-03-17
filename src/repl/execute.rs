@@ -1260,7 +1260,14 @@ pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSett
 pub(super) fn run_pager_for_text(settings: &ReplSettings, text: &str, raw_bytes: &[u8]) {
     if let Some(ref cmd) = settings.pager_command {
         if let Err(e) = crate::pager::run_pager_external(cmd, text) {
-            eprintln!("rpg: pager error: {e}");
+            if e.kind() == io::ErrorKind::NotFound {
+                eprintln!(
+                    "rpg: pager '{cmd}' not found — check your PAGER setting \
+                     (\\set PAGER off to disable)"
+                );
+            } else {
+                eprintln!("rpg: pager error: {e}");
+            }
             let _ = io::stdout().write_all(raw_bytes);
         }
     } else if let Err(e) = crate::pager::run_pager(text) {

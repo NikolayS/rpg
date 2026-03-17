@@ -109,6 +109,8 @@ pub struct PsetConfig {
     pub title: Option<String>,
     /// Expanded display mode.
     pub expanded: ExpandedMode,
+    /// When `true`, suppress ANSI colour codes in output (mirrors `\set HIGHLIGHT off`).
+    pub no_highlight: bool,
 }
 
 impl Default for PsetConfig {
@@ -123,6 +125,7 @@ impl Default for PsetConfig {
             footer: true,
             title: None,
             expanded: ExpandedMode::Off,
+            no_highlight: false,
         }
     }
 }
@@ -782,7 +785,24 @@ pub fn format_duration(d: Duration) -> String {
 /// Returns the terminal display width of a string, handling multi-byte and
 /// double-width Unicode characters (CJK, emoji, …).
 pub fn display_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
+    // Strip ANSI CSI escape sequences (ESC [ ... final-byte) before measuring
+    // so that colour codes embedded in cell values don't inflate the width.
+    let mut visible = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+                          // Consume until the CSI final byte (0x40–0x7E).
+            for c in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            visible.push(ch);
+        }
+    }
+    UnicodeWidthStr::width(visible.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -819,8 +839,15 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg
     }
 
     // Data rows.
+    // When highlighting is on and null_display is non-empty, render NULL cells
+    // with ANSI dim so they are visually distinct from empty-string cells.
+    let null_rendered = if !pcfg.no_highlight && !null_str.is_empty() {
+        format!("\x1b[2m{null_str}\x1b[0m")
+    } else {
+        null_str.to_owned()
+    };
     for row in rows {
-        let null = null_str.clone();
+        let null = null_rendered.clone();
         write_aligned_row_border(
             out,
             cols,
@@ -1100,6 +1127,14 @@ mod tests {
     fn test_display_width_mixed() {
         // ASCII (1) + CJK (2) + ASCII (3) = 6
         assert_eq!(display_width("a中bc"), 5);
+    }
+
+    #[test]
+    fn test_display_width_ansi_stripped() {
+        // ANSI dim codes must not inflate the measured width.
+        assert_eq!(display_width("\x1b[2mNULL\x1b[0m"), 4);
+        assert_eq!(display_width("\x1b[33mhello\x1b[39m"), 5);
+        assert_eq!(display_width("\x1b[2m\x1b[0m"), 0);
     }
 
     // -----------------------------------------------------------------------
