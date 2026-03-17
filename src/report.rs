@@ -41,10 +41,6 @@ fn run_report_text(server_version: &str) -> i32 {
     println!();
     println!("PostgreSQL server version: {server_version}");
     println!();
-    println!(
-        "Use \\dba in the interactive REPL for diagnostic queries."
-    );
-    println!();
     println!("Use \\dba in the interactive REPL for diagnostic queries.");
     println!();
     println!("=== Summary ===");
