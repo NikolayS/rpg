@@ -54,7 +54,7 @@ Integrates with OpenAI, Anthropic, and Ollama:
 /ask What indexes should I add for my orders table?
 
 -- Interpret EXPLAIN (ANALYZE, BUFFERS) output
-explain select * from orders where status = 'pending';
+select * from orders where status = 'pending';
 /explain
 
 -- Fix errors and optimize queries
