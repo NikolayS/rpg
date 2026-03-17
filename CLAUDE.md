@@ -98,9 +98,6 @@ timeout 10 kubectl exec pod-name -n namespace -- \
 
 See `SPEC.md` for the full specification. Key concepts:
 
-- **AAA Architecture** — Analyzer / Actor / Auditor (triangle, not pipeline)
-- **O/S/A Autonomy** — Observe / Supervised / Auto (per-feature)
-- **Evidence Classification** — Factual / Heuristic / Advisory
 - **Language:** Rust
 - **Wire protocol:** tokio-postgres
 - **PG support:** 14-18

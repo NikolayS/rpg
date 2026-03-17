@@ -42,8 +42,7 @@ fn run_report_text(server_version: &str) -> i32 {
     println!("PostgreSQL server version: {server_version}");
     println!();
     println!(
-        "Note: detailed analyzer reports (vacuum, bloat, index health, etc.) \
-         have moved to the autonomous agent component."
+        "Use \\dba in the interactive REPL for diagnostic queries."
     );
     println!();
     println!("Use \\dba in the interactive REPL for diagnostic queries.");
@@ -68,7 +67,7 @@ fn run_report_json(server_version: &str) -> i32 {
             "warnings": 0,
             "clean": 0,
         },
-        "note": "Detailed analyzer reports have moved to the autonomous agent component.",
+        "note": "Use \\dba in the interactive REPL for diagnostic queries.",
     });
 
     println!(

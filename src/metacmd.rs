@@ -529,7 +529,7 @@ pub fn parse(input: &str) -> ParsedMeta {
 // Command-specific parsers
 // ---------------------------------------------------------------------------
 
-/// Parse `\a` (toggle align), `\aaa [sub]`, or `\autonomy [area level]`.
+/// Parse `\a` (toggle align).
 fn parse_a_family(input: &str) -> ParsedMeta {
     // Bare `\a` — toggle aligned/unaligned output.
     parse_simple_or_unknown(input, "a", MetaCmd::ToggleAlign)
