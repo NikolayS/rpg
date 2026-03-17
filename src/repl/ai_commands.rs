@@ -713,9 +713,7 @@ pub(super) async fn handle_ai_ask(
                         if settings.i_know_what_im_doing {
                             eprintln!("-- YOLO: auto-executing write query");
                         } else {
-                            eprintln!(
-                                "-- YOLO: write query executing — proceed with care"
-                            );
+                            eprintln!("-- YOLO: write query executing — proceed with care");
                         }
                     }
                     AskChoice::Yes
@@ -723,8 +721,7 @@ pub(super) async fn handle_ai_ask(
 
                 match choice {
                     AskChoice::Yes => {
-                        let ok =
-                            execute_query_interactive(client, sql, settings, tx).await;
+                        let ok = execute_query_interactive(client, sql, settings, tx).await;
                         if ok {
                             settings.conversation.push_query_result(sql, "(executed)");
                         }
@@ -736,8 +733,7 @@ pub(super) async fn handle_ai_ask(
                                 eprintln!("(empty — skipped)");
                             } else {
                                 let ok =
-                                    execute_query_interactive(client, edited, settings, tx)
-                                        .await;
+                                    execute_query_interactive(client, edited, settings, tx).await;
                                 if ok {
                                     settings
                                         .conversation
