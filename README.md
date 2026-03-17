@@ -11,7 +11,7 @@ Build from source (requires Rust 1.85+):
 git clone https://github.com/NikolayS/rpg.git
 cd rpg
 cargo build --release
-cp ./target/release/rpg /usr/local/bin/
+sudo cp ./target/release/rpg /usr/local/bin/
 ```
 
 ## Connect
