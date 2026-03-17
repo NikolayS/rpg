@@ -148,6 +148,16 @@ postgres=# select id, name, deleted_at from users limit 3;
 (3 rows)
 ```
 
+### External pager (pspg)
+
+[pspg](https://github.com/okbob/pspg) is supported as an external pager:
+
+```
+\set PAGER pspg
+```
+
+Or set `PAGER=pspg` in your environment before launching rpg.
+
 ## DBA diagnostics
 
 15+ diagnostic commands accessible via `\dba`:
