@@ -1021,6 +1021,9 @@ pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
     highlight: bool,
+    /// Current input mode — SQL highlighting is suppressed in `Text2Sql` mode
+    /// because the user is typing natural language, not SQL.
+    input_mode: crate::repl::InputMode,
     /// Whether schema-aware tab completion is active.
     ///
     /// When `false`, `complete()` returns no candidates (toggled by F2).
@@ -1056,6 +1059,7 @@ impl RpgHelper {
         Self {
             cache,
             highlight,
+            input_mode: crate::repl::InputMode::Sql,
             completion_enabled: true,
             dropdown_completion_enabled: false,
             dropdown: Arc::new(Mutex::new(DropdownState::default())),
@@ -1079,6 +1083,11 @@ impl RpgHelper {
     /// Enable or disable syntax highlighting at runtime.
     pub fn set_highlight(&mut self, enabled: bool) {
         self.highlight = enabled;
+    }
+
+    /// Update the current input mode so the highlighter can adapt.
+    pub fn set_input_mode(&mut self, mode: crate::repl::InputMode) {
+        self.input_mode = mode;
     }
 
     /// Enable or disable schema-aware tab completion at runtime.
@@ -1336,24 +1345,25 @@ impl Validator for RpgHelper {}
 
 impl Highlighter for RpgHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
-        if self.highlight_enabled() {
-            // Build a set of known schema object names (tables + columns) for
-            // schema-aware identifier colouring.  We do this inline on each
-            // keystroke so it stays fresh after a cache reload; the lock is
-            // held only for the duration of the set construction.
-            let schema_names: Option<std::collections::HashSet<String>> =
-                self.cache.read().ok().map(|cache| {
-                    cache
-                        .tables
-                        .iter()
-                        .map(|t| t.name.to_lowercase())
-                        .chain(cache.columns.iter().map(|c| c.name.to_lowercase()))
-                        .collect()
-                });
-            crate::highlight::highlight_sql(line, schema_names.as_ref())
-        } else {
-            std::borrow::Cow::Borrowed(line)
+        // In text2sql mode the user types natural language, not SQL —
+        // SQL syntax highlighting would be meaningless and distracting.
+        if !self.highlight_enabled() || self.input_mode == crate::repl::InputMode::Text2Sql {
+            return std::borrow::Cow::Borrowed(line);
         }
+        // Build a set of known schema object names (tables + columns) for
+        // schema-aware identifier colouring.  We do this inline on each
+        // keystroke so it stays fresh after a cache reload; the lock is
+        // held only for the duration of the set construction.
+        let schema_names: Option<std::collections::HashSet<String>> =
+            self.cache.read().ok().map(|cache| {
+                cache
+                    .tables
+                    .iter()
+                    .map(|t| t.name.to_lowercase())
+                    .chain(cache.columns.iter().map(|c| c.name.to_lowercase()))
+                    .collect()
+            });
+        crate::highlight::highlight_sql(line, schema_names.as_ref())
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {

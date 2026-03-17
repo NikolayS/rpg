@@ -536,21 +536,6 @@ pub enum ExecMode {
 }
 
 // ---------------------------------------------------------------------------
-// YOLO write-action decision
-// ---------------------------------------------------------------------------
-
-/// Outcome of the YOLO-mode safety check for write queries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum YoloWriteAction {
-    /// Block the write.
-    Block,
-    /// Execute but emit a caution warning.
-    WarnThenExecute,
-    /// Execute silently.
-    Execute,
-}
-
-// ---------------------------------------------------------------------------
 // Auto-EXPLAIN mode
 // ---------------------------------------------------------------------------
 
@@ -1029,6 +1014,15 @@ pub struct ReplSettings {
     /// hint is suppressed for any error produced by the fixed query,
     /// avoiding suggestion loops.  Cleared after each query execution.
     pub last_was_fix: bool,
+    /// Whether to show the generated SQL box in `\text2sql` mode.
+    ///
+    /// Defaults to `true`. When `true`, the SQL is printed in a
+    /// `┌── sql` box before execution and the user is prompted
+    /// `Execute? [Y/n/e]`.  When `false` (or when `exec_mode == Yolo`),
+    /// the SQL is hidden and auto-executed without confirmation.
+    ///
+    /// Toggle with `\set TEXT2SQL_SHOW_SQL on/off`.
+    pub text2sql_show_sql: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1123,6 +1117,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("last_query_duration_ms", &self.last_query_duration_ms)
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
+            .field("text2sql_show_sql", &self.text2sql_show_sql)
             .finish()
     }
 }
@@ -1183,6 +1178,7 @@ impl Default for ReplSettings {
             last_query_duration_ms: None,
             auto_suggest_fix: true,
             last_was_fix: false,
+            text2sql_show_sql: true,
         }
     }
 }
@@ -1687,9 +1683,10 @@ Input/execution modes:
   \sql              switch to SQL input mode (default)
   \text2sql / \t2s  switch to text2sql input mode
   \plan             enter plan execution mode
-  \yolo             enter YOLO execution mode
+  \yolo             enter YOLO execution mode (hides SQL box, auto-executes)
   \interactive      return to interactive mode (default)
   \mode             show current input and execution mode
+  \\set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
 
 Auto-EXPLAIN:
   \\set EXPLAIN on       show EXPLAIN for every query
@@ -1938,6 +1935,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "AI_SHOW_SQL" {
         settings.config.ai.show_sql = matches!(value, "on" | "true" | "1");
     }
+    // Mirror TEXT2SQL_SHOW_SQL into text2sql_show_sql.
+    if name == "TEXT2SQL_SHOW_SQL" {
+        settings.text2sql_show_sql = matches!(value, "on" | "true" | "1");
+    }
     // Mirror AI_PROVIDER into config.ai.provider.
     if name == "AI_PROVIDER" {
         const KNOWN_PROVIDERS: &[&str] = &["anthropic", "claude", "openai", "ollama"];
@@ -2040,6 +2041,10 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
         // Mirror AI_MODEL.
         if name == "AI_MODEL" {
             settings.config.ai.model = None;
+        }
+        // Mirror TEXT2SQL_SHOW_SQL.
+        if name == "TEXT2SQL_SHOW_SQL" {
+            settings.text2sql_show_sql = true;
         }
     } else {
         eprintln!("\\unset: variable {name} was not set");
@@ -3588,9 +3593,10 @@ async fn run_readline_loop(
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
 
         // Keep the completion helper in sync with the current prompt width
-        // so the dropdown aligns under the word being completed.
+        // and input mode (text2sql suppresses SQL syntax highlighting).
         if let Some(helper) = rl.helper_mut() {
             helper.set_prompt_width(prompt.chars().count());
+            helper.set_input_mode(settings.input_mode);
         }
 
         match rl.readline(&prompt) {
@@ -5625,6 +5631,36 @@ mod tests {
     fn last_was_fix_default_is_false() {
         let s = ReplSettings::default();
         assert!(!s.last_was_fix);
+    }
+
+    #[test]
+    fn text2sql_show_sql_default_is_true() {
+        let s = ReplSettings::default();
+        assert!(s.text2sql_show_sql);
+    }
+
+    #[test]
+    fn set_text2sql_show_sql_off_disables_flag() {
+        let mut s = ReplSettings::default();
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "off");
+        assert!(!s.text2sql_show_sql);
+    }
+
+    #[test]
+    fn set_text2sql_show_sql_on_enables_flag() {
+        let mut s = ReplSettings::default();
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "off");
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "on");
+        assert!(s.text2sql_show_sql);
+    }
+
+    #[test]
+    fn unset_text2sql_show_sql_resets_to_default() {
+        let mut s = ReplSettings::default();
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "off");
+        assert!(!s.text2sql_show_sql);
+        apply_unset(&mut s, "TEXT2SQL_SHOW_SQL");
+        assert!(s.text2sql_show_sql);
     }
 
     #[test]

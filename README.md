@@ -54,7 +54,7 @@ Integrates with OpenAI, Anthropic, and Ollama:
 /ask What indexes should I add for my orders table?
 
 -- Interpret EXPLAIN (ANALYZE, BUFFERS) output
-explain select * from orders where status = 'pending';
+select * from orders where status = 'pending';
 /explain
 
 -- Fix errors and optimize queries
@@ -64,16 +64,37 @@ explain select * from orders where status = 'pending';
 
 ### \text2sql — natural language to SQL
 
+By default, the generated SQL is shown in a preview box and you confirm before it runs:
+
 ```
 postgres=# \text2sql
 Input mode: text2sql
-postgres=#
+postgres=# what is DB size?
+┌── sql
+select pg_size_pretty(pg_database_size(current_database())) as db_size;
+└───────
+Execute? [Y/n/e]
+ db_size
+---------
+ 58 MB
+(1 row)
+```
+
+### \yolo — silent auto-execute
+
+`\yolo` hides the SQL box and executes immediately without confirmation:
+
+```
+postgres=# \yolo
+Execution mode: yolo
 postgres=# what is DB size?
  db_size
 ---------
  58 MB
 (1 row)
 ```
+
+Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview in text2sql mode with `\set TEXT2SQL_SHOW_SQL off`.
 
 ### /fix — auto-correct errors
 
