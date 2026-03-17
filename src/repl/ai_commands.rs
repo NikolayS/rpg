@@ -1113,7 +1113,12 @@ pub(super) async fn handle_ai_fix(
          - First, briefly explain what caused the error (1-2 sentences)\n\
          - Then output the corrected SQL query\n\
          - Use standard PostgreSQL syntax\n\
-         - Keep the corrected query as close to the original intent as possible",
+         - Keep the corrected query as close to the original intent as possible\n\
+         - IMPORTANT: columns annotated 'generated always as identity' in the \
+           schema are identity columns — never include them in an INSERT column \
+           list; the database generates their values automatically\n\
+         - Do NOT reference sequences (e.g. nextval) for identity columns; \
+           simply omit those columns from the INSERT",
         dbname = params.dbname,
         schema = schema_ctx,
     );
@@ -1126,16 +1131,18 @@ pub(super) async fn handle_ai_fix(
         error = last_error.error_message,
     );
 
-    let messages = vec![
-        crate::ai::Message {
-            role: crate::ai::Role::System,
-            content: system_content,
-        },
-        crate::ai::Message {
-            role: crate::ai::Role::User,
-            content: user_content,
-        },
-    ];
+    // Build messages: system + any prior /fix attempts from the conversation
+    // history (so repeated /fix calls carry forward what was tried before and
+    // avoid repeating the same wrong suggestions) + the current error.
+    let mut messages = vec![crate::ai::Message {
+        role: crate::ai::Role::System,
+        content: system_content,
+    }];
+    messages.extend(settings.conversation.to_messages());
+    messages.push(crate::ai::Message {
+        role: crate::ai::Role::User,
+        content: user_content.clone(),
+    });
 
     let options = crate::ai::CompletionOptions {
         model: settings.config.ai.model.clone().unwrap_or_default(),
@@ -1158,6 +1165,15 @@ pub(super) async fn handle_ai_fix(
         }
     };
     record_token_usage(settings, &result);
+
+    // Record this fix attempt in the conversation so that the next /fix call
+    // carries forward the full chain: what failed, what was suggested, and
+    // (below) whether the suggestion itself failed.  This prevents the AI
+    // from looping on the same wrong fix.
+    settings.conversation.push_user(user_content);
+    settings
+        .conversation
+        .push_assistant(result.content.clone());
 
     // If the response contains a corrected SQL block, offer to execute it.
     if let Some(fix_sql) = extract_last_sql_block(&result.content) {
