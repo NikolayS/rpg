@@ -98,6 +98,9 @@ timeout 10 kubectl exec pod-name -n namespace -- \
 
 See `SPEC.md` for the full specification. Key concepts:
 
+- **Modern Postgres terminal** — psql replacement with DBA diagnostics and AI assistant
+- **AI via slash commands** — `/ask`, `/fix`, `/explain`, `/optimize`
+- **`\dba` diagnostics** — built-in DBA commands for bloat, vacuuming, index health, wait events
 - **Language:** Rust
 - **Wire protocol:** tokio-postgres
 - **PG support:** 14-18
