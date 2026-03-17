@@ -4143,6 +4143,9 @@ async fn handle_backslash_dumb(
         }
         MetaResult::SetInputMode(mode) => {
             settings.input_mode = mode;
+            // Switching input mode always returns to interactive exec mode
+            // so that \t2s after \yolo doesn't silently execute queries.
+            settings.exec_mode = ExecMode::Interactive;
             let label = match mode {
                 InputMode::Sql => "sql",
                 InputMode::Text2Sql => "text2sql",
