@@ -531,7 +531,7 @@ pub enum ExecMode {
     Interactive,
     /// AI investigates (read-only) and produces a plan document.
     Plan,
-    /// AI auto-executes within configured autonomy level.
+    /// AI auto-executes suggested fixes directly.
     Yolo,
 }
 
@@ -539,14 +539,14 @@ pub enum ExecMode {
 // YOLO write-action decision
 // ---------------------------------------------------------------------------
 
-/// Outcome of the YOLO-mode autonomy boundary check for write queries.
+/// Outcome of the YOLO-mode safety check for write queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum YoloWriteAction {
-    /// Block the write — autonomy level is Observe (L1).
+    /// Block the write.
     Block,
-    /// Execute but emit a caution warning — autonomy level is Supervised (L2).
+    /// Execute but emit a caution warning.
     WarnThenExecute,
-    /// Execute silently — autonomy level is Auto (L3) or bypass flag set.
+    /// Execute silently.
     Execute,
 }
 
@@ -927,11 +927,11 @@ pub struct ReplSettings {
     ///
     /// Populated at connect time by [`crate::capabilities::detect`].
     pub db_capabilities: crate::capabilities::DbCapabilities,
-    /// Bypass autonomy level checks in YOLO mode.
+    /// Bypass safety checks in YOLO mode.
     ///
     /// Set by `--i-know-what-im-doing` CLI flag. When `true` and
-    /// `exec_mode == Yolo`, all write queries are auto-executed regardless
-    /// of the configured autonomy level. Use with extreme care.
+    /// `exec_mode == Yolo`, all write queries are auto-executed. Use
+    /// with extreme care.
     pub i_know_what_im_doing: bool,
     /// Verbosity level for error display, mirroring psql's `\set VERBOSITY`.
     ///
@@ -1625,7 +1625,7 @@ Backslash commands:
   \timing [on|off]      toggle/set query timing display
   \x [on|off|auto]      toggle/set expanded display
   \conninfo[+]    show connection information (+ for verbose pooler/provider details)
-  \copyright      show PostgreSQL usage and distribution terms
+  \copyright      show rpg copyright information
   \version        show rpg version and build information
   \?              show this help
 
@@ -1795,32 +1795,24 @@ fn print_profiles(config: &crate::config::Config) {
     }
 }
 
-/// Print the `PostgreSQL` copyright notice (matches psql `\copyright` output).
-fn print_copyright() {
+/// Print rpg copyright notice, including a pointer to the `PostgreSQL` license.
+fn print_copyright(server_version: Option<&str>) {
     println!(
-        "PostgreSQL Database Management System
-(also known as Postgres, formerly known as Postgres95)
+        "rpg — modern Postgres terminal
+Copyright (c) 2024-2026, Nikolay Samokhvalov and contributors
+https://github.com/NikolayS/rpg
 
-Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
-
-Portions Copyright (c) 1994, The Regents of the University of California
-
-Permission to use, copy, modify, and distribute this software and its
-documentation for any purpose, without fee, and without a written agreement
-is hereby granted, provided that the above copyright notice and this
-paragraph and the following two paragraphs appear in all copies.
-
-IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR
-DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
-LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS
-DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
-INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
-AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
-ON AN \"AS IS\" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
-PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS."
+Licensed under the Apache License, Version 2.0."
+    );
+    if let Some(ver) = server_version {
+        println!();
+        println!("Connected to: {ver}");
+    }
+    println!();
+    println!(
+        "rpg is a PostgreSQL client. It is not part of the PostgreSQL project.
+PostgreSQL is Copyright (c) 1996-2026, PostgreSQL Global Development Group.
+See https://www.postgresql.org/about/licence/"
     );
 }
 
@@ -2815,10 +2807,13 @@ async fn dispatch_meta(
             print_profiles(&settings.config);
         }
         MetaCmd::Copyright => {
-            print_copyright();
+            print_copyright(settings.db_capabilities.server_version.as_deref());
         }
         MetaCmd::Version => {
             println!("{}", crate::version_string());
+            if let Some(ref sv) = settings.db_capabilities.server_version {
+                println!("Server: PostgreSQL {sv}");
+            }
         }
         MetaCmd::SqlMode => {
             return MetaResult::SetInputMode(InputMode::Sql);

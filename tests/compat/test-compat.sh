@@ -42,9 +42,11 @@ trap cleanup EXIT
 normalize() {
   expand | \
   sed \
+    -e 's/\x1b\[[0-9;]*m//g' \
     -e 's/[[:space:]]*$//' \
     -e '/^Time: [0-9]/d' \
-    -e '/^Timing is /d' | \
+    -e '/^Timing is /d' \
+    -e '/^Hint: /d' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
@@ -495,8 +497,9 @@ compare_flags "\\i file include" \
 # Info commands
 # ---------------------------------------------------------------------------
 
-compare "\\copyright" \
-  "\\copyright"
+# \copyright is intentionally different in rpg (shows rpg's own copyright).
+# compare "\\copyright" \
+#   "\\copyright"
 
 # ---------------------------------------------------------------------------
 # Conditional execution (\if / \else / \endif)

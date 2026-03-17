@@ -1,38 +1,21 @@
-# rpg — a modern Postgres terminal
+# rpg — modern Postgres terminal
 
-A psql-compatible terminal with built-in DBA diagnostics, AI assistant, and
-autonomous operations. Single binary, no dependencies, cross-platform.
+[![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
+
+A psql-compatible terminal with built-in DBA diagnostics and AI assistant.
+Single binary, no dependencies, cross-platform.
 
 ## Installation
 
-### Homebrew (macOS / Linux)
+Build from source (requires Rust 1.85+):
 
 ```bash
-brew tap NikolayS/rpg
-brew install rpg
-```
-
-### Install script (macOS / Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NikolayS/project-alpha/main/scripts/install.sh | bash
-```
-
-### Build from source
-
-Requires Rust 1.85+.
-
-```bash
-git clone https://github.com/NikolayS/project-alpha.git
-cd project-alpha
+git clone https://github.com/NikolayS/rpg.git
+cd rpg
 cargo build --release
-cp ./target/release/rpg /usr/local/bin/
-```
-
-### Self-update
-
-```bash
-rpg --update
+sudo cp ./target/release/rpg /usr/local/bin/
 ```
 
 ## Connect
@@ -98,74 +81,40 @@ explain select * from orders where status = 'pending';
 /optimize
 ```
 
+### /fix — auto-correct errors
+
 ```
-postgres=# \set AI_PROVIDER anthropic
-postgres=# \set AI_MODEL claude-sonnet-4-20250514
-```
+postgres=# select * fromm t1 where i = 10;
+ERROR:  syntax error at or near "fromm"
+LINE 1: select * fromm t1 where i = 10;
+                 ^
+Hint: Replace "fromm" with "from".
+Hint: type /fix to auto-correct this query
 
-## Daemon mode
-
-Run as a background monitor with anomaly detection:
-
-```bash
-rpg --daemon --config ~/.config/rpg/config.toml
-```
-
-Continuously observes `pg_stat_activity`, wait events, bloat, and replication
-lag. Fires alerts when thresholds are breached.
-
-## Notifications
-
-Alert on Slack, PagerDuty, Telegram, webhook, or email:
-
-```toml
-[notifications]
-slack_webhook = "https://hooks.slack.com/..."
-pagerduty_key = "..."
-telegram_bot_token = "..."
-email_to = "dba@example.com"
+postgres=# /fix
+Corrected SQL query:
+┌── sql
+select * from t1 where i = 10;
+└───────
+Execute? [Y/n/e]
+  i |             random
+----+--------------------
+ 10 | 0.6895257944299762
+(1 row)
 ```
 
-## Connectors
+### /optimize — index and performance suggestions
 
-Pull context from external systems: Datadog, CloudWatch, Supabase, pganalyze,
-GitHub, GitLab, Jira, and PostgresAI. A plugin system lets you add your own.
-
-```toml
-[connectors.cloudwatch]
-region = "us-east-1"
-log_group = "/aws/rds/instance/mydb/postgresql"
-
-[connectors.pganalyze]
-api_key = "..."
 ```
+postgres=# /optimize
+<runs EXPLAIN ANALYZE, then suggests:>
 
-## Governance (AAA Architecture)
+1. Create an Index on t1.i — parallel seq scan is inefficient for point lookups
+   CREATE INDEX idx_t1_i ON public.t1 (i);
+   Expected: 28ms → sub-millisecond
 
-rpg uses a three-component governance model for all autonomous operations:
-
-- **Analyzer** — reads all database state, diagnoses issues, proposes actions
-- **Actor** — executes only approved actions within defined boundaries
-- **Auditor** — independently reviews both proposals and outcomes; can veto
-
-Autonomy is configured **per feature**, not globally:
-
-```toml
-[autonomy]
-vacuum           = "observe"     # O/S/A: observe / supervised / auto
-index_health     = "supervised"
-query_optimization = "auto"
-```
-
-```bash
-rpg --autonomy vacuum:auto,bloat:supervised
-```
-
-## Health checks and reports
-
-```bash
-rpg --check    # run all health checks and exit
-rpg --report   # generate a full diagnostic report
+2. Run ANALYZE on t1 — statistics may be stale
+   ANALYZE public.t1;
 ```
 
 ## SSH tunnel
@@ -181,9 +130,9 @@ rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 - **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
 - **DBA diagnostics** — 15+ `\dba` commands for activity, locks, bloat, indexes
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
-- **pgcli-style completion** — dropdown with arrow navigation, schema-aware
+- **Schema-aware completion** — tab completion for tables, columns, keywords
 - **TUI pager** — scrollable pager for large result sets
-- **Syntax highlighting** — SQL keywords, strings, schema objects
+- **Syntax highlighting** — SQL keywords, strings, operators; color-coded errors (red), warnings (yellow), notices (cyan)
 - **Named queries** — save and recall frequent queries
 - **Session persistence** — history and settings preserved across sessions
 - **Config profiles** — per-project `.rpg.toml`
@@ -193,6 +142,15 @@ rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 ## PostgreSQL compatibility
 
 Supports PostgreSQL 14, 15, 16, 17, and 18.
+
+## Development
+
+rpg is engineered by [Nikolay Samokhvalov](https://github.com/NikolayS) with a
+team of Claude Opus 4.6 AI agents (via [Claude Code](https://claude.com/claude-code),
+occasionally with OpenClaw). All architecture decisions, feature design, and
+project direction are human-driven. The codebase is large and 100% of the code
+has been AI-reviewed and tested, though only a portion has been manually reviewed
+line-by-line.
 
 ## License
 

@@ -683,13 +683,8 @@ pub(super) async fn handle_ai_ask(
 
                 let read_only = !is_write_query(sql);
 
-                // In YOLO mode, check autonomy level for write queries.
-                //
-                // L1 Observe     — block all writes (read-only fence).
-                // L2 Supervised  — warn then execute.
-                // L3 Auto        — execute silently.
-                //
-                // --i-know-what-im-doing bypasses all level checks.
+                // In YOLO mode, check safety for write queries.
+                // --i-know-what-im-doing bypasses all checks.
                 let yolo_write_action = if yolo && !read_only {
                     if settings.i_know_what_im_doing {
                         YoloWriteAction::Execute
@@ -702,10 +697,8 @@ pub(super) async fn handle_ai_ask(
 
                 if yolo_write_action == YoloWriteAction::Block {
                     eprintln!(
-                        "-- YOLO: write query blocked \
-                         (autonomy level is Observe). \
-                         Use \\set governance.default_autonomy supervised \
-                         or pass --i-know-what-im-doing to bypass"
+                        "-- YOLO: write query blocked. \
+                         Pass --i-know-what-im-doing to bypass"
                     );
                     continue;
                 }
@@ -720,8 +713,7 @@ pub(super) async fn handle_ai_ask(
                             YoloWriteAction::WarnThenExecute => {
                                 eprintln!(
                                     "-- YOLO: write query executing \
-                                     (autonomy level is Supervised \
-                                     — proceed with care)"
+                                     — proceed with care"
                                 );
                             }
                             YoloWriteAction::Execute => {
