@@ -107,7 +107,7 @@ Execute? [Y/n/e]
 
 ```
 postgres=# /optimize
-<runs EXPLAIN ANALYZE, then suggests:>
+<runs EXPLAIN (ANALYZE, BUFFERS), then suggests:>
 
 1. Create an Index on t1.i — parallel seq scan is inefficient for point lookups
    CREATE INDEX idx_t1_i ON public.t1 (i);
