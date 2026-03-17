@@ -310,6 +310,40 @@ impl AiConfig {
             None
         };
     }
+
+    /// Auto-detect provider from well-known environment variables when
+    /// neither `api_key_env` nor `provider` has been set explicitly.
+    ///
+    /// Probes environment variables in priority order:
+    ///
+    /// 1. `ANTHROPIC_API_KEY` → provider `"anthropic"`
+    /// 2. `OPENAI_API_KEY`    → provider `"openai"`
+    /// 3. `OLLAMA_API_KEY`    → provider `"ollama"`
+    ///
+    /// Stops at the first non-empty variable found.  Called after
+    /// [`infer_provider`] so that an explicit `api_key_env` config value
+    /// always takes precedence.
+    pub fn auto_detect_provider(&mut self) {
+        const CANDIDATES: &[(&str, &str)] = &[
+            ("ANTHROPIC_API_KEY", "anthropic"),
+            ("OPENAI_API_KEY", "openai"),
+            ("OLLAMA_API_KEY", "ollama"),
+        ];
+        // Only probe when the config carries no explicit settings.
+        if self.api_key_env.is_some() || self.provider.is_some() {
+            return;
+        }
+        for (env_var, provider_name) in CANDIDATES {
+            match std::env::var(env_var) {
+                Ok(val) if !val.is_empty() => {
+                    self.api_key_env = Some((*env_var).to_owned());
+                    self.provider = Some((*provider_name).to_owned());
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,8 +605,10 @@ pub fn load_config() -> (Config, Vec<String>) {
         }
     }
 
-    // Post-load fixup: infer provider from api_key_env when not explicit.
+    // Post-load fixup: infer provider from api_key_env when not explicit,
+    // then fall back to probing well-known env vars (zero-config case).
     config.ai.infer_provider();
+    config.ai.auto_detect_provider();
 
     // Apply RPG_* environment variable overrides.
     // RPG_DROPDOWN_COMPLETION=1 enables the experimental dropdown menu.
@@ -714,8 +750,10 @@ pub fn merge_project_config(mut base: Config, project: &ProjectConfig) -> Config
         .project_context_files
         .extend_from_slice(&project.ai.context_files);
 
-    // Post-merge fixup: infer provider from api_key_env when not explicit.
+    // Post-merge fixup: infer provider from api_key_env when not explicit,
+    // then fall back to probing well-known env vars (zero-config case).
     base.ai.infer_provider();
+    base.ai.auto_detect_provider();
 
     base
 }
@@ -1454,6 +1492,73 @@ provider = "ollama"
         let mut ai = AiConfig::default();
         ai.infer_provider();
         assert!(ai.provider.is_none());
+    }
+
+    // -- AiConfig::auto_detect_provider -------------------------------------
+
+    #[test]
+    fn auto_detect_finds_anthropic_key() {
+        // Ensure OPENAI and OLLAMA are absent so only ANTHROPIC is visible.
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OLLAMA_API_KEY");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        let mut ai = AiConfig::default();
+        ai.auto_detect_provider();
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert_eq!(ai.provider.as_deref(), Some("anthropic"));
+        assert_eq!(ai.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn auto_detect_anthropic_before_openai() {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        std::env::set_var("OPENAI_API_KEY", "sk-openai-test");
+        let mut ai = AiConfig::default();
+        ai.auto_detect_provider();
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        // Anthropic is checked first and wins.
+        assert_eq!(ai.provider.as_deref(), Some("anthropic"));
+        assert_eq!(ai.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn auto_detect_skipped_when_api_key_env_set() {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        let mut ai = AiConfig {
+            api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.auto_detect_provider();
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        // Explicit api_key_env takes precedence; auto-detect must not fire.
+        assert!(ai.provider.is_none());
+        assert_eq!(ai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn auto_detect_skipped_when_provider_set() {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        let mut ai = AiConfig {
+            provider: Some("ollama".to_owned()),
+            ..AiConfig::default()
+        };
+        ai.auto_detect_provider();
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        // Explicit provider takes precedence; auto-detect must not fire.
+        assert_eq!(ai.provider.as_deref(), Some("ollama"));
+        assert!(ai.api_key_env.is_none());
+    }
+
+    #[test]
+    fn auto_detect_no_env_vars_leaves_none() {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("OLLAMA_API_KEY");
+        let mut ai = AiConfig::default();
+        ai.auto_detect_provider();
+        assert!(ai.provider.is_none());
+        assert!(ai.api_key_env.is_none());
     }
 
     #[test]
