@@ -1671,23 +1671,10 @@ AI commands:
   /fix              diagnose and fix the last error
   /optimize <query> suggest query optimizations
   /describe <table> AI-generated table description
-  /rca              root cause analysis of current database state
   /init             generate .rpg.toml and POSTGRES.md in current directory
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
-
-Governance:
-  \aaa [status]         show governance overview
-  \aaa audit [N]        show last N audit log entries (alias: \aaa log)
-  \aaa vetoes           show active veto patterns
-  \aaa breaker          show circuit breaker status
-
-Health checks:
-  \health [list]        list all health checks
-  \health show <name>   show details for a named health check
-  \health enable <name> enable a health check
-  \health disable <name> disable a health check
 
 Named queries:
   \ns <name> <query>  save a named query (name: alphanumerics + underscores)
@@ -1701,7 +1688,6 @@ Input/execution modes:
   \text2sql / \t2s  switch to text2sql input mode
   \plan             enter plan execution mode
   \yolo             enter YOLO execution mode
-  \observe          enter observe execution mode
   \interactive      return to interactive mode (default)
   \mode             show current input and execution mode
 
@@ -2403,7 +2389,7 @@ pub enum MetaResult {
     ClosePrepared(String),
     /// Switch input mode (`\sql`, `\text2sql`, `\t2s`).
     SetInputMode(InputMode),
-    /// Switch execution mode (`\plan`, `\yolo`, `\observe`, `\interactive`).
+    /// Switch execution mode (`\plan`, `\yolo`, `\interactive`).
     SetExecMode(ExecMode),
     /// Show current mode summary (`\mode`).
     ShowMode,
