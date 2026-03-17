@@ -229,7 +229,9 @@ pub async fn execute_query(
                         if auto_explain_active && result_set_index == 0 {
                             let plan_text: String = rows
                                 .iter()
-                                .filter_map(|r| r.first().and_then(|v| v.as_deref()).map(str::to_owned))
+                                .filter_map(|r| {
+                                    r.first().and_then(|v| v.as_deref()).map(str::to_owned)
+                                })
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             if !plan_text.is_empty() {
