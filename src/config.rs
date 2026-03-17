@@ -904,6 +904,11 @@ pub fn get_profile<'a>(config: &'a Config, name: &str) -> Option<&'a ConnectionP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate process-wide environment variables so that
+    // parallel test threads do not interfere with each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // -- TOML parsing --------------------------------------------------------
 
@@ -1498,6 +1503,7 @@ provider = "ollama"
 
     #[test]
     fn auto_detect_finds_anthropic_key() {
+        let _lock = ENV_LOCK.lock().unwrap();
         // Ensure OPENAI and OLLAMA are absent so only ANTHROPIC is visible.
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OLLAMA_API_KEY");
@@ -1511,6 +1517,7 @@ provider = "ollama"
 
     #[test]
     fn auto_detect_anthropic_before_openai() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
         std::env::set_var("OPENAI_API_KEY", "sk-openai-test");
         let mut ai = AiConfig::default();
@@ -1524,6 +1531,7 @@ provider = "ollama"
 
     #[test]
     fn auto_detect_skipped_when_api_key_env_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
         let mut ai = AiConfig {
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
@@ -1538,6 +1546,7 @@ provider = "ollama"
 
     #[test]
     fn auto_detect_skipped_when_provider_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
         let mut ai = AiConfig {
             provider: Some("ollama".to_owned()),
@@ -1552,6 +1561,7 @@ provider = "ollama"
 
     #[test]
     fn auto_detect_no_env_vars_leaves_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("OLLAMA_API_KEY");
