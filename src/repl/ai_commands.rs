@@ -488,9 +488,8 @@ pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
 
     let mut input = String::new();
     match io::stdin().read_line(&mut input) {
-        // EOF (0 bytes read): Ctrl+C or Ctrl+D — abort, never execute.
-        Ok(0) => return AskChoice::No,
-        Err(_) => return AskChoice::No,
+        // EOF (0 bytes) or error: Ctrl+C / Ctrl+D — abort, never execute.
+        Ok(0) | Err(_) => return AskChoice::No,
         Ok(_) => {}
     }
     let answer = input.trim().to_lowercase();
