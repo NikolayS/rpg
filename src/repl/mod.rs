@@ -1795,18 +1795,24 @@ fn print_profiles(config: &crate::config::Config) {
     }
 }
 
-/// Print rpg copyright notice.
-fn print_copyright() {
+/// Print rpg copyright notice, including a pointer to the `PostgreSQL` license.
+fn print_copyright(server_version: Option<&str>) {
     println!(
         "rpg — modern Postgres terminal
 Copyright (c) 2024-2026, Nikolay Samokhvalov and contributors
 https://github.com/NikolayS/rpg
 
-Licensed under the Apache License, Version 2.0.
-
-rpg is a PostgreSQL client application. It is not part of the
-PostgreSQL project. PostgreSQL is Copyright (c) 1996-2026,
-PostgreSQL Global Development Group."
+Licensed under the Apache License, Version 2.0."
+    );
+    if let Some(ver) = server_version {
+        println!();
+        println!("Connected to: {ver}");
+    }
+    println!();
+    println!(
+        "rpg is a PostgreSQL client. It is not part of the PostgreSQL project.
+PostgreSQL is Copyright (c) 1996-2026, PostgreSQL Global Development Group.
+See https://www.postgresql.org/about/licence/"
     );
 }
 
@@ -2801,10 +2807,13 @@ async fn dispatch_meta(
             print_profiles(&settings.config);
         }
         MetaCmd::Copyright => {
-            print_copyright();
+            print_copyright(settings.db_capabilities.server_version.as_deref());
         }
         MetaCmd::Version => {
             println!("{}", crate::version_string());
+            if let Some(ref sv) = settings.db_capabilities.server_version {
+                println!("Server: PostgreSQL {sv}");
+            }
         }
         MetaCmd::SqlMode => {
             return MetaResult::SetInputMode(InputMode::Sql);

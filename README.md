@@ -5,34 +5,13 @@ Single binary, no dependencies, cross-platform.
 
 ## Installation
 
-### Homebrew (macOS / Linux)
+Build from source (requires Rust 1.85+):
 
 ```bash
-brew tap NikolayS/rpg
-brew install rpg
-```
-
-### Install script (macOS / Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NikolayS/project-alpha/main/scripts/install.sh | bash
-```
-
-### Build from source
-
-Requires Rust 1.85+.
-
-```bash
-git clone https://github.com/NikolayS/project-alpha.git
-cd project-alpha
+git clone https://github.com/NikolayS/rpg.git
+cd rpg
 cargo build --release
 cp ./target/release/rpg /usr/local/bin/
-```
-
-### Self-update
-
-```bash
-rpg --update
 ```
 
 ## Connect
