@@ -220,21 +220,37 @@ impl StatusLine {
     }
 
     /// Write `content` to the last terminal row using save/restore cursor.
+    ///
+    /// The bar uses reverse-video (`\x1b[7m`) as its base style.  Within that
+    /// context a foreground-color code *becomes* the background, so we inject
+    /// color codes around the `tx:` segment to signal transaction state:
+    /// yellow for an open transaction, red for a failed one.
     fn write_status_row(&self, content: &str) {
+        // Colorise the tx segment within reverse-video context.
+        // \x1b[33m = yellow fg (→ yellow bg in reverse), \x1b[39m = reset fg.
+        // \x1b[31m = red fg   (→ red bg in reverse),    \x1b[39m = reset fg.
+        let colored: std::borrow::Cow<str> = match self.tx_state {
+            TxState::Idle => content.into(),
+            TxState::InTransaction => content
+                .replacen("tx:in-tx", "\x1b[33mtx:in-tx\x1b[39m", 1)
+                .into(),
+            TxState::Failed => content
+                .replacen("tx:failed", "\x1b[31mtx:failed\x1b[39m", 1)
+                .into(),
+        };
+
         let row = self.term_rows;
         let mut stderr = io::stderr();
         // \x1b[s         — save cursor position
         // \x1b[{row};1H  — move to last row, column 1 (1-based)
         // \x1b[7m        — reverse video (background fills to end of line)
-        // {content}      — status string (already padded to terminal width)
-        // \x1b[K         — erase to end of line with current attributes,
-        //                   ensuring the background extends to the right edge
-        //                   even when the terminal width changes mid-render
+        // {colored}      — status string with per-segment color codes
+        // \x1b[K         — erase to end of line with current attributes
         // \x1b[0m        — reset attributes
         // \x1b[u         — restore cursor position
         let _ = write!(
             stderr,
-            "\x1b[s\x1b[{row};1H\x1b[7m{content}\x1b[K\x1b[0m\x1b[u"
+            "\x1b[s\x1b[{row};1H\x1b[7m{colored}\x1b[K\x1b[0m\x1b[u"
         );
         let _ = stderr.flush();
     }
