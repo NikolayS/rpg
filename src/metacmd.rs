@@ -616,10 +616,19 @@ fn parse_set(input: &str) -> ParsedMeta {
     if rest.is_empty() {
         return ParsedMeta::simple(MetaCmd::Set(String::new(), String::new()));
     }
-    // `\set name` or `\set name value`
+    // `\set name` or `\set name value…`
+    // The name is the first whitespace-delimited token; value tokens are
+    // parsed with `split_params` (strips surrounding single-quotes, handles
+    // `\'`/`''` escapes) and concatenated *without* spaces, matching psql:
+    //   `\set d '\'' :var '\''`  →  d = "'<var>'"  (after interpolation)
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("").to_owned();
-    let value = parts.next().map_or("", str::trim).to_owned();
+    let raw_value = parts.next().map_or("", str::trim);
+    let value = if raw_value.is_empty() {
+        String::new()
+    } else {
+        split_params(raw_value).concat()
+    };
     ParsedMeta::simple(MetaCmd::Set(name, value))
 }
 
@@ -1427,9 +1436,10 @@ fn parse_shell(input: &str) -> ParsedMeta {
 /// Split a whitespace-separated argument string into individual tokens.
 ///
 /// A token may be single-quoted to include spaces: `'hello world'` → one
-/// token.  Doubled single-quotes inside a quoted token are an escaped quote.
+/// token.  Inside a single-quoted token both `''` (doubled) and `\'`
+/// (backslash-escaped) produce a literal `'`, matching psql behaviour.
 /// Unquoted tokens are delimited by ASCII whitespace.
-fn split_params(s: &str) -> Vec<String> {
+pub fn split_params(s: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut chars = s.chars().peekable();
 
@@ -1439,7 +1449,8 @@ fn split_params(s: &str) -> Vec<String> {
             continue;
         }
         if c == '\'' {
-            // Quoted token: consume until closing `'` ('' is an escape).
+            // Quoted token: consume until closing `'`.
+            // Both `''` (doubled) and `\'` (backslash) escape a literal `'`.
             chars.next(); // consume opening quote
             let mut token = String::new();
             loop {
@@ -1447,11 +1458,20 @@ fn split_params(s: &str) -> Vec<String> {
                     None => break,
                     Some('\'') => {
                         if chars.peek() == Some(&'\'') {
-                            // Escaped quote inside quoted string.
+                            // Doubled single-quote → literal `'`.
                             chars.next();
                             token.push('\'');
                         } else {
                             break;
+                        }
+                    }
+                    Some('\\') => {
+                        if chars.peek() == Some(&'\'') {
+                            // Backslash-escaped single-quote → literal `'`.
+                            chars.next();
+                            token.push('\'');
+                        } else {
+                            token.push('\\');
                         }
                     }
                     Some(ch) => token.push(ch),
@@ -2277,10 +2297,22 @@ mod tests {
 
     #[test]
     fn parse_set_value_with_spaces() {
-        // Second token onwards is the value, trimmed.
+        // Multiple value tokens are concatenated without separators,
+        // matching psql behaviour: `\set X hello world` → X = "helloworld".
         assert_eq!(
             parse("\\set X hello world").cmd,
-            MetaCmd::Set("X".to_owned(), "hello world".to_owned())
+            MetaCmd::Set("X".to_owned(), "helloworld".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_set_value_quoted_concat() {
+        // Single-quoted tokens strip quotes; `\'` inside a quoted token
+        // escapes a single-quote.  Adjacent tokens are concatenated:
+        //   `\set d '\'' val '\''`  →  d = "'val'"
+        assert_eq!(
+            parse("\\set d '\\'' val '\\''").cmd,
+            MetaCmd::Set("d".to_owned(), "'val'".to_owned())
         );
     }
 

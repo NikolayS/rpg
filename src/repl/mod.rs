@@ -1288,6 +1288,9 @@ pub async fn exec_command(
             }
             MetaResult::SetExecMode(mode) => {
                 settings.exec_mode = mode;
+                if mode == ExecMode::Yolo {
+                    settings.input_mode = InputMode::Text2Sql;
+                }
                 let label = match mode {
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
@@ -2492,7 +2495,14 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::Echo => {
-            println!("{}", parsed.pattern.as_deref().unwrap_or(""));
+            let raw = parsed.pattern.as_deref().unwrap_or("");
+            // Split into tokens (strips surrounding single-quotes, handles
+            // `\'`/`''` escapes inside quoted strings), join with spaces,
+            // then process backslash escape sequences — matching psql's
+            // \echo behaviour so that e.g. `\echo '\033[1;35mMenu:\033[0m'`
+            // emits an ANSI-coloured string.
+            let joined = crate::metacmd::split_params(raw).join(" ");
+            println!("{}", unescape_echo(&joined));
             Some(MetaResult::Continue)
         }
         MetaCmd::QEcho => {
@@ -2687,6 +2697,114 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
         Ok(_) => {}
         Err(e) => eprintln!("{e}"),
     }
+}
+
+/// Process backslash escape sequences in `\echo` output, matching psql.
+///
+/// Recognised sequences:
+/// - `\n` → newline
+/// - `\t` → tab
+/// - `\r` → carriage return
+/// - `\b` → backspace
+/// - `\f` → form feed
+/// - `\\` → backslash
+/// - `\'` → single quote
+/// - `\ooo` (1–3 octal digits) → byte with that octal value
+/// - `\xhh` (1–2 hex digits) → byte with that hex value
+///
+/// Unknown sequences (e.g. `\q`) are left verbatim.
+fn unescape_echo(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if bytes[i] != b'\\' || i + 1 >= len {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // Peek at the character after the backslash.
+        match bytes[i + 1] {
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'b' => {
+                out.push(0x08);
+                i += 2;
+            }
+            b'f' => {
+                out.push(0x0C);
+                i += 2;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                i += 2;
+            }
+            b'\'' => {
+                out.push(b'\'');
+                i += 2;
+            }
+            b'x' | b'X' => {
+                // Hex escape: \xhh (1–2 hex digits).
+                let start = i + 2;
+                let end = bytes[start..]
+                    .iter()
+                    .take(2)
+                    .take_while(|b| b.is_ascii_hexdigit())
+                    .count();
+                if end > 0 {
+                    let hex: String = bytes[start..start + end]
+                        .iter()
+                        .map(|&b| b as char)
+                        .collect();
+                    if let Ok(val) = u8::from_str_radix(&hex, 16) {
+                        out.push(val);
+                        i = start + end;
+                        continue;
+                    }
+                }
+                // Not a valid hex escape — emit verbatim.
+                out.push(b'\\');
+                i += 1;
+            }
+            b'0'..=b'7' => {
+                // Octal escape: \ooo (1–3 octal digits).
+                let start = i + 1;
+                let end = bytes[start..]
+                    .iter()
+                    .take(3)
+                    .take_while(|&&b| (b'0'..=b'7').contains(&b))
+                    .count();
+                let octal: String = bytes[start..start + end]
+                    .iter()
+                    .map(|&b| b as char)
+                    .collect();
+                if let Ok(val) = u8::from_str_radix(&octal, 8) {
+                    out.push(val);
+                    i = start + end;
+                } else {
+                    out.push(b'\\');
+                    i += 1;
+                }
+            }
+            _ => {
+                // Unknown escape — emit verbatim.
+                out.push(b'\\');
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Dispatch a parsed meta-command, applying any side-effects to `settings`.
@@ -4155,6 +4273,9 @@ async fn handle_backslash_dumb(
         }
         MetaResult::SetExecMode(mode) => {
             settings.exec_mode = mode;
+            if mode == ExecMode::Yolo {
+                settings.input_mode = InputMode::Text2Sql;
+            }
             let label = match mode {
                 ExecMode::Interactive => "interactive",
                 ExecMode::Plan => "plan",
@@ -4478,6 +4599,9 @@ async fn handle_line(
             }
             MetaResult::SetExecMode(mode) => {
                 settings.exec_mode = mode;
+                if mode == ExecMode::Yolo {
+                    settings.input_mode = InputMode::Text2Sql;
+                }
                 let label = match mode {
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
@@ -7266,5 +7390,63 @@ mod tests {
             combined.contains("ERROR:"),
             "expected 'ERROR:' in conversation messages, got: {combined}"
         );
+    }
+
+    // -- unescape_echo ---------------------------------------------------------
+
+    #[test]
+    fn unescape_echo_plain_text() {
+        assert_eq!(super::unescape_echo("hello world"), "hello world");
+    }
+
+    #[test]
+    fn unescape_echo_newline_seq() {
+        assert_eq!(super::unescape_echo("a\\nb"), "a\nb");
+    }
+
+    #[test]
+    fn unescape_echo_tab_seq() {
+        assert_eq!(super::unescape_echo("a\\tb"), "a\tb");
+    }
+
+    #[test]
+    fn unescape_echo_backslash_seq() {
+        assert_eq!(super::unescape_echo("a\\\\b"), "a\\b");
+    }
+
+    #[test]
+    fn unescape_echo_single_quote_seq() {
+        assert_eq!(super::unescape_echo("a\\'b"), "a'b");
+    }
+
+    #[test]
+    fn unescape_echo_octal_esc_seq() {
+        // \033 is ESC (decimal 27).
+        let result = super::unescape_echo("\\033[1;35m");
+        assert_eq!(result.as_bytes()[0], 27);
+        assert_eq!(&result[1..], "[1;35m");
+    }
+
+    #[test]
+    fn unescape_echo_hex_seq() {
+        // \x1b is ESC.
+        let result = super::unescape_echo("\\x1b[0m");
+        assert_eq!(result.as_bytes()[0], 0x1b);
+        assert_eq!(&result[1..], "[0m");
+    }
+
+    #[test]
+    fn unescape_echo_unknown_escape_stays_verbatim() {
+        assert_eq!(super::unescape_echo("\\q"), "\\q");
+    }
+
+    #[test]
+    fn unescape_echo_ansi_color_sequence() {
+        // Simulates postgres_dba: '\033[1;35mMenu:\033[0m'
+        // After split_params strips quotes: \033[1;35mMenu:\033[0m
+        let text = "\\033[1;35mMenu:\\033[0m";
+        let result = super::unescape_echo(text);
+        assert_eq!(result.as_bytes()[0], 27);
+        assert!(result.ends_with("Menu:\x1b[0m"));
     }
 }
