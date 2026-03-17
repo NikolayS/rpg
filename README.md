@@ -1,7 +1,7 @@
-# rpg — a modern Postgres terminal
+# rpg — modern Postgres terminal
 
-A psql-compatible terminal with built-in DBA diagnostics, AI assistant, and
-autonomous operations. Single binary, no dependencies, cross-platform.
+A psql-compatible terminal with built-in DBA diagnostics and AI assistant.
+Single binary, no dependencies, cross-platform.
 
 ## Installation
 
@@ -101,64 +101,6 @@ explain select * from orders where status = 'pending';
 ```
 postgres=# \set AI_PROVIDER anthropic
 postgres=# \set AI_MODEL claude-sonnet-4-20250514
-```
-
-## Daemon mode
-
-Run as a background monitor with anomaly detection:
-
-```bash
-rpg --daemon --config ~/.config/rpg/config.toml
-```
-
-Continuously observes `pg_stat_activity`, wait events, bloat, and replication
-lag. Fires alerts when thresholds are breached.
-
-## Notifications
-
-Alert on Slack, PagerDuty, Telegram, webhook, or email:
-
-```toml
-[notifications]
-slack_webhook = "https://hooks.slack.com/..."
-pagerduty_key = "..."
-telegram_bot_token = "..."
-email_to = "dba@example.com"
-```
-
-## Connectors
-
-Pull context from external systems: Datadog, CloudWatch, Supabase, pganalyze,
-GitHub, GitLab, Jira, and PostgresAI. A plugin system lets you add your own.
-
-```toml
-[connectors.cloudwatch]
-region = "us-east-1"
-log_group = "/aws/rds/instance/mydb/postgresql"
-
-[connectors.pganalyze]
-api_key = "..."
-```
-
-## Governance (AAA Architecture)
-
-rpg uses a three-component governance model for all autonomous operations:
-
-- **Analyzer** — reads all database state, diagnoses issues, proposes actions
-- **Actor** — executes only approved actions within defined boundaries
-- **Auditor** — independently reviews both proposals and outcomes; can veto
-
-Autonomy is configured **per feature**, not globally:
-
-```toml
-[autonomy]
-vacuum           = "observe"     # O/S/A: observe / supervised / auto
-index_health     = "supervised"
-query_optimization = "auto"
-```
-
-```bash
-rpg --autonomy vacuum:auto,bloat:supervised
 ```
 
 ## Health checks and reports
