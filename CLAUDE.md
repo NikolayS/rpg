@@ -118,3 +118,20 @@ See `SPEC.md` for the full specification. Key concepts:
 - **Language:** Rust
 - **Wire protocol:** tokio-postgres
 - **PG support:** 14-18
+
+## PR workflow (mandatory for all agents)
+
+Every PR must follow this sequence — **no exceptions**:
+
+1. **CI green** — all GitHub Actions checks must pass
+2. **REV review** — run `/review-mr <PR-URL>` (https://gitlab.com/postgres-ai/rev/) and get no BLOCKING issues
+   - Fetch diff: `gh pr diff <number> --repo NikolayS/rpg`
+   - Run parallel review agents: security, bugs, tests, guidelines, docs
+   - Post report as PR comment
+   - Only NON-BLOCKING / POTENTIAL / INFO findings = **pass**
+3. **Merge** — squash merge: `gh pr merge <number> --squash --repo NikolayS/rpg`
+
+**If CI fails or REV has BLOCKING issues → fix first, then re-run CI and REV.**
+Do not merge until both pass.
+
+**Copyright:** always `Copyright 2026` — never a year range.
