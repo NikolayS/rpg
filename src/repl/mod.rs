@@ -3593,9 +3593,10 @@ async fn run_readline_loop(
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
 
         // Keep the completion helper in sync with the current prompt width
-        // so the dropdown aligns under the word being completed.
+        // and input mode (text2sql suppresses SQL syntax highlighting).
         if let Some(helper) = rl.helper_mut() {
             helper.set_prompt_width(prompt.chars().count());
+            helper.set_input_mode(settings.input_mode);
         }
 
         match rl.readline(&prompt) {
