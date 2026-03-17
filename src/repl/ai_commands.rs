@@ -689,7 +689,10 @@ pub(super) async fn handle_ai_ask(
                 if text2sql_show {
                     // Print in the same ┌── sql box style as /fix.
                     let boxed = format!("```sql\n{sql}\n```");
-                    print!("{}", crate::markdown::render_markdown(&boxed, false));
+                    print!(
+                        "{}",
+                        crate::markdown::render_markdown(&boxed, settings.no_highlight)
+                    );
                 } else if show_sql {
                     // Legacy /ask path: plain highlighted SQL.
                     if settings.no_highlight {

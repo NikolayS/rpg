@@ -2041,6 +2041,10 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
         if name == "AI_MODEL" {
             settings.config.ai.model = None;
         }
+        // Mirror TEXT2SQL_SHOW_SQL.
+        if name == "TEXT2SQL_SHOW_SQL" {
+            settings.text2sql_show_sql = true;
+        }
     } else {
         eprintln!("\\unset: variable {name} was not set");
     }
@@ -5625,6 +5629,36 @@ mod tests {
     fn last_was_fix_default_is_false() {
         let s = ReplSettings::default();
         assert!(!s.last_was_fix);
+    }
+
+    #[test]
+    fn text2sql_show_sql_default_is_true() {
+        let s = ReplSettings::default();
+        assert!(s.text2sql_show_sql);
+    }
+
+    #[test]
+    fn set_text2sql_show_sql_off_disables_flag() {
+        let mut s = ReplSettings::default();
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "off");
+        assert!(!s.text2sql_show_sql);
+    }
+
+    #[test]
+    fn set_text2sql_show_sql_on_enables_flag() {
+        let mut s = ReplSettings::default();
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "off");
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "on");
+        assert!(s.text2sql_show_sql);
+    }
+
+    #[test]
+    fn unset_text2sql_show_sql_resets_to_default() {
+        let mut s = ReplSettings::default();
+        apply_set(&mut s, "TEXT2SQL_SHOW_SQL", "off");
+        assert!(!s.text2sql_show_sql);
+        apply_unset(&mut s, "TEXT2SQL_SHOW_SQL");
+        assert!(s.text2sql_show_sql);
     }
 
     #[test]
