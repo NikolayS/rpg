@@ -1683,9 +1683,10 @@ Input/execution modes:
   \sql              switch to SQL input mode (default)
   \text2sql / \t2s  switch to text2sql input mode
   \plan             enter plan execution mode
-  \yolo             enter YOLO execution mode
+  \yolo             enter YOLO execution mode (hides SQL box, auto-executes)
   \interactive      return to interactive mode (default)
   \mode             show current input and execution mode
+  \\set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
 
 Auto-EXPLAIN:
   \\set EXPLAIN on       show EXPLAIN for every query

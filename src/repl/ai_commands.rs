@@ -705,8 +705,13 @@ pub(super) async fn handle_ai_ask(
                 // Decide whether to prompt before executing.
                 let read_only = !is_write_query(sql);
                 let choice = if text2sql_show {
-                    // text2sql interactive: always ask (SQL box was shown).
-                    ask_yne_prompt("Execute? [Y/n/e] ", true)
+                    // text2sql interactive: SQL box was shown; read-only defaults
+                    // yes, write queries default no to avoid accidental mutation.
+                    if read_only {
+                        ask_yne_prompt("Execute? [Y/n/e] ", true)
+                    } else {
+                        ask_yne_prompt("Execute write query? [y/N/e] ", false)
+                    }
                 } else if yolo {
                     // Yolo: auto-execute; warn on write queries.
                     if !read_only {
