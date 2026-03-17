@@ -539,16 +539,6 @@ pub enum ExecMode {
 // YOLO write-action decision
 // ---------------------------------------------------------------------------
 
-/// Outcome of the YOLO-mode safety check for write queries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum YoloWriteAction {
-    /// Block the write.
-    Block,
-    /// Execute but emit a caution warning.
-    WarnThenExecute,
-    /// Execute silently.
-    Execute,
-}
 
 // ---------------------------------------------------------------------------
 // Auto-EXPLAIN mode
@@ -1029,6 +1019,15 @@ pub struct ReplSettings {
     /// hint is suppressed for any error produced by the fixed query,
     /// avoiding suggestion loops.  Cleared after each query execution.
     pub last_was_fix: bool,
+    /// Whether to show the generated SQL box in `\text2sql` mode.
+    ///
+    /// Defaults to `true`. When `true`, the SQL is printed in a
+    /// `┌── sql` box before execution and the user is prompted
+    /// `Execute? [Y/n/e]`.  When `false` (or when `exec_mode == Yolo`),
+    /// the SQL is hidden and auto-executed without confirmation.
+    ///
+    /// Toggle with `\set TEXT2SQL_SHOW_SQL on/off`.
+    pub text2sql_show_sql: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1123,6 +1122,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("last_query_duration_ms", &self.last_query_duration_ms)
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
+            .field("text2sql_show_sql", &self.text2sql_show_sql)
             .finish()
     }
 }
@@ -1183,6 +1183,7 @@ impl Default for ReplSettings {
             last_query_duration_ms: None,
             auto_suggest_fix: true,
             last_was_fix: false,
+            text2sql_show_sql: true,
         }
     }
 }
@@ -1937,6 +1938,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror AI_SHOW_SQL into config.ai.show_sql.
     if name == "AI_SHOW_SQL" {
         settings.config.ai.show_sql = matches!(value, "on" | "true" | "1");
+    }
+    // Mirror TEXT2SQL_SHOW_SQL into text2sql_show_sql.
+    if name == "TEXT2SQL_SHOW_SQL" {
+        settings.text2sql_show_sql = matches!(value, "on" | "true" | "1");
     }
     // Mirror AI_PROVIDER into config.ai.provider.
     if name == "AI_PROVIDER" {

@@ -600,14 +600,21 @@ pub(super) async fn handle_ai_ask(
         wait = wait_section,
     );
 
-    // In text2sql mode, strengthen the system prompt so the LLM outputs
-    // only SQL and no surrounding commentary.
+    // In text2sql mode, guide the LLM to translate natural language to SQL —
+    // but allow plain-text answers for conversational/meta questions that do
+    // not require a database query (e.g. "what SQL did you use?", "show SQL").
     let system_content = if settings.input_mode == InputMode::Text2Sql {
         format!(
             "{system_content}\n\n\
-             IMPORTANT: You are in text2sql mode. Output ONLY the SQL query \
-             inside a ```sql code fence. Do NOT include any explanatory text, \
-             commentary, or description. Just the SQL."
+             You are in text2sql mode.\n\
+             - If the user's input describes a database operation or asks for \
+               data from the database, respond with ONLY the SQL query inside \
+               a ```sql code fence — no commentary, no explanation.\n\
+             - If the user's input is conversational or meta (e.g. asking about \
+               previous queries, asking you to explain what you did, asking to \
+               show the SQL you used), answer in plain text WITHOUT a SQL block. \
+               Do NOT generate SQL that re-runs a previous query just because \
+               the user asked about it."
         )
     } else {
         system_content
@@ -657,18 +664,23 @@ pub(super) async fn handle_ai_ask(
     }
 
     // Parse the response into text and SQL segments, then process each.
-    let show_sql = settings.config.ai.show_sql || settings.echo_hidden;
+    let in_text2sql = settings.input_mode == InputMode::Text2Sql;
     let yolo = settings.exec_mode == ExecMode::Yolo;
+    // In text2sql mode: show SQL box + ask confirm by default.
+    // Yolo mode or TEXT2SQL_SHOW_SQL=off suppresses the box and skips confirm.
+    let text2sql_show = in_text2sql && settings.text2sql_show_sql && !yolo;
+    // Legacy AI_SHOW_SQL / echo_hidden path (used by /ask outside text2sql).
+    let show_sql = settings.config.ai.show_sql || settings.echo_hidden;
 
     let segments = parse_ai_response_segments(&ai_response);
 
     for segment in &segments {
         match segment {
             AiResponseSegment::Text(text) => {
-                // In text2sql mode, suppress LLM commentary — only show SQL
-                // results. The system prompt already discourages the LLM from
-                // emitting text, but this guard handles any residual output.
-                if settings.input_mode == InputMode::Text2Sql {
+                // In text2sql mode, suppress LLM commentary — only SQL matters.
+                // The system prompt already discourages text, but this guards
+                // against any residual output.
+                if in_text2sql {
                     continue;
                 }
                 let text = text.trim();
@@ -677,8 +689,12 @@ pub(super) async fn handle_ai_ask(
                 }
             }
             AiResponseSegment::Sql(sql) => {
-                // Optionally reveal the generated SQL.
-                if show_sql {
+                if text2sql_show {
+                    // Print in the same ┌── sql box style as /fix.
+                    let boxed = format!("```sql\n{sql}\n```");
+                    print!("{}", crate::markdown::render_markdown(&boxed, false));
+                } else if show_sql {
+                    // Legacy /ask path: plain highlighted SQL.
                     if settings.no_highlight {
                         eprintln!("{sql}");
                     } else {
@@ -686,57 +702,29 @@ pub(super) async fn handle_ai_ask(
                     }
                 }
 
-                let read_only = !is_write_query(sql);
-
-                // In YOLO mode, check safety for write queries.
-                // --i-know-what-im-doing bypasses all checks.
-                let yolo_write_action = if yolo && !read_only {
-                    if settings.i_know_what_im_doing {
-                        YoloWriteAction::Execute
-                    } else {
-                        YoloWriteAction::WarnThenExecute
-                    }
+                // In text2sql interactive mode (SQL was shown): always ask.
+                // In yolo or hidden mode: auto-execute (guard writes with warn).
+                let choice = if text2sql_show {
+                    ask_yne_prompt("Execute? [Y/n/e] ", true)
                 } else {
-                    YoloWriteAction::Execute
-                };
-
-                if yolo_write_action == YoloWriteAction::Block {
-                    eprintln!(
-                        "-- YOLO: write query blocked. \
-                         Pass --i-know-what-im-doing to bypass"
-                    );
-                    continue;
-                }
-
-                // Read-only queries auto-execute; write queries prompt for
-                // confirmation unless YOLO mode overrides.
-                let auto_exec = read_only || (yolo && yolo_write_action != YoloWriteAction::Block);
-
-                let choice = if auto_exec {
+                    let read_only = !is_write_query(sql);
                     if yolo && !read_only {
-                        match yolo_write_action {
-                            YoloWriteAction::WarnThenExecute => {
-                                eprintln!(
-                                    "-- YOLO: write query executing \
-                                     — proceed with care"
-                                );
-                            }
-                            YoloWriteAction::Execute => {
-                                eprintln!("-- YOLO: auto-executing write query");
-                            }
-                            YoloWriteAction::Block => {
-                                unreachable!("Block handled above")
-                            }
+                        // Write query in yolo mode — warn unless bypassed.
+                        if settings.i_know_what_im_doing {
+                            eprintln!("-- YOLO: auto-executing write query");
+                        } else {
+                            eprintln!(
+                                "-- YOLO: write query executing — proceed with care"
+                            );
                         }
                     }
                     AskChoice::Yes
-                } else {
-                    ask_yne_prompt("Execute (write query)? [y/N/e] ", false)
                 };
 
                 match choice {
                     AskChoice::Yes => {
-                        let ok = execute_query(client, sql, settings, tx).await;
+                        let ok =
+                            execute_query_interactive(client, sql, settings, tx).await;
                         if ok {
                             settings.conversation.push_query_result(sql, "(executed)");
                         }
@@ -747,7 +735,9 @@ pub(super) async fn handle_ai_ask(
                             if edited.is_empty() {
                                 eprintln!("(empty — skipped)");
                             } else {
-                                let ok = execute_query(client, edited, settings, tx).await;
+                                let ok =
+                                    execute_query_interactive(client, edited, settings, tx)
+                                        .await;
                                 if ok {
                                     settings
                                         .conversation
@@ -1112,7 +1102,7 @@ pub(super) async fn handle_ai_fix(
                 // Mark that this execution originates from /fix so the
                 // auto-suggest hint is suppressed for any resulting error.
                 settings.last_was_fix = true;
-                execute_query(client, fix_sql, settings, tx).await;
+                execute_query_interactive(client, fix_sql, settings, tx).await;
             }
             AskChoice::Edit => match crate::io::edit(fix_sql, None, None) {
                 Ok(edited) => {
@@ -1121,7 +1111,7 @@ pub(super) async fn handle_ai_fix(
                         eprintln!("(empty — skipped)");
                     } else {
                         settings.last_was_fix = true;
-                        execute_query(client, edited, settings, tx).await;
+                        execute_query_interactive(client, edited, settings, tx).await;
                     }
                 }
                 Err(e) => eprintln!("{e}"),
