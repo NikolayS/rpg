@@ -677,12 +677,9 @@ pub(super) async fn handle_ai_ask(
     for segment in &segments {
         match segment {
             AiResponseSegment::Text(text) => {
-                // In text2sql mode, suppress LLM commentary — only SQL matters.
-                // The system prompt already discourages text, but this guards
-                // against any residual output.
-                if in_text2sql {
-                    continue;
-                }
+                // Always show text segments — in text2sql mode the system
+                // prompt now allows plain-text answers for conversational
+                // questions, and we want those to reach the user.
                 let text = text.trim();
                 if !text.is_empty() {
                     println!("{text}");
@@ -702,20 +699,26 @@ pub(super) async fn handle_ai_ask(
                     }
                 }
 
-                // In text2sql interactive mode (SQL was shown): always ask.
-                // In yolo or hidden mode: auto-execute (guard writes with warn).
+                // Decide whether to prompt before executing.
+                let read_only = !is_write_query(sql);
                 let choice = if text2sql_show {
+                    // text2sql interactive: always ask (SQL box was shown).
                     ask_yne_prompt("Execute? [Y/n/e] ", true)
-                } else {
-                    let read_only = !is_write_query(sql);
-                    if yolo && !read_only {
-                        // Write query in yolo mode — warn unless bypassed.
+                } else if yolo {
+                    // Yolo: auto-execute; warn on write queries.
+                    if !read_only {
                         if settings.i_know_what_im_doing {
                             eprintln!("-- YOLO: auto-executing write query");
                         } else {
                             eprintln!("-- YOLO: write query executing — proceed with care");
                         }
                     }
+                    AskChoice::Yes
+                } else if !read_only {
+                    // /ask interactive mode, write query: require explicit yes.
+                    ask_yne_prompt("Execute (write query)? [y/N/e] ", false)
+                } else {
+                    // /ask interactive mode, read-only: auto-execute.
                     AskChoice::Yes
                 };
 
