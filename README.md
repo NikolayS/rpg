@@ -149,7 +149,7 @@ rpg is engineered by [Nikolay Samokhvalov](https://github.com/NikolayS) with a
 team of Claude Opus 4.6 AI agents (via [Claude Code](https://claude.com/claude-code),
 occasionally with OpenClaw). All architecture decisions, feature design, and
 project direction are human-driven. The codebase is ~46 kLOC and 100% of the
-code has been AI-reviewed and tested, though only a portion has been manually
+code has been AI-reviewed and CI/AI-tested, though only a portion has been manually
 reviewed line-by-line.
 
 ## License
