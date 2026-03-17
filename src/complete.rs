@@ -1021,7 +1021,7 @@ pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
     highlight: bool,
-    /// Current input mode — SQL highlighting is suppressed in Text2Sql mode
+    /// Current input mode — SQL highlighting is suppressed in `Text2Sql` mode
     /// because the user is typing natural language, not SQL.
     input_mode: crate::repl::InputMode,
     /// Whether schema-aware tab completion is active.
