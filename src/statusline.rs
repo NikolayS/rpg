@@ -104,11 +104,16 @@ impl StatusLine {
     }
 
     /// Refresh the cached terminal size (call on SIGWINCH / resize events).
+    ///
+    /// Re-installs the scroll region for the new terminal height so that
+    /// normal output does not overwrite the status bar row, then redraws the
+    /// bar at the correct (new) position.
     pub fn on_resize(&mut self) {
         if let Ok((cols, rows)) = crossterm::terminal::size() {
             self.term_cols = cols;
             self.term_rows = rows;
         }
+        self.setup_scroll_region();
         self.render();
     }
 
