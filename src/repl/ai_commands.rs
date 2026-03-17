@@ -495,11 +495,10 @@ pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
     let raw_enabled = terminal::enable_raw_mode().is_ok();
 
     let choice = loop {
-        match read() {
-            Ok(Event::Key(key)) => match (key.code, key.modifiers) {
-                // Ctrl+C or Ctrl+D — abort without executing.
-                (KeyCode::Char('c'), KeyModifiers::CONTROL)
-                | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+        if let Ok(Event::Key(key)) = read() {
+            match (key.code, key.modifiers) {
+                // Ctrl+C / Ctrl+D / Escape — abort without executing.
+                (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
                     let _ = write!(io::stderr(), "\r\n");
                     break AskChoice::No;
                 }
@@ -512,31 +511,25 @@ pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
                         AskChoice::No
                     };
                 }
-                (KeyCode::Char('y') | KeyCode::Char('Y'), _) => {
+                (KeyCode::Char('y' | 'Y'), _) => {
                     let _ = write!(io::stderr(), "y\r\n");
                     break AskChoice::Yes;
                 }
-                (KeyCode::Char('n') | KeyCode::Char('N'), _) => {
+                (KeyCode::Char('n' | 'N'), _) => {
                     let _ = write!(io::stderr(), "n\r\n");
                     break AskChoice::No;
                 }
-                (KeyCode::Char('e') | KeyCode::Char('E'), _) => {
+                (KeyCode::Char('e' | 'E'), _) => {
                     let _ = write!(io::stderr(), "e\r\n");
                     break AskChoice::Edit;
                 }
-                // Escape — abort.
-                (KeyCode::Esc, _) => {
-                    let _ = write!(io::stderr(), "\r\n");
-                    break AskChoice::No;
-                }
                 // Any other key: ignore and keep waiting.
-                _ => continue,
-            },
-            // EOF or error — abort.
-            Ok(_) | Err(_) => {
-                let _ = write!(io::stderr(), "\r\n");
-                break AskChoice::No;
+                _ => {}
             }
+        } else {
+            // EOF or error — abort.
+            let _ = write!(io::stderr(), "\r\n");
+            break AskChoice::No;
         }
     };
 
