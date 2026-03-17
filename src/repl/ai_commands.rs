@@ -482,31 +482,65 @@ pub(super) enum AskChoice {
 /// Ctrl+C and Ctrl+D (EOF) always return `No` regardless of the default,
 /// so the user can safely abort without the query being executed.
 pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
+    use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+    use crossterm::terminal;
     use std::io::Write;
+
     eprint!("{prompt}");
     let _ = io::stderr().flush();
 
-    let mut input = String::new();
-    match io::stdin().read_line(&mut input) {
-        // EOF (0 bytes) or error: Ctrl+C / Ctrl+D — abort, never execute.
-        Ok(0) | Err(_) => return AskChoice::No,
-        Ok(_) => {}
+    // Enable raw mode so we can read single key events and detect Ctrl+C.
+    // Outside readline, the terminal is in cooked mode; we temporarily switch
+    // to raw, read one meaningful key, then restore.
+    let raw_enabled = terminal::enable_raw_mode().is_ok();
+
+    let choice = loop {
+        match read() {
+            Ok(Event::Key(key)) => match (key.code, key.modifiers) {
+                // Ctrl+C or Ctrl+D — abort without executing.
+                (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                    let _ = write!(io::stderr(), "\r\n");
+                    break AskChoice::No;
+                }
+                // Enter — use the default.
+                (KeyCode::Enter, _) => {
+                    let _ = write!(io::stderr(), "\r\n");
+                    break if default_yes { AskChoice::Yes } else { AskChoice::No };
+                }
+                (KeyCode::Char('y') | KeyCode::Char('Y'), _) => {
+                    let _ = write!(io::stderr(), "y\r\n");
+                    break AskChoice::Yes;
+                }
+                (KeyCode::Char('n') | KeyCode::Char('N'), _) => {
+                    let _ = write!(io::stderr(), "n\r\n");
+                    break AskChoice::No;
+                }
+                (KeyCode::Char('e') | KeyCode::Char('E'), _) => {
+                    let _ = write!(io::stderr(), "e\r\n");
+                    break AskChoice::Edit;
+                }
+                // Escape — abort.
+                (KeyCode::Esc, _) => {
+                    let _ = write!(io::stderr(), "\r\n");
+                    break AskChoice::No;
+                }
+                // Any other key: ignore and keep waiting.
+                _ => continue,
+            },
+            // EOF or error — abort.
+            Ok(_) | Err(_) => {
+                let _ = write!(io::stderr(), "\r\n");
+                break AskChoice::No;
+            }
+        }
+    };
+
+    if raw_enabled {
+        let _ = terminal::disable_raw_mode();
     }
-    let answer = input.trim().to_lowercase();
-    if answer.is_empty() {
-        return if default_yes {
-            AskChoice::Yes
-        } else {
-            AskChoice::No
-        };
-    }
-    if answer.starts_with('e') {
-        AskChoice::Edit
-    } else if answer.starts_with('y') {
-        AskChoice::Yes
-    } else {
-        AskChoice::No
-    }
+
+    choice
 }
 
 /// Handle a `/ask <prompt>` command end-to-end.

@@ -132,6 +132,22 @@ postgres=# /optimize
    ANALYZE public.t1;
 ```
 
+## psql-compatible display settings
+
+### \pset — display settings
+
+```
+postgres=# \pset null '∅'
+Null display is "∅".
+postgres=# select id, name, deleted_at from users limit 3;
+ id | name  | deleted_at
+----+-------+------------
+  1 | Alice | ∅
+  2 | Bob   | 2024-03-15
+  3 | Carol | ∅
+(3 rows)
+```
+
 ## DBA diagnostics
 
 15+ diagnostic commands accessible via `\dba`:
