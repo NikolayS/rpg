@@ -1304,6 +1304,7 @@ order by 1, 2"
 ///
 /// Matches psql's `\dp [pattern]` output: Schema, Name, Type, Access
 /// privileges, Column privileges, Policies.
+#[allow(clippy::too_many_lines)]
 async fn list_privileges(
     client: &Client,
     meta: &ParsedMeta,
