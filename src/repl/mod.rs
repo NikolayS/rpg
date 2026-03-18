@@ -7247,4 +7247,24 @@ mod tests {
         let ts = format_utc_timestamp(1_773_325_381);
         assert_eq!(ts, "2026-03-12 14:23:01 UTC");
     }
+
+    // -- error push behavior ---------------------------------------------------
+
+    #[test]
+    fn conversation_error_push_appears_in_messages() {
+        // Verifies that pushing an error result via push_query_result causes the
+        // error text to appear in to_messages(), so the AI receives the signal.
+        let mut ctx = ConversationContext::new();
+        ctx.push_query_result("SELECT boom()", "ERROR: function boom() does not exist");
+        let msgs = ctx.to_messages();
+        assert!(
+            !msgs.is_empty(),
+            "messages should not be empty after error push"
+        );
+        let combined: String = msgs.iter().map(|m| m.content.as_str()).collect();
+        assert!(
+            combined.contains("ERROR:"),
+            "expected 'ERROR:' in conversation messages, got: {combined}"
+        );
+    }
 }

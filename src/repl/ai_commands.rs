@@ -765,6 +765,15 @@ pub(super) async fn handle_ai_ask(
                         let ok = execute_query_interactive(client, sql, settings, tx).await;
                         if ok {
                             settings.conversation.push_query_result(sql, "(executed)");
+                        } else if let Some(err) = &settings.last_error {
+                            let msg = err.error_message.clone();
+                            settings
+                                .conversation
+                                .push_query_result(sql, &format!("ERROR: {msg}"));
+                        } else {
+                            settings
+                                .conversation
+                                .push_query_result(sql, "ERROR: (execution failed)");
                         }
                     }
                     AskChoice::Edit => match crate::io::edit(sql, None, None) {
@@ -779,6 +788,15 @@ pub(super) async fn handle_ai_ask(
                                     settings
                                         .conversation
                                         .push_query_result(edited, "(executed after edit)");
+                                } else if let Some(err) = &settings.last_error {
+                                    let msg = err.error_message.clone();
+                                    settings
+                                        .conversation
+                                        .push_query_result(edited, &format!("ERROR: {msg}"));
+                                } else {
+                                    settings
+                                        .conversation
+                                        .push_query_result(edited, "ERROR: (execution failed)");
                                 }
                             }
                         }
