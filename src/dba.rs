@@ -1190,8 +1190,8 @@ async fn dba_progress_vacuum(
     // In PG 17 max_dead_tuples/num_dead_tuples were renamed to
     // max_dead_item_ids/num_dead_item_ids.
     let use_item_ids = capabilities
-        .and_then(|c| c.pg_major_version())
-        .map_or(false, |v| v >= 17);
+        .and_then(crate::capabilities::DbCapabilities::pg_major_version)
+        .is_some_and(|v| v >= 17);
     let dead_cols = if use_item_ids {
         "p.max_dead_item_ids, \
             p.num_dead_item_ids"
