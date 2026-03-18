@@ -1856,6 +1856,45 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Pager helper
+// ---------------------------------------------------------------------------
+
+/// Route `text` through the pager when it exceeds the terminal height, or
+/// print directly to stdout when paging is disabled / output is short.
+///
+/// Honours `\o` redirection: when `settings.output_target` is set the text
+/// is written to that file instead of stdout / the pager.
+fn maybe_page(settings: &mut ReplSettings, text: &str) {
+    // Honour \o redirect.
+    if let Some(ref mut w) = settings.output_target {
+        let _ = writeln!(w, "{text}");
+        return;
+    }
+    let term_rows = crossterm::terminal::size()
+        .map(|(_, h)| h as usize)
+        .unwrap_or(24);
+    if settings.pager_enabled
+        && crate::pager::needs_paging_with_min(
+            text,
+            term_rows.saturating_sub(2),
+            settings.pager_min_lines,
+        )
+    {
+        if let Some(ref sl) = settings.statusline {
+            sl.clear();
+            sl.teardown_scroll_region();
+        }
+        run_pager_for_text(settings, text, text.as_bytes());
+        if let Some(ref sl) = settings.statusline {
+            sl.setup_scroll_region();
+            sl.render();
+        }
+    } else {
+        print!("{text}");
+    }
+}
+
 /// Apply a `\set` command.
 ///
 /// - `\set` (bare) — print all variables sorted by name.
@@ -1869,9 +1908,12 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         // List all variables.
         let mut pairs: Vec<(&String, &String)> = settings.vars.all().iter().collect();
         pairs.sort_by_key(|(k, _)| k.as_str());
+        let mut out = String::new();
         for (k, v) in pairs {
-            println!("{k} = '{v}'");
+            use std::fmt::Write as FmtWrite;
+            let _ = writeln!(out, "{k} = '{v}'");
         }
+        maybe_page(settings, &out);
         return;
     }
     if value.is_empty() {
@@ -2218,7 +2260,8 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
 
     if option.is_empty() {
         // Display all pset options.
-        print_pset_status(settings);
+        let text = pset_status_text(settings);
+        maybe_page(settings, &text);
         return;
     }
 
@@ -2341,31 +2384,43 @@ fn format_name(fmt: &crate::output::OutputFormat) -> &'static str {
     }
 }
 
-/// Print a summary of the current `PsetConfig` (matching psql `\pset` output).
-fn print_pset_status(settings: &ReplSettings) {
+/// Build a summary of the current `PsetConfig` as a `String`.
+///
+/// Format matches psql `\pset` bare output.
+fn pset_status_text(settings: &ReplSettings) -> String {
+    use std::fmt::Write as FmtWrite;
+    let mut out = String::new();
     let pset = &settings.pset;
-    println!("border         = {}", pset.border);
-    println!("expanded       = {}", expanded_mode_str(pset.expanded));
-    println!("fieldsep       = \"{}\"", pset.field_sep);
-    println!(
+    let _ = writeln!(out, "border         = {}", pset.border);
+    let _ = writeln!(out, "expanded       = {}", expanded_mode_str(pset.expanded));
+    let _ = writeln!(out, "fieldsep       = \"{}\"", pset.field_sep);
+    let _ = writeln!(
+        out,
         "footer         = {}",
         if pset.footer { "on" } else { "off" }
     );
-    println!("format         = {}", format_name(&pset.format));
-    println!("linestyle      = ascii");
-    println!("null           = \"{}\"", pset.null_display);
-    println!(
+    let _ = writeln!(out, "format         = {}", format_name(&pset.format));
+    let _ = writeln!(out, "linestyle      = ascii");
+    let _ = writeln!(out, "null           = \"{}\"", pset.null_display);
+    let _ = writeln!(
+        out,
         "pager          = {}",
         if settings.pager_enabled { "on" } else { "off" }
     );
-    println!(
+    let _ = writeln!(
+        out,
         "tuples_only    = {}",
         if pset.tuples_only { "on" } else { "off" }
     );
     match &pset.title {
-        Some(t) => println!("title          = \"{t}\""),
-        None => println!("title          = (not set)"),
+        Some(t) => {
+            let _ = writeln!(out, "title          = \"{t}\"");
+        }
+        None => {
+            let _ = writeln!(out, "title          = (not set)");
+        }
     }
+    out
 }
 
 /// Apply `\a` — toggle between aligned and unaligned output.
@@ -3010,33 +3065,7 @@ async fn dispatch_meta(
     match parsed.cmd {
         MetaCmd::Quit => return MetaResult::Quit,
         MetaCmd::Help => {
-            let text = help_text();
-            if let Some(ref mut w) = settings.output_target {
-                let _ = writeln!(w, "{text}");
-            } else {
-                let term_rows = crossterm::terminal::size()
-                    .map(|(_, h)| h as usize)
-                    .unwrap_or(24);
-                if settings.pager_enabled
-                    && crate::pager::needs_paging_with_min(
-                        &text,
-                        term_rows.saturating_sub(2),
-                        settings.pager_min_lines,
-                    )
-                {
-                    if let Some(ref sl) = settings.statusline {
-                        sl.clear();
-                        sl.teardown_scroll_region();
-                    }
-                    run_pager_for_text(settings, &text, text.as_bytes());
-                    if let Some(ref sl) = settings.statusline {
-                        sl.setup_scroll_region();
-                        sl.render();
-                    }
-                } else {
-                    println!("{text}");
-                }
-            }
+            maybe_page(settings, &help_text());
         }
         MetaCmd::Timing(mode) => apply_timing(settings, mode),
         MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
@@ -3139,7 +3168,13 @@ async fn dispatch_meta(
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
         MetaCmd::SqlHelp => {
-            crate::session::sql_help(parsed.pattern.as_deref());
+            match crate::session::sql_help_text(parsed.pattern.as_deref()) {
+                Ok(text) => maybe_page(settings, &text),
+                Err(t) => {
+                    eprintln!("No help available for \"{t}\".");
+                    eprintln!("Try \\h with no argument to list available topics.");
+                }
+            }
         }
         MetaCmd::ShowFunctionSource => match parsed.pattern.as_deref() {
             Some(name) => {
@@ -3315,9 +3350,12 @@ async fn dispatch_meta(
             if queries.is_empty() {
                 println!("No named queries saved.");
             } else {
+                let mut out = String::new();
                 for (name, query) in queries {
-                    println!("  {name}: {query}");
+                    use std::fmt::Write as FmtWrite;
+                    let _ = writeln!(out, "  {name}: {query}");
                 }
+                maybe_page(settings, &out);
             }
         }
         MetaCmd::NamedDelete(ref name) => {
@@ -3373,8 +3411,13 @@ async fn dispatch_meta(
                     | MetaCmd::ListUserMappings
             ) =>
         {
-            crate::describe::execute(client, &parsed, settings.db_capabilities.pg_major_version())
-                .await;
+            crate::describe::execute(
+                client,
+                &parsed,
+                settings.db_capabilities.pg_major_version(),
+                settings,
+            )
+            .await;
         }
         // Session persistence meta-commands (#247).
         MetaCmd::SessionList => {
@@ -7797,5 +7840,55 @@ mod tests {
         assert!(ai_commands::is_write_query(
             "--comment\nINSERT INTO t VALUES (1);"
         ));
+    }
+
+    // -- pset_status_text -------------------------------------------------------
+
+    #[test]
+    fn pset_status_text_contains_key_fields() {
+        let settings = ReplSettings::default();
+        let text = pset_status_text(&settings);
+        assert!(text.contains("border"), "must include border field");
+        assert!(text.contains("format"), "must include format field");
+        assert!(text.contains("pager"), "must include pager field");
+        assert!(text.contains("tuples_only"), "must include tuples_only");
+        assert!(text.contains("expanded"), "must include expanded");
+    }
+
+    #[test]
+    fn pset_status_text_pager_on_by_default() {
+        let settings = ReplSettings::default();
+        let text = pset_status_text(&settings);
+        assert!(
+            text.contains("pager          = on"),
+            "default pager state must be 'on'"
+        );
+    }
+
+    // -- sql_help_text ----------------------------------------------------------
+
+    #[test]
+    fn sql_help_text_no_topic_returns_ok_with_header() {
+        let text = crate::session::sql_help_text(None).expect("should succeed");
+        assert!(text.contains("Available help:"), "must include header");
+        assert!(
+            text.contains("\\h <command-name>"),
+            "must include usage hint"
+        );
+    }
+
+    #[test]
+    fn sql_help_text_select_topic() {
+        let text =
+            crate::session::sql_help_text(Some("SELECT")).expect("SELECT should be found");
+        assert!(text.contains("Command:     SELECT"), "must include command");
+        assert!(text.contains("Syntax:"), "must include syntax header");
+    }
+
+    #[test]
+    fn sql_help_text_unknown_topic_returns_err() {
+        let err =
+            crate::session::sql_help_text(Some("NOTACOMMAND")).expect_err("should be Err");
+        assert_eq!(err, "NOTACOMMAND");
     }
 }

@@ -25,38 +25,108 @@ use crate::pattern;
 ///
 /// `pg_major_version` is used to adapt catalog queries to the connected
 /// server (e.g. column renames between PG 15/16/17).
+/// `settings` is used to route output through the pager when appropriate.
 ///
 /// Returns `true` if the REPL loop should exit after this command (always
 /// `false` for describe commands — only `\q` exits).
-pub async fn execute(client: &Client, meta: &ParsedMeta, pg_major_version: Option<u32>) -> bool {
+pub async fn execute(
+    client: &Client,
+    meta: &ParsedMeta,
+    pg_major_version: Option<u32>,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
     match &meta.cmd {
-        MetaCmd::DescribeObject => describe_object(client, meta).await,
-        MetaCmd::ListTables => list_relations(client, meta, &["r", "p"]).await,
-        MetaCmd::ListIndexes => list_relations(client, meta, &["i"]).await,
-        MetaCmd::ListSequences => list_relations(client, meta, &["S"]).await,
-        MetaCmd::ListViews => list_relations(client, meta, &["v"]).await,
-        MetaCmd::ListMatViews => list_relations(client, meta, &["m"]).await,
-        MetaCmd::ListForeignTables => list_relations(client, meta, &["f"]).await,
-        MetaCmd::ListFunctions => list_functions(client, meta).await,
-        MetaCmd::ListSchemas => list_schemas(client, meta).await,
-        MetaCmd::ListRoles => list_roles(client, meta).await,
-        MetaCmd::ListDatabases => list_databases(client, meta, pg_major_version).await,
-        MetaCmd::ListExtensions => list_extensions(client, meta).await,
-        MetaCmd::ListTablespaces => list_tablespaces(client, meta).await,
-        MetaCmd::ListTypes => list_types(client, meta).await,
-        MetaCmd::ListDomains => list_domains(client, meta).await,
-        MetaCmd::ListPrivileges => list_privileges(client, meta).await,
-        MetaCmd::ListConversions => list_conversions(client, meta).await,
-        MetaCmd::ListCasts => list_casts(client, meta).await,
-        MetaCmd::ListComments => list_comments(client, meta).await,
-        MetaCmd::ListForeignServers => list_foreign_servers(client, meta).await,
-        MetaCmd::ListFdws => list_fdws(client, meta).await,
-        MetaCmd::ListForeignTablesViaFdw => list_foreign_tables_via_fdw(client, meta).await,
-        MetaCmd::ListUserMappings => list_user_mappings(client, meta).await,
-        MetaCmd::ListEventTriggers => list_event_triggers(client, meta).await,
-        MetaCmd::ListOperators => list_operators(client, meta).await,
+        MetaCmd::DescribeObject => describe_object(client, meta, settings).await,
+        MetaCmd::ListTables => {
+            list_relations(client, meta, &["r", "p"], settings).await
+        }
+        MetaCmd::ListIndexes => list_relations(client, meta, &["i"], settings).await,
+        MetaCmd::ListSequences => list_relations(client, meta, &["S"], settings).await,
+        MetaCmd::ListViews => list_relations(client, meta, &["v"], settings).await,
+        MetaCmd::ListMatViews => list_relations(client, meta, &["m"], settings).await,
+        MetaCmd::ListForeignTables => {
+            list_relations(client, meta, &["f"], settings).await
+        }
+        MetaCmd::ListFunctions => list_functions(client, meta, settings).await,
+        MetaCmd::ListSchemas => list_schemas(client, meta, settings).await,
+        MetaCmd::ListRoles => list_roles(client, meta, settings).await,
+        MetaCmd::ListDatabases => {
+            list_databases(client, meta, pg_major_version, settings).await
+        }
+        MetaCmd::ListExtensions => list_extensions(client, meta, settings).await,
+        MetaCmd::ListTablespaces => list_tablespaces(client, meta, settings).await,
+        MetaCmd::ListTypes => list_types(client, meta, settings).await,
+        MetaCmd::ListDomains => list_domains(client, meta, settings).await,
+        MetaCmd::ListPrivileges => list_privileges(client, meta, settings).await,
+        MetaCmd::ListConversions => list_conversions(client, meta, settings).await,
+        MetaCmd::ListCasts => list_casts(client, meta, settings).await,
+        MetaCmd::ListComments => list_comments(client, meta, settings).await,
+        MetaCmd::ListForeignServers => list_foreign_servers(client, meta, settings).await,
+        MetaCmd::ListFdws => list_fdws(client, meta, settings).await,
+        MetaCmd::ListForeignTablesViaFdw => {
+            list_foreign_tables_via_fdw(client, meta, settings).await
+        }
+        MetaCmd::ListUserMappings => list_user_mappings(client, meta, settings).await,
+        MetaCmd::ListEventTriggers => list_event_triggers(client, meta, settings).await,
+        MetaCmd::ListOperators => list_operators(client, meta, settings).await,
         // Non-describe commands should never reach this function.
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Pager helper
+// ---------------------------------------------------------------------------
+
+/// Route `text` through the pager when it exceeds the terminal height,
+/// otherwise print directly to stdout.
+///
+/// Mirrors the logic used by `maybe_page` in `src/repl/mod.rs`.
+fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
+    use std::io::Write;
+
+    // Honour \o redirect.
+    if let Some(ref mut w) = settings.output_target {
+        let _ = writeln!(w, "{text}");
+        return;
+    }
+    let term_rows = crossterm::terminal::size()
+        .map(|(_, h)| h as usize)
+        .unwrap_or(24);
+    if settings.pager_enabled
+        && crate::pager::needs_paging_with_min(
+            text,
+            term_rows.saturating_sub(2),
+            settings.pager_min_lines,
+        )
+    {
+        if let Some(ref sl) = settings.statusline {
+            sl.clear();
+            sl.teardown_scroll_region();
+        }
+        if let Some(ref cmd) = settings.pager_command.clone() {
+            if let Err(e) = crate::pager::run_pager_external(cmd, text) {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "rpg: pager '{cmd}' not found — check your PAGER setting \
+                         (\\set PAGER off to disable)"
+                    );
+                } else {
+                    eprintln!("rpg: pager error: {e}");
+                }
+                let _ = std::io::stdout().write_all(text.as_bytes());
+            }
+        } else if let Err(e) = crate::pager::run_pager(text) {
+            eprintln!("rpg: pager error: {e}");
+            let _ = std::io::stdout().write_all(text.as_bytes());
+        }
+        if let Some(ref sl) = settings.statusline {
+            sl.setup_scroll_region();
+            sl.render();
+        }
+    } else {
+        print!("{text}");
     }
 }
 
@@ -73,8 +143,9 @@ async fn run_and_print_titled(
     sql: &str,
     echo_hidden: bool,
     title: Option<&str>,
+    settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    run_and_print_full(client, sql, echo_hidden, title, true).await
+    run_and_print_full(client, sql, echo_hidden, title, true, settings).await
 }
 
 /// Like `run_and_print_titled` but suppresses the `(N rows)` footer.
@@ -84,8 +155,9 @@ async fn run_and_print_no_count(
     sql: &str,
     echo_hidden: bool,
     title: Option<&str>,
+    settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    run_and_print_full(client, sql, echo_hidden, title, false).await
+    run_and_print_full(client, sql, echo_hidden, title, false, settings).await
 }
 
 async fn run_and_print_full(
@@ -94,6 +166,7 @@ async fn run_and_print_full(
     echo_hidden: bool,
     title: Option<&str>,
     show_row_count: bool,
+    settings: &mut crate::repl::ReplSettings,
 ) -> bool {
     if echo_hidden {
         eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
@@ -132,7 +205,8 @@ async fn run_and_print_full(
                 }
             }
 
-            print_table_inner(&col_names, &rows, title, show_row_count);
+            let text = format_table_inner(&col_names, &rows, title, show_row_count);
+            maybe_page(settings, &text);
         }
         Err(e) => {
             crate::output::eprint_db_error(&e, Some(sql), false);
@@ -142,7 +216,7 @@ async fn run_and_print_full(
     false
 }
 
-/// Print a column-aligned table to stdout, optionally with a centered title.
+/// Format a column-aligned table as a `String`, optionally with a centered title.
 ///
 /// Matches the psql default output format:
 /// ```text
@@ -155,25 +229,31 @@ async fn run_and_print_full(
 ///
 /// When `show_row_count` is `false` the `(N rows)` footer is suppressed (used
 /// by `\d tablename` to match psql behaviour).
+///
+/// The `#[cfg(test)]` wrapper below provides a `print_table` helper for tests.
 #[cfg(test)]
 fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
-    print_table_inner(col_names, rows, title, true);
+    print!("{}", format_table_inner(col_names, rows, title, true));
 }
 
 #[allow(clippy::too_many_lines)]
-fn print_table_inner(
+fn format_table_inner(
     col_names: &[String],
     rows: &[Vec<String>],
     title: Option<&str>,
     show_row_count: bool,
-) {
+) -> String {
+    use std::fmt::Write as FmtWrite;
+
+    let mut out = String::new();
+
     if col_names.is_empty() {
         if show_row_count {
             let n = rows.len();
             let word = if n == 1 { "row" } else { "rows" };
-            println!("({n} {word})");
+            let _ = writeln!(out, "({n} {word})");
         }
-        return;
+        return out;
     }
 
     // Compute column widths (multi-line cell values: each line counts separately).
@@ -187,19 +267,22 @@ fn print_table_inner(
         }
     }
 
-    // Total table width: 1 (leading space) + sum(widths) + 3*(ncols-1) (` | `) + 1 (trailing space).
+    // Total table width: 1 (leading space) + sum(widths) +
+    // 3*(ncols-1) (` | `) + 1 (trailing space).
     let ncols = widths.len();
     let table_width =
-        1 + widths.iter().sum::<usize>() + if ncols > 1 { 3 * (ncols - 1) } else { 0 } + 1;
+        1 + widths.iter().sum::<usize>()
+            + if ncols > 1 { 3 * (ncols - 1) } else { 0 }
+            + 1;
 
     // Optional title centered to table width.
     if let Some(t) = title {
         let tlen = t.len();
         if tlen >= table_width {
-            println!("{t}");
+            let _ = writeln!(out, "{t}");
         } else {
             let padding = (table_width - tlen) / 2;
-            println!("{:>width$}", t, width = padding + tlen);
+            let _ = writeln!(out, "{:>width$}", t, width = padding + tlen);
         }
     }
 
@@ -219,11 +302,11 @@ fn print_table_inner(
             }
         })
         .collect();
-    println!(" {} ", header.join(" | "));
+    let _ = writeln!(out, " {} ", header.join(" | "));
 
     // Separator.
     let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
-    println!("-{}-", sep.join("-+-"));
+    let _ = writeln!(out, "-{}-", sep.join("-+-"));
 
     // Data rows — cells with embedded newlines are printed as psql continuation
     // lines.  For the last column, `+` replaces the trailing space.  For middle
@@ -286,7 +369,8 @@ fn print_table_inner(
                     line.push('+');
                     prev_had_continuation = true;
                 } else if col_idx == ncols - 1 && !has_more {
-                    // Last column without continuation — no trailing padding (matches psql).
+                    // Last column without continuation — no trailing padding
+                    // (matches psql).
                     line.push_str(text);
                 } else {
                     // Normal cell — pad to column width.
@@ -304,15 +388,17 @@ fn print_table_inner(
                 line.push('+');
             }
 
-            println!("{line}");
+            let _ = writeln!(out, "{line}");
         }
     }
 
     if show_row_count {
         let n = rows.len();
         let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})\n");
+        let _ = writeln!(out, "({n} {word})\n");
     }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +434,7 @@ fn relation_title(_relkinds: &[&str]) -> &'static str {
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
 #[allow(clippy::too_many_lines)]
-async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str]) -> bool {
+async fn list_relations(client: &Client, meta: &ParsedMeta, relkinds: &[&str], settings: &mut crate::repl::ReplSettings) -> bool {
     // Build the relkind IN list: ('r','p')
     let kind_list: Vec<String> = relkinds.iter().map(|k| format!("'{k}'")).collect();
     let kind_in = kind_list.join(",");
@@ -520,14 +606,14 @@ order by 1, 2"
     };
 
     let title = relation_title(relkinds);
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some(title)).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some(title), settings).await
 }
 
 // ---------------------------------------------------------------------------
 // \df — list functions
 // ---------------------------------------------------------------------------
 
-async fn list_functions(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_functions(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "p.proname", Some("n.nspname"));
 
@@ -618,14 +704,14 @@ order by 1, 2, 4"
         )
     };
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of functions")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of functions"), settings).await
 }
 
 // ---------------------------------------------------------------------------
 // \dn — list schemas
 // ---------------------------------------------------------------------------
 
-async fn list_schemas(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_schemas(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "n.nspname", None);
 
     let sys_filter = if meta.system {
@@ -678,14 +764,14 @@ order by 1"
         )
     };
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of schemas")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of schemas"), settings).await
 }
 
 // ---------------------------------------------------------------------------
 // \du / \dg — list roles
 // ---------------------------------------------------------------------------
 
-async fn list_roles(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_roles(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "r.rolname", None);
 
     // When no pattern is specified, filter out pg_* system roles (matches psql behaviour).
@@ -751,14 +837,19 @@ order by 1"
     };
 
     // psql suppresses the row count footer for \du.
-    run_and_print_no_count(client, &sql, meta.echo_hidden, Some("List of roles")).await
+    run_and_print_no_count(client, &sql, meta.echo_hidden, Some("List of roles"), settings).await
 }
 
 // ---------------------------------------------------------------------------
 // \l — list databases
 // ---------------------------------------------------------------------------
 
-async fn list_databases(client: &Client, meta: &ParsedMeta, pg_major_version: Option<u32>) -> bool {
+async fn list_databases(
+    client: &Client,
+    meta: &ParsedMeta,
+    pg_major_version: Option<u32>,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "d.datname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -846,14 +937,14 @@ order by 1"
         )
     };
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of databases")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of databases"), settings).await
 }
 
 // ---------------------------------------------------------------------------
 // \dx — list extensions
 // ---------------------------------------------------------------------------
 
-async fn list_extensions(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_extensions(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "e.extname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -881,6 +972,7 @@ order by 1"
         &sql,
         meta.echo_hidden,
         Some("List of installed extensions"),
+        settings,
     )
     .await
 }
@@ -889,7 +981,7 @@ order by 1"
 // \db — list tablespaces
 // ---------------------------------------------------------------------------
 
-async fn list_tablespaces(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_tablespaces(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "spcname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -927,7 +1019,7 @@ order by 1"
         )
     };
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of tablespaces")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of tablespaces"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -939,7 +1031,7 @@ order by 1"
 /// Basic columns: Schema, Name, Description.
 /// Verbose (`\dT+`) adds: Internal name, Size, Elements, Owner,
 /// Access privileges.
-async fn list_types(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_types(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "t.typname", Some("n.nspname"));
 
@@ -1020,7 +1112,7 @@ order by 1, 2"
         )
     };
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of data types")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of data types"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,7 +1123,7 @@ order by 1, 2"
 ///
 /// Basic columns: Schema, Name, Type, Collation, Nullable, Default, Check.
 /// Verbose (`\dD+`) adds: Access privileges, Description.
-async fn list_domains(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_domains(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "t.typname", Some("n.nspname"));
 
@@ -1127,7 +1219,7 @@ order by 1, 2"
         )
     };
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of domains")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of domains"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,7 +1230,7 @@ order by 1, 2"
 ///
 /// Matches psql's `\dp [pattern]` output: Schema, Name, Type, Access
 /// privileges, Column privileges, Policies.
-async fn list_privileges(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_privileges(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.relname", Some("n.nspname"));
 
@@ -1240,7 +1332,7 @@ left join pg_catalog.pg_namespace as n
 order by 1, 2"
     );
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("Access privileges")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("Access privileges"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,7 +1343,7 @@ order by 1, 2"
 ///
 /// Matches psql's `\dd [pattern]` output: Schema, Name, Object, Description.
 /// Shows objects that have comments but are not shown by other `\d` commands.
-async fn list_comments(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_comments(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "n.nspname", Some("n.nspname"));
 
@@ -1311,7 +1403,7 @@ where pg_catalog.obj_description(t.oid, 'pg_type') is not null
 order by 1, 3, 2"
     );
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("Object descriptions")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("Object descriptions"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,7 +1420,7 @@ order by 1, 3, 2"
 /// `search_path` are shown.  When a pattern is supplied it is matched
 /// against both `typname` and the formatted type name (`format_type()`),
 /// using the same `~` regex operator that psql uses.
-async fn list_casts(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_casts(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     // Build the WHERE clause.  psql always applies a visibility filter; when
     // a pattern is present it is also matched against type names via regex.
     let where_clause = match meta.pattern.as_deref() {
@@ -1387,7 +1479,7 @@ left join pg_catalog.pg_namespace as nt
 order by 1, 2"
     );
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of casts")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of casts"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1398,7 +1490,7 @@ order by 1, 2"
 ///
 /// Matches psql's `\dc [pattern]` output: Schema, Name, Source, Destination,
 /// Default?
-async fn list_conversions(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_conversions(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.conname", Some("n.nspname"));
 
@@ -1444,7 +1536,7 @@ left join pg_catalog.pg_namespace as n
 order by 1, 2"
     );
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of conversions")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of conversions"), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1455,7 +1547,7 @@ order by 1, 2"
 ///
 /// Matches psql's `\des [pattern]` output: Name, Owner, Foreign-data wrapper.
 /// With `+`: also shows Type, Version, FDW options, Description.
-async fn list_foreign_servers(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_foreign_servers(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "s.srvname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -1499,6 +1591,7 @@ order by 1"
         &sql,
         meta.echo_hidden,
         Some("List of foreign servers"),
+        settings,
     )
     .await
 }
@@ -1511,7 +1604,7 @@ order by 1"
 ///
 /// Matches psql's `\dew [pattern]` output: Name, Owner, Handler, Validator.
 /// With `+`: also shows FDW options, Description.
-async fn list_fdws(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_fdws(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "fdwname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -1551,6 +1644,7 @@ order by 1"
         &sql,
         meta.echo_hidden,
         Some("List of foreign-data wrappers"),
+        settings,
     )
     .await
 }
@@ -1563,7 +1657,7 @@ order by 1"
 ///
 /// Matches psql's `\det [pattern]` output: Schema, Table, Server.
 /// With `+`: also shows FDW options, Description.
-async fn list_foreign_tables_via_fdw(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_foreign_tables_via_fdw(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.relname", Some("n.nspname"));
 
@@ -1634,6 +1728,7 @@ order by 1, 2"
         &sql,
         meta.echo_hidden,
         Some("List of foreign tables"),
+        settings,
     )
     .await
 }
@@ -1646,7 +1741,7 @@ order by 1, 2"
 ///
 /// Matches psql's `\deu [pattern]` output: Server, User name.
 /// With `+`: also shows FDW options.
-async fn list_user_mappings(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_user_mappings(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "um.srvname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -1681,6 +1776,7 @@ order by 1, 2"
         &sql,
         meta.echo_hidden,
         Some("List of user mappings"),
+        settings,
     )
     .await
 }
@@ -1695,7 +1791,7 @@ order by 1, 2"
 /// Function, Tags.  With `+`, also adds a Description column.
 ///
 /// Event triggers are global objects (no schema qualifier).
-async fn list_event_triggers(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_event_triggers(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter = pattern::where_clause(meta.pattern.as_deref(), "e.evtname", None);
 
     let where_clause = if name_filter.is_empty() {
@@ -1760,6 +1856,7 @@ order by 1"
         &sql,
         meta.echo_hidden,
         Some("List of event triggers"),
+        settings,
     )
     .await
 }
@@ -1773,7 +1870,7 @@ order by 1"
 /// Matches psql's `\do [pattern]` output: Schema, Name, Left arg type,
 /// Right arg type, Result type, Description.  With `+`, Description uses the
 /// same coalesce but the query is otherwise identical.
-async fn list_operators(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_operators(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "o.oprname", Some("n.nspname"));
 
@@ -1839,18 +1936,18 @@ order by 1, 2, 3, 4"
 
     let _ = meta.plus; // both modes use the same query
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of operators")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of operators"), settings).await
 }
 
 // ---------------------------------------------------------------------------
 // \d [table] — describe a specific table, or list all relations
 // ---------------------------------------------------------------------------
 
-async fn describe_object(client: &Client, meta: &ParsedMeta) -> bool {
+async fn describe_object(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     match &meta.pattern {
         None => {
             // `\d` with no argument: list all user-visible relations.
-            list_all_relations(client, meta).await
+            list_all_relations(client, meta, settings).await
         }
         Some(pattern) => {
             // `\d pattern`: look up all matching objects, then describe each.
@@ -1937,7 +2034,7 @@ order by 2, 3"
                 // Use the exact schema-qualified name so describe_table resolves
                 // to exactly one object.
                 let qualified = format!("{schema}.{name}");
-                describe_table(client, meta, &qualified).await;
+                describe_table(client, meta, &qualified, settings).await;
             }
 
             // Return false unconditionally (only \q should exit the REPL).
@@ -1947,7 +2044,7 @@ order by 2, 3"
 }
 
 /// List all user-visible relations (tables, views, sequences, indexes, etc.)
-async fn list_all_relations(client: &Client, meta: &ParsedMeta) -> bool {
+async fn list_all_relations(client: &Client, meta: &ParsedMeta, settings: &mut crate::repl::ReplSettings) -> bool {
     let sys_filter = system_schema_filter(meta.system);
 
     // When not showing system objects, also restrict to search_path-visible
@@ -2005,12 +2102,12 @@ where c.relkind in ('r','p','i','I','S','v','m','f','c')
 order by 1, 2"
     );
 
-    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of relations")).await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some("List of relations"), settings).await
 }
 
 /// Describe a single table (or view, sequence, …): columns + indexes + constraints.
 #[allow(clippy::too_many_lines)]
-async fn describe_table(client: &Client, meta: &ParsedMeta, obj_pattern: &str) -> bool {
+async fn describe_table(client: &Client, meta: &ParsedMeta, obj_pattern: &str, settings: &mut crate::repl::ReplSettings) -> bool {
     // Split into (schema, name) parts.
     let (schema_part, name_part) = crate::pattern::split_schema(obj_pattern);
 
@@ -2196,7 +2293,7 @@ limit 1"
     // centered above the column table — matching psql's \d output.  The row
     // count footer is suppressed to match psql behaviour.
     let table_title = format!("{obj_label} \"{display_name}\"");
-    run_and_print_no_count(client, &cols_sql, meta.echo_hidden, Some(&table_title)).await;
+    run_and_print_no_count(client, &cols_sql, meta.echo_hidden, Some(&table_title), settings).await;
 
     // 2. Indexes on this table (Bug 1 applied: use name_part not obj_pattern).
     let idx_name_filter = crate::pattern::where_clause(Some(name_part), "tc.relname", None);
@@ -2827,8 +2924,53 @@ order by 2, 3"
     }
 
     // -----------------------------------------------------------------------
-    // print_table (smoke test via captured stdout)
+    // format_table_inner / print_table
     // -----------------------------------------------------------------------
+
+    /// Verify that `format_table_inner` returns a non-empty string for a
+    /// single-row result.
+    #[test]
+    fn format_table_inner_single_row() {
+        let cols = vec!["Name".to_owned()];
+        let rows = vec![vec!["users".to_owned()]];
+        let text = format_table_inner(&cols, &rows, None, true);
+        assert!(text.contains("Name"), "header must appear in output");
+        assert!(text.contains("users"), "data must appear in output");
+        assert!(text.contains("(1 row)"), "row count must appear");
+    }
+
+    #[test]
+    fn format_table_inner_empty_rows_has_zero_rows_footer() {
+        let cols = vec!["Schema".to_owned(), "Name".to_owned()];
+        let rows: Vec<Vec<String>> = vec![];
+        let text = format_table_inner(&cols, &rows, None, true);
+        assert!(text.contains("(0 rows)"), "must have (0 rows) footer");
+    }
+
+    #[test]
+    fn format_table_inner_no_columns_returns_row_count() {
+        let text = format_table_inner(&[], &[], None, true);
+        assert!(text.contains("(0 rows)"), "empty table must show (0 rows)");
+    }
+
+    #[test]
+    fn format_table_inner_show_row_count_false_no_footer() {
+        let cols = vec!["Col".to_owned()];
+        let rows = vec![vec!["val".to_owned()]];
+        let text = format_table_inner(&cols, &rows, None, false);
+        assert!(!text.contains("row"), "no row count when show_row_count=false");
+    }
+
+    #[test]
+    fn format_table_inner_with_title_includes_title() {
+        let cols = vec!["Col".to_owned()];
+        let rows: Vec<Vec<String>> = vec![];
+        let text = format_table_inner(&cols, &rows, Some("List of tables"), true);
+        assert!(
+            text.contains("List of tables"),
+            "title must appear in output"
+        );
+    }
 
     /// Verify that `print_table` produces a `(0 rows)` footer for an empty result.
     #[test]

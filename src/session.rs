@@ -1038,23 +1038,35 @@ where option can be one of:\n\
 /// With a topic: show the synopsis for that command (case-insensitive match;
 /// matches on any prefix of multi-word commands, e.g. `CREATE` matches
 /// `CREATE TABLE`).
-pub fn sql_help(topic: Option<&str>) {
+/// Return the SQL help text for `topic` as a `String`.
+///
+/// When `topic` is `None`, returns the full list of available help topics.
+/// When `topic` is `Some`, returns the synopsis for that command, or `None`
+/// when no matching entry is found (the caller should print an error to
+/// stderr in that case).
+///
+/// Returns `Err(topic)` when no matching entry is found so the caller can
+/// print an appropriate error message.
+pub fn sql_help_text(topic: Option<&str>) -> Result<String, String> {
     match topic {
-        None => print_help_topics(),
-        Some(t) => print_help_topic(t),
+        None => Ok(help_topics_text()),
+        Some(t) => help_topic_text(t),
     }
 }
 
-/// Print a two-column list of available SQL help topics.
+/// Build and return a two-column list of available SQL help topics.
 ///
 /// Format matches psql: two columns, left column 33 characters wide,
 /// each entry indented by 2 spaces.
-fn print_help_topics() {
+fn help_topics_text() -> String {
+    use std::fmt::Write as FmtWrite;
+
     // psql uses a fixed column width of 33 characters for the left column.
     const COL_W: usize = 33;
 
-    println!("Available help:");
-    println!();
+    let mut out = String::new();
+    let _ = writeln!(out, "Available help:");
+    let _ = writeln!(out);
 
     // Collect names and lay them out in two columns.
     let names: Vec<&str> = SQL_HELP.iter().map(|e| e.name).collect();
@@ -1064,17 +1076,21 @@ fn print_help_topics() {
         let left = names[i];
         let right = names.get(i + half).copied().unwrap_or("");
         if right.is_empty() {
-            println!("  {left}");
+            let _ = writeln!(out, "  {left}");
         } else {
-            println!("  {left:<COL_W$}{right}");
+            let _ = writeln!(out, "  {left:<COL_W$}{right}");
         }
     }
 
-    println!();
-    println!("Type \\h <command-name> for help on a specific command");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Type \\h <command-name> for help on a specific command");
+    out
 }
 
-/// Print the synopsis for a specific SQL command (case-insensitive).
+/// Build and return the synopsis for a specific SQL command (case-insensitive).
+///
+/// Returns `Ok(text)` when the command is found, or `Err(topic)` when no
+/// matching entry is found.
 ///
 /// Output format matches psql exactly:
 /// ```text
@@ -1085,7 +1101,9 @@ fn print_help_topics() {
 ///
 /// URL: https://...
 /// ```
-fn print_help_topic(topic: &str) {
+fn help_topic_text(topic: &str) -> Result<String, String> {
+    use std::fmt::Write as FmtWrite;
+
     let upper = topic.trim().to_uppercase();
 
     // Look for an exact match first, then a prefix match.
@@ -1095,15 +1113,16 @@ fn print_help_topic(topic: &str) {
         .or_else(|| SQL_HELP.iter().find(|e| e.name.starts_with(&upper)));
 
     if let Some(e) = entry {
-        println!("Command:     {}", e.name);
-        println!("Description: {}", e.description);
-        println!("Syntax:");
-        println!("{}", e.synopsis);
-        println!();
-        println!("URL: {}", e.url);
+        let mut out = String::new();
+        let _ = writeln!(out, "Command:     {}", e.name);
+        let _ = writeln!(out, "Description: {}", e.description);
+        let _ = writeln!(out, "Syntax:");
+        let _ = writeln!(out, "{}", e.synopsis);
+        let _ = writeln!(out);
+        let _ = writeln!(out, "URL: {}", e.url);
+        Ok(out)
     } else {
-        eprintln!("No help available for \"{topic}\".");
-        eprintln!("Try \\h with no argument to list available topics.");
+        Err(topic.to_owned())
     }
 }
 
@@ -1244,12 +1263,32 @@ mod tests {
         assert_eq!(a, ReconnectArgs::default());
     }
 
-    // -- sql_help ------------------------------------------------------------
+    // -- sql_help / sql_help_text -------------------------------------------
 
     #[test]
     fn sql_help_no_panic_no_topic() {
-        // Should not panic.
-        sql_help(None);
+        // Should not panic; verify via sql_help_text which is the primary API.
+        let text = sql_help_text(None).expect("no-topic help text should succeed");
+        assert!(!text.is_empty(), "help text must be non-empty");
+    }
+
+    #[test]
+    fn sql_help_text_no_topic_returns_ok() {
+        let text = sql_help_text(None).expect("no-topic should succeed");
+        assert!(text.contains("Available help:"));
+    }
+
+    #[test]
+    fn sql_help_text_select_returns_ok() {
+        let text = sql_help_text(Some("SELECT")).expect("SELECT should be found");
+        assert!(text.contains("Command:     SELECT"));
+        assert!(text.contains("Syntax:"));
+    }
+
+    #[test]
+    fn sql_help_text_unknown_returns_err() {
+        let err = sql_help_text(Some("NOTAVALIDCOMMAND")).expect_err("should be Err");
+        assert_eq!(err, "NOTAVALIDCOMMAND");
     }
 
     #[test]
