@@ -1859,7 +1859,7 @@ mod tests {
 
     // -- ConversationContext loop-prevention mechanism -------------------------
 
-    /// Verify that messages pushed into ConversationContext are returned by
+    /// Verify that messages pushed into `ConversationContext` are returned by
     /// `to_messages()` in order and with the correct roles.  This is the
     /// mechanism that injects prior /fix attempts into subsequent AI calls,
     /// preventing the AI from suggesting the same wrong fix repeatedly.
