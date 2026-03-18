@@ -2517,7 +2517,10 @@ async fn dispatch_io(
         }
         MetaCmd::Warn => {
             let raw = parsed.pattern.as_deref().unwrap_or("");
-            eprintln!("{}", unescape_echo(&crate::metacmd::split_params(raw).join(" ")));
+            eprintln!(
+                "{}",
+                unescape_echo(&crate::metacmd::split_params(raw).join(" "))
+            );
             Some(MetaResult::Continue)
         }
         MetaCmd::Encoding => {
