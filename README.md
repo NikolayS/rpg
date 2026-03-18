@@ -1,10 +1,10 @@
-# rpg — modern Postgres terminal
+# rpg — modern Postgres terminal written in Rust
 
 [![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
 
-A psql-compatible terminal with built-in DBA diagnostics and AI assistant.
+A psql-compatible terminal written in Rust with built-in DBA diagnostics and AI assistant.
 Single binary, no dependencies, cross-platform.
 
 ## Features
@@ -80,9 +80,11 @@ Execute? [Y/n/e]
 (1 row)
 ```
 
-### \yolo — silent auto-execute
+### \yolo — fast natural-language mode
 
-`\yolo` hides the SQL box and executes immediately without confirmation:
+`\yolo` combines text2sql and silent auto-execute in one command: it enables
+text2sql input, hides the SQL preview box, and executes immediately without
+confirmation.
 
 ```
 postgres=# \yolo
@@ -94,7 +96,8 @@ postgres=# what is DB size?
 (1 row)
 ```
 
-Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview in text2sql mode with `\set TEXT2SQL_SHOW_SQL off`.
+Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview box with
+`\set TEXT2SQL_SHOW_SQL on`.
 
 ### /fix — auto-correct errors
 

@@ -1288,6 +1288,9 @@ pub async fn exec_command(
             }
             MetaResult::SetExecMode(mode) => {
                 settings.exec_mode = mode;
+                if mode == ExecMode::Yolo {
+                    settings.input_mode = InputMode::Text2Sql;
+                }
                 let label = match mode {
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
@@ -1686,7 +1689,7 @@ Input/execution modes:
   \sql              switch to SQL input mode (default)
   \text2sql / \t2s  switch to text2sql input mode
   \plan             enter plan execution mode
-  \yolo             enter YOLO execution mode (hides SQL box, auto-executes)
+  \yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
   \interactive      return to interactive mode (default)
   \mode             show current input and execution mode
   \\set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
@@ -2492,11 +2495,19 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::Echo => {
-            println!("{}", parsed.pattern.as_deref().unwrap_or(""));
+            let raw = parsed.pattern.as_deref().unwrap_or("");
+            // Split into tokens (strips surrounding single-quotes, handles
+            // `\'`/`''` escapes inside quoted strings), join with spaces,
+            // then process backslash escape sequences — matching psql's
+            // \echo behaviour so that e.g. `\echo '\033[1;35mMenu:\033[0m'`
+            // emits an ANSI-coloured string.
+            let joined = crate::metacmd::split_params(raw).join(" ");
+            println!("{}", unescape_echo(&joined));
             Some(MetaResult::Continue)
         }
         MetaCmd::QEcho => {
-            let text = parsed.pattern.as_deref().unwrap_or("");
+            let raw = parsed.pattern.as_deref().unwrap_or("");
+            let text = unescape_echo(&crate::metacmd::split_params(raw).join(" "));
             if let Some(ref mut w) = settings.output_target {
                 let _ = writeln!(w, "{text}");
             } else {
@@ -2505,7 +2516,11 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::Warn => {
-            eprintln!("{}", parsed.pattern.as_deref().unwrap_or(""));
+            let raw = parsed.pattern.as_deref().unwrap_or("");
+            eprintln!(
+                "{}",
+                unescape_echo(&crate::metacmd::split_params(raw).join(" "))
+            );
             Some(MetaResult::Continue)
         }
         MetaCmd::Encoding => {
@@ -2687,6 +2702,116 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
         Ok(_) => {}
         Err(e) => eprintln!("{e}"),
     }
+}
+
+/// Process backslash escape sequences in `\echo` output, matching psql.
+///
+/// Recognised sequences:
+/// - `\n` → newline
+/// - `\t` → tab
+/// - `\r` → carriage return
+/// - `\b` → backspace
+/// - `\f` → form feed
+/// - `\\` → backslash
+/// - `\'` → single quote
+/// - `\ooo` (1–3 octal digits) → byte with that octal value
+/// - `\xhh` (1–2 hex digits) → byte with that hex value
+///
+/// Unknown sequences (e.g. `\q`) are left verbatim.
+fn unescape_echo(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        if bytes[i] != b'\\' || i + 1 >= len {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // Peek at the character after the backslash.
+        match bytes[i + 1] {
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'b' => {
+                out.push(0x08);
+                i += 2;
+            }
+            b'f' => {
+                out.push(0x0C);
+                i += 2;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                i += 2;
+            }
+            b'\'' => {
+                out.push(b'\'');
+                i += 2;
+            }
+            b'x' | b'X' => {
+                // Hex escape: \xhh (1–2 hex digits).
+                let start = i + 2;
+                let end = bytes[start..]
+                    .iter()
+                    .take(2)
+                    .take_while(|b| b.is_ascii_hexdigit())
+                    .count();
+                if end > 0 {
+                    let hex: String = bytes[start..start + end]
+                        .iter()
+                        .map(|&b| b as char)
+                        .collect();
+                    if let Ok(val) = u8::from_str_radix(&hex, 16) {
+                        out.push(val);
+                        i = start + end;
+                        continue;
+                    }
+                }
+                // Not a valid hex escape — emit verbatim.
+                out.push(b'\\');
+                i += 1;
+            }
+            b'0'..=b'7' => {
+                // Octal escape: \ooo (1–3 octal digits).
+                let start = i + 1;
+                let end = bytes[start..]
+                    .iter()
+                    .take(3)
+                    .take_while(|&&b| (b'0'..=b'7').contains(&b))
+                    .count();
+                let octal: String = bytes[start..start + end]
+                    .iter()
+                    .map(|&b| b as char)
+                    .collect();
+                if let Ok(val) = u32::from_str_radix(&octal, 8) {
+                    // Truncate to 8 bits, matching psql behaviour (\400 → 0x00).
+                    #[allow(clippy::cast_possible_truncation)]
+                    out.push((val & 0xFF) as u8);
+                    i = start + end;
+                } else {
+                    out.push(b'\\');
+                    i += 1;
+                }
+            }
+            _ => {
+                // Unknown escape — emit verbatim.
+                out.push(b'\\');
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Dispatch a parsed meta-command, applying any side-effects to `settings`.
@@ -4155,6 +4280,9 @@ async fn handle_backslash_dumb(
         }
         MetaResult::SetExecMode(mode) => {
             settings.exec_mode = mode;
+            if mode == ExecMode::Yolo {
+                settings.input_mode = InputMode::Text2Sql;
+            }
             let label = match mode {
                 ExecMode::Interactive => "interactive",
                 ExecMode::Plan => "plan",
@@ -4478,6 +4606,9 @@ async fn handle_line(
             }
             MetaResult::SetExecMode(mode) => {
                 settings.exec_mode = mode;
+                if mode == ExecMode::Yolo {
+                    settings.input_mode = InputMode::Text2Sql;
+                }
                 let label = match mode {
                     ExecMode::Interactive => "interactive",
                     ExecMode::Plan => "plan",
@@ -7266,5 +7397,141 @@ mod tests {
             combined.contains("ERROR:"),
             "expected 'ERROR:' in conversation messages, got: {combined}"
         );
+    }
+
+    // -- unescape_echo ---------------------------------------------------------
+
+    #[test]
+    fn unescape_echo_plain_text() {
+        assert_eq!(super::unescape_echo("hello world"), "hello world");
+    }
+
+    #[test]
+    fn unescape_echo_newline_seq() {
+        assert_eq!(super::unescape_echo("a\\nb"), "a\nb");
+    }
+
+    #[test]
+    fn unescape_echo_tab_seq() {
+        assert_eq!(super::unescape_echo("a\\tb"), "a\tb");
+    }
+
+    #[test]
+    fn unescape_echo_backslash_seq() {
+        assert_eq!(super::unescape_echo("a\\\\b"), "a\\b");
+    }
+
+    #[test]
+    fn unescape_echo_single_quote_seq() {
+        assert_eq!(super::unescape_echo("a\\'b"), "a'b");
+    }
+
+    #[test]
+    fn unescape_echo_octal_esc_seq() {
+        // \033 is ESC (decimal 27).
+        let result = super::unescape_echo("\\033[1;35m");
+        assert_eq!(result.as_bytes()[0], 27);
+        assert_eq!(&result[1..], "[1;35m");
+    }
+
+    #[test]
+    fn unescape_echo_hex_seq() {
+        // \x1b is ESC.
+        let result = super::unescape_echo("\\x1b[0m");
+        assert_eq!(result.as_bytes()[0], 0x1b);
+        assert_eq!(&result[1..], "[0m");
+    }
+
+    #[test]
+    fn unescape_echo_unknown_escape_stays_verbatim() {
+        assert_eq!(super::unescape_echo("\\q"), "\\q");
+    }
+
+    #[test]
+    fn unescape_echo_ansi_color_sequence() {
+        // Simulates postgres_dba: '\033[1;35mMenu:\033[0m'
+        // After split_params strips quotes: \033[1;35mMenu:\033[0m
+        let text = "\\033[1;35mMenu:\\033[0m";
+        let result = super::unescape_echo(text);
+        assert_eq!(result.as_bytes()[0], 27);
+        assert!(result.ends_with("Menu:\x1b[0m"));
+    }
+
+    #[test]
+    fn unescape_echo_octal_overflow_truncates() {
+        // \400 = 256 decimal; psql truncates mod 256 → 0x00.
+        let result = super::unescape_echo("\\400");
+        assert_eq!(result.as_bytes(), &[0x00]);
+    }
+
+    // -- postgres_dba patterns (Copyright 2026) --------------------------------
+    //
+    // These tests replicate the exact \echo calls from
+    // https://github.com/NikolayS/postgres_dba/blob/master/start.psql
+    // to verify that split_params + unescape_echo together produce the
+    // correct ANSI output, matching what psql does.
+
+    #[test]
+    fn postgres_dba_menu_header_split_then_unescape() {
+        // start.psql line 2: \echo '\033[1;35mMenu:\033[0m'
+        // split_params strips the surrounding single quotes, then
+        // unescape_echo converts \033 to ESC (0x1b).
+        let raw = "'\\033[1;35mMenu:\\033[0m'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        assert_eq!(joined, "\\033[1;35mMenu:\\033[0m");
+        let result = super::unescape_echo(&joined);
+        // First byte must be ESC (0x1b = 27).
+        assert_eq!(result.as_bytes()[0], 0x1b);
+        // Bold magenta on: [1;35m
+        assert!(result.contains("[1;35m"));
+        // Reset: ESC[0m
+        assert!(result.ends_with("\x1b[0m"));
+        // The literal text "Menu:" must be present.
+        assert!(result.contains("Menu:"));
+    }
+
+    #[test]
+    fn postgres_dba_error_banner_split_then_unescape() {
+        // start.psql line 219:
+        //   \echo '\033[1;31mError:\033[0m Unknown option! Try again.'
+        // split_params strips quotes; unescape_echo resolves \033.
+        let raw = "'\\033[1;31mError:\\033[0m Unknown option! Try again.'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        assert_eq!(
+            joined,
+            "\\033[1;31mError:\\033[0m Unknown option! Try again."
+        );
+        let result = super::unescape_echo(&joined);
+        // First byte is ESC.
+        assert_eq!(result.as_bytes()[0], 0x1b);
+        // Bold red on: [1;31m
+        assert!(result.contains("[1;31m"));
+        // The literal error text must survive.
+        assert!(result.contains("Error:"));
+        assert!(result.contains("Unknown option! Try again."));
+        // Reset sequence present.
+        assert!(result.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn postgres_dba_plain_echo_no_escape() {
+        // start.psql line 79: \echo 'Bye!'
+        // No escape sequences; split_params strips quotes, output is literal.
+        let raw = "'Bye!'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        let result = super::unescape_echo(&joined);
+        assert_eq!(result, "Bye!");
+    }
+
+    #[test]
+    fn postgres_dba_menu_item_echo_preserves_spacing() {
+        // start.psql line 3 (representative plain menu line):
+        //   \echo '   0 – Node and current database information'
+        // Spaces inside quotes must be preserved.
+        let raw = "'   0 \u{2013} Node and current database information'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        let result = super::unescape_echo(&joined);
+        assert!(result.starts_with("   0"));
+        assert!(result.contains("Node and current database information"));
     }
 }
