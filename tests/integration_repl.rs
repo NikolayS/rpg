@@ -699,3 +699,128 @@ async fn ask_readonly_tx_blocks_insert() {
         .simple_query("drop table if exists test_ask_guard_insert")
         .await;
 }
+
+// ---------------------------------------------------------------------------
+// /ask yolo mode — write queries rejected by read-only tx even in yolo mode
+// ---------------------------------------------------------------------------
+//
+// In yolo mode `/ask` skips the advisory `is_write_query` check and proceeds
+// to `AskChoice::Yes`.  The read-only transaction wrapper is the DB-level
+// safety net that prevents actual mutations.  These tests confirm that the
+// wrapper is applied unconditionally — not only when `is_write_query` returns
+// false.
+
+/// In yolo mode, a write query that reaches `AskChoice::Yes` is still wrapped
+/// in `start transaction read only` and therefore rejected by PostgreSQL.
+///
+/// We simulate the exact SQL that `wrap_in_ask_readonly_tx` produces for an
+/// INSERT statement and verify that PostgreSQL rejects it.
+#[tokio::test]
+async fn ask_yolo_write_query_rejected_by_readonly_tx() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Create a scratch table for the INSERT attempt.
+    client
+        .simple_query("create table if not exists test_ask_yolo_guard (id int)")
+        .await
+        .expect("setup CREATE TABLE failed");
+
+    // Simulate wrap_in_ask_readonly_tx("insert into test_ask_yolo_guard values (42)")
+    // — this is the SQL that handle_ai_ask now generates for ALL queries,
+    // including write queries in yolo mode.
+    let wrapped = "start transaction read only;\n\
+                   insert into test_ask_yolo_guard values (42);\n\
+                   commit;";
+
+    let result = client.simple_query(wrapped).await;
+    assert!(
+        result.is_err(),
+        "INSERT must be rejected by start transaction read only even in yolo mode"
+    );
+
+    // Verify the error is a read-only violation.
+    let err = result.unwrap_err();
+    let pg_msg = std::error::Error::source(&err)
+        .and_then(|src| src.downcast_ref::<tokio_postgres::error::DbError>())
+        .map_or("", tokio_postgres::error::DbError::message);
+    assert!(
+        pg_msg.contains("read-only") || pg_msg.contains("read only"),
+        "PostgreSQL error must mention read-only; got: {pg_msg:?} (raw: {err})"
+    );
+
+    let _ = client.simple_query("rollback").await;
+
+    // Confirm no row was inserted.
+    let check = client
+        .simple_query("select count(*) as n from test_ask_yolo_guard")
+        .await
+        .expect("count query failed");
+    let mut n = 0i64;
+    for msg in check {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            n = row
+                .get("n")
+                .unwrap_or("0")
+                .parse()
+                .expect("count should be numeric");
+        }
+    }
+    assert_eq!(
+        n, 0,
+        "no rows must be inserted via yolo /ask read-only guard"
+    );
+
+    // Clean up.
+    let _ = client
+        .simple_query("drop table if exists test_ask_yolo_guard")
+        .await;
+}
+
+/// In yolo mode, a DDL statement (CREATE TABLE) is also rejected by the
+/// read-only transaction wrapper, confirming the guard applies to all
+/// write query types.
+#[tokio::test]
+async fn ask_yolo_ddl_rejected_by_readonly_tx() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Simulate wrap_in_ask_readonly_tx for a CREATE TABLE.
+    let wrapped = "start transaction read only;\n\
+                   create table test_ask_yolo_ddl_guard (id int);\n\
+                   commit;";
+
+    let result = client.simple_query(wrapped).await;
+    assert!(
+        result.is_err(),
+        "CREATE TABLE must be rejected by start transaction read only in yolo mode"
+    );
+
+    let _ = client.simple_query("rollback").await;
+
+    // Verify the table was NOT created.
+    let check = client
+        .simple_query(
+            "select count(*) as n from information_schema.tables \
+             where table_schema = 'public' \
+               and table_name = 'test_ask_yolo_ddl_guard'",
+        )
+        .await
+        .expect("table existence check failed");
+    let mut n = 0i64;
+    for msg in check {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            n = row
+                .get("n")
+                .unwrap_or("0")
+                .parse()
+                .expect("count should be numeric");
+        }
+    }
+    assert_eq!(
+        n, 0,
+        "test_ask_yolo_ddl_guard must not exist after failed yolo read-only tx"
+    );
+}

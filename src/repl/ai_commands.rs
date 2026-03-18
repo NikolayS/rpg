@@ -586,13 +586,16 @@ pub(super) fn wrap_in_ask_readonly_tx(sql: &str) -> String {
 ///
 /// # Read-only protection
 ///
-/// Every read-only query — across all execution paths (interactive, text2sql,
-/// yolo, and the edit path) — is wrapped in
-/// `start transaction read only` / `commit` so that even if [`is_write_query`]
-/// misclassifies a query, the database itself rejects any mutation.
+/// Every query executed by `/ask` — across all execution paths (interactive,
+/// text2sql, yolo, and the edit path) — is wrapped in
+/// `start transaction read only` / `commit`.  This is a second line of
+/// defence: even in yolo mode, the database rejects any mutation that slips
+/// past [`is_write_query`].
 ///
-/// Write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) always prompt for
-/// confirmation unless running in YOLO mode.
+/// In non-yolo mode write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) are
+/// refused before execution (`AskChoice::No`).  In yolo mode they reach
+/// `AskChoice::Yes` but the read-only transaction wrapper causes PostgreSQL
+/// to reject them at the wire level.
 #[allow(clippy::too_many_lines)]
 pub(super) async fn handle_ai_ask(
     client: &Client,
@@ -789,13 +792,15 @@ pub(super) async fn handle_ai_ask(
                 // Decide whether to prompt before executing.
                 let read_only = !is_write_query(sql);
                 let choice = if yolo {
-                    // Yolo: auto-execute; warn on write queries.
+                    // Yolo: auto-execute.  Write queries still go through the
+                    // read-only transaction wrapper, so PostgreSQL will reject
+                    // them at the DB level.  Warn so the user understands why
+                    // the query failed.
                     if !read_only {
-                        if settings.i_know_what_im_doing {
-                            eprintln!("-- YOLO: auto-executing write query");
-                        } else {
-                            eprintln!("-- YOLO: write query executing — proceed with care");
-                        }
+                        eprintln!(
+                            "-- YOLO: write query attempted — \
+                             read-only transaction will reject it"
+                        );
                     }
                     AskChoice::Yes
                 } else if !read_only {
@@ -819,17 +824,14 @@ pub(super) async fn handle_ai_ask(
 
                 match choice {
                     AskChoice::Yes => {
-                        // Always wrap read-only queries in a read-only
-                        // transaction so the database rejects any write that
-                        // slips past is_write_query (e.g. a novel DML keyword
-                        // or a comment-prefixed query that was misclassified).
-                        let exec_sql: std::borrow::Cow<str> = if read_only {
-                            std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(sql))
-                        } else {
-                            std::borrow::Cow::Borrowed(sql)
-                        };
+                        // Always wrap in a read-only transaction regardless of
+                        // is_write_query classification.  This provides a
+                        // second line of defence: even in yolo mode, the
+                        // database itself will reject any mutation that slips
+                        // past the is_write_query advisory check.
+                        let exec_sql = std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(sql));
                         let ok = execute_query_interactive(client, &exec_sql, settings, tx).await;
-                        if read_only && !ok {
+                        if !ok {
                             // Roll back on error to leave the session clean.
                             let _ = client.simple_query("rollback").await;
                         }
@@ -852,19 +854,16 @@ pub(super) async fn handle_ai_ask(
                             if edited.is_empty() {
                                 eprintln!("(empty — skipped)");
                             } else {
-                                // Re-evaluate after edit: the user may have
-                                // changed a read-only query into a write or
-                                // vice versa.
-                                let edited_read_only = !is_write_query(edited);
-                                let exec_edited: std::borrow::Cow<str> = if edited_read_only {
-                                    std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited))
-                                } else {
-                                    std::borrow::Cow::Borrowed(edited)
-                                };
+                                // Always wrap the edited query in a read-only
+                                // transaction — same policy as the non-edit
+                                // path.  The database enforces read-only
+                                // regardless of what is_write_query says.
+                                let exec_edited =
+                                    std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited));
                                 let ok =
                                     execute_query_interactive(client, &exec_edited, settings, tx)
                                         .await;
-                                if edited_read_only && !ok {
+                                if !ok {
                                     let _ = client.simple_query("rollback").await;
                                 }
                                 if ok {
@@ -2140,7 +2139,7 @@ mod tests {
     /// Verify that `wrap_in_ask_readonly_tx` produces SQL that can be rolled
     /// back: the wrapped output starts a transaction, so a subsequent
     /// `rollback;` is valid.  This tests the invariant relied upon by the
-    /// `if read_only && !ok { rollback }` path in `handle_ai_ask`.
+    /// `if !ok { rollback }` path in `handle_ai_ask`.
     #[test]
     fn wrap_readonly_tx_rollback_path_produces_valid_rollback_target() {
         let wrapped = wrap_in_ask_readonly_tx("select 1/0");
