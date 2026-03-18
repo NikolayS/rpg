@@ -935,9 +935,10 @@ pub(super) async fn execute_query_interactive(
             sl.teardown_scroll_region();
         }
         run_pager_for_text(settings, &text, &captured);
-        // Re-establish scroll region and re-render status bar after pager exits.
+        // Re-establish scroll region, reposition cursor to bottom of scroll
+        // region, and re-render status bar after pager exits.
         if let Some(ref sl) = settings.statusline {
-            sl.setup_scroll_region();
+            sl.setup_scroll_region_and_restore_cursor();
             sl.render();
         }
     } else {
@@ -1054,9 +1055,10 @@ pub(super) async fn execute_query_extended_interactive(
             sl.teardown_scroll_region();
         }
         run_pager_for_text(settings, &text, &captured);
-        // Re-establish scroll region and re-render after pager exits.
+        // Re-establish scroll region, reposition cursor to bottom of scroll
+        // region, and re-render after pager exits.
         if let Some(ref sl) = settings.statusline {
-            sl.setup_scroll_region();
+            sl.setup_scroll_region_and_restore_cursor();
             sl.render();
         }
     } else {
