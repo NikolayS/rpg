@@ -7996,7 +7996,7 @@ mod tests {
         // VACUUM with arguments (space-separated) must be detected.
         // Note: bare "VACUUM;" (no space before semicolon) is not detected
         // because split_whitespace treats "VACUUM;" as one token — see
-        // issue #625 for the edge-case tracker.
+        // issue #627 for the edge-case tracker.
         assert!(ai_commands::is_write_query("VACUUM FULL t;"));
         assert!(ai_commands::is_write_query("VACUUM ANALYZE t;"));
         assert!(ai_commands::is_write_query("vacuum analyze t;"));
