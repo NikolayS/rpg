@@ -553,10 +553,17 @@ async fn ask_readonly_tx_blocks_create_table() {
         result.is_err(),
         "CREATE TABLE must be rejected inside start transaction read only"
     );
-    let err_msg = result.unwrap_err().to_string();
+    // The tokio-postgres Error::to_string() returns "db error"; the actual
+    // PostgreSQL message lives in the DbError source.  Check via source()
+    // to get the human-readable text from PG.
+    let err = result.unwrap_err();
+    let pg_msg = std::error::Error::source(&err)
+        .and_then(|src| src.downcast_ref::<tokio_postgres::error::DbError>())
+        .map(|db| db.message())
+        .unwrap_or("");
     assert!(
-        err_msg.contains("read-only") || err_msg.contains("read only"),
-        "error must mention read-only: {err_msg}"
+        pg_msg.contains("read-only") || pg_msg.contains("read only"),
+        "PostgreSQL error must mention read-only; got: {pg_msg:?} (raw: {err})"
     );
 
     // The transaction was aborted — roll it back to leave the session clean.
