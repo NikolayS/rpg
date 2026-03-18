@@ -768,8 +768,8 @@ pub(super) async fn handle_ai_ask(
                     AskChoice::Yes
                 } else if !read_only {
                     // /ask is a question command — show the SQL but do not execute
-                    // DML or DDL. Use \t2s mode to run write queries.
-                    eprintln!("-- (write query — not executed in /ask mode; use \\t2s to run)");
+                    // DML or DDL. The user can copy and run it manually or use \t2s.
+                    eprintln!("-- (write query — not executed in /ask mode; use \\t2s to execute)");
                     AskChoice::No
                 } else {
                     // /ask interactive mode, read-only: auto-execute.
@@ -1232,23 +1232,28 @@ pub(super) async fn handle_ai_fix(
     }
 }
 
-/// Detect whether a query is a data-modifying statement that must be
-/// wrapped in a rolled-back transaction before `EXPLAIN ANALYZE`.
+/// Detect whether a query is a write or schema-changing statement.
 ///
 /// Returns `true` for:
 /// - **DML**: `INSERT`, `UPDATE`, `DELETE`, `MERGE`
 /// - **DDL**: `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `RENAME`
-/// - **Privilege control**: `GRANT`, `REVOKE`
+/// - **DCL**: `GRANT`, `REVOKE`
 /// - **Maintenance**: `VACUUM`, `CLUSTER`, `REINDEX`, `REFRESH`
-/// - **CTEs** (`WITH`): treated conservatively as writes to prevent
-///   DML-prefixed CTE bypass.
+/// - **CTEs**: any query starting with `WITH` (treated conservatively as a
+///   potential write, since CTEs may wrap DML)
+///
+/// Used to decide whether to wrap a query in `BEGIN`/`ROLLBACK` for
+/// `EXPLAIN ANALYZE`, and whether to require confirmation before
+/// auto-executing in `/ask` and yolo modes.
 pub(super) fn is_write_query(sql: &str) -> bool {
     let first = sql
         .split_whitespace()
         .next()
         .unwrap_or("")
         .to_ascii_uppercase();
-    // WITH starts a CTE; may wrap DML so treat as write (conservative).
+    // WITH starts a CTE which may wrap DML (INSERT/UPDATE/DELETE/MERGE).
+    // Treat all CTEs as potentially mutating to prevent silent auto-execution
+    // of CTE-prefixed write queries in /ask and yolo modes.
     if first == "WITH" {
         return true;
     }
