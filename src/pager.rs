@@ -126,6 +126,12 @@ impl Drop for TerminalGuard {
         // the terminal is always restored, including during panics.
         let _ = terminal::disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        // Reset the scroll region on the main screen buffer so the REPL can
+        // re-install its own DECSTBM constraint.  Without this the main buffer
+        // inherits whatever scroll region was set before the pager launched,
+        // leaving the cursor stuck at row 1.
+        let _ = io::stderr().write_all(b"\x1b[r");
+        let _ = io::stderr().flush();
     }
 }
 
