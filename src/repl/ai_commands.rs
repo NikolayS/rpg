@@ -484,10 +484,20 @@ pub(super) enum AskChoice {
 pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
     use crossterm::event::{read, Event, KeyCode, KeyModifiers};
     use crossterm::terminal;
-    use std::io::Write;
+    use std::io::{IsTerminal, Write};
 
     eprint!("{prompt}");
     let _ = io::stderr().flush();
+
+    // Non-TTY guard: if stdin is not a terminal (CI, piped input, scripts),
+    // skip the raw-mode loop entirely and return the default answer.
+    if !io::stdin().is_terminal() {
+        return if default_yes {
+            AskChoice::Yes
+        } else {
+            AskChoice::No
+        };
+    }
 
     // Enable raw mode so we can read single key events and detect Ctrl+C.
     // Outside readline, the terminal is in cooked mode; we temporarily switch
