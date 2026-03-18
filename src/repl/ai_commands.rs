@@ -1248,7 +1248,9 @@ pub(super) fn is_write_query(sql: &str) -> bool {
         .next()
         .unwrap_or("")
         .to_ascii_uppercase();
-    // WITH starts a CTE; may wrap DML so treat as write (conservative).
+    // WITH starts a CTE which may wrap DML (INSERT/UPDATE/DELETE/MERGE).
+    // Treat all CTEs as potentially mutating to prevent silent auto-execution
+    // of CTE-prefixed write queries in /ask and yolo modes.
     if first == "WITH" {
         return true;
     }
