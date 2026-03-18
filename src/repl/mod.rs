@@ -6301,57 +6301,27 @@ mod tests {
     }
 
     #[test]
-    fn write_query_ddl_create() {
+    fn write_query_ddl_is_true() {
         assert!(is_write_query("CREATE TABLE t (id int)"));
-    }
-
-    #[test]
-    fn write_query_ddl_drop() {
+        assert!(is_write_query("CREATE INDEX idx_foo ON t(id)"));
         assert!(is_write_query("DROP TABLE t"));
-    }
-
-    #[test]
-    fn write_query_ddl_alter() {
         assert!(is_write_query("ALTER TABLE t ADD COLUMN x text"));
-    }
-
-    #[test]
-    fn write_query_ddl_truncate() {
         assert!(is_write_query("TRUNCATE TABLE t"));
-    }
-
-    #[test]
-    fn write_query_ddl_rename() {
         assert!(is_write_query("RENAME TABLE t TO t2"));
+        assert!(is_write_query("create index concurrently ..."));
     }
 
     #[test]
-    fn write_query_dcl_grant() {
+    fn write_query_grant_revoke_is_true() {
         assert!(is_write_query("GRANT SELECT ON t TO user1"));
+        assert!(is_write_query("REVOKE ALL ON t FROM user1"));
     }
 
     #[test]
-    fn write_query_dcl_revoke() {
-        assert!(is_write_query("REVOKE SELECT ON t FROM user1"));
-    }
-
-    #[test]
-    fn write_query_maintenance_vacuum() {
+    fn write_query_maintenance_is_true() {
         assert!(is_write_query("VACUUM ANALYZE t"));
-    }
-
-    #[test]
-    fn write_query_maintenance_cluster() {
         assert!(is_write_query("CLUSTER t USING t_pkey"));
-    }
-
-    #[test]
-    fn write_query_maintenance_reindex() {
         assert!(is_write_query("REINDEX TABLE t"));
-    }
-
-    #[test]
-    fn write_query_maintenance_refresh() {
         assert!(is_write_query("REFRESH MATERIALIZED VIEW mv"));
     }
 
