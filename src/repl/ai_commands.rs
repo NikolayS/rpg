@@ -768,8 +768,8 @@ pub(super) async fn handle_ai_ask(
                     AskChoice::Yes
                 } else if !read_only {
                     // /ask is a question command — show the SQL but do not execute
-                    // DML or DDL. The user can copy and run it manually or use \t2s.
-                    eprintln!("-- (write query — not executed in /ask mode; use \\t2s to execute)");
+                    // DML or DDL. Use \t2s mode to run write queries.
+                    eprintln!("-- (write query — not executed in /ask mode; use \\t2s to run)");
                     AskChoice::No
                 } else {
                     // /ask interactive mode, read-only: auto-execute.
