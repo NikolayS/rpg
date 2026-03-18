@@ -7912,9 +7912,7 @@ mod tests {
     #[test]
     fn write_query_explain_select_is_false() {
         // EXPLAIN of a SELECT is still a read query.
-        assert!(!ai_commands::is_write_query(
-            "EXPLAIN SELECT * FROM users"
-        ));
+        assert!(!ai_commands::is_write_query("EXPLAIN SELECT * FROM users"));
         assert!(!ai_commands::is_write_query(
             "explain analyze select * from users"
         ));
@@ -7990,9 +7988,7 @@ mod tests {
         assert!(ai_commands::is_write_query("REINDEX TABLE t;"));
         assert!(ai_commands::is_write_query("REINDEX INDEX idx;"));
         assert!(ai_commands::is_write_query("REINDEX DATABASE mydb;"));
-        assert!(ai_commands::is_write_query(
-            "REINDEX TABLE CONCURRENTLY t;"
-        ));
+        assert!(ai_commands::is_write_query("REINDEX TABLE CONCURRENTLY t;"));
     }
 
     #[test]
@@ -8033,27 +8029,21 @@ mod tests {
         assert!(ai_commands::is_write_query(
             "ALTER SEQUENCE s RESTART WITH 1;"
         ));
-        assert!(ai_commands::is_write_query(
-            "alter table t drop column x;"
-        ));
+        assert!(ai_commands::is_write_query("alter table t drop column x;"));
     }
 
     #[test]
     fn write_query_create_variants_are_true() {
         // All CREATE variants must be detected.
         assert!(ai_commands::is_write_query("CREATE TABLE t (id int);"));
-        assert!(ai_commands::is_write_query(
-            "CREATE INDEX idx ON t (id);"
-        ));
+        assert!(ai_commands::is_write_query("CREATE INDEX idx ON t (id);"));
         assert!(ai_commands::is_write_query(
             "CREATE UNIQUE INDEX CONCURRENTLY idx ON t (email);"
         ));
         assert!(ai_commands::is_write_query(
             "CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE sql AS ''"
         ));
-        assert!(ai_commands::is_write_query(
-            "CREATE VIEW v AS SELECT 1;"
-        ));
+        assert!(ai_commands::is_write_query("CREATE VIEW v AS SELECT 1;"));
         assert!(ai_commands::is_write_query(
             "CREATE MATERIALIZED VIEW mv AS SELECT 1;"
         ));
@@ -8067,18 +8057,14 @@ mod tests {
         assert!(ai_commands::is_write_query("DROP TABLE IF EXISTS t;"));
         assert!(ai_commands::is_write_query("DROP INDEX idx;"));
         assert!(ai_commands::is_write_query("DROP VIEW v;"));
-        assert!(ai_commands::is_write_query(
-            "DROP FUNCTION f(int);"
-        ));
+        assert!(ai_commands::is_write_query("DROP FUNCTION f(int);"));
         assert!(ai_commands::is_write_query("drop table t;"));
     }
 
     #[test]
     fn write_query_grant_variants_are_true() {
         // All GRANT variants must be detected.
-        assert!(ai_commands::is_write_query(
-            "GRANT SELECT ON t TO user1;"
-        ));
+        assert!(ai_commands::is_write_query("GRANT SELECT ON t TO user1;"));
         assert!(ai_commands::is_write_query(
             "GRANT ALL PRIVILEGES ON DATABASE mydb TO user1;"
         ));
@@ -8090,15 +8076,11 @@ mod tests {
     #[test]
     fn write_query_revoke_variants_are_true() {
         // All REVOKE variants must be detected.
-        assert!(ai_commands::is_write_query(
-            "REVOKE ALL ON t FROM user1;"
-        ));
+        assert!(ai_commands::is_write_query("REVOKE ALL ON t FROM user1;"));
         assert!(ai_commands::is_write_query(
             "REVOKE SELECT ON t FROM PUBLIC;"
         ));
-        assert!(ai_commands::is_write_query(
-            "revoke all on t from user1;"
-        ));
+        assert!(ai_commands::is_write_query("revoke all on t from user1;"));
     }
 
     #[test]

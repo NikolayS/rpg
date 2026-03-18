@@ -2338,7 +2338,9 @@ mod tests {
     #[test]
     fn is_write_comment_stripping_create() {
         // AI-generated SQL with a leading comment must still be detected.
-        assert!(is_write_query("-- Create the table\nCREATE TABLE t (id int);"));
+        assert!(is_write_query(
+            "-- Create the table\nCREATE TABLE t (id int);"
+        ));
         assert!(is_write_query("/* block */\nCREATE TABLE t (id int);"));
     }
 
