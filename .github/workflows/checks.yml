@@ -184,6 +184,27 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     needs: [lint, test]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d testdb"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 5s
+    env:
+      TEST_PGHOST: localhost
+      TEST_PGPORT: "15432"
+      TEST_PGUSER: testuser
+      TEST_PGPASSWORD: testpass
+      TEST_PGDATABASE: testdb
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
