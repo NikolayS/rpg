@@ -45,8 +45,13 @@ x509-certificate = { version = "0.23", default-features = false }
 unicode-width = "0.2"
 webpki-roots = "0.26"
 
+[[bench]]
+name = "non_ai_paths"
+harness = false
+
 [dev-dependencies]
 anyhow = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
 serial_test = "3"
 tempfile = "3"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
