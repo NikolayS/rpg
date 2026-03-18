@@ -990,10 +990,10 @@ async fn dba_redundant_indexes(client: &Client, _verbose: bool) {
         select \
             s.schemaname, \
             s.relname, \
-            s.indexname as redundant_index, \
+            s.indexrelname as redundant_index, \
             s.idx_scan as redundant_scans, \
             pg_size_pretty(pg_relation_size(s.indexrelid)) as redundant_size, \
-            s2.indexname as covering_index, \
+            s2.indexrelname as covering_index, \
             s2.idx_scan as covering_scans \
         from \
             pg_catalog.pg_stat_user_indexes as s \
@@ -1188,12 +1188,12 @@ async fn dba_progress_vacuum(
     capabilities: Option<&crate::capabilities::DbCapabilities>,
 ) {
     // In PG 17 max_dead_tuples/num_dead_tuples were renamed to
-    // max_dead_item_ids/num_dead_item_ids.
-    let use_item_ids = capabilities
+    // max_dead_tuple_bytes/num_dead_item_ids.
+    let use_pg17_cols = capabilities
         .and_then(crate::capabilities::DbCapabilities::pg_major_version)
         .is_some_and(|v| v >= 17);
-    let dead_cols = if use_item_ids {
-        "p.max_dead_item_ids, \
+    let dead_cols = if use_pg17_cols {
+        "p.max_dead_tuple_bytes, \
             p.num_dead_item_ids"
     } else {
         "p.max_dead_tuples, \
