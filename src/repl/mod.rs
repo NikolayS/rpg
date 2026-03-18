@@ -3275,6 +3275,7 @@ async fn dispatch_meta(
                 subcommand,
                 parsed.plus,
                 Some(&settings.db_capabilities),
+                settings,
             )
             .await;
             // AI interpretation when the command returns context (e.g. \dba waits+).

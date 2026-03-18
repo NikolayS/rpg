@@ -17,6 +17,7 @@ use tokio_postgres::Client;
 /// `subcommand` is the first word after `\dba` (e.g. `"activity"`, `"locks"`).
 /// `verbose` is `true` when the `+` modifier was specified.
 /// `capabilities` provides version-gated feature detection.
+/// `settings` is used to route output through the pager when appropriate.
 ///
 /// Returns optional text for AI interpretation (e.g. `\dba waits+`).
 #[allow(clippy::too_many_lines)]
@@ -25,75 +26,76 @@ pub async fn execute(
     subcommand: &str,
     verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
+    settings: &crate::repl::ReplSettings,
 ) -> Option<String> {
     match subcommand {
         "activity" | "act" => {
-            dba_activity(client, verbose, capabilities).await;
+            dba_activity(client, verbose, capabilities, settings).await;
             None
         }
         "locks" | "lock" => {
-            dba_locks(client, verbose, capabilities).await;
+            dba_locks(client, verbose, capabilities, settings).await;
             None
         }
         "bloat" => {
-            dba_bloat(client, verbose).await;
+            dba_bloat(client, verbose, settings).await;
             None
         }
         "vacuum" | "vac" => {
-            dba_vacuum(client, verbose).await;
+            dba_vacuum(client, verbose, settings).await;
             None
         }
         "tablesize" | "ts" => {
-            dba_tablesize(client, verbose).await;
+            dba_tablesize(client, verbose, settings).await;
             None
         }
         "connections" | "conn" => {
-            dba_connections(client, verbose).await;
+            dba_connections(client, verbose, settings).await;
             None
         }
         "unused-idx" | "unused" => {
-            dba_unused_indexes(client, verbose).await;
+            dba_unused_indexes(client, verbose, settings).await;
             None
         }
         "invalid-idx" | "iidx" => {
-            dba_invalid_indexes(client, verbose).await;
+            dba_invalid_indexes(client, verbose, settings).await;
             None
         }
         "redundant-idx" | "ridx" => {
-            dba_redundant_indexes(client, verbose).await;
+            dba_redundant_indexes(client, verbose, settings).await;
             None
         }
         "missing-fk-idx" | "mfk" => {
-            dba_missing_fk_indexes(client, verbose).await;
+            dba_missing_fk_indexes(client, verbose, settings).await;
             None
         }
         "seq-scans" | "seq" => {
-            dba_seq_scans(client, verbose).await;
+            dba_seq_scans(client, verbose, settings).await;
             None
         }
         "cache-hit" | "cache" => {
-            dba_cache_hit(client, verbose).await;
+            dba_cache_hit(client, verbose, settings).await;
             None
         }
         "replication" | "repl" => {
-            dba_replication(client, verbose).await;
+            dba_replication(client, verbose, settings).await;
             None
         }
         "config" | "conf" => {
-            dba_config(client, verbose).await;
+            dba_config(client, verbose, settings).await;
             None
         }
-        "waits" | "wait" => dba_waits(client, verbose).await,
+        "waits" | "wait" => dba_waits(client, verbose, settings).await,
         "progress" | "prog" => {
-            dba_progress(client, None, capabilities).await;
+            dba_progress(client, None, capabilities, settings).await;
             None
         }
         "io" => {
-            dba_io(client, verbose, capabilities).await;
+            dba_io(client, verbose, capabilities, settings).await;
             None
         }
         "" | "help" => {
-            print_dba_help();
+            maybe_page(settings, &dba_help_text());
             None
         }
         _ => {
@@ -102,7 +104,7 @@ pub async fn execute(
                 .strip_prefix("progress ")
                 .or_else(|| subcommand.strip_prefix("prog "))
             {
-                dba_progress(client, Some(rest.trim()), capabilities).await;
+                dba_progress(client, Some(rest.trim()), capabilities, settings).await;
                 return None;
             }
             eprintln!("\\dba: unknown subcommand \"{subcommand}\"");
@@ -113,15 +115,64 @@ pub async fn execute(
 }
 
 // ---------------------------------------------------------------------------
+// Pager helper
+// ---------------------------------------------------------------------------
+
+/// Print `text` through the pager if the content exceeds the terminal height,
+/// otherwise print directly to stdout.
+///
+/// Mirrors the same logic used by `\?` (help) in `src/repl/mod.rs`.
+fn maybe_page(settings: &crate::repl::ReplSettings, text: &str) {
+    let term_rows = crossterm::terminal::size()
+        .map(|(_, h)| h as usize)
+        .unwrap_or(24);
+    if settings.pager_enabled
+        && crate::pager::needs_paging_with_min(
+            text,
+            term_rows.saturating_sub(2),
+            settings.pager_min_lines,
+        )
+    {
+        if let Some(ref sl) = settings.statusline {
+            sl.clear();
+            sl.teardown_scroll_region();
+        }
+        // Use the public pager API directly.
+        if let Some(ref cmd) = settings.pager_command {
+            if let Err(e) = crate::pager::run_pager_external(cmd, text) {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "rpg: pager '{cmd}' not found — check your PAGER setting \
+                         (\\set PAGER off to disable)"
+                    );
+                } else {
+                    eprintln!("rpg: pager error: {e}");
+                }
+                print!("{text}");
+            }
+        } else if let Err(e) = crate::pager::run_pager(text) {
+            eprintln!("rpg: pager error: {e}");
+            print!("{text}");
+        }
+        if let Some(ref sl) = settings.statusline {
+            sl.setup_scroll_region();
+            sl.render();
+        }
+    } else {
+        print!("{text}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal execution helper
 // ---------------------------------------------------------------------------
 
-/// Execute `sql` via `simple_query`, collect results, and print a formatted
-/// table.
+/// Execute `sql` via `simple_query`, collect results, format a table, and
+/// route the output through the pager when the content is long enough.
 ///
 /// If the query fails, the error is printed to stderr and the function
 /// returns without panicking.
-async fn run_and_print(client: &Client, sql: &str) {
+async fn run_and_print(client: &Client, sql: &str, settings: &crate::repl::ReplSettings) {
     crate::logging::trace("dba", &format!("diagnostic query: {}", sql.trim()));
     match client.simple_query(sql).await {
         Ok(messages) => {
@@ -148,7 +199,7 @@ async fn run_and_print(client: &Client, sql: &str) {
                 }
             }
 
-            print_table(&col_names, &rows);
+            maybe_page(settings, &format_table(&col_names, &rows));
         }
         Err(e) => {
             if let Some(db_err) = e.as_db_error() {
@@ -164,7 +215,7 @@ async fn run_and_print(client: &Client, sql: &str) {
 // Table formatter
 // ---------------------------------------------------------------------------
 
-/// Print a column-aligned table to stdout.
+/// Format a column-aligned table as a `String`.
 ///
 /// Output matches the psql default aligned format:
 /// ```text
@@ -173,12 +224,16 @@ async fn run_and_print(client: &Client, sql: &str) {
 ///  val  | val
 /// (N rows)
 /// ```
-fn print_table(col_names: &[String], rows: &[Vec<String>]) {
+fn format_table(col_names: &[String], rows: &[Vec<String>]) -> String {
+    use std::fmt::Write as FmtWrite;
+
+    let mut out = String::new();
+
     if col_names.is_empty() {
         let n = rows.len();
         let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})");
-        return;
+        let _ = writeln!(out, "({n} {word})");
+        return out;
     }
 
     // Compute column widths.
@@ -210,24 +265,24 @@ fn print_table(col_names: &[String], rows: &[Vec<String>]) {
         })
         .collect();
 
-    // Print header row.
+    // Header row.
     let header_line = header_cells
         .iter()
         .enumerate()
         .map(|(i, h)| format!(" {:<width$}", h, width = widths[i]))
         .collect::<Vec<_>>()
         .join(" |");
-    println!("{header_line}");
+    let _ = writeln!(out, "{header_line}");
 
-    // Print separator.
+    // Separator.
     let sep_line = widths
         .iter()
         .map(|w| "-".repeat(w + 2))
         .collect::<Vec<_>>()
         .join("+");
-    println!("{sep_line}");
+    let _ = writeln!(out, "{sep_line}");
 
-    // Print data rows.
+    // Data rows.
     for row in rows {
         let row_line = row
             .iter()
@@ -238,55 +293,61 @@ fn print_table(col_names: &[String], rows: &[Vec<String>]) {
             })
             .collect::<Vec<_>>()
             .join(" |");
-        println!("{row_line}");
+        let _ = writeln!(out, "{row_line}");
     }
 
     // Footer.
     let n = rows.len();
     let word = if n == 1 { "row" } else { "rows" };
-    println!("({n} {word})");
+    let _ = writeln!(out, "({n} {word})");
+
+    out
 }
 
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
-fn print_dba_help() {
-    println!("\\dba diagnostic commands:");
-    println!(
+fn dba_help_text() -> String {
+    let mut out = String::new();
+    out.push_str("\\dba diagnostic commands:\n");
+    out.push_str(
         "  \\dba activity    pg_stat_activity: grouped by state, \
-         duration, wait events"
+         duration, wait events\n",
     );
-    println!("  \\dba locks       Lock tree (blocked/blocking)");
-    println!("  \\dba waits       Wait event breakdown (+ for AI interpretation)");
-    println!("  \\dba bloat       Table bloat estimates (dead tuples)");
-    println!("  \\dba vacuum      Vacuum status and dead tuples");
-    println!("  \\dba tablesize   Largest tables");
-    println!("  \\dba connections Connection counts by state");
-    println!("  \\dba unused-idx  Unused indexes");
-    println!("  \\dba invalid-idx Invalid indexes with drop/recreate DDL");
-    println!("  \\dba redundant-idx Indexes covered by a broader index");
-    println!("  \\dba missing-fk-idx FK constraints without a supporting index");
-    println!("  \\dba seq-scans   Tables with high sequential scan ratio");
-    println!("  \\dba cache-hit   Buffer cache hit ratios");
-    println!("  \\dba replication Replication slot status");
-    println!("  \\dba config      Non-default configuration parameters");
-    println!("  \\dba progress    Long-running operation progress (pg_stat_progress_*)");
-    println!("  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)");
-    println!();
-    println!(
+    out.push_str("  \\dba locks       Lock tree (blocked/blocking)\n");
+    out.push_str("  \\dba waits       Wait event breakdown (+ for AI interpretation)\n");
+    out.push_str("  \\dba bloat       Table bloat estimates (dead tuples)\n");
+    out.push_str("  \\dba vacuum      Vacuum status and dead tuples\n");
+    out.push_str("  \\dba tablesize   Largest tables\n");
+    out.push_str("  \\dba connections Connection counts by state\n");
+    out.push_str("  \\dba unused-idx  Unused indexes\n");
+    out.push_str("  \\dba invalid-idx Invalid indexes with drop/recreate DDL\n");
+    out.push_str("  \\dba redundant-idx Indexes covered by a broader index\n");
+    out.push_str("  \\dba missing-fk-idx FK constraints without a supporting index\n");
+    out.push_str("  \\dba seq-scans   Tables with high sequential scan ratio\n");
+    out.push_str("  \\dba cache-hit   Buffer cache hit ratios\n");
+    out.push_str("  \\dba replication Replication slot status\n");
+    out.push_str("  \\dba config      Non-default configuration parameters\n");
+    out.push_str("  \\dba progress    Long-running operation progress (pg_stat_progress_*)\n");
+    out.push_str(
+        "  \\dba io          I/O statistics by backend type (PG 16+, verbose: \\dba+ io)\n",
+    );
+    out.push('\n');
+    out.push_str(
         "Aliases: act, lock, wait, vac, ts, conn, \
-         unused, iidx, ridx, mfk, seq, cache, repl, conf, prog"
+         unused, iidx, ridx, mfk, seq, cache, repl, conf, prog\n",
     );
-    println!();
-    println!("Progress sub-commands:");
-    println!("  \\dba progress             All in-progress operations");
-    println!("  \\dba progress vacuum      VACUUM progress");
-    println!("  \\dba progress analyze     ANALYZE progress");
-    println!("  \\dba progress create_index CREATE INDEX progress");
-    println!("  \\dba progress cluster     CLUSTER / VACUUM FULL progress");
-    println!("  \\dba progress copy        COPY progress");
-    println!("  \\dba progress basebackup  Base backup progress");
+    out.push('\n');
+    out.push_str("Progress sub-commands:\n");
+    out.push_str("  \\dba progress             All in-progress operations\n");
+    out.push_str("  \\dba progress vacuum      VACUUM progress\n");
+    out.push_str("  \\dba progress analyze     ANALYZE progress\n");
+    out.push_str("  \\dba progress create_index CREATE INDEX progress\n");
+    out.push_str("  \\dba progress cluster     CLUSTER / VACUUM FULL progress\n");
+    out.push_str("  \\dba progress copy        COPY progress\n");
+    out.push_str("  \\dba progress basebackup  Base backup progress\n");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +390,9 @@ async fn dba_activity(
     client: &Client,
     _verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
+    settings: &crate::repl::ReplSettings,
 ) {
+    use std::fmt::Write as FmtWrite;
     use tokio_postgres::SimpleQueryMessage;
 
     // PG 14-18: all required columns exist.  The query_id column was added
@@ -427,16 +490,16 @@ async fn dba_activity(
         }
     }
 
-    print_table(&col_names, &rows);
+    let mut text = format_table(&col_names, &rows);
 
     // Summary line.
-    println!(
+    let _ = writeln!(
+        text,
         "{} active, {} idle in transaction, {} idle, {} total",
-        counts.active,
-        counts.idle_in_xact,
-        counts.idle,
-        counts.total()
+        counts.active, counts.idle_in_xact, counts.idle, counts.total()
     );
+
+    maybe_page(settings, &text);
 }
 
 // ---------------------------------------------------------------------------
@@ -764,7 +827,7 @@ fn build_children(
     children
 }
 
-/// Render the lock forest to stdout with tree-drawing characters.
+/// Render the lock forest to a `String` with tree-drawing characters.
 ///
 /// Example output:
 /// ```text
@@ -777,26 +840,32 @@ fn build_children(
 /// └─ PID 3456 (carol@mydb) WAITING 4.8s RowShareLock on users
 ///    query: select * from users ...
 /// ```
-fn render_lock_forest(forest: &[LockNode]) {
+fn render_lock_forest(forest: &[LockNode]) -> String {
+    let mut out = String::new();
+
     if forest.is_empty() {
-        println!("No blocking locks detected.");
-        return;
+        out.push_str("No blocking locks detected.\n");
+        return out;
     }
 
     for (i, root) in forest.iter().enumerate() {
         if i > 0 {
-            println!();
+            out.push('\n');
         }
-        render_node(root, "", true, true);
+        render_node(root, "", true, true, &mut out);
     }
+
+    out
 }
 
-/// Render a single node and its subtree.
+/// Render a single node and its subtree into `out`.
 ///
 /// `prefix` is the leading string for all lines of this node's children.
 /// `is_root` means the node is a top-level blocker (no tree connector).
 /// `is_last` means this is the last child of its parent.
-fn render_node(node: &LockNode, prefix: &str, is_root: bool, is_last: bool) {
+fn render_node(node: &LockNode, prefix: &str, is_root: bool, is_last: bool, out: &mut String) {
+    use std::fmt::Write as FmtWrite;
+
     // Choose connector.
     let connector = if is_root {
         ""
@@ -813,12 +882,14 @@ fn render_node(node: &LockNode, prefix: &str, is_root: bool, is_last: bool) {
     };
 
     if let Some(ref dur) = node.wait_duration {
-        println!(
+        let _ = writeln!(
+            out,
             "{prefix}{connector}PID {} ({}@{}) WAITING {} {} {}",
             node.pid, node.user, node.db, dur, node.mode, relation_part
         );
     } else {
-        println!(
+        let _ = writeln!(
+            out,
             "{prefix}{connector}PID {} ({}@{}) GRANTED {} {}",
             node.pid, node.user, node.db, node.mode, relation_part
         );
@@ -833,7 +904,7 @@ fn render_node(node: &LockNode, prefix: &str, is_root: bool, is_last: bool) {
         format!("{prefix}│  ")
     };
     if !node.query.is_empty() {
-        println!("{query_prefix}query: {}", node.query);
+        let _ = writeln!(out, "{query_prefix}query: {}", node.query);
     }
 
     // Render children.
@@ -848,7 +919,7 @@ fn render_node(node: &LockNode, prefix: &str, is_root: bool, is_last: bool) {
     let n = node.children.len();
     for (i, child) in node.children.iter().enumerate() {
         let child_is_last = i + 1 == n;
-        render_node(child, &child_prefix, false, child_is_last);
+        render_node(child, &child_prefix, false, child_is_last, out);
     }
 }
 
@@ -857,13 +928,14 @@ async fn dba_locks(
     client: &Client,
     _verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
+    settings: &crate::repl::ReplSettings,
 ) {
     let edges = collect_lock_edges(client, capabilities).await;
     let forest = build_lock_forest(&edges);
-    render_lock_forest(&forest);
+    maybe_page(settings, &render_lock_forest(&forest));
 }
 
-async fn dba_bloat(client: &Client, _verbose: bool) {
+async fn dba_bloat(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     // pg_stat_user_tables uses `relname`, not `tablename`.
     let sql = "select \
         schemaname, \
@@ -880,10 +952,10 @@ async fn dba_bloat(client: &Client, _verbose: bool) {
     where n_dead_tup > 0 \
     order by n_dead_tup desc \
     limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_vacuum(client: &Client, _verbose: bool) {
+async fn dba_vacuum(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     // Raw vacuum status table (psql-style tabular output).
     let sql = "select \
         s.schemaname, \
@@ -907,10 +979,10 @@ async fn dba_vacuum(client: &Client, _verbose: bool) {
         ) \
     order by s.n_dead_tup desc \
     limit 30";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_tablesize(client: &Client, _verbose: bool) {
+async fn dba_tablesize(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         schemaname || '.' || tablename as relation, \
         pg_size_pretty(pg_total_relation_size( \
@@ -929,10 +1001,10 @@ async fn dba_tablesize(client: &Client, _verbose: bool) {
     where schemaname not in ('pg_catalog', 'information_schema') \
     order by raw_total desc \
     limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_connections(client: &Client, _verbose: bool) {
+async fn dba_connections(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         state, \
         usename, \
@@ -943,10 +1015,10 @@ async fn dba_connections(client: &Client, _verbose: bool) {
     where backend_type = 'client backend' \
     group by state, usename, datname, application_name \
     order by count desc";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_unused_indexes(client: &Client, _verbose: bool) {
+async fn dba_unused_indexes(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         schemaname, \
         indexrelname, \
@@ -958,10 +1030,14 @@ async fn dba_unused_indexes(client: &Client, _verbose: bool) {
       and indexrelname not like 'pg_%' \
     order by pg_relation_size(indexrelid) desc \
     limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_invalid_indexes(client: &Client, _verbose: bool) {
+async fn dba_invalid_indexes(
+    client: &Client,
+    _verbose: bool,
+    settings: &crate::repl::ReplSettings,
+) {
     let sql = "\
         select \
             n.nspname as schema_name, \
@@ -982,10 +1058,14 @@ async fn dba_invalid_indexes(client: &Client, _verbose: bool) {
             and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') \
         order by \
             pg_relation_size(ix.indexrelid) desc";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_redundant_indexes(client: &Client, _verbose: bool) {
+async fn dba_redundant_indexes(
+    client: &Client,
+    _verbose: bool,
+    settings: &crate::repl::ReplSettings,
+) {
     let sql = "\
         select \
             s.schemaname, \
@@ -1011,10 +1091,14 @@ async fn dba_redundant_indexes(client: &Client, _verbose: bool) {
         order by \
             pg_relation_size(s.indexrelid) desc \
         limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_missing_fk_indexes(client: &Client, _verbose: bool) {
+async fn dba_missing_fk_indexes(
+    client: &Client,
+    _verbose: bool,
+    settings: &crate::repl::ReplSettings,
+) {
     let sql = "\
         select \
             n.nspname as schema_name, \
@@ -1049,10 +1133,10 @@ async fn dba_missing_fk_indexes(client: &Client, _verbose: bool) {
         order by \
             pg_relation_size(t.oid) desc \
         limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_seq_scans(client: &Client, _verbose: bool) {
+async fn dba_seq_scans(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         schemaname, \
         relname, \
@@ -1068,10 +1152,10 @@ async fn dba_seq_scans(client: &Client, _verbose: bool) {
     where seq_scan > 0 \
     order by seq_scan desc \
     limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_cache_hit(client: &Client, _verbose: bool) {
+async fn dba_cache_hit(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         schemaname, \
         relname, \
@@ -1085,10 +1169,10 @@ async fn dba_cache_hit(client: &Client, _verbose: bool) {
     where heap_blks_hit + heap_blks_read > 0 \
     order by heap_blks_hit + heap_blks_read desc \
     limit 20";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_replication(client: &Client, _verbose: bool) {
+async fn dba_replication(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         slot_name, \
         slot_type, \
@@ -1099,11 +1183,15 @@ async fn dba_replication(client: &Client, _verbose: bool) {
         confirmed_flush_lsn \
     from pg_replication_slots \
     order by slot_name";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
 /// Returns AI context text when `verbose` is true.
-async fn dba_waits(client: &Client, verbose: bool) -> Option<String> {
+async fn dba_waits(
+    client: &Client,
+    verbose: bool,
+    settings: &crate::repl::ReplSettings,
+) -> Option<String> {
     let sql = "SELECT \
         coalesce(wait_event_type, 'CPU/Running') AS wait_type, \
         coalesce(wait_event, 'active') AS wait_event, \
@@ -1116,7 +1204,7 @@ async fn dba_waits(client: &Client, verbose: bool) -> Option<String> {
     GROUP BY wait_event_type, wait_event \
     ORDER BY sessions DESC \
     LIMIT 25";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 
     if !verbose {
         return None;
@@ -1160,22 +1248,25 @@ async fn dba_progress(
     client: &Client,
     filter: Option<&str>,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
+    settings: &crate::repl::ReplSettings,
 ) {
     match filter {
         None | Some("all") => {
-            dba_progress_vacuum(client, capabilities).await;
-            dba_progress_analyze(client).await;
-            dba_progress_create_index(client).await;
-            dba_progress_cluster(client).await;
-            dba_progress_copy(client).await;
-            dba_progress_basebackup(client).await;
+            dba_progress_vacuum(client, capabilities, settings).await;
+            dba_progress_analyze(client, settings).await;
+            dba_progress_create_index(client, settings).await;
+            dba_progress_cluster(client, settings).await;
+            dba_progress_copy(client, settings).await;
+            dba_progress_basebackup(client, settings).await;
         }
-        Some("vacuum" | "vac") => dba_progress_vacuum(client, capabilities).await,
-        Some("analyze") => dba_progress_analyze(client).await,
-        Some("create_index" | "index" | "idx") => dba_progress_create_index(client).await,
-        Some("cluster") => dba_progress_cluster(client).await,
-        Some("copy") => dba_progress_copy(client).await,
-        Some("basebackup" | "backup") => dba_progress_basebackup(client).await,
+        Some("vacuum" | "vac") => dba_progress_vacuum(client, capabilities, settings).await,
+        Some("analyze") => dba_progress_analyze(client, settings).await,
+        Some("create_index" | "index" | "idx") => {
+            dba_progress_create_index(client, settings).await;
+        }
+        Some("cluster") => dba_progress_cluster(client, settings).await,
+        Some("copy") => dba_progress_copy(client, settings).await,
+        Some("basebackup" | "backup") => dba_progress_basebackup(client, settings).await,
         Some(other) => {
             eprintln!("\\dba progress: unknown operation \"{other}\"");
             eprintln!("Available: vacuum, analyze, create_index, cluster, copy, basebackup");
@@ -1186,6 +1277,7 @@ async fn dba_progress(
 async fn dba_progress_vacuum(
     client: &Client,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
+    settings: &crate::repl::ReplSettings,
 ) {
     // In PG 17 max_dead_tuples/num_dead_tuples were renamed to
     // max_dead_tuple_bytes/num_dead_item_ids.
@@ -1221,10 +1313,10 @@ async fn dba_progress_vacuum(
         order by p.pid"
     );
     eprintln!("-- VACUUM progress --");
-    run_and_print(client, &sql).await;
+    run_and_print(client, &sql, settings).await;
 }
 
-async fn dba_progress_analyze(client: &Client) {
+async fn dba_progress_analyze(client: &Client, settings: &crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1246,10 +1338,10 @@ async fn dba_progress_analyze(client: &Client) {
             on a.pid = p.pid \
         order by p.pid";
     eprintln!("-- ANALYZE progress --");
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_create_index(client: &Client) {
+async fn dba_progress_create_index(client: &Client, settings: &crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1273,10 +1365,10 @@ async fn dba_progress_create_index(client: &Client) {
             on a.pid = p.pid \
         order by p.pid";
     eprintln!("-- CREATE INDEX progress --");
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_cluster(client: &Client) {
+async fn dba_progress_cluster(client: &Client, settings: &crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1298,10 +1390,10 @@ async fn dba_progress_cluster(client: &Client) {
             on a.pid = p.pid \
         order by p.pid";
     eprintln!("-- CLUSTER / VACUUM FULL progress --");
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_copy(client: &Client) {
+async fn dba_progress_copy(client: &Client, settings: &crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1322,10 +1414,10 @@ async fn dba_progress_copy(client: &Client) {
             on a.pid = p.pid \
         order by p.pid";
     eprintln!("-- COPY progress --");
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_basebackup(client: &Client) {
+async fn dba_progress_basebackup(client: &Client, settings: &crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1341,7 +1433,7 @@ async fn dba_progress_basebackup(client: &Client) {
         from pg_stat_progress_basebackup as p \
         order by p.pid";
     eprintln!("-- Base backup progress --");
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,6 +1444,7 @@ async fn dba_io(
     client: &Client,
     verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
+    settings: &crate::repl::ReplSettings,
 ) {
     let has_io = capabilities.is_some_and(crate::capabilities::DbCapabilities::has_pg_stat_io);
     if !has_io {
@@ -1388,7 +1481,7 @@ async fn dba_io(
                 stats_reset \
             from pg_stat_io \
             order by backend_type, object, context";
-        run_and_print(client, sql).await;
+        run_and_print(client, sql, settings).await;
     } else {
         // Non-verbose: only rows with actual activity.
         let sql = "\
@@ -1411,7 +1504,7 @@ async fn dba_io(
                or evictions > 0 \
                or fsyncs > 0 \
             order by reads + writes + hits desc";
-        run_and_print(client, sql).await;
+        run_and_print(client, sql, settings).await;
     }
 }
 
@@ -1419,7 +1512,7 @@ async fn dba_io(
 // Configuration
 // ---------------------------------------------------------------------------
 
-async fn dba_config(client: &Client, _verbose: bool) {
+async fn dba_config(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
     let sql = "select \
         name, \
         setting, \
@@ -1430,7 +1523,7 @@ async fn dba_config(client: &Client, _verbose: bool) {
     where source != 'default' \
       and source != 'override' \
     order by name";
-    run_and_print(client, sql).await;
+    run_and_print(client, sql, settings).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,38 +1538,48 @@ mod tests {
     ///
     /// Because tests run concurrently and stdout capture in Rust requires
     /// mutable access to global state, we use a `Vec<u8>` buffer and the
-    /// output captured via `print_table` is verified on the buffer in tests
-    /// that call `print_table` directly.
+    /// output captured via `format_table` is verified on the buffer in tests
+    /// that call `format_table` directly.
     #[test]
-    fn print_table_empty_col_names() {
-        // When no columns are present, only the row-count footer is printed.
-        // This test verifies there is no panic; it does not capture stdout.
+    fn format_table_empty_col_names() {
+        // When no columns are present, only the row-count footer is returned.
         let col_names: Vec<String> = Vec::new();
         let rows: Vec<Vec<String>> = Vec::new();
-        print_table(&col_names, &rows);
+        let out = format_table(&col_names, &rows);
+        assert!(
+            out.contains("(0 rows)"),
+            "expected row-count footer, got: {out}"
+        );
     }
 
     #[test]
-    fn print_table_with_data() {
+    fn format_table_with_data() {
         let col_names = vec!["name".to_owned(), "value".to_owned()];
         let rows = vec![
             vec!["alpha".to_owned(), "1".to_owned()],
             vec!["beta".to_owned(), "2".to_owned()],
         ];
-        // Verify no panic on typical output.
-        print_table(&col_names, &rows);
+        let out = format_table(&col_names, &rows);
+        assert!(out.contains("name"), "header missing: {out}");
+        assert!(out.contains("alpha"), "data missing: {out}");
+        assert!(out.contains("(2 rows)"), "footer missing: {out}");
     }
 
     #[test]
-    fn print_table_single_row() {
+    fn format_table_single_row() {
         let col_names = vec!["state".to_owned()];
         let rows = vec![vec!["active".to_owned()]];
-        print_table(&col_names, &rows);
+        let out = format_table(&col_names, &rows);
+        assert!(
+            out.contains("(1 row)"),
+            "expected singular footer, got: {out}"
+        );
     }
 
     #[test]
-    fn print_dba_help_no_panic() {
-        print_dba_help();
+    fn dba_help_text_no_panic() {
+        let text = dba_help_text();
+        assert!(!text.is_empty());
     }
 
     // -- ActivityCounts tests ------------------------------------------------
@@ -1661,8 +1764,9 @@ mod tests {
     }
 
     #[test]
-    fn render_lock_forest_no_panic_empty() {
-        render_lock_forest(&[]);
+    fn render_lock_forest_empty() {
+        let out = render_lock_forest(&[]);
+        assert!(out.contains("No blocking locks detected."), "got: {out}");
     }
 
     #[test]
@@ -1677,8 +1781,9 @@ mod tests {
             5.2,
         )];
         let forest = build_lock_forest(&edges);
-        // Should not panic.
-        render_lock_forest(&forest);
+        // Should not panic and should produce non-empty output.
+        let out = render_lock_forest(&forest);
+        assert!(!out.is_empty());
     }
 
     #[test]
@@ -1688,6 +1793,7 @@ mod tests {
             make_edge(5678, "bob", 9012, "eve", "RowExclusiveLock", "t", 5.0),
         ];
         let forest = build_lock_forest(&edges);
-        render_lock_forest(&forest);
+        let out = render_lock_forest(&forest);
+        assert!(!out.is_empty());
     }
 }
