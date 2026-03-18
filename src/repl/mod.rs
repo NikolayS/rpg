@@ -3271,14 +3271,8 @@ async fn dispatch_meta(
         MetaCmd::Dba => {
             let subcommand = parsed.pattern.as_deref().unwrap_or("");
             let caps = settings.db_capabilities.clone();
-            let ai_context = crate::dba::execute(
-                client,
-                subcommand,
-                parsed.plus,
-                Some(&caps),
-                settings,
-            )
-            .await;
+            let ai_context =
+                crate::dba::execute(client, subcommand, parsed.plus, Some(&caps), settings).await;
             // AI interpretation when the command returns context (e.g. \dba waits+).
             if let Some(ref context) = ai_context {
                 interpret_dba_output(context, subcommand, settings).await;
