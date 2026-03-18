@@ -7,8 +7,7 @@
 //   cargo bench --bench non_ai_paths
 //
 // Results are written to target/criterion/non_ai_paths/*/
-
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 // ---------------------------------------------------------------------------
 // Inline the modules under test via #[path] so this bench binary can access
@@ -270,12 +269,7 @@ fn make_rowset(n_rows: usize, n_cols: usize) -> query::RowSet {
 fn bench_format_aligned(c: &mut Criterion) {
     let mut group = c.benchmark_group("format_aligned");
 
-    let cases: &[(usize, usize)] = &[
-        (10, 3),
-        (100, 5),
-        (1000, 8),
-        (10, 10),
-    ];
+    let cases: &[(usize, usize)] = &[(10, 3), (100, 5), (1000, 8), (10, 10)];
 
     for &(n_rows, n_cols) in cases {
         let rs = make_rowset(n_rows, n_cols);

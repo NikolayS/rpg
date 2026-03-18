@@ -158,9 +158,8 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 #[allow(unsafe_code)]
                 // SAFETY: seg_start and $end are always on valid UTF-8
                 // boundaries (see doc comment above).
-                $current.push_str(unsafe {
-                    std::str::from_utf8_unchecked(&bytes[seg_start..$end])
-                });
+                $current
+                    .push_str(unsafe { std::str::from_utf8_unchecked(&bytes[seg_start..$end]) });
                 seg_start = $end;
             }
         };
