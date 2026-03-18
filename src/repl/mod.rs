@@ -6300,9 +6300,7 @@ mod tests {
         // All CTEs treated as write to prevent CTE-prefixed DML bypass.
         assert!(is_write_query("with cte as (select 1) select * from cte"));
         assert!(is_write_query("WITH data AS (SELECT 1) DELETE FROM t"));
-        assert!(is_write_query(
-            "WITH data AS (SELECT 1) INSERT INTO t VALUES (1)"
-        ));
+        assert!(is_write_query("WITH data AS (SELECT 1) INSERT INTO t VALUES (1)"));
         assert!(is_write_query("WITH x AS (SELECT 1) UPDATE t SET a = 1"));
     }
 
