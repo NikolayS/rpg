@@ -3167,15 +3167,13 @@ async fn dispatch_meta(
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
         }
-        MetaCmd::SqlHelp => {
-            match crate::session::sql_help_text(parsed.pattern.as_deref()) {
-                Ok(text) => maybe_page(settings, &text),
-                Err(t) => {
-                    eprintln!("No help available for \"{t}\".");
-                    eprintln!("Try \\h with no argument to list available topics.");
-                }
+        MetaCmd::SqlHelp => match crate::session::sql_help_text(parsed.pattern.as_deref()) {
+            Ok(text) => maybe_page(settings, &text),
+            Err(t) => {
+                eprintln!("No help available for \"{t}\".");
+                eprintln!("Try \\h with no argument to list available topics.");
             }
-        }
+        },
         MetaCmd::ShowFunctionSource => match parsed.pattern.as_deref() {
             Some(name) => {
                 crate::session::show_function_source(client, name, parsed.plus, parsed.echo_hidden)
@@ -7879,16 +7877,14 @@ mod tests {
 
     #[test]
     fn sql_help_text_select_topic() {
-        let text =
-            crate::session::sql_help_text(Some("SELECT")).expect("SELECT should be found");
+        let text = crate::session::sql_help_text(Some("SELECT")).expect("SELECT should be found");
         assert!(text.contains("Command:     SELECT"), "must include command");
         assert!(text.contains("Syntax:"), "must include syntax header");
     }
 
     #[test]
     fn sql_help_text_unknown_topic_returns_err() {
-        let err =
-            crate::session::sql_help_text(Some("NOTACOMMAND")).expect_err("should be Err");
+        let err = crate::session::sql_help_text(Some("NOTACOMMAND")).expect_err("should be Err");
         assert_eq!(err, "NOTACOMMAND");
     }
 }

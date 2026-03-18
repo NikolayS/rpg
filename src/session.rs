@@ -1083,7 +1083,10 @@ fn help_topics_text() -> String {
     }
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "Type \\h <command-name> for help on a specific command");
+    let _ = writeln!(
+        out,
+        "Type \\h <command-name> for help on a specific command"
+    );
     out
 }
 
