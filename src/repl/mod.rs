@@ -1023,6 +1023,14 @@ pub struct ReplSettings {
     ///
     /// Toggle with `\set TEXT2SQL_SHOW_SQL on/off`.
     pub text2sql_show_sql: bool,
+    /// Set to `true` when `\prompt` detects Ctrl+C (interrupt).
+    ///
+    /// `exec_lines` checks this flag after each meta-command dispatch and
+    /// stops processing the current script, allowing the user to abort an
+    /// interactive postgres_dba-style menu with Ctrl+C.  The flag is cleared
+    /// at the top of the readline loop so that the next REPL cycle starts
+    /// clean.
+    pub prompt_interrupted: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1118,6 +1126,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
             .field("text2sql_show_sql", &self.text2sql_show_sql)
+            .field("prompt_interrupted", &self.prompt_interrupted)
             .finish()
     }
 }
@@ -1179,6 +1188,7 @@ impl Default for ReplSettings {
             auto_suggest_fix: true,
             last_was_fix: false,
             text2sql_show_sql: true,
+            prompt_interrupted: false,
         }
     }
 }
@@ -1275,28 +1285,12 @@ pub async fn exec_command(
                 };
                 eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             }
-            MetaResult::SetInputMode(mode) => {
-                settings.input_mode = mode;
-                // Switching input mode always returns to interactive exec mode
-                // so that \t2s after \yolo doesn't silently execute queries.
-                settings.exec_mode = ExecMode::Interactive;
-                let label = match mode {
-                    InputMode::Sql => "sql",
-                    InputMode::Text2Sql => "text2sql",
-                };
-                eprintln!("Input mode: {label}");
-            }
-            MetaResult::SetExecMode(mode) => {
-                settings.exec_mode = mode;
-                if mode == ExecMode::Yolo {
-                    settings.input_mode = InputMode::Text2Sql;
+            result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
+                let label = apply_mode_change(&result, settings);
+                match result {
+                    MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
+                    _ => eprintln!("Execution mode: {label}"),
                 }
-                let label = match mode {
-                    ExecMode::Interactive => "interactive",
-                    ExecMode::Plan => "plan",
-                    ExecMode::Yolo => "yolo",
-                };
-                eprintln!("Execution mode: {label}");
             }
             _ => {}
         }
@@ -1514,6 +1508,10 @@ pub(crate) async fn exec_lines(
                     }
                 }
                 _ => {}
+            }
+            // Stop the script loop when `\prompt` detected Ctrl+C.
+            if settings.prompt_interrupted {
+                break 'lines;
             }
         } else if settings.cond.is_active() {
             // Check for inline backslash command (e.g. `select 1 \gset`).
@@ -2114,24 +2112,89 @@ fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
 /// to the tty, not stdout), reads one line from stdin, and stores the result
 /// in the variable `var_name`.  When stdin is not a terminal the prompt text
 /// is suppressed.
+///
+/// When the user presses Ctrl+C, the variable is set to an empty string and
+/// `settings.prompt_interrupted` is set to `true` so that the calling script
+/// loop in `exec_lines` can detect the interrupt and stop processing.
 fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) {
-    if io::stdin().is_terminal() && !prompt_text.is_empty() {
-        eprint!("{prompt_text}");
-        let _ = io::stderr().flush();
-    }
-    let mut line = String::new();
-    match io::stdin().read_line(&mut line) {
-        Ok(0) => {
-            // EOF — store empty string.
+    use std::io::Write;
+
+    if io::stdin().is_terminal() {
+        // Interactive path: use crossterm raw mode so Ctrl+C is detectable.
+        // Read the input character-by-character, building a line.
+        use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+        use crossterm::terminal;
+
+        if !prompt_text.is_empty() {
+            eprint!("{prompt_text}");
+            let _ = io::stderr().flush();
+        }
+
+        let raw_enabled = terminal::enable_raw_mode().is_ok();
+        let mut input = String::new();
+        let interrupted = loop {
+            match read() {
+                Ok(Event::Key(key)) => match (key.code, key.modifiers) {
+                    // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
+                    (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break true;
+                    }
+                    // Enter — end of input.
+                    (KeyCode::Enter, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break false;
+                    }
+                    // Backspace — delete last character.
+                    (KeyCode::Backspace, _) => {
+                        if input.pop().is_some() {
+                            // Erase the character on screen.
+                            let _ = write!(io::stderr(), "\x08 \x08");
+                            let _ = io::stderr().flush();
+                        }
+                    }
+                    // Printable character — echo and accumulate.
+                    (KeyCode::Char(ch), _) => {
+                        input.push(ch);
+                        let _ = write!(io::stderr(), "{ch}");
+                        let _ = io::stderr().flush();
+                    }
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        };
+        if raw_enabled {
+            let _ = terminal::disable_raw_mode();
+        }
+
+        if interrupted {
             settings.vars.set(var_name, "");
+            settings.prompt_interrupted = true;
+        } else {
+            settings.vars.set(var_name, &input);
         }
-        Ok(_) => {
-            // Strip the trailing newline that `read_line` includes.
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            settings.vars.set(var_name, trimmed);
+    } else {
+        // Non-interactive (piped) path: use read_line as before; Ctrl+C is
+        // handled by the OS signal handler and terminates the process.
+        if !prompt_text.is_empty() {
+            // Suppress prompt text when stdin is not a terminal (psql behaviour).
         }
-        Err(e) => {
-            eprintln!("\\prompt: {e}");
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => {
+                // EOF — store empty string.
+                settings.vars.set(var_name, "");
+            }
+            Ok(_) => {
+                // Strip the trailing newline that `read_line` includes.
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                settings.vars.set(var_name, trimmed);
+            }
+            Err(e) => {
+                eprintln!("\\prompt: {e}");
+            }
         }
     }
 }
@@ -2411,6 +2474,52 @@ pub enum MetaResult {
     SetExecMode(ExecMode),
     /// Show current mode summary (`\mode`).
     ShowMode,
+}
+
+/// Apply a `SetInputMode` or `SetExecMode` result to `settings`.
+///
+/// Centralises all mode-transition side-effects so the three REPL dispatch
+/// sites (interactive loop, file execution, and `exec_command`) stay in sync:
+///
+/// - `SetInputMode` always resets `exec_mode` to `Interactive` so that
+///   `\t2s` (or `\sql`) after `\yolo` stops auto-executing queries.
+/// - `SetExecMode(Yolo)` auto-enables `input_mode = Text2Sql` so natural
+///   language goes to the AI.
+/// - `SetExecMode(Interactive)` resets `input_mode` back to `Sql` so the
+///   user returns fully to the default state.
+///
+/// Returns a short label string used for the confirmation message.
+fn apply_mode_change(result: &MetaResult, settings: &mut ReplSettings) -> &'static str {
+    match result {
+        MetaResult::SetInputMode(mode) => {
+            settings.input_mode = *mode;
+            // Switching input mode always returns to interactive exec mode
+            // so that \t2s after \yolo doesn't silently execute queries.
+            settings.exec_mode = ExecMode::Interactive;
+            match mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            }
+        }
+        MetaResult::SetExecMode(mode) => {
+            settings.exec_mode = *mode;
+            match mode {
+                ExecMode::Yolo => {
+                    settings.input_mode = InputMode::Text2Sql;
+                }
+                ExecMode::Interactive => {
+                    settings.input_mode = InputMode::Sql;
+                }
+                ExecMode::Plan => {}
+            }
+            match mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+            }
+        }
+        _ => "",
+    }
 }
 
 /// Dispatch I/O and utility meta-commands (the `#33` family).
@@ -3746,6 +3855,9 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
+        // Clear any interrupt flag left by a `\prompt` Ctrl+C in a script.
+        settings.prompt_interrupted = false;
+
         // Re-render the status bar before each prompt so it stays fresh
         // (handles resize events and mode changes from previous commands).
         if let Some(ref mut sl) = settings.statusline {
@@ -3904,6 +4016,9 @@ async fn run_dumb_loop(
     let mut buf = String::new();
 
     loop {
+        // Clear any interrupt flag left by a `\prompt` Ctrl+C in a script.
+        settings.prompt_interrupted = false;
+
         // Print prompt to stderr (so it doesn't mix with redirected output).
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
         eprint!("{prompt}");
@@ -4295,29 +4410,12 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::Continue
         }
-        MetaResult::SetInputMode(mode) => {
-            settings.input_mode = mode;
-            // Switching input mode always returns to interactive exec mode
-            // so that \t2s after \yolo doesn't silently execute queries.
-            settings.exec_mode = ExecMode::Interactive;
-            let label = match mode {
-                InputMode::Sql => "sql",
-                InputMode::Text2Sql => "text2sql",
-            };
-            eprintln!("Input mode: {label}");
-            HandleLineResult::Continue
-        }
-        MetaResult::SetExecMode(mode) => {
-            settings.exec_mode = mode;
-            if mode == ExecMode::Yolo {
-                settings.input_mode = InputMode::Text2Sql;
+        result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
+            let label = apply_mode_change(&result, settings);
+            match result {
+                MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
+                _ => eprintln!("Execution mode: {label}"),
             }
-            let label = match mode {
-                ExecMode::Interactive => "interactive",
-                ExecMode::Plan => "plan",
-                ExecMode::Yolo => "yolo",
-            };
-            eprintln!("Execution mode: {label}");
             HandleLineResult::Continue
         }
         MetaResult::ShowMode => {
@@ -4621,29 +4719,12 @@ async fn handle_line(
                 }
                 HandleLineResult::Continue
             }
-            MetaResult::SetInputMode(mode) => {
-                settings.input_mode = mode;
-                // Switching input mode always returns to interactive exec mode
-                // so that \t2s after \yolo doesn't silently execute queries.
-                settings.exec_mode = ExecMode::Interactive;
-                let label = match mode {
-                    InputMode::Sql => "sql",
-                    InputMode::Text2Sql => "text2sql",
-                };
-                eprintln!("Input mode: {label}");
-                HandleLineResult::Continue
-            }
-            MetaResult::SetExecMode(mode) => {
-                settings.exec_mode = mode;
-                if mode == ExecMode::Yolo {
-                    settings.input_mode = InputMode::Text2Sql;
+            result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
+                let label = apply_mode_change(&result, settings);
+                match result {
+                    MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
+                    _ => eprintln!("Execution mode: {label}"),
                 }
-                let label = match mode {
-                    ExecMode::Interactive => "interactive",
-                    ExecMode::Plan => "plan",
-                    ExecMode::Yolo => "yolo",
-                };
-                eprintln!("Execution mode: {label}");
                 HandleLineResult::Continue
             }
             MetaResult::ShowMode => {
@@ -6207,7 +6288,9 @@ mod tests {
         // All CTEs treated as write to prevent CTE-prefixed DML bypass.
         assert!(is_write_query("with cte as (select 1) select * from cte"));
         assert!(is_write_query("WITH data AS (SELECT 1) DELETE FROM t"));
-        assert!(is_write_query("WITH data AS (SELECT 1) INSERT INTO t VALUES (1)"));
+        assert!(is_write_query(
+            "WITH data AS (SELECT 1) INSERT INTO t VALUES (1)"
+        ));
         assert!(is_write_query("WITH x AS (SELECT 1) UPDATE t SET a = 1"));
     }
 
@@ -7566,5 +7649,87 @@ mod tests {
         let result = super::unescape_echo(&joined);
         assert!(result.starts_with("   0"));
         assert!(result.contains("Node and current database information"));
+    }
+
+    // -- mode transition tests (apply_mode_change) ----------------------------
+
+    #[test]
+    fn yolo_sets_text2sql_input_mode() {
+        let mut s = ReplSettings::default();
+        // Default state: sql + interactive.
+        assert_eq!(s.input_mode, InputMode::Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+    }
+
+    #[test]
+    fn t2s_after_yolo_resets_exec_mode_to_interactive() {
+        let mut s = ReplSettings::default();
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+
+        // \t2s / \text2sql → SetInputMode(Text2Sql)
+        super::apply_mode_change(&MetaResult::SetInputMode(InputMode::Text2Sql), &mut s);
+
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+    }
+
+    #[test]
+    fn sql_after_yolo_resets_exec_mode_to_interactive() {
+        let mut s = ReplSettings::default();
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+
+        // \sql → SetInputMode(Sql)
+        super::apply_mode_change(&MetaResult::SetInputMode(InputMode::Sql), &mut s);
+
+        assert_eq!(s.input_mode, InputMode::Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+    }
+
+    #[test]
+    fn interactive_after_yolo_resets_both_modes() {
+        let mut s = ReplSettings::default();
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+
+        // \interactive → SetExecMode(Interactive)
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Interactive), &mut s);
+
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+        assert_eq!(s.input_mode, InputMode::Sql);
+    }
+
+    #[test]
+    fn plan_mode_leaves_input_mode_unchanged() {
+        let mut s = ReplSettings {
+            input_mode: InputMode::Text2Sql,
+            ..ReplSettings::default()
+        };
+
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Plan), &mut s);
+
+        assert_eq!(s.exec_mode, ExecMode::Plan);
+        // \plan does not touch input_mode.
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+    }
+
+    #[test]
+    fn set_input_mode_sql_resets_exec_mode() {
+        let mut s = ReplSettings {
+            exec_mode: ExecMode::Plan,
+            ..ReplSettings::default()
+        };
+
+        super::apply_mode_change(&MetaResult::SetInputMode(InputMode::Sql), &mut s);
+
+        assert_eq!(s.input_mode, InputMode::Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
     }
 }
