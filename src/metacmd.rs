@@ -616,12 +616,19 @@ fn parse_set(input: &str) -> ParsedMeta {
     if rest.is_empty() {
         return ParsedMeta::simple(MetaCmd::Set(String::new(), String::new()));
     }
-    // `\set name` or `\set name value`
-    // The value is the raw string after the name, matching psql behaviour
-    // (no quote-stripping or token-splitting at parse time).
+    // `\set name` or `\set name value…`
+    // The name is the first whitespace-delimited token; value tokens are
+    // parsed with `split_params` (strips surrounding single-quotes, handles
+    // `\'`/`''` escapes) and concatenated *without* spaces, matching psql:
+    //   `\set d '\'' :var '\''`  →  d = "'<var>'"  (after interpolation)
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("").to_owned();
-    let value = parts.next().map_or("", str::trim).to_owned();
+    let raw_value = parts.next().map_or("", str::trim);
+    let value = if raw_value.is_empty() {
+        String::new()
+    } else {
+        split_params(raw_value).concat()
+    };
     ParsedMeta::simple(MetaCmd::Set(name, value))
 }
 
@@ -2290,12 +2297,24 @@ mod tests {
 
     #[test]
     fn parse_set_value_with_spaces() {
-        // Multiple value tokens are concatenated without separators,
+        // Multiple unquoted value tokens are concatenated without separators,
         // matching psql behaviour: `\set X hello world` → X = "helloworld".
-        // psql behaviour: raw string after name, spaces preserved.
         assert_eq!(
             parse("\\set X hello world").cmd,
-            MetaCmd::Set("X".to_owned(), "hello world".to_owned())
+            MetaCmd::Set("X".to_owned(), "helloworld".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_set_value_quoted_concat() {
+        // Single-quoted tokens strip quotes; `\'` inside a quoted token
+        // escapes a single-quote.  Adjacent tokens are concatenated:
+        //   `\set d '\'' val '\''`  →  d = "'val'"
+        // This is the pattern used by postgres_dba to wrap user input in
+        // single quotes for safe SQL interpolation.
+        assert_eq!(
+            parse("\\set d '\\'' val '\\''").cmd,
+            MetaCmd::Set("d".to_owned(), "'val'".to_owned())
         );
     }
 
