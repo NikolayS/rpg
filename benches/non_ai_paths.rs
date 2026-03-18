@@ -7,6 +7,11 @@
 //   cargo bench --bench non_ai_paths
 //
 // Results are written to target/criterion/non_ai_paths/*/
+//
+// The bench binary inlines source modules via `#[path]`, which exposes
+// items used only within the main binary.  Suppress the resulting
+// dead-code and unused-import lint noise here.
+#![allow(dead_code, unused_imports)]
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 // ---------------------------------------------------------------------------
@@ -59,7 +64,7 @@ where id = $1;
 "#;
 
 /// A SQL string containing dollar-quoting (heavier path for `split_statements`).
-const SQL_DOLLAR_QUOTED: &str = r#"
+const SQL_DOLLAR_QUOTED: &str = r"
 create or replace function count_active_users()
 returns bigint
 language sql
@@ -69,10 +74,10 @@ as $$
     where active = true;
 $$;
 select count_active_users();
-"#;
+";
 
 /// A long SQL query used for tokenization benchmarks.
-const SQL_LONG_QUERY: &str = r#"
+const SQL_LONG_QUERY: &str = r"
 select
     t.client_id as client_id,
     date(t.created_at) as day,
@@ -101,7 +106,7 @@ order by
     total_cents desc,
     day asc
 limit 1000;
-"#;
+";
 
 // ---------------------------------------------------------------------------
 // Benchmark: metacommand parsing
@@ -240,7 +245,7 @@ fn bench_pattern(c: &mut Criterion) {
 // Benchmark: output formatting
 // ---------------------------------------------------------------------------
 
-/// Build a synthetic RowSet with `n_rows` rows and `n_cols` text columns.
+/// Build a synthetic `RowSet` with `n_rows` rows and `n_cols` text columns.
 fn make_rowset(n_rows: usize, n_cols: usize) -> query::RowSet {
     let columns: Vec<query::ColumnMeta> = (0..n_cols)
         .map(|i| query::ColumnMeta {
