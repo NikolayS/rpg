@@ -1023,6 +1023,14 @@ pub struct ReplSettings {
     ///
     /// Toggle with `\set TEXT2SQL_SHOW_SQL on/off`.
     pub text2sql_show_sql: bool,
+    /// Set to `true` when `\prompt` detects Ctrl+C (interrupt).
+    ///
+    /// `exec_lines` checks this flag after each meta-command dispatch and
+    /// stops processing the current script, allowing the user to abort an
+    /// interactive postgres_dba-style menu with Ctrl+C.  The flag is cleared
+    /// at the top of the readline loop so that the next REPL cycle starts
+    /// clean.
+    pub prompt_interrupted: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1118,6 +1126,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("auto_suggest_fix", &self.auto_suggest_fix)
             .field("last_was_fix", &self.last_was_fix)
             .field("text2sql_show_sql", &self.text2sql_show_sql)
+            .field("prompt_interrupted", &self.prompt_interrupted)
             .finish()
     }
 }
@@ -1179,6 +1188,7 @@ impl Default for ReplSettings {
             auto_suggest_fix: true,
             last_was_fix: false,
             text2sql_show_sql: true,
+            prompt_interrupted: false,
         }
     }
 }
@@ -1498,6 +1508,10 @@ pub(crate) async fn exec_lines(
                     }
                 }
                 _ => {}
+            }
+            // Stop the script loop when `\prompt` detected Ctrl+C.
+            if settings.prompt_interrupted {
+                break 'lines;
             }
         } else if settings.cond.is_active() {
             // Check for inline backslash command (e.g. `select 1 \gset`).
@@ -2098,24 +2112,89 @@ fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
 /// to the tty, not stdout), reads one line from stdin, and stores the result
 /// in the variable `var_name`.  When stdin is not a terminal the prompt text
 /// is suppressed.
+///
+/// When the user presses Ctrl+C, the variable is set to an empty string and
+/// `settings.prompt_interrupted` is set to `true` so that the calling script
+/// loop in `exec_lines` can detect the interrupt and stop processing.
 fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) {
-    if io::stdin().is_terminal() && !prompt_text.is_empty() {
-        eprint!("{prompt_text}");
-        let _ = io::stderr().flush();
-    }
-    let mut line = String::new();
-    match io::stdin().read_line(&mut line) {
-        Ok(0) => {
-            // EOF — store empty string.
+    use std::io::Write;
+
+    if io::stdin().is_terminal() {
+        // Interactive path: use crossterm raw mode so Ctrl+C is detectable.
+        // Read the input character-by-character, building a line.
+        use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+        use crossterm::terminal;
+
+        if !prompt_text.is_empty() {
+            eprint!("{prompt_text}");
+            let _ = io::stderr().flush();
+        }
+
+        let raw_enabled = terminal::enable_raw_mode().is_ok();
+        let mut input = String::new();
+        let interrupted = loop {
+            match read() {
+                Ok(Event::Key(key)) => match (key.code, key.modifiers) {
+                    // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
+                    (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break true;
+                    }
+                    // Enter — end of input.
+                    (KeyCode::Enter, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break false;
+                    }
+                    // Backspace — delete last character.
+                    (KeyCode::Backspace, _) => {
+                        if input.pop().is_some() {
+                            // Erase the character on screen.
+                            let _ = write!(io::stderr(), "\x08 \x08");
+                            let _ = io::stderr().flush();
+                        }
+                    }
+                    // Printable character — echo and accumulate.
+                    (KeyCode::Char(ch), _) => {
+                        input.push(ch);
+                        let _ = write!(io::stderr(), "{ch}");
+                        let _ = io::stderr().flush();
+                    }
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        };
+        if raw_enabled {
+            let _ = terminal::disable_raw_mode();
+        }
+
+        if interrupted {
             settings.vars.set(var_name, "");
+            settings.prompt_interrupted = true;
+        } else {
+            settings.vars.set(var_name, &input);
         }
-        Ok(_) => {
-            // Strip the trailing newline that `read_line` includes.
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            settings.vars.set(var_name, trimmed);
+    } else {
+        // Non-interactive (piped) path: use read_line as before; Ctrl+C is
+        // handled by the OS signal handler and terminates the process.
+        if !prompt_text.is_empty() {
+            // Suppress prompt text when stdin is not a terminal (psql behaviour).
         }
-        Err(e) => {
-            eprintln!("\\prompt: {e}");
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => {
+                // EOF — store empty string.
+                settings.vars.set(var_name, "");
+            }
+            Ok(_) => {
+                // Strip the trailing newline that `read_line` includes.
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                settings.vars.set(var_name, trimmed);
+            }
+            Err(e) => {
+                eprintln!("\\prompt: {e}");
+            }
         }
     }
 }
@@ -3772,6 +3851,9 @@ async fn run_readline_loop(
     let mut stmt_buf = String::new();
 
     loop {
+        // Clear any interrupt flag left by a `\prompt` Ctrl+C in a script.
+        settings.prompt_interrupted = false;
+
         // Re-render the status bar before each prompt so it stays fresh
         // (handles resize events and mode changes from previous commands).
         if let Some(ref mut sl) = settings.statusline {
@@ -3930,6 +4012,9 @@ async fn run_dumb_loop(
     let mut buf = String::new();
 
     loop {
+        // Clear any interrupt flag left by a `\prompt` Ctrl+C in a script.
+        settings.prompt_interrupted = false;
+
         // Print prompt to stderr (so it doesn't mix with redirected output).
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
         eprint!("{prompt}");
