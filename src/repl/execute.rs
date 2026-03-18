@@ -1332,7 +1332,11 @@ pub(super) fn run_pager_for_text(settings: &ReplSettings, text: &str, raw_bytes:
             let _ = io::stdout().write_all(raw_bytes);
         }
     } else if let Err(e) = crate::pager::run_pager(text) {
-        eprintln!("rpg: pager error: {e}");
+        // Unsupported means no TTY is available (e.g. piped / non-interactive
+        // mode).  Fall back silently — no error message, just print.
+        if e.kind() != io::ErrorKind::Unsupported {
+            eprintln!("rpg: pager error: {e}");
+        }
         let _ = io::stdout().write_all(raw_bytes);
     }
 }

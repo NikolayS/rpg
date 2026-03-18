@@ -26,7 +26,7 @@
 //! A brief "Copied!" or "Copied N lines!" message appears in the status bar
 //! for 1 second after copying.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
 
 use crossterm::{
@@ -146,7 +146,29 @@ impl Drop for TerminalGuard {
 /// returns when the user presses `q`, `Esc`, or `Ctrl-C`.
 ///
 /// Returns `Ok(())` on clean exit, or an error if terminal control fails.
+///
+/// Returns `Err` with kind `Unsupported` when stdin is not a terminal —
+/// callers should fall back to plain `print!` without logging an error in
+/// that case.
 pub fn run_pager(content: &str) -> io::Result<()> {
+    // crossterm's event reader (mio/kqueue) requires a real TTY file
+    // descriptor that was inherited as stdin (fd 0).  When stdin is a pipe
+    // or some other non-TTY, crossterm opens /dev/tty to get a new fd, but
+    // on macOS kqueue refuses to register that newly-opened fd with
+    // EVFILT_READ, returning EINVAL.  This causes UnixInternalEventSource
+    // to fail, leaving the global event reader with source=None, which
+    // subsequently reports "Failed to initialize input reader".
+    //
+    // The safest guard: require stdin to be a real TTY.  When it is not
+    // (piped / non-interactive / redirected), return Unsupported so callers
+    // can fall back to plain stdout output without printing a spurious error.
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pager requires a TTY on stdin (non-interactive/piped mode)",
+        ));
+    }
+
     // Split content into owned lines so they outlive this function's scope.
     let lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
 

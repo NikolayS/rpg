@@ -112,7 +112,11 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
                 let _ = std::io::stdout().write_all(text.as_bytes());
             }
         } else if let Err(e) = crate::pager::run_pager(text) {
-            eprintln!("rpg: pager error: {e}");
+            // Unsupported means no TTY available (piped/non-interactive).
+            // Fall back silently — no error message, just print.
+            if e.kind() != std::io::ErrorKind::Unsupported {
+                eprintln!("rpg: pager error: {e}");
+            }
             let _ = std::io::stdout().write_all(text.as_bytes());
         }
         if let Some(ref sl) = settings.statusline {
