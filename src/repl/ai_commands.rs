@@ -1235,7 +1235,13 @@ pub(super) async fn handle_ai_fix(
 /// Detect whether a query is a data-modifying statement that must be
 /// wrapped in a rolled-back transaction before `EXPLAIN ANALYZE`.
 ///
-/// Returns `true` for `INSERT`, `UPDATE`, `DELETE`, and `MERGE`.
+/// Returns `true` for:
+/// - **DML**: `INSERT`, `UPDATE`, `DELETE`, `MERGE`
+/// - **DDL**: `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `RENAME`
+/// - **Privilege control**: `GRANT`, `REVOKE`
+/// - **Maintenance**: `VACUUM`, `CLUSTER`, `REINDEX`, `REFRESH`
+/// - **CTEs** (`WITH`): treated conservatively as writes to prevent
+///   DML-prefixed CTE bypass.
 pub(super) fn is_write_query(sql: &str) -> bool {
     let first = sql
         .split_whitespace()

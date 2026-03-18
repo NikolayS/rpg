@@ -2999,27 +2999,31 @@ async fn dispatch_meta(
         MetaCmd::Quit => return MetaResult::Quit,
         MetaCmd::Help => {
             let text = help_text();
-            let term_rows = crossterm::terminal::size()
-                .map(|(_, h)| h as usize)
-                .unwrap_or(24);
-            if settings.pager_enabled
-                && crate::pager::needs_paging_with_min(
-                    &text,
-                    term_rows.saturating_sub(2),
-                    settings.pager_min_lines,
-                )
-            {
-                if let Some(ref sl) = settings.statusline {
-                    sl.clear();
-                    sl.teardown_scroll_region();
-                }
-                run_pager_for_text(settings, &text, text.as_bytes());
-                if let Some(ref sl) = settings.statusline {
-                    sl.setup_scroll_region();
-                    sl.render();
-                }
+            if let Some(ref mut w) = settings.output_target {
+                let _ = writeln!(w, "{text}");
             } else {
-                println!("{text}");
+                let term_rows = crossterm::terminal::size()
+                    .map(|(_, h)| h as usize)
+                    .unwrap_or(24);
+                if settings.pager_enabled
+                    && crate::pager::needs_paging_with_min(
+                        &text,
+                        term_rows.saturating_sub(2),
+                        settings.pager_min_lines,
+                    )
+                {
+                    if let Some(ref sl) = settings.statusline {
+                        sl.clear();
+                        sl.teardown_scroll_region();
+                    }
+                    run_pager_for_text(settings, &text, text.as_bytes());
+                    if let Some(ref sl) = settings.statusline {
+                        sl.setup_scroll_region();
+                        sl.render();
+                    }
+                } else {
+                    println!("{text}");
+                }
             }
         }
         MetaCmd::Timing(mode) => apply_timing(settings, mode),
@@ -6298,10 +6302,12 @@ mod tests {
 
     #[test]
     fn write_query_ddl_is_true() {
+        assert!(is_write_query("CREATE TABLE t (id int)"));
         assert!(is_write_query("CREATE INDEX idx_foo ON t(id)"));
         assert!(is_write_query("DROP TABLE t"));
-        assert!(is_write_query("ALTER TABLE t ADD COLUMN x int"));
-        assert!(is_write_query("TRUNCATE t"));
+        assert!(is_write_query("ALTER TABLE t ADD COLUMN x text"));
+        assert!(is_write_query("TRUNCATE TABLE t"));
+        assert!(is_write_query("RENAME TABLE t TO t2"));
         assert!(is_write_query("create index concurrently ..."));
     }
 
@@ -6309,6 +6315,14 @@ mod tests {
     fn write_query_grant_revoke_is_true() {
         assert!(is_write_query("GRANT SELECT ON t TO user1"));
         assert!(is_write_query("REVOKE ALL ON t FROM user1"));
+    }
+
+    #[test]
+    fn write_query_maintenance_is_true() {
+        assert!(is_write_query("VACUUM ANALYZE t"));
+        assert!(is_write_query("CLUSTER t USING t_pkey"));
+        assert!(is_write_query("REINDEX TABLE t"));
+        assert!(is_write_query("REFRESH MATERIALIZED VIEW mv"));
     }
 
     // -- build_explain_sql -----------------------------------------------------
