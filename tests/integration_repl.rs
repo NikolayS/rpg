@@ -559,8 +559,7 @@ async fn ask_readonly_tx_blocks_create_table() {
     let err = result.unwrap_err();
     let pg_msg = std::error::Error::source(&err)
         .and_then(|src| src.downcast_ref::<tokio_postgres::error::DbError>())
-        .map(|db| db.message())
-        .unwrap_or("");
+        .map_or("", tokio_postgres::error::DbError::message);
     assert!(
         pg_msg.contains("read-only") || pg_msg.contains("read only"),
         "PostgreSQL error must mention read-only; got: {pg_msg:?} (raw: {err})"
