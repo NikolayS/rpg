@@ -525,17 +525,17 @@ async fn gset_stores_columns_with_prefix() {
 // /ask read-only transaction guard — PostgreSQL-level enforcement
 // ---------------------------------------------------------------------------
 //
-// These tests verify the database-level safety net used by /ask: every
+// These tests verify the database-level safety net used by `/ask`: every
 // read-only query is executed inside `start transaction read only` so that
-// even if is_write_query misclassifies a query the database will reject the
+// even if `is_write_query` misclassifies a query the database will reject the
 // mutation.  We test this directly against PostgreSQL because unit tests
 // cannot exercise the actual wire protocol.
 
 /// `start transaction read only` rejects CREATE TABLE at the database level.
 ///
-/// This is the fallback guard used by /ask: even if is_write_query somehow
+/// This is the fallback guard used by `/ask`: even if `is_write_query` somehow
 /// returns false for a DDL statement, wrapping it in a read-only transaction
-/// causes PostgreSQL to reject it with a clear error.
+/// causes `PostgreSQL` to reject it with a clear error.
 #[tokio::test]
 async fn ask_readonly_tx_blocks_create_table() {
     let _ = connect_or_skip!();

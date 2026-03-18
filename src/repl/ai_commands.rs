@@ -2355,9 +2355,10 @@ mod tests {
 
     // -- parse_ai_response_segments + is_write_query: DDL detection ---------
 
-    /// An AI response with a ```sql fence containing CREATE TABLE is parsed as
-    /// a Sql segment, and is_write_query correctly flags it as a write query.
-    /// This is the core invariant that prevents DDL execution in /ask mode.
+    /// An AI response with a ` ```sql ` fence containing CREATE TABLE is
+    /// parsed as a `Sql` segment, and `is_write_query` correctly flags it as
+    /// a write query.  This is the core invariant that prevents DDL execution
+    /// in `/ask` mode.
     #[test]
     fn ask_create_table_is_write_query() {
         let response = "Here is how to create the table:\n\
@@ -2387,8 +2388,8 @@ mod tests {
         );
     }
 
-    /// An AI response with a ```sql fence containing DROP TABLE is flagged as
-    /// a write query.  DDL must never auto-execute in /ask mode.
+    /// An AI response with a ` ```sql ` fence containing DROP TABLE is
+    /// flagged as a write query.  DDL must never auto-execute in `/ask` mode.
     #[test]
     fn ask_drop_table_is_write_query() {
         let response = "To remove the table:\n\
@@ -2398,7 +2399,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 AiResponseSegment::Sql(sql) => Some(sql.as_str()),
-                _ => None,
+                AiResponseSegment::Text(_) => None,
             })
             .collect();
         assert_eq!(sql_segments.len(), 1, "expected one SQL segment");
@@ -2408,7 +2409,8 @@ mod tests {
         );
     }
 
-    /// SELECT query is NOT a write query and will be auto-executed in /ask mode.
+    /// SELECT query is NOT a write query and will be auto-executed in `/ask`
+    /// mode.
     #[test]
     fn ask_select_is_not_write_query() {
         let response = "Here are the results:\n\
@@ -2418,7 +2420,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 AiResponseSegment::Sql(sql) => Some(sql.as_str()),
-                _ => None,
+                AiResponseSegment::Text(_) => None,
             })
             .collect();
         assert_eq!(sql_segments.len(), 1, "expected one SQL segment");
@@ -2429,7 +2431,7 @@ mod tests {
     }
 
     /// An INSERT statement is classified as a write query and must not
-    /// auto-execute in /ask mode.
+    /// auto-execute in `/ask` mode.
     #[test]
     fn ask_insert_is_write_query() {
         let response = "```sql\nINSERT INTO users (name) VALUES ('Alice');\n```";
@@ -2438,7 +2440,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 AiResponseSegment::Sql(sql) => Some(sql.as_str()),
-                _ => None,
+                AiResponseSegment::Text(_) => None,
             })
             .collect();
         assert_eq!(sql_segments.len(), 1, "expected one SQL segment");
@@ -2448,9 +2450,9 @@ mod tests {
         );
     }
 
-    /// A response with no ```sql fence produces only Text segments — nothing
-    /// is executed.  This covers the case where the AI returns plain text with
-    /// a code block but without the `sql` language tag.
+    /// A response with no ` ```sql ` fence produces only Text segments —
+    /// nothing is executed.  This covers the case where the AI returns plain
+    /// text with a code block but without the `sql` language tag.
     #[test]
     fn ask_no_sql_fence_produces_no_sql_segment() {
         let response = "Here is the SQL:\n\
@@ -2461,7 +2463,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 AiResponseSegment::Sql(sql) => Some(sql.as_str()),
-                _ => None,
+                AiResponseSegment::Text(_) => None,
             })
             .collect();
         assert!(
@@ -2472,7 +2474,7 @@ mod tests {
     }
 
     /// SQL shown to the user is always printed — even when it will not be
-    /// executed (write query in /ask mode).  This test verifies that the
+    /// executed (write query in `/ask` mode).  This test verifies that the
     /// SQL segment IS parsed so it can be displayed, not silently swallowed.
     #[test]
     fn ask_write_query_sql_is_parsed_for_display() {
