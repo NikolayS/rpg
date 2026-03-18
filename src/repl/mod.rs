@@ -7769,4 +7769,37 @@ mod tests {
         assert_eq!(s.input_mode, InputMode::Sql);
         assert_eq!(s.exec_mode, ExecMode::Interactive);
     }
+
+    // -- is_write_query (comment stripping) ------------------------------------
+
+    #[test]
+    fn is_write_query_leading_single_line_comment_create() {
+        // AI-generated SQL with a leading -- comment must still be detected
+        // as a write query.
+        assert!(ai_commands::is_write_query(
+            "-- Create table\nCREATE TABLE t2 (id int);"
+        ));
+    }
+
+    #[test]
+    fn is_write_query_leading_block_comment_drop() {
+        // A /* block comment */ before DROP must still be detected as write.
+        assert!(ai_commands::is_write_query("/* block */\nDROP TABLE t2;"));
+    }
+
+    #[test]
+    fn is_write_query_leading_comments_before_select() {
+        // Multiple leading comments before SELECT must return false (read-only).
+        assert!(!ai_commands::is_write_query(
+            "-- comment\n-- another\nSELECT 1;"
+        ));
+    }
+
+    #[test]
+    fn is_write_query_comment_no_space_insert() {
+        // --comment (no space after --) before INSERT must return true.
+        assert!(ai_commands::is_write_query(
+            "--comment\nINSERT INTO t VALUES (1);"
+        ));
+    }
 }

@@ -751,10 +751,18 @@ pub(super) async fn handle_ai_ask(
                     } else {
                         eprintln!("{}", crate::highlight::highlight_sql(sql, None));
                     }
+                } else {
+                    // Always show the SQL /ask is about to execute so the user
+                    // knows what's happening.
+                    eprintln!("{sql}");
                 }
 
                 // Decide whether to prompt before executing.
                 let read_only = !is_write_query(sql);
+                // Track whether this is the /ask non-text2sql, non-yolo
+                // read-only auto-execute path so we can wrap it in a
+                // read-only transaction for defence-in-depth.
+                let mut ask_readonly_autoexec = false;
                 let choice = if text2sql_show {
                     // text2sql interactive: SQL box was shown; always default yes.
                     if read_only {
@@ -778,13 +786,31 @@ pub(super) async fn handle_ai_ask(
                     eprintln!("-- (write query — not executed in /ask mode; use \\t2s to execute)");
                     AskChoice::No
                 } else {
-                    // /ask interactive mode, read-only: auto-execute.
+                    // /ask interactive mode, read-only: auto-execute wrapped in
+                    // a read-only transaction for defence-in-depth.
+                    ask_readonly_autoexec = true;
                     AskChoice::Yes
                 };
 
                 match choice {
                     AskChoice::Yes => {
-                        let ok = execute_query_interactive(client, sql, settings, tx).await;
+                        let ok = if ask_readonly_autoexec {
+                            // Wrap in a read-only transaction so the database
+                            // itself rejects any write that slips past
+                            // is_write_query (e.g. a novel DML keyword or a
+                            // comment-prefixed query that was misclassified).
+                            let wrapped =
+                                format!("begin; set transaction read only;\n{sql};\ncommit;");
+                            let ok =
+                                execute_query_interactive(client, &wrapped, settings, tx).await;
+                            if !ok {
+                                // Roll back on error to leave the session clean.
+                                let _ = client.simple_query("rollback").await;
+                            }
+                            ok
+                        } else {
+                            execute_query_interactive(client, sql, settings, tx).await
+                        };
                         if ok {
                             settings.conversation.push_query_result(sql, "(executed)");
                         } else if let Some(err) = &settings.last_error {
@@ -1265,6 +1291,41 @@ pub(super) async fn handle_ai_fix(
     }
 }
 
+/// Strip leading SQL comments (both `--` single-line and `/* */` block)
+/// and any surrounding whitespace, returning a slice that starts at the
+/// first real SQL token.
+///
+/// This is needed so that `is_write_query` correctly classifies queries
+/// that the AI generates with a leading comment such as:
+///
+/// ```sql
+/// -- Create the table
+/// CREATE TABLE foo (id int);
+/// ```
+pub(super) fn strip_leading_sql_comments(sql: &str) -> &str {
+    let mut s = sql.trim_start();
+    loop {
+        if s.starts_with("--") {
+            // Skip to end of line.
+            s = match s.find('\n') {
+                Some(pos) => &s[pos + 1..],
+                None => "",
+            };
+            s = s.trim_start();
+        } else if s.starts_with("/*") {
+            // Skip to end of block comment.
+            s = match s.find("*/") {
+                Some(pos) => &s[pos + 2..],
+                None => "",
+            };
+            s = s.trim_start();
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 /// Detect whether a query is a write or schema-changing statement.
 ///
 /// Returns `true` for:
@@ -1275,11 +1336,15 @@ pub(super) async fn handle_ai_fix(
 /// - **CTEs**: any query starting with `WITH` (treated conservatively as a
 ///   potential write, since CTEs may wrap DML)
 ///
+/// Leading SQL comments (`--` and `/* */`) are stripped before checking so
+/// that AI-generated SQL prefixed with a comment is classified correctly.
+///
 /// Used to decide whether to wrap a query in `BEGIN`/`ROLLBACK` for
 /// `EXPLAIN ANALYZE`, and whether to require confirmation before
 /// auto-executing in `/ask` and yolo modes.
 pub(super) fn is_write_query(sql: &str) -> bool {
-    let first = sql
+    let effective = strip_leading_sql_comments(sql);
+    let first = effective
         .split_whitespace()
         .next()
         .unwrap_or("")
