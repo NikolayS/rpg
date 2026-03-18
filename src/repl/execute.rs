@@ -114,6 +114,26 @@ pub async fn execute_query(
     // Interpolate variables before sending.
     let interpolated = settings.vars.interpolate(sql);
 
+    // Split-execution guard: if the batch mixes regular statements with
+    // statements that cannot run inside a transaction block (ALTER SYSTEM,
+    // VACUUM, etc.), execute each statement individually.  PostgreSQL wraps
+    // multi-statement simple-query strings in an implicit transaction, which
+    // would otherwise cause "cannot run inside a transaction block" errors.
+    if needs_split_execution(interpolated.as_str()) {
+        let stmts = crate::query::split_statements(interpolated.as_str());
+        let mut all_ok = true;
+        for stmt in stmts {
+            // Each statement goes through the full execute_query pipeline
+            // (auto-explain, safety checks, echo, timing, etc.).
+            let ok = Box::pin(execute_query(client, &stmt, settings, tx)).await;
+            if !ok {
+                all_ok = false;
+                // Continue executing remaining statements (psql behaviour).
+            }
+        }
+        return all_ok;
+    }
+
     // Auto-EXPLAIN: prepend EXPLAIN prefix when enabled.
     // Skip for statements that are already EXPLAIN, or for
     // non-query statements (SET, BEGIN, COMMIT, etc.).
@@ -1095,6 +1115,54 @@ pub(super) fn is_ddl_statement(sql: &str) -> bool {
         || upper.starts_with("COMMENT")
 }
 
+/// Return `true` if `sql` is a statement that `PostgreSQL` forbids inside any
+/// transaction block (explicit or implicit).
+///
+/// `PostgreSQL` wraps multi-statement simple-query strings in an implicit
+/// transaction.  Statements matched here must therefore be sent as
+/// individual `simple_query` calls to avoid
+/// `ERROR: <command> cannot run inside a transaction block`.
+///
+/// Covered statements (per PG docs):
+/// - `ALTER SYSTEM`
+/// - `VACUUM` (bare or `VACUUM ANALYZE`; excludes `VACUUM (…)` with options
+///   — that form is also forbidden but uses the same keyword so it is caught)
+/// - `CLUSTER` (all forms — re-cluster all tables, specific table, or specific index)
+/// - `CREATE DATABASE` / `DROP DATABASE`
+/// - `CREATE TABLESPACE` / `DROP TABLESPACE`
+/// - `REINDEX DATABASE` / `REINDEX SYSTEM`
+pub(super) fn is_no_tx_statement(sql: &str) -> bool {
+    let upper = sql.trim_start().to_uppercase();
+    // Collect the first two whitespace-separated tokens for pattern matching.
+    let mut tokens = upper.split_whitespace();
+    let first = tokens.next().unwrap_or("");
+    let second = tokens.next().unwrap_or("");
+
+    match first {
+        "ALTER" => second == "SYSTEM",
+        // All forms of VACUUM and CLUSTER are forbidden inside a transaction.
+        // For VACUUM: both bare `VACUUM` and `VACUUM (options…)` are blocked.
+        // For CLUSTER: bare, per-table, and per-index forms are all blocked.
+        "VACUUM" | "CLUSTER" => true,
+        "CREATE" => matches!(second, "DATABASE" | "TABLESPACE"),
+        "DROP" => matches!(second, "DATABASE" | "TABLESPACE"),
+        "REINDEX" => matches!(second, "DATABASE" | "SYSTEM"),
+        _ => false,
+    }
+}
+
+/// Return `true` when `sql` contains multiple statements and at least one of
+/// them is a no-transaction statement (see [`is_no_tx_statement`]).
+///
+/// In that case `execute_query` must split the batch and send each statement
+/// individually so that `PostgreSQL`'s implicit-transaction wrapping of
+/// multi-statement simple-query strings does not cause
+/// `ERROR: … cannot run inside a transaction block`.
+pub(super) fn needs_split_execution(sql: &str) -> bool {
+    let stmts = crate::query::split_statements(sql);
+    stmts.len() > 1 && stmts.iter().any(|s| is_no_tx_statement(s))
+}
+
 // ---------------------------------------------------------------------------
 // Query audit log (FR-23)
 // ---------------------------------------------------------------------------
@@ -1622,5 +1690,195 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
         println!("(1 row)");
     } else {
         println!("({n} rows)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{is_no_tx_statement, needs_split_execution};
+
+    // -- is_no_tx_statement ---------------------------------------------------
+
+    #[test]
+    fn no_tx_alter_system() {
+        assert!(is_no_tx_statement(
+            "ALTER SYSTEM SET autovacuum_insert_scale_factor = 0.01"
+        ));
+    }
+
+    #[test]
+    fn no_tx_alter_system_lowercase() {
+        assert!(is_no_tx_statement("alter system set work_mem = '64MB'"));
+    }
+
+    #[test]
+    fn no_tx_alter_system_reset() {
+        assert!(is_no_tx_statement("ALTER SYSTEM RESET autovacuum_naptime"));
+    }
+
+    #[test]
+    fn no_tx_alter_system_reset_all() {
+        assert!(is_no_tx_statement("ALTER SYSTEM RESET ALL"));
+    }
+
+    #[test]
+    fn no_tx_vacuum_bare() {
+        assert!(is_no_tx_statement("VACUUM"));
+    }
+
+    #[test]
+    fn no_tx_vacuum_table() {
+        assert!(is_no_tx_statement("VACUUM my_table"));
+    }
+
+    #[test]
+    fn no_tx_vacuum_analyze() {
+        assert!(is_no_tx_statement("VACUUM ANALYZE my_table"));
+    }
+
+    #[test]
+    fn no_tx_vacuum_full() {
+        assert!(is_no_tx_statement("VACUUM (FULL, ANALYZE) my_table"));
+    }
+
+    #[test]
+    fn no_tx_vacuum_lowercase() {
+        assert!(is_no_tx_statement("vacuum my_table"));
+    }
+
+    #[test]
+    fn no_tx_cluster_bare() {
+        assert!(is_no_tx_statement("CLUSTER"));
+    }
+
+    #[test]
+    fn no_tx_cluster_table() {
+        assert!(is_no_tx_statement("CLUSTER my_table"));
+    }
+
+    #[test]
+    fn no_tx_cluster_using() {
+        assert!(is_no_tx_statement("CLUSTER my_table USING my_index"));
+    }
+
+    #[test]
+    fn no_tx_create_database() {
+        assert!(is_no_tx_statement("CREATE DATABASE mydb"));
+    }
+
+    #[test]
+    fn no_tx_drop_database() {
+        assert!(is_no_tx_statement("DROP DATABASE mydb"));
+    }
+
+    #[test]
+    fn no_tx_create_tablespace() {
+        assert!(is_no_tx_statement(
+            "CREATE TABLESPACE ts1 LOCATION '/data/ts1'"
+        ));
+    }
+
+    #[test]
+    fn no_tx_drop_tablespace() {
+        assert!(is_no_tx_statement("DROP TABLESPACE ts1"));
+    }
+
+    #[test]
+    fn no_tx_reindex_database() {
+        assert!(is_no_tx_statement("REINDEX DATABASE mydb"));
+    }
+
+    #[test]
+    fn no_tx_reindex_system() {
+        assert!(is_no_tx_statement("REINDEX SYSTEM mydb"));
+    }
+
+    #[test]
+    fn no_tx_leading_whitespace() {
+        assert!(is_no_tx_statement(
+            "  ALTER SYSTEM SET shared_buffers = '1GB'"
+        ));
+    }
+
+    // Statements that ARE allowed in transactions.
+    #[test]
+    fn tx_ok_alter_table() {
+        assert!(!is_no_tx_statement("ALTER TABLE foo ADD COLUMN bar text"));
+    }
+
+    #[test]
+    fn tx_ok_create_table() {
+        assert!(!is_no_tx_statement("CREATE TABLE foo (id int)"));
+    }
+
+    #[test]
+    fn tx_ok_drop_table() {
+        assert!(!is_no_tx_statement("DROP TABLE foo"));
+    }
+
+    #[test]
+    fn tx_ok_reindex_table() {
+        assert!(!is_no_tx_statement("REINDEX TABLE foo"));
+    }
+
+    #[test]
+    fn tx_ok_reindex_index() {
+        assert!(!is_no_tx_statement("REINDEX INDEX foo_idx"));
+    }
+
+    #[test]
+    fn tx_ok_select() {
+        assert!(!is_no_tx_statement("SELECT pg_reload_conf()"));
+    }
+
+    #[test]
+    fn tx_ok_insert() {
+        assert!(!is_no_tx_statement("INSERT INTO t VALUES (1)"));
+    }
+
+    // -- needs_split_execution ------------------------------------------------
+
+    #[test]
+    fn split_needed_alter_system_with_reload() {
+        // The canonical two-statement pattern from the bug report.
+        assert!(needs_split_execution(
+            "ALTER SYSTEM SET autovacuum_insert_scale_factor = 0.01;\
+             SELECT pg_reload_conf()"
+        ));
+    }
+
+    #[test]
+    fn split_not_needed_single_alter_system() {
+        // Single statement never needs split.
+        assert!(!needs_split_execution(
+            "ALTER SYSTEM SET autovacuum_insert_scale_factor = 0.01"
+        ));
+    }
+
+    #[test]
+    fn split_not_needed_two_regular_stmts() {
+        // Two normal statements: no split needed (server handles them fine).
+        assert!(!needs_split_execution("SELECT 1; SELECT 2"));
+    }
+
+    #[test]
+    fn split_needed_vacuum_plus_select() {
+        assert!(needs_split_execution("VACUUM my_table; SELECT 1"));
+    }
+
+    #[test]
+    fn split_needed_create_database_plus_select() {
+        assert!(needs_split_execution(
+            "CREATE DATABASE newdb; SELECT current_database()"
+        ));
+    }
+
+    #[test]
+    fn split_not_needed_empty() {
+        assert!(!needs_split_execution(""));
     }
 }
