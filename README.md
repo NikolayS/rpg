@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
 
-A psql-compatible terminal with built-in DBA diagnostics and AI assistant.
+A psql-compatible terminal written in Rust with built-in DBA diagnostics and AI assistant.
 Single binary, no dependencies, cross-platform.
 
 ## Features
