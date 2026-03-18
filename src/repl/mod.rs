@@ -7887,4 +7887,226 @@ mod tests {
         let err = crate::session::sql_help_text(Some("NOTACOMMAND")).expect_err("should be Err");
         assert_eq!(err, "NOTACOMMAND");
     }
+
+    // -- is_write_query (comprehensive Section 13 coverage) -------------------
+
+    #[test]
+    fn write_query_empty_string_is_false() {
+        // Empty input is not a write query.
+        assert!(!ai_commands::is_write_query(""));
+    }
+
+    #[test]
+    fn write_query_whitespace_only_is_false() {
+        // Whitespace-only input is not a write query.
+        assert!(!ai_commands::is_write_query("   \n\t  "));
+    }
+
+    #[test]
+    fn write_query_select_with_leading_whitespace_is_false() {
+        // SELECT with leading whitespace must still be detected as read.
+        assert!(!ai_commands::is_write_query("   SELECT * FROM t"));
+        assert!(!ai_commands::is_write_query("\n\nselect 1"));
+    }
+
+    #[test]
+    fn write_query_explain_select_is_false() {
+        // EXPLAIN of a SELECT is still a read query.
+        assert!(!ai_commands::is_write_query(
+            "EXPLAIN SELECT * FROM users"
+        ));
+        assert!(!ai_commands::is_write_query(
+            "explain analyze select * from users"
+        ));
+    }
+
+    #[test]
+    fn write_query_show_is_false() {
+        // SHOW is a read-only metadata command.
+        assert!(!ai_commands::is_write_query("SHOW work_mem"));
+    }
+
+    #[test]
+    fn write_query_set_is_false() {
+        // SET is a session-local configuration command, not a data-write.
+        // The current classifier does not flag SET — verify it remains stable.
+        assert!(!ai_commands::is_write_query("SET work_mem = '256MB'"));
+    }
+
+    #[test]
+    fn write_query_table_is_false() {
+        // TABLE t is a shorthand for SELECT * FROM t — it is a read query.
+        assert!(!ai_commands::is_write_query("TABLE users"));
+    }
+
+    #[test]
+    fn write_query_values_is_false() {
+        // VALUES not preceded by INSERT is a read-only expression.
+        // The classifier only looks at the first keyword, so VALUES alone
+        // is not flagged.
+        assert!(!ai_commands::is_write_query("VALUES (1, 2, 3)"));
+    }
+
+    #[test]
+    fn write_query_multiple_leading_block_comments_create() {
+        // Several /* */ comments before CREATE must still be detected.
+        assert!(ai_commands::is_write_query(
+            "/* first */ /* second */\nCREATE TABLE t (id int);"
+        ));
+    }
+
+    #[test]
+    fn write_query_mixed_leading_comments_insert() {
+        // Mix of -- and /* */ comments before INSERT must be detected.
+        assert!(ai_commands::is_write_query(
+            "-- line one\n/* block */\nINSERT INTO t VALUES (1);"
+        ));
+    }
+
+    #[test]
+    fn write_query_merge_uppercase_is_true() {
+        // MERGE (SQL:2003) is a write operation.
+        assert!(ai_commands::is_write_query(
+            "MERGE INTO target AS t\n\
+             USING source AS s ON (t.id = s.id)\n\
+             WHEN MATCHED THEN UPDATE SET t.v = s.v;"
+        ));
+    }
+
+    #[test]
+    fn write_query_refresh_matview_is_true() {
+        // REFRESH MATERIALIZED VIEW is flagged as write / maintenance.
+        assert!(ai_commands::is_write_query(
+            "REFRESH MATERIALIZED VIEW my_mv;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "refresh materialized view my_mv;"
+        ));
+    }
+
+    #[test]
+    fn write_query_reindex_is_true() {
+        // All REINDEX variants must be detected.
+        assert!(ai_commands::is_write_query("REINDEX TABLE t;"));
+        assert!(ai_commands::is_write_query("REINDEX INDEX idx;"));
+        assert!(ai_commands::is_write_query("REINDEX DATABASE mydb;"));
+        assert!(ai_commands::is_write_query(
+            "REINDEX TABLE CONCURRENTLY t;"
+        ));
+    }
+
+    #[test]
+    fn write_query_vacuum_variants_are_true() {
+        // VACUUM with arguments (space-separated) must be detected.
+        // Note: bare "VACUUM;" (no space before semicolon) is not detected
+        // because split_whitespace treats "VACUUM;" as one token — see
+        // issue #625 for the edge-case tracker.
+        assert!(ai_commands::is_write_query("VACUUM FULL t;"));
+        assert!(ai_commands::is_write_query("VACUUM ANALYZE t;"));
+        assert!(ai_commands::is_write_query("vacuum analyze t;"));
+        assert!(ai_commands::is_write_query("VACUUM t"));
+    }
+
+    #[test]
+    fn write_query_cluster_is_true() {
+        // CLUSTER must be detected.
+        assert!(ai_commands::is_write_query("CLUSTER t USING t_pkey;"));
+        assert!(ai_commands::is_write_query("cluster t using t_pkey;"));
+    }
+
+    #[test]
+    fn write_query_truncate_is_true() {
+        // TRUNCATE is a DDL write operation.
+        assert!(ai_commands::is_write_query("TRUNCATE TABLE t;"));
+        assert!(ai_commands::is_write_query("truncate t;"));
+    }
+
+    #[test]
+    fn write_query_alter_variants_are_true() {
+        // All ALTER variants must be detected.
+        assert!(ai_commands::is_write_query(
+            "ALTER TABLE t ADD COLUMN x text;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "ALTER INDEX idx RENAME TO idx2;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "ALTER SEQUENCE s RESTART WITH 1;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "alter table t drop column x;"
+        ));
+    }
+
+    #[test]
+    fn write_query_create_variants_are_true() {
+        // All CREATE variants must be detected.
+        assert!(ai_commands::is_write_query("CREATE TABLE t (id int);"));
+        assert!(ai_commands::is_write_query(
+            "CREATE INDEX idx ON t (id);"
+        ));
+        assert!(ai_commands::is_write_query(
+            "CREATE UNIQUE INDEX CONCURRENTLY idx ON t (email);"
+        ));
+        assert!(ai_commands::is_write_query(
+            "CREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE sql AS ''"
+        ));
+        assert!(ai_commands::is_write_query(
+            "CREATE VIEW v AS SELECT 1;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "CREATE MATERIALIZED VIEW mv AS SELECT 1;"
+        ));
+        assert!(ai_commands::is_write_query("create table t (id int);"));
+    }
+
+    #[test]
+    fn write_query_drop_variants_are_true() {
+        // All DROP variants must be detected.
+        assert!(ai_commands::is_write_query("DROP TABLE t;"));
+        assert!(ai_commands::is_write_query("DROP TABLE IF EXISTS t;"));
+        assert!(ai_commands::is_write_query("DROP INDEX idx;"));
+        assert!(ai_commands::is_write_query("DROP VIEW v;"));
+        assert!(ai_commands::is_write_query(
+            "DROP FUNCTION f(int);"
+        ));
+        assert!(ai_commands::is_write_query("drop table t;"));
+    }
+
+    #[test]
+    fn write_query_grant_variants_are_true() {
+        // All GRANT variants must be detected.
+        assert!(ai_commands::is_write_query(
+            "GRANT SELECT ON t TO user1;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "GRANT ALL PRIVILEGES ON DATABASE mydb TO user1;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "grant select, insert on t to user1;"
+        ));
+    }
+
+    #[test]
+    fn write_query_revoke_variants_are_true() {
+        // All REVOKE variants must be detected.
+        assert!(ai_commands::is_write_query(
+            "REVOKE ALL ON t FROM user1;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "REVOKE SELECT ON t FROM PUBLIC;"
+        ));
+        assert!(ai_commands::is_write_query(
+            "revoke all on t from user1;"
+        ));
+    }
+
+    #[test]
+    fn write_query_with_select_only_is_true_conservative() {
+        // Pure `WITH ... SELECT` (read-only CTE) is treated as write
+        // conservatively — this prevents CTE-bypass of the write check.
+        assert!(ai_commands::is_write_query(
+            "WITH x AS (SELECT 1) SELECT * FROM x"
+        ));
+    }
 }

@@ -773,3 +773,301 @@ async fn describe_df_lists_functions() {
         "\\df should produce output:\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CLI output-format flags — Section 1 of issue #618
+// ---------------------------------------------------------------------------
+
+/// `--csv` produces comma-separated output with a header row.
+#[test]
+fn cli_csv_flag_produces_csv_output() {
+    let (stdout, _stderr, code) = run_rpg(&["--csv", "-c", "select 1 as n, 2 as m"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with --csv flag\nstdout: {stdout}"
+    );
+    // CSV output must contain a comma separator somewhere.
+    assert!(
+        stdout.contains(','),
+        "expected CSV output (comma separator):\n{stdout}"
+    );
+    // Column names must appear in the header row.
+    assert!(
+        stdout.contains('n') && stdout.contains('m'),
+        "expected column names in CSV header:\n{stdout}"
+    );
+}
+
+/// `--json` produces JSON array output.
+#[test]
+fn cli_json_flag_produces_json_output() {
+    let (stdout, _stderr, code) = run_rpg(&["--json", "-c", "select 1 as n"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with --json flag\nstdout: {stdout}"
+    );
+    // JSON output must contain bracket/brace characters.
+    assert!(
+        stdout.contains('[') && stdout.contains(']'),
+        "expected JSON array output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains('"'),
+        "expected quoted JSON keys in output:\n{stdout}"
+    );
+}
+
+/// `-t / --tuples-only` suppresses the header and footer rows.
+#[test]
+fn cli_tuples_only_suppresses_header_and_footer() {
+    let (stdout, _stderr, code) = run_rpg(&["-t", "-c", "select 42 as answer"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -t flag\nstdout: {stdout}"
+    );
+    // Header column name must not appear.
+    assert!(
+        !stdout.contains("answer"),
+        "expected no header row with -t flag:\n{stdout}"
+    );
+    // Footer "(1 row)" must not appear.
+    assert!(
+        !stdout.contains("(1 row)"),
+        "expected no footer with -t flag:\n{stdout}"
+    );
+    // The value itself must still appear.
+    assert!(
+        stdout.contains("42"),
+        "expected value '42' in tuples-only output:\n{stdout}"
+    );
+}
+
+/// `-A / --no-align` produces unaligned output (no padding or border lines).
+#[test]
+fn cli_no_align_produces_unaligned_output() {
+    let (stdout, _stderr, code) = run_rpg(&["-A", "-c", "select 1 as a, 2 as b"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -A flag\nstdout: {stdout}"
+    );
+    // Unaligned output must not contain table-border dashes.
+    assert!(
+        !stdout.contains("-----"),
+        "expected no table border dashes in unaligned mode:\n{stdout}"
+    );
+    // Values must still be present.
+    assert!(
+        stdout.contains('1') && stdout.contains('2'),
+        "expected values in unaligned output:\n{stdout}"
+    );
+}
+
+/// `-x / --expanded` produces expanded (vertical) key-value output.
+#[test]
+fn cli_expanded_produces_expanded_output() {
+    let (stdout, _stderr, code) = run_rpg(&["-x", "-c", "select 1 as answer"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -x flag\nstdout: {stdout}"
+    );
+    // Expanded output uses key-value layout; column name must appear.
+    assert!(
+        stdout.contains("answer"),
+        "expected column name 'answer' in expanded output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "expected value '1' in expanded output:\n{stdout}"
+    );
+}
+
+/// `-o / --output FILE` redirects query output to a file.
+#[test]
+fn cli_output_flag_redirects_to_file() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_path = dir.path().join("out.txt");
+    let path_str = out_path.to_str().expect("path to str failed");
+
+    let (_stdout, _stderr, code) = run_rpg(&["-o", path_str, "-c", "select 'hello' as msg"]);
+    assert_eq!(code, 0, "expected exit 0 with -o flag");
+
+    let contents = std::fs::read_to_string(&out_path)
+        .expect("output file should have been created by -o flag");
+    assert!(
+        contents.contains("hello"),
+        "expected 'hello' in redirected output file:\n{contents}"
+    );
+}
+
+/// `-q / --quiet` flag does not crash and exits 0.
+///
+/// In quiet mode informational noise (banners, notices) is suppressed.
+/// We verify the flag is accepted and the query still runs.
+#[test]
+fn cli_quiet_flag_runs_query() {
+    let (stdout, _stderr, code) = run_rpg(&["-q", "-c", "select 1 as n"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -q flag\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "expected query result '1' with -q flag:\n{stdout}"
+    );
+}
+
+/// Piped stdin executes the query and exits 0.
+#[test]
+fn cli_piped_stdin_executes_query() {
+    let host = std::env::var("TEST_PGHOST").unwrap_or_else(|_| "localhost".to_owned());
+    let port = std::env::var("TEST_PGPORT").unwrap_or_else(|_| "15432".to_owned());
+    let user = std::env::var("TEST_PGUSER").unwrap_or_else(|_| "testuser".to_owned());
+    let password =
+        std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
+    let dbname =
+        std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
+
+    let bin = env!("CARGO_BIN_EXE_rpg");
+    let mut child = std::process::Command::new(bin)
+        .args(["-h", &host, "-p", &port, "-U", &user, "-d", &dbname])
+        .env("PGPASSWORD", &password)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn rpg");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write as _;
+        let _ = stdin.write_all(b"select 99 as piped;\n");
+    }
+
+    let result = child.wait_with_output().expect("wait failed");
+    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+    let code = result.status.code().unwrap_or(-1);
+
+    // If no test DB is available outside CI, skip gracefully.
+    if code == 2 && std::env::var("CI").is_err() {
+        return;
+    }
+
+    assert_eq!(
+        code, 0,
+        "expected exit 0 for piped stdin\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("99"),
+        "expected value '99' in piped stdin output:\n{stdout}"
+    );
+}
+
+/// `-F / --field-separator` sets a custom separator for unaligned output.
+#[test]
+fn cli_field_separator_flag() {
+    let (stdout, _stderr, code) =
+        run_rpg(&["-A", "-t", "-F", "|", "-c", "select 1 as a, 2 as b"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -F flag\nstdout: {stdout}"
+    );
+    // With -t (tuples only) and custom separator, output should be "1|2".
+    assert!(
+        stdout.contains("1|2") || stdout.contains('|'),
+        "expected custom field separator '|' in output:\n{stdout}"
+    );
+}
+
+/// `-v NAME=VALUE` sets a psql variable accessible via `:name` syntax.
+#[test]
+fn cli_variable_flag_sets_psql_variable() {
+    let (stdout, _stderr, code) =
+        run_rpg(&["-v", "myvar=hello", "-c", "select :'myvar' as val"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -v flag\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("hello"),
+        "expected variable value 'hello' in output:\n{stdout}"
+    );
+}
+
+/// `-P format=csv` sets CSV format via the --pset flag.
+#[test]
+fn cli_pset_format_csv() {
+    let (stdout, _stderr, code) =
+        run_rpg(&["-P", "format=csv", "-c", "select 1 as n, 2 as m"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -P format=csv\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(','),
+        "expected CSV comma separator in -P format=csv output:\n{stdout}"
+    );
+}
+
+/// `-P null=NULL` causes NULL cells to display as the literal string "NULL".
+#[test]
+fn cli_pset_null_string() {
+    let (stdout, _stderr, code) =
+        run_rpg(&["-P", "null=NULL", "-c", "select null::text as val"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 with -P null=NULL\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("NULL"),
+        "expected null display 'NULL' in output:\n{stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Non-interactive / scripting mode — Section 16 of issue #618
+// ---------------------------------------------------------------------------
+
+/// `rpg --csv -c "select 1,2"` outputs CSV to stdout (scripting mode).
+#[test]
+fn scripting_csv_to_stdout() {
+    let (stdout, _stderr, code) = run_rpg(&["--csv", "-c", "select 1 as a, 2 as b"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 for CSV scripting\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(','),
+        "expected comma in CSV scripting output:\n{stdout}"
+    );
+}
+
+/// `rpg --json -c "select 1"` outputs valid JSON to stdout (scripting mode).
+#[test]
+fn scripting_json_to_stdout() {
+    let (stdout, _stderr, code) = run_rpg(&["--json", "-c", "select 1 as n"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 for JSON scripting\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains('{') || stdout.contains('['),
+        "expected JSON structure in scripting output:\n{stdout}"
+    );
+}
+
+/// `rpg -t -c "select 1"` outputs tuples only, no header/footer (scripting mode).
+#[test]
+fn scripting_tuples_only() {
+    let (stdout, _stderr, code) = run_rpg(&["-t", "-c", "select 1 as n"]);
+    assert_eq!(
+        code, 0,
+        "expected exit 0 for tuples-only scripting\nstdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains("(1 row)"),
+        "expected no footer in tuples-only scripting mode:\n{stdout}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "expected value '1' in tuples-only scripting output:\n{stdout}"
+    );
+}
