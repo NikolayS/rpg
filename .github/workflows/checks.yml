@@ -200,9 +200,7 @@ jobs:
           restore-keys: |
             coverage-${{ runner.os }}-cargo-
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@b3af0c1e10ace5c86b78e3974db2e5b776b0d983  # v2
-        with:
-          tool: cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
       - name: Collect coverage
         run: |
           set -Eeuo pipefail
