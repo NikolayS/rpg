@@ -26,7 +26,7 @@ pub async fn execute(
     subcommand: &str,
     verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) -> Option<String> {
     match subcommand {
         "activity" | "act" => {
@@ -122,7 +122,13 @@ pub async fn execute(
 /// otherwise print directly to stdout.
 ///
 /// Mirrors the same logic used by `\?` (help) in `src/repl/mod.rs`.
-fn maybe_page(settings: &crate::repl::ReplSettings, text: &str) {
+fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
+    // Honour \o redirect: write to file instead of stdout/pager.
+    if let Some(ref mut w) = settings.output_target {
+        use std::io::Write;
+        let _ = writeln!(w, "{text}");
+        return;
+    }
     let term_rows = crossterm::terminal::size()
         .map(|(_, h)| h as usize)
         .unwrap_or(24);
@@ -172,7 +178,7 @@ fn maybe_page(settings: &crate::repl::ReplSettings, text: &str) {
 ///
 /// If the query fails, the error is printed to stderr and the function
 /// returns without panicking.
-async fn run_and_print(client: &Client, sql: &str, settings: &crate::repl::ReplSettings) {
+async fn run_and_print(client: &Client, sql: &str, settings: &mut crate::repl::ReplSettings) {
     crate::logging::trace("dba", &format!("diagnostic query: {}", sql.trim()));
     match client.simple_query(sql).await {
         Ok(messages) => {
@@ -390,7 +396,7 @@ async fn dba_activity(
     client: &Client,
     _verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     use std::fmt::Write as FmtWrite;
     use tokio_postgres::SimpleQueryMessage;
@@ -931,14 +937,14 @@ async fn dba_locks(
     client: &Client,
     _verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     let edges = collect_lock_edges(client, capabilities).await;
     let forest = build_lock_forest(&edges);
     maybe_page(settings, &render_lock_forest(&forest));
 }
 
-async fn dba_bloat(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_bloat(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {
     // pg_stat_user_tables uses `relname`, not `tablename`.
     let sql = "select \
         schemaname, \
@@ -958,7 +964,7 @@ async fn dba_bloat(client: &Client, _verbose: bool, settings: &crate::repl::Repl
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_vacuum(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_vacuum(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {
     // Raw vacuum status table (psql-style tabular output).
     let sql = "select \
         s.schemaname, \
@@ -985,7 +991,7 @@ async fn dba_vacuum(client: &Client, _verbose: bool, settings: &crate::repl::Rep
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_tablesize(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_tablesize(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {
     let sql = "select \
         schemaname || '.' || tablename as relation, \
         pg_size_pretty(pg_total_relation_size( \
@@ -1007,7 +1013,11 @@ async fn dba_tablesize(client: &Client, _verbose: bool, settings: &crate::repl::
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_connections(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_connections(
+    client: &Client,
+    _verbose: bool,
+    settings: &mut crate::repl::ReplSettings,
+) {
     let sql = "select \
         state, \
         usename, \
@@ -1021,7 +1031,11 @@ async fn dba_connections(client: &Client, _verbose: bool, settings: &crate::repl
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_unused_indexes(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_unused_indexes(
+    client: &Client,
+    _verbose: bool,
+    settings: &mut crate::repl::ReplSettings,
+) {
     let sql = "select \
         schemaname, \
         indexrelname, \
@@ -1039,7 +1053,7 @@ async fn dba_unused_indexes(client: &Client, _verbose: bool, settings: &crate::r
 async fn dba_invalid_indexes(
     client: &Client,
     _verbose: bool,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     let sql = "\
         select \
@@ -1067,7 +1081,7 @@ async fn dba_invalid_indexes(
 async fn dba_redundant_indexes(
     client: &Client,
     _verbose: bool,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     let sql = "\
         select \
@@ -1100,7 +1114,7 @@ async fn dba_redundant_indexes(
 async fn dba_missing_fk_indexes(
     client: &Client,
     _verbose: bool,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     let sql = "\
         select \
@@ -1139,7 +1153,7 @@ async fn dba_missing_fk_indexes(
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_seq_scans(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_seq_scans(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {
     let sql = "select \
         schemaname, \
         relname, \
@@ -1158,7 +1172,7 @@ async fn dba_seq_scans(client: &Client, _verbose: bool, settings: &crate::repl::
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_cache_hit(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_cache_hit(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {
     let sql = "select \
         schemaname, \
         relname, \
@@ -1175,7 +1189,11 @@ async fn dba_cache_hit(client: &Client, _verbose: bool, settings: &crate::repl::
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_replication(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_replication(
+    client: &Client,
+    _verbose: bool,
+    settings: &mut crate::repl::ReplSettings,
+) {
     let sql = "select \
         slot_name, \
         slot_type, \
@@ -1193,7 +1211,7 @@ async fn dba_replication(client: &Client, _verbose: bool, settings: &crate::repl
 async fn dba_waits(
     client: &Client,
     verbose: bool,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) -> Option<String> {
     let sql = "SELECT \
         coalesce(wait_event_type, 'CPU/Running') AS wait_type, \
@@ -1251,7 +1269,7 @@ async fn dba_progress(
     client: &Client,
     filter: Option<&str>,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     match filter {
         None | Some("all") => {
@@ -1280,7 +1298,7 @@ async fn dba_progress(
 async fn dba_progress_vacuum(
     client: &Client,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     // In PG 17 max_dead_tuples/num_dead_tuples were renamed to
     // max_dead_tuple_bytes/num_dead_item_ids.
@@ -1319,7 +1337,7 @@ async fn dba_progress_vacuum(
     run_and_print(client, &sql, settings).await;
 }
 
-async fn dba_progress_analyze(client: &Client, settings: &crate::repl::ReplSettings) {
+async fn dba_progress_analyze(client: &Client, settings: &mut crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1344,7 +1362,7 @@ async fn dba_progress_analyze(client: &Client, settings: &crate::repl::ReplSetti
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_create_index(client: &Client, settings: &crate::repl::ReplSettings) {
+async fn dba_progress_create_index(client: &Client, settings: &mut crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1371,7 +1389,7 @@ async fn dba_progress_create_index(client: &Client, settings: &crate::repl::Repl
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_cluster(client: &Client, settings: &crate::repl::ReplSettings) {
+async fn dba_progress_cluster(client: &Client, settings: &mut crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1396,7 +1414,7 @@ async fn dba_progress_cluster(client: &Client, settings: &crate::repl::ReplSetti
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_copy(client: &Client, settings: &crate::repl::ReplSettings) {
+async fn dba_progress_copy(client: &Client, settings: &mut crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1420,7 +1438,7 @@ async fn dba_progress_copy(client: &Client, settings: &crate::repl::ReplSettings
     run_and_print(client, sql, settings).await;
 }
 
-async fn dba_progress_basebackup(client: &Client, settings: &crate::repl::ReplSettings) {
+async fn dba_progress_basebackup(client: &Client, settings: &mut crate::repl::ReplSettings) {
     let sql = "\
         select \
             p.pid, \
@@ -1447,7 +1465,7 @@ async fn dba_io(
     client: &Client,
     verbose: bool,
     capabilities: Option<&crate::capabilities::DbCapabilities>,
-    settings: &crate::repl::ReplSettings,
+    settings: &mut crate::repl::ReplSettings,
 ) {
     let has_io = capabilities.is_some_and(crate::capabilities::DbCapabilities::has_pg_stat_io);
     if !has_io {
@@ -1515,7 +1533,7 @@ async fn dba_io(
 // Configuration
 // ---------------------------------------------------------------------------
 
-async fn dba_config(client: &Client, _verbose: bool, settings: &crate::repl::ReplSettings) {
+async fn dba_config(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {
     let sql = "select \
         name, \
         setting, \

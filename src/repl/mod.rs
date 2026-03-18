@@ -3270,11 +3270,12 @@ async fn dispatch_meta(
         // Diagnostic commands — delegate to the dba module.
         MetaCmd::Dba => {
             let subcommand = parsed.pattern.as_deref().unwrap_or("");
+            let caps = settings.db_capabilities.clone();
             let ai_context = crate::dba::execute(
                 client,
                 subcommand,
                 parsed.plus,
-                Some(&settings.db_capabilities),
+                Some(&caps),
                 settings,
             )
             .await;
