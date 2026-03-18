@@ -1,4 +1,4 @@
-# rpg — modern Postgres terminal
+# rpg — modern Postgres terminal written in Rust
 
 [![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
