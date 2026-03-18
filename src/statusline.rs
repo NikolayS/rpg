@@ -143,6 +143,25 @@ impl StatusLine {
         let _ = io::stderr().flush();
     }
 
+    /// Re-install the scroll region and reposition the cursor to the bottom
+    /// of the scroll region.
+    ///
+    /// Call this after returning from the built-in pager.  `LeaveAlternateScreen`
+    /// restores the main screen buffer but the DECSTBM scroll region constraint
+    /// may still be active; `setup_scroll_region()` re-establishes it, which
+    /// moves the cursor to row 1 as a side-effect.  This method then moves the
+    /// cursor back to the bottom of the scroll region so the next prompt
+    /// appears at the correct position.
+    pub fn setup_scroll_region_and_restore_cursor(&self) {
+        self.setup_scroll_region();
+        if !self.enabled {
+            return;
+        }
+        let bottom = self.term_rows.saturating_sub(1);
+        let _ = write!(io::stderr(), "\x1b[{bottom};1H");
+        let _ = io::stderr().flush();
+    }
+
     /// Restore the full scroll region.  Call at REPL exit.
     pub fn teardown_scroll_region(&self) {
         if !self.enabled {
