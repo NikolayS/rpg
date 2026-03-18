@@ -6290,6 +6290,21 @@ mod tests {
         assert!(is_write_query("Insert Into t values (1)"));
     }
 
+    #[test]
+    fn write_query_ddl_is_true() {
+        assert!(is_write_query("CREATE INDEX idx_foo ON t(id)"));
+        assert!(is_write_query("DROP TABLE t"));
+        assert!(is_write_query("ALTER TABLE t ADD COLUMN x int"));
+        assert!(is_write_query("TRUNCATE t"));
+        assert!(is_write_query("create index concurrently ..."));
+    }
+
+    #[test]
+    fn write_query_grant_revoke_is_true() {
+        assert!(is_write_query("GRANT SELECT ON t TO user1"));
+        assert!(is_write_query("REVOKE ALL ON t FROM user1"));
+    }
+
     // -- build_explain_sql -----------------------------------------------------
 
     #[test]

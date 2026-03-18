@@ -1232,7 +1232,17 @@ pub(super) async fn handle_ai_fix(
 /// Returns `true` for `INSERT`, `UPDATE`, `DELETE`, and `MERGE`.
 pub(super) fn is_write_query(sql: &str) -> bool {
     let first = sql.split_whitespace().next().unwrap_or("").to_uppercase();
-    matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+    matches!(
+        first.as_str(),
+        // DML
+        "INSERT" | "UPDATE" | "DELETE" | "MERGE"
+        // DDL — always require confirmation; never auto-execute
+        | "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME"
+        // Privilege control
+        | "GRANT" | "REVOKE"
+        // Maintenance (mutate physical storage / stats)
+        | "VACUUM" | "CLUSTER" | "REINDEX" | "REFRESH"
+    )
 }
 
 /// Build the `EXPLAIN` SQL for a given target query.
