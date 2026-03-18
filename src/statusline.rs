@@ -105,15 +105,28 @@ impl StatusLine {
 
     /// Refresh the cached terminal size (call on SIGWINCH / resize events).
     ///
-    /// Re-installs the scroll region for the new terminal height so that
-    /// normal output does not overwrite the status bar row, then redraws the
-    /// bar at the correct (new) position.
+    /// Re-installs the scroll region **only when the terminal size changed**.
+    /// `setup_scroll_region()` emits DECSTBM, which unconditionally moves the
+    /// cursor to the home position (row 1, col 1) as a side effect.  The REPL
+    /// loop calls this method before every prompt, so emitting DECSTBM every
+    /// iteration would reset the cursor to row 1 before each prompt.
     pub fn on_resize(&mut self) {
+        let old_rows = self.term_rows;
+        let old_cols = self.term_cols;
         if let Ok((cols, rows)) = crossterm::terminal::size() {
             self.term_cols = cols;
             self.term_rows = rows;
         }
-        self.setup_scroll_region();
+        if self.term_rows != old_rows || self.term_cols != old_cols {
+            self.setup_scroll_region();
+            // DECSTBM moves cursor to row 1.  Restore it to the bottom of the
+            // scroll region so the next prompt appears at the correct position.
+            if self.enabled {
+                let bottom = self.term_rows.saturating_sub(1);
+                let _ = write!(io::stderr(), "\x1b[{bottom};1H");
+                let _ = io::stderr().flush();
+            }
+        }
         self.render();
     }
 
