@@ -788,14 +788,7 @@ pub(super) async fn handle_ai_ask(
 
                 // Decide whether to prompt before executing.
                 let read_only = !is_write_query(sql);
-                let choice = if text2sql_show {
-                    // text2sql interactive: SQL box was shown; always default yes.
-                    if read_only {
-                        ask_yne_prompt("Execute? [Y/n/e] ", true)
-                    } else {
-                        ask_yne_prompt("Execute write query? [Y/n/e] ", true)
-                    }
-                } else if yolo {
+                let choice = if yolo {
                     // Yolo: auto-execute; warn on write queries.
                     if !read_only {
                         if settings.i_know_what_im_doing {
@@ -807,9 +800,18 @@ pub(super) async fn handle_ai_ask(
                     AskChoice::Yes
                 } else if !read_only {
                     // /ask is a question command — show the SQL but do not execute
-                    // DML or DDL. The user can copy and run it manually or use \t2s.
-                    eprintln!("-- (write query — not executed in /ask mode; use \\t2s to execute)");
+                    // DML or DDL in any mode (including text2sql).  Write queries
+                    // require the user to copy and run them manually, or use raw
+                    // SQL input / a direct \t2s prompt — not /ask.
+                    eprintln!(
+                        "-- (write query — not executed in /ask mode; \
+                         use \\t2s to execute)"
+                    );
                     AskChoice::No
+                } else if text2sql_show {
+                    // text2sql interactive mode, read-only query: show the SQL box
+                    // (already printed above) and ask for confirmation.
+                    ask_yne_prompt("Execute? [Y/n/e] ", true)
                 } else {
                     // /ask interactive mode, read-only: auto-execute.
                     AskChoice::Yes
@@ -2349,5 +2351,141 @@ mod tests {
         // Leading comments before SELECT must not flip the result.
         assert!(!is_write_query("-- read only\nSELECT 1;"));
         assert!(!is_write_query("/* read */\nselect * from t;"));
+    }
+
+    // -- parse_ai_response_segments + is_write_query: DDL detection ---------
+
+    /// An AI response with a ` ```sql ` fence containing CREATE TABLE is
+    /// parsed as a `Sql` segment, and `is_write_query` correctly flags it as
+    /// a write query.  This is the core invariant that prevents DDL execution
+    /// in `/ask` mode.
+    #[test]
+    fn ask_create_table_is_write_query() {
+        let response = "Here is how to create the table:\n\
+                        ```sql\nCREATE TABLE t4 (id int);\n```\n\
+                        This creates t4.";
+        let segments = parse_ai_response_segments(response);
+
+        // Exactly one SQL segment must be found.
+        let sql_segments: Vec<&str> = segments
+            .iter()
+            .filter_map(|s| match s {
+                AiResponseSegment::Sql(sql) => Some(sql.as_str()),
+                AiResponseSegment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            sql_segments.len(),
+            1,
+            "expected exactly one SQL segment in response"
+        );
+
+        // That SQL segment must be classified as a write query.
+        let sql = sql_segments[0];
+        assert!(
+            is_write_query(sql),
+            "CREATE TABLE must be detected as a write query; sql={sql:?}"
+        );
+    }
+
+    /// An AI response with a ` ```sql ` fence containing DROP TABLE is
+    /// flagged as a write query.  DDL must never auto-execute in `/ask` mode.
+    #[test]
+    fn ask_drop_table_is_write_query() {
+        let response = "To remove the table:\n\
+                        ```sql\nDROP TABLE IF EXISTS t4;\n```";
+        let segments = parse_ai_response_segments(response);
+        let sql_segments: Vec<&str> = segments
+            .iter()
+            .filter_map(|s| match s {
+                AiResponseSegment::Sql(sql) => Some(sql.as_str()),
+                AiResponseSegment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(sql_segments.len(), 1, "expected one SQL segment");
+        assert!(
+            is_write_query(sql_segments[0]),
+            "DROP TABLE must be a write query"
+        );
+    }
+
+    /// SELECT query is NOT a write query and will be auto-executed in `/ask`
+    /// mode.
+    #[test]
+    fn ask_select_is_not_write_query() {
+        let response = "Here are the results:\n\
+                        ```sql\nSELECT * FROM users WHERE active = true;\n```";
+        let segments = parse_ai_response_segments(response);
+        let sql_segments: Vec<&str> = segments
+            .iter()
+            .filter_map(|s| match s {
+                AiResponseSegment::Sql(sql) => Some(sql.as_str()),
+                AiResponseSegment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(sql_segments.len(), 1, "expected one SQL segment");
+        assert!(
+            !is_write_query(sql_segments[0]),
+            "SELECT must not be a write query"
+        );
+    }
+
+    /// An INSERT statement is classified as a write query and must not
+    /// auto-execute in `/ask` mode.
+    #[test]
+    fn ask_insert_is_write_query() {
+        let response = "```sql\nINSERT INTO users (name) VALUES ('Alice');\n```";
+        let segments = parse_ai_response_segments(response);
+        let sql_segments: Vec<&str> = segments
+            .iter()
+            .filter_map(|s| match s {
+                AiResponseSegment::Sql(sql) => Some(sql.as_str()),
+                AiResponseSegment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(sql_segments.len(), 1, "expected one SQL segment");
+        assert!(
+            is_write_query(sql_segments[0]),
+            "INSERT must be a write query"
+        );
+    }
+
+    /// A response with no ` ```sql ` fence produces only Text segments —
+    /// nothing is executed.  This covers the case where the AI returns plain
+    /// text with a code block but without the `sql` language tag.
+    #[test]
+    fn ask_no_sql_fence_produces_no_sql_segment() {
+        let response = "Here is the SQL:\n\
+                        ```\nCREATE TABLE t4 (id int);\n```\n\
+                        Run the above.";
+        let segments = parse_ai_response_segments(response);
+        let sql_segments: Vec<&str> = segments
+            .iter()
+            .filter_map(|s| match s {
+                AiResponseSegment::Sql(sql) => Some(sql.as_str()),
+                AiResponseSegment::Text(_) => None,
+            })
+            .collect();
+        assert!(
+            sql_segments.is_empty(),
+            "backtick fence without 'sql' tag must not produce a SQL segment; \
+             got: {sql_segments:?}"
+        );
+    }
+
+    /// SQL shown to the user is always printed — even when it will not be
+    /// executed (write query in `/ask` mode).  This test verifies that the
+    /// SQL segment IS parsed so it can be displayed, not silently swallowed.
+    #[test]
+    fn ask_write_query_sql_is_parsed_for_display() {
+        let response = "```sql\nALTER TABLE users ADD COLUMN bio text;\n```";
+        let segments = parse_ai_response_segments(response);
+        let has_sql = segments
+            .iter()
+            .any(|s| matches!(s, AiResponseSegment::Sql(_)));
+        assert!(
+            has_sql,
+            "write query must be parsed as a SQL segment so it can be shown to the user"
+        );
     }
 }

@@ -520,3 +520,182 @@ async fn gset_stores_columns_with_prefix() {
         "expected '1' in output for :my_x, got: {stdout:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// /ask read-only transaction guard — PostgreSQL-level enforcement
+// ---------------------------------------------------------------------------
+//
+// These tests verify the database-level safety net used by `/ask`: every
+// read-only query is executed inside `start transaction read only` so that
+// even if `is_write_query` misclassifies a query the database will reject the
+// mutation.  We test this directly against PostgreSQL because unit tests
+// cannot exercise the actual wire protocol.
+
+/// `start transaction read only` rejects CREATE TABLE at the database level.
+///
+/// This is the fallback guard used by `/ask`: even if `is_write_query` somehow
+/// returns false for a DDL statement, wrapping it in a read-only transaction
+/// causes `PostgreSQL` to reject it with a clear error.
+#[tokio::test]
+async fn ask_readonly_tx_blocks_create_table() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Simulate wrap_in_ask_readonly_tx("create table test_ask_guard (id int)")
+    let wrapped = "start transaction read only;\
+                   \ncreate table test_ask_guard_create (id int);\
+                   \ncommit;";
+
+    let result = client.simple_query(wrapped).await;
+    // PostgreSQL must reject CREATE TABLE inside a read-only transaction.
+    assert!(
+        result.is_err(),
+        "CREATE TABLE must be rejected inside start transaction read only"
+    );
+    // The tokio-postgres Error::to_string() returns "db error"; the actual
+    // PostgreSQL message lives in the DbError source.  Check via source()
+    // to get the human-readable text from PG.
+    let err = result.unwrap_err();
+    let pg_msg = std::error::Error::source(&err)
+        .and_then(|src| src.downcast_ref::<tokio_postgres::error::DbError>())
+        .map_or("", tokio_postgres::error::DbError::message);
+    assert!(
+        pg_msg.contains("read-only") || pg_msg.contains("read only"),
+        "PostgreSQL error must mention read-only; got: {pg_msg:?} (raw: {err})"
+    );
+
+    // The transaction was aborted — roll it back to leave the session clean.
+    let _ = client.simple_query("rollback").await;
+
+    // Verify the table was NOT created.
+    let check = client
+        .simple_query(
+            "select count(*) as n from information_schema.tables \
+             where table_schema = 'public' \
+               and table_name = 'test_ask_guard_create'",
+        )
+        .await
+        .expect("table existence check failed");
+    let mut n = 0i64;
+    for msg in check {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            n = row
+                .get("n")
+                .unwrap_or("0")
+                .parse()
+                .expect("count should be numeric");
+        }
+    }
+    assert_eq!(
+        n, 0,
+        "test_ask_guard_create must not exist after failed read-only transaction"
+    );
+}
+
+/// `start transaction read only` rejects DROP TABLE at the database level.
+#[tokio::test]
+async fn ask_readonly_tx_blocks_drop_table() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Create a temporary table to try to drop.
+    client
+        .simple_query("create table if not exists test_ask_guard_drop (id int)")
+        .await
+        .expect("setup CREATE TABLE failed");
+
+    let wrapped = "start transaction read only;\
+                   \ndrop table test_ask_guard_drop;\
+                   \ncommit;";
+    let result = client.simple_query(wrapped).await;
+    assert!(
+        result.is_err(),
+        "DROP TABLE must be rejected inside start transaction read only"
+    );
+
+    let _ = client.simple_query("rollback").await;
+
+    // Clean up — the table should still exist since DROP was rejected.
+    let _ = client
+        .simple_query("drop table if exists test_ask_guard_drop")
+        .await;
+}
+
+/// `start transaction read only` allows SELECT queries (the normal /ask path).
+#[tokio::test]
+async fn ask_readonly_tx_allows_select() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    let wrapped = "start transaction read only;\nselect 1 as n;\ncommit;";
+    let msgs = client
+        .simple_query(wrapped)
+        .await
+        .expect("SELECT inside read-only transaction should succeed");
+
+    let mut found = false;
+    for msg in msgs {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            if let Some(v) = row.get("n") {
+                assert_eq!(v, "1", "expected value 1 from SELECT in read-only tx");
+                found = true;
+            }
+        }
+    }
+    assert!(
+        found,
+        "no rows returned from SELECT in read-only transaction"
+    );
+}
+
+/// `start transaction read only` rejects INSERT at the database level.
+///
+/// This confirms the guard also blocks DML, not just DDL.
+#[tokio::test]
+async fn ask_readonly_tx_blocks_insert() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Create a scratch table for the INSERT attempt.
+    client
+        .simple_query("create table if not exists test_ask_guard_insert (id int)")
+        .await
+        .expect("setup CREATE TABLE failed");
+
+    let wrapped = "start transaction read only;\
+                   \ninsert into test_ask_guard_insert values (1);\
+                   \ncommit;";
+    let result = client.simple_query(wrapped).await;
+    assert!(
+        result.is_err(),
+        "INSERT must be rejected inside start transaction read only"
+    );
+
+    let _ = client.simple_query("rollback").await;
+
+    // Verify no row was inserted.
+    let check = client
+        .simple_query("select count(*) as n from test_ask_guard_insert")
+        .await
+        .expect("count query failed");
+    let mut n = 0i64;
+    for msg in check {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            n = row
+                .get("n")
+                .unwrap_or("0")
+                .parse()
+                .expect("count should be numeric");
+        }
+    }
+    assert_eq!(n, 0, "no rows must be inserted via read-only transaction");
+
+    // Clean up.
+    let _ = client
+        .simple_query("drop table if exists test_ask_guard_insert")
+        .await;
+}
