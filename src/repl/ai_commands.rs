@@ -2156,4 +2156,198 @@ mod tests {
             "commit present; on error the code issues rollback instead"
         );
     }
+
+    // -- strip_leading_sql_comments -------------------------------------------
+
+    #[test]
+    fn strip_no_comment_returns_same() {
+        assert_eq!(strip_leading_sql_comments("SELECT 1"), "SELECT 1");
+    }
+
+    #[test]
+    fn strip_single_line_comment() {
+        let result = strip_leading_sql_comments("-- hello\nSELECT 1");
+        assert_eq!(result, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_block_comment() {
+        let result = strip_leading_sql_comments("/* comment */SELECT 1");
+        assert_eq!(result, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_block_comment_with_whitespace() {
+        let result = strip_leading_sql_comments("/* comment */ SELECT 1");
+        assert_eq!(result, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_multiple_single_line_comments() {
+        let result = strip_leading_sql_comments("-- one\n-- two\nSELECT 1");
+        assert_eq!(result, "SELECT 1");
+    }
+
+    #[test]
+    fn strip_mixed_comments() {
+        let result =
+            strip_leading_sql_comments("-- line comment\n/* block */\nINSERT INTO t VALUES (1)");
+        assert_eq!(result, "INSERT INTO t VALUES (1)");
+    }
+
+    #[test]
+    fn strip_unterminated_block_comment_returns_empty() {
+        // An unterminated block comment consumes the rest; result is empty.
+        let result = strip_leading_sql_comments("/* unterminated");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn strip_comment_only_returns_empty() {
+        // A comment with nothing after it returns an empty slice.
+        let result = strip_leading_sql_comments("-- only a comment");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn strip_whitespace_preserved_within_sql() {
+        // Leading whitespace before the real token is trimmed; interior
+        // whitespace is preserved.
+        let result = strip_leading_sql_comments("  SELECT  1  AS  n");
+        assert_eq!(result, "SELECT  1  AS  n");
+    }
+
+    // -- is_write_query (all categories, isolated) ----------------------------
+
+    #[test]
+    fn is_write_dml_insert_is_true() {
+        assert!(is_write_query("INSERT INTO t VALUES (1)"));
+        assert!(is_write_query("insert into t values (1)"));
+    }
+
+    #[test]
+    fn is_write_dml_update_is_true() {
+        assert!(is_write_query("UPDATE t SET x = 1 WHERE id = 1"));
+        assert!(is_write_query("update t set x = 1"));
+    }
+
+    #[test]
+    fn is_write_dml_delete_is_true() {
+        assert!(is_write_query("DELETE FROM t WHERE id = 1"));
+        assert!(is_write_query("delete from t"));
+    }
+
+    #[test]
+    fn is_write_dml_merge_is_true() {
+        assert!(is_write_query("MERGE INTO t USING src ON (t.id = src.id)"));
+        assert!(is_write_query("merge into t using src on (t.id = src.id)"));
+    }
+
+    #[test]
+    fn is_write_ddl_create_is_true() {
+        assert!(is_write_query("CREATE TABLE t (id int)"));
+        assert!(is_write_query("create table t (id int)"));
+    }
+
+    #[test]
+    fn is_write_ddl_drop_is_true() {
+        assert!(is_write_query("DROP TABLE t"));
+        assert!(is_write_query("drop table t"));
+    }
+
+    #[test]
+    fn is_write_ddl_alter_is_true() {
+        assert!(is_write_query("ALTER TABLE t ADD COLUMN x text"));
+        assert!(is_write_query("alter table t add column x text"));
+    }
+
+    #[test]
+    fn is_write_ddl_truncate_is_true() {
+        assert!(is_write_query("TRUNCATE TABLE t"));
+        assert!(is_write_query("truncate t"));
+    }
+
+    #[test]
+    fn is_write_ddl_rename_is_true() {
+        assert!(is_write_query("RENAME TABLE t TO t2"));
+        assert!(is_write_query("rename table t to t2"));
+    }
+
+    #[test]
+    fn is_write_dcl_grant_is_true() {
+        assert!(is_write_query("GRANT SELECT ON t TO user1"));
+        assert!(is_write_query("grant all on t to user1"));
+    }
+
+    #[test]
+    fn is_write_dcl_revoke_is_true() {
+        assert!(is_write_query("REVOKE ALL ON t FROM user1"));
+        assert!(is_write_query("revoke select on t from user1"));
+    }
+
+    #[test]
+    fn is_write_maintenance_vacuum_is_true() {
+        assert!(is_write_query("VACUUM ANALYZE t"));
+        assert!(is_write_query("vacuum full t"));
+        assert!(is_write_query("VACUUM t"));
+    }
+
+    #[test]
+    fn is_write_maintenance_cluster_is_true() {
+        assert!(is_write_query("CLUSTER t USING t_pkey"));
+        assert!(is_write_query("cluster t using t_pkey"));
+    }
+
+    #[test]
+    fn is_write_maintenance_reindex_is_true() {
+        assert!(is_write_query("REINDEX TABLE t"));
+        assert!(is_write_query("reindex index idx"));
+    }
+
+    #[test]
+    fn is_write_maintenance_refresh_is_true() {
+        assert!(is_write_query("REFRESH MATERIALIZED VIEW mv"));
+        assert!(is_write_query("refresh materialized view mv"));
+    }
+
+    #[test]
+    fn is_write_cte_prefix_is_true() {
+        // All CTEs (WITH ...) are conservatively treated as writes.
+        assert!(is_write_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+        assert!(is_write_query("WITH data AS (SELECT 1) DELETE FROM t"));
+        assert!(is_write_query(
+            "WITH data AS (SELECT 1) INSERT INTO t VALUES (1)"
+        ));
+        assert!(is_write_query("WITH x AS (SELECT 1) UPDATE t SET a = 1"));
+        assert!(is_write_query("with x as (select 1) select * from x"));
+    }
+
+    #[test]
+    fn is_write_select_is_false() {
+        assert!(!is_write_query("SELECT * FROM users"));
+        assert!(!is_write_query("select 1"));
+        assert!(!is_write_query("select count(*) from pg_class"));
+    }
+
+    #[test]
+    fn is_write_empty_is_false() {
+        assert!(!is_write_query(""));
+        assert!(!is_write_query("   "));
+    }
+
+    #[test]
+    fn is_write_comment_stripping_create() {
+        // AI-generated SQL with a leading comment must still be detected.
+        assert!(is_write_query(
+            "-- Create the table\nCREATE TABLE t (id int);"
+        ));
+        assert!(is_write_query("/* block */\nCREATE TABLE t (id int);"));
+    }
+
+    #[test]
+    fn is_write_comment_stripping_select_false() {
+        // Leading comments before SELECT must not flip the result.
+        assert!(!is_write_query("-- read only\nSELECT 1;"));
+        assert!(!is_write_query("/* read */\nselect * from t;"));
+    }
 }
