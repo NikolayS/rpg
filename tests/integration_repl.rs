@@ -711,10 +711,10 @@ async fn ask_readonly_tx_blocks_insert() {
 // false.
 
 /// In yolo mode, a write query that reaches `AskChoice::Yes` is still wrapped
-/// in `start transaction read only` and therefore rejected by PostgreSQL.
+/// in `start transaction read only` and therefore rejected by `PostgreSQL`.
 ///
 /// We simulate the exact SQL that `wrap_in_ask_readonly_tx` produces for an
-/// INSERT statement and verify that PostgreSQL rejects it.
+/// INSERT statement and verify that `PostgreSQL` rejects it.
 #[tokio::test]
 async fn ask_yolo_write_query_rejected_by_readonly_tx() {
     let _ = connect_or_skip!();

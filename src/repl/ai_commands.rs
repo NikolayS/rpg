@@ -594,7 +594,7 @@ pub(super) fn wrap_in_ask_readonly_tx(sql: &str) -> String {
 ///
 /// In non-yolo mode write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) are
 /// refused before execution (`AskChoice::No`).  In yolo mode they reach
-/// `AskChoice::Yes` but the read-only transaction wrapper causes PostgreSQL
+/// `AskChoice::Yes` but the read-only transaction wrapper causes `PostgreSQL`
 /// to reject them at the wire level.
 #[allow(clippy::too_many_lines)]
 pub(super) async fn handle_ai_ask(
