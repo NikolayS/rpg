@@ -763,8 +763,10 @@ pub(super) async fn handle_ai_ask(
                     }
                     AskChoice::Yes
                 } else if !read_only {
-                    // /ask interactive mode, write query: default yes.
-                    ask_yne_prompt("Execute (write query)? [Y/n/e] ", true)
+                    // /ask is a question command — show the SQL but do not execute
+                    // DML or DDL. The user can copy and run it manually or use \t2s.
+                    eprintln!("-- (write query — not executed in /ask mode; use \\t2s to execute)");
+                    AskChoice::No
                 } else {
                     // /ask interactive mode, read-only: auto-execute.
                     AskChoice::Yes
@@ -1231,8 +1233,26 @@ pub(super) async fn handle_ai_fix(
 ///
 /// Returns `true` for `INSERT`, `UPDATE`, `DELETE`, and `MERGE`.
 pub(super) fn is_write_query(sql: &str) -> bool {
-    let first = sql.split_whitespace().next().unwrap_or("").to_uppercase();
-    matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+    let first = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    // WITH starts a CTE; may wrap DML so treat as write (conservative).
+    if first == "WITH" {
+        return true;
+    }
+    matches!(
+        first.as_str(),
+        // DML
+        "INSERT" | "UPDATE" | "DELETE" | "MERGE"
+        // DDL — always require confirmation; never auto-execute
+        | "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME"
+        // Privilege control
+        | "GRANT" | "REVOKE"
+        // Maintenance (mutate physical storage / stats)
+        | "VACUUM" | "CLUSTER" | "REINDEX" | "REFRESH"
+    )
 }
 
 /// Build the `EXPLAIN` SQL for a given target query.
