@@ -1285,28 +1285,12 @@ pub async fn exec_command(
                 };
                 eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             }
-            MetaResult::SetInputMode(mode) => {
-                settings.input_mode = mode;
-                // Switching input mode always returns to interactive exec mode
-                // so that \t2s after \yolo doesn't silently execute queries.
-                settings.exec_mode = ExecMode::Interactive;
-                let label = match mode {
-                    InputMode::Sql => "sql",
-                    InputMode::Text2Sql => "text2sql",
-                };
-                eprintln!("Input mode: {label}");
-            }
-            MetaResult::SetExecMode(mode) => {
-                settings.exec_mode = mode;
-                if mode == ExecMode::Yolo {
-                    settings.input_mode = InputMode::Text2Sql;
+            result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
+                let label = apply_mode_change(&result, settings);
+                match result {
+                    MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
+                    _ => eprintln!("Execution mode: {label}"),
                 }
-                let label = match mode {
-                    ExecMode::Interactive => "interactive",
-                    ExecMode::Plan => "plan",
-                    ExecMode::Yolo => "yolo",
-                };
-                eprintln!("Execution mode: {label}");
             }
             _ => {}
         }
@@ -2490,6 +2474,52 @@ pub enum MetaResult {
     SetExecMode(ExecMode),
     /// Show current mode summary (`\mode`).
     ShowMode,
+}
+
+/// Apply a `SetInputMode` or `SetExecMode` result to `settings`.
+///
+/// Centralises all mode-transition side-effects so the three REPL dispatch
+/// sites (interactive loop, file execution, and `exec_command`) stay in sync:
+///
+/// - `SetInputMode` always resets `exec_mode` to `Interactive` so that
+///   `\t2s` (or `\sql`) after `\yolo` stops auto-executing queries.
+/// - `SetExecMode(Yolo)` auto-enables `input_mode = Text2Sql` so natural
+///   language goes to the AI.
+/// - `SetExecMode(Interactive)` resets `input_mode` back to `Sql` so the
+///   user returns fully to the default state.
+///
+/// Returns a short label string used for the confirmation message.
+fn apply_mode_change(result: &MetaResult, settings: &mut ReplSettings) -> &'static str {
+    match result {
+        MetaResult::SetInputMode(mode) => {
+            settings.input_mode = *mode;
+            // Switching input mode always returns to interactive exec mode
+            // so that \t2s after \yolo doesn't silently execute queries.
+            settings.exec_mode = ExecMode::Interactive;
+            match mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            }
+        }
+        MetaResult::SetExecMode(mode) => {
+            settings.exec_mode = *mode;
+            match mode {
+                ExecMode::Yolo => {
+                    settings.input_mode = InputMode::Text2Sql;
+                }
+                ExecMode::Interactive => {
+                    settings.input_mode = InputMode::Sql;
+                }
+                ExecMode::Plan => {}
+            }
+            match mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+            }
+        }
+        _ => "",
+    }
 }
 
 /// Dispatch I/O and utility meta-commands (the `#33` family).
@@ -4376,29 +4406,12 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::Continue
         }
-        MetaResult::SetInputMode(mode) => {
-            settings.input_mode = mode;
-            // Switching input mode always returns to interactive exec mode
-            // so that \t2s after \yolo doesn't silently execute queries.
-            settings.exec_mode = ExecMode::Interactive;
-            let label = match mode {
-                InputMode::Sql => "sql",
-                InputMode::Text2Sql => "text2sql",
-            };
-            eprintln!("Input mode: {label}");
-            HandleLineResult::Continue
-        }
-        MetaResult::SetExecMode(mode) => {
-            settings.exec_mode = mode;
-            if mode == ExecMode::Yolo {
-                settings.input_mode = InputMode::Text2Sql;
+        result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
+            let label = apply_mode_change(&result, settings);
+            match result {
+                MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
+                _ => eprintln!("Execution mode: {label}"),
             }
-            let label = match mode {
-                ExecMode::Interactive => "interactive",
-                ExecMode::Plan => "plan",
-                ExecMode::Yolo => "yolo",
-            };
-            eprintln!("Execution mode: {label}");
             HandleLineResult::Continue
         }
         MetaResult::ShowMode => {
@@ -4702,29 +4715,12 @@ async fn handle_line(
                 }
                 HandleLineResult::Continue
             }
-            MetaResult::SetInputMode(mode) => {
-                settings.input_mode = mode;
-                // Switching input mode always returns to interactive exec mode
-                // so that \t2s after \yolo doesn't silently execute queries.
-                settings.exec_mode = ExecMode::Interactive;
-                let label = match mode {
-                    InputMode::Sql => "sql",
-                    InputMode::Text2Sql => "text2sql",
-                };
-                eprintln!("Input mode: {label}");
-                HandleLineResult::Continue
-            }
-            MetaResult::SetExecMode(mode) => {
-                settings.exec_mode = mode;
-                if mode == ExecMode::Yolo {
-                    settings.input_mode = InputMode::Text2Sql;
+            result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
+                let label = apply_mode_change(&result, settings);
+                match result {
+                    MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
+                    _ => eprintln!("Execution mode: {label}"),
                 }
-                let label = match mode {
-                    ExecMode::Interactive => "interactive",
-                    ExecMode::Plan => "plan",
-                    ExecMode::Yolo => "yolo",
-                };
-                eprintln!("Execution mode: {label}");
                 HandleLineResult::Continue
             }
             MetaResult::ShowMode => {
@@ -7643,5 +7639,87 @@ mod tests {
         let result = super::unescape_echo(&joined);
         assert!(result.starts_with("   0"));
         assert!(result.contains("Node and current database information"));
+    }
+
+    // -- mode transition tests (apply_mode_change) ----------------------------
+
+    #[test]
+    fn yolo_sets_text2sql_input_mode() {
+        let mut s = ReplSettings::default();
+        // Default state: sql + interactive.
+        assert_eq!(s.input_mode, InputMode::Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+    }
+
+    #[test]
+    fn t2s_after_yolo_resets_exec_mode_to_interactive() {
+        let mut s = ReplSettings::default();
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+
+        // \t2s / \text2sql → SetInputMode(Text2Sql)
+        super::apply_mode_change(&MetaResult::SetInputMode(InputMode::Text2Sql), &mut s);
+
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+    }
+
+    #[test]
+    fn sql_after_yolo_resets_exec_mode_to_interactive() {
+        let mut s = ReplSettings::default();
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+
+        // \sql → SetInputMode(Sql)
+        super::apply_mode_change(&MetaResult::SetInputMode(InputMode::Sql), &mut s);
+
+        assert_eq!(s.input_mode, InputMode::Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+    }
+
+    #[test]
+    fn interactive_after_yolo_resets_both_modes() {
+        let mut s = ReplSettings::default();
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Yolo), &mut s);
+        assert_eq!(s.exec_mode, ExecMode::Yolo);
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+
+        // \interactive → SetExecMode(Interactive)
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Interactive), &mut s);
+
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
+        assert_eq!(s.input_mode, InputMode::Sql);
+    }
+
+    #[test]
+    fn plan_mode_leaves_input_mode_unchanged() {
+        let mut s = ReplSettings {
+            input_mode: InputMode::Text2Sql,
+            ..ReplSettings::default()
+        };
+
+        super::apply_mode_change(&MetaResult::SetExecMode(ExecMode::Plan), &mut s);
+
+        assert_eq!(s.exec_mode, ExecMode::Plan);
+        // \plan does not touch input_mode.
+        assert_eq!(s.input_mode, InputMode::Text2Sql);
+    }
+
+    #[test]
+    fn set_input_mode_sql_resets_exec_mode() {
+        let mut s = ReplSettings {
+            exec_mode: ExecMode::Plan,
+            ..ReplSettings::default()
+        };
+
+        super::apply_mode_change(&MetaResult::SetInputMode(InputMode::Sql), &mut s);
+
+        assert_eq!(s.input_mode, InputMode::Sql);
+        assert_eq!(s.exec_mode, ExecMode::Interactive);
     }
 }
