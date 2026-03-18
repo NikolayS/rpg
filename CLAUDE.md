@@ -106,7 +106,10 @@ Every PR must go through this sequence before merge — no exceptions:
    - Any BLOCKING finding must be fixed first, then re-review
 3. **Merge** — squash merge: `gh pr merge <number> --squash --repo NikolayS/rpg`
 
-**Copyright:** always `Copyright 2026` — never a year range like `2024-2026`.
+**SOC2 findings:** REV may flag missing reviewer or linked issue — ignore SOC2
+findings, they are not blocking for this project.
+
+**Copyright:** always `Copyright 2026` — never a year range.like `2024-2026`.
 
 ## Architecture
 
@@ -133,5 +136,8 @@ Every PR must follow this sequence — **no exceptions**:
 
 **If CI fails or REV has BLOCKING issues → fix first, then re-run CI and REV.**
 Do not merge until both pass.
+
+**SOC2 findings:** REV may flag missing reviewer or linked issue — ignore SOC2
+findings, they are not blocking for this project.
 
 **Copyright:** always `Copyright 2026` — never a year range.
