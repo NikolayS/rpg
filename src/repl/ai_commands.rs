@@ -1189,7 +1189,16 @@ pub(super) async fn handle_ai_fix(
                 // Mark that this execution originates from /fix so the
                 // auto-suggest hint is suppressed for any resulting error.
                 settings.last_was_fix = true;
-                execute_query_interactive(client, fix_sql, settings, tx).await;
+                let ok = execute_query_interactive(client, fix_sql, settings, tx).await;
+                if ok {
+                    settings
+                        .conversation
+                        .push_query_result(fix_sql, "(fix applied)");
+                } else if let Some(ref err) = settings.last_error {
+                    settings
+                        .conversation
+                        .push_query_result(fix_sql, &err.error_message.clone());
+                }
             }
             AskChoice::Edit => match crate::io::edit(fix_sql, None, None) {
                 Ok(edited) => {
@@ -1198,7 +1207,16 @@ pub(super) async fn handle_ai_fix(
                         eprintln!("(empty — skipped)");
                     } else {
                         settings.last_was_fix = true;
-                        execute_query_interactive(client, edited, settings, tx).await;
+                        let ok = execute_query_interactive(client, edited, settings, tx).await;
+                        if ok {
+                            settings
+                                .conversation
+                                .push_query_result(edited, "(fix applied after edit)");
+                        } else if let Some(ref err) = settings.last_error {
+                            settings
+                                .conversation
+                                .push_query_result(edited, &err.error_message.clone());
+                        }
                     }
                 }
                 Err(e) => eprintln!("{e}"),
@@ -1828,5 +1846,68 @@ pub(super) async fn handle_init(client: &Client, settings: &ReplSettings, params
             },
             Err(e) => eprintln!("Error querying database for POSTGRES.md: {e}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- ConversationContext loop-prevention mechanism -------------------------
+
+    /// Verify that messages pushed into ConversationContext are returned by
+    /// `to_messages()` in order and with the correct roles.  This is the
+    /// mechanism that injects prior /fix attempts into subsequent AI calls,
+    /// preventing the AI from suggesting the same wrong fix repeatedly.
+    #[test]
+    fn conversation_history_injected_into_fix_calls() {
+        let mut ctx = ConversationContext::new();
+
+        // Simulate a first /fix attempt: user error + AI suggestion.
+        ctx.push_user(
+            "The following query failed:\n\n\
+             ```sql\nSELECT * FROM usres;\n```\n\n\
+             Error: relation \"usres\" does not exist"
+                .to_owned(),
+        );
+        ctx.push_assistant(
+            "The table name appears to be misspelled. Try:\n\n\
+             ```sql\nSELECT * FROM users;\n```"
+                .to_owned(),
+        );
+
+        // Simulate recording the execution result (fix was applied or failed).
+        ctx.push_query_result("SELECT * FROM users;", "(fix applied)");
+
+        let msgs = ctx.to_messages();
+
+        // All three entries must be present and in order.
+        assert_eq!(msgs.len(), 3);
+        assert!(
+            matches!(msgs[0].role, crate::ai::Role::User),
+            "first message should be user role"
+        );
+        assert!(
+            matches!(msgs[1].role, crate::ai::Role::Assistant),
+            "second message should be assistant role"
+        );
+        assert!(
+            matches!(msgs[2].role, crate::ai::Role::User),
+            "query result is recorded as a user message"
+        );
+
+        // The query result entry must contain both the SQL and the outcome.
+        assert!(
+            msgs[2].content.contains("SELECT * FROM users;"),
+            "query result message should contain the executed SQL"
+        );
+        assert!(
+            msgs[2].content.contains("(fix applied)"),
+            "query result message should contain the result summary"
+        );
     }
 }
