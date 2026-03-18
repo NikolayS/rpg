@@ -496,7 +496,10 @@ async fn dba_activity(
     let _ = writeln!(
         text,
         "{} active, {} idle in transaction, {} idle, {} total",
-        counts.active, counts.idle_in_xact, counts.idle, counts.total()
+        counts.active,
+        counts.idle_in_xact,
+        counts.idle,
+        counts.total()
     );
 
     maybe_page(settings, &text);
