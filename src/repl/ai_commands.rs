@@ -572,10 +572,24 @@ pub(super) fn wrap_in_ask_readonly_tx(sql: &str) -> String {
 /// are automatically executed; results are shown interleaved with the AI's
 /// explanatory text.
 ///
-/// Every read-only query is always wrapped in `start transaction read only` /
-/// `commit` so that even if [`is_write_query`] misclassifies a query, the
-/// database itself rejects any mutation.  The generated SQL is always shown
-/// to the user before execution.
+/// # SQL display
+///
+/// The generated SQL is always printed before execution.  The display format
+/// depends on mode and settings:
+///
+/// - **text2sql** (`\t2s`): rendered in a boxed ```` ```sql ```` markdown fence
+///   (unless yolo mode suppresses the box).
+/// - **`ai.show_sql = true`** (config) or **`\set ECHO_HIDDEN on`** (runtime):
+///   syntax-highlighted SQL on stderr.
+/// - **fallback**: plain SQL on stderr so the user always sees what is about to
+///   run.
+///
+/// # Read-only protection
+///
+/// Every read-only query — across all execution paths (interactive, text2sql,
+/// yolo, and the edit path) — is wrapped in
+/// `start transaction read only` / `commit` so that even if [`is_write_query`]
+/// misclassifies a query, the database itself rejects any mutation.
 ///
 /// Write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) always prompt for
 /// confirmation unless running in YOLO mode.
@@ -812,8 +826,7 @@ pub(super) async fn handle_ai_ask(
                         } else {
                             std::borrow::Cow::Borrowed(sql)
                         };
-                        let ok =
-                            execute_query_interactive(client, &exec_sql, settings, tx).await;
+                        let ok = execute_query_interactive(client, &exec_sql, settings, tx).await;
                         if read_only && !ok {
                             // Roll back on error to leave the session clean.
                             let _ = client.simple_query("rollback").await;
@@ -837,8 +850,21 @@ pub(super) async fn handle_ai_ask(
                             if edited.is_empty() {
                                 eprintln!("(empty — skipped)");
                             } else {
+                                // Re-evaluate after edit: the user may have
+                                // changed a read-only query into a write or
+                                // vice versa.
+                                let edited_read_only = !is_write_query(edited);
+                                let exec_edited: std::borrow::Cow<str> = if edited_read_only {
+                                    std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited))
+                                } else {
+                                    std::borrow::Cow::Borrowed(edited)
+                                };
                                 let ok =
-                                    execute_query_interactive(client, edited, settings, tx).await;
+                                    execute_query_interactive(client, &exec_edited, settings, tx)
+                                        .await;
+                                if edited_read_only && !ok {
+                                    let _ = client.simple_query("rollback").await;
+                                }
                                 if ok {
                                     settings
                                         .conversation
@@ -2056,33 +2082,18 @@ mod tests {
     /// A plain SELECT is wrapped with start transaction read only / commit.
     #[test]
     fn wrap_readonly_tx_basic_select() {
-        let wrapped = wrap_in_ask_readonly_tx("select 1");
-        assert!(
-            wrapped.starts_with("start transaction read only;"),
-            "must open with start transaction read only"
-        );
-        assert!(
-            wrapped.ends_with("commit;"),
-            "must close with commit"
-        );
-        assert!(
-            wrapped.contains("select 1;"),
-            "original SQL must appear in the wrapped form"
+        assert_eq!(
+            wrap_in_ask_readonly_tx("select 1"),
+            "start transaction read only;\nselect 1;\ncommit;"
         );
     }
 
     /// SQL that already ends with a semicolon must not gain a double semicolon.
     #[test]
     fn wrap_readonly_tx_no_double_semicolon() {
-        let wrapped = wrap_in_ask_readonly_tx("select 1;");
-        // The SQL body should appear exactly once, without ';;'.
-        assert!(
-            !wrapped.contains(";;"),
-            "must not produce a double semicolon"
-        );
-        assert!(
-            wrapped.contains("select 1;"),
-            "SQL must still be present"
+        assert_eq!(
+            wrap_in_ask_readonly_tx("select 1;"),
+            "start transaction read only;\nselect 1;\ncommit;"
         );
     }
 
@@ -2091,14 +2102,12 @@ mod tests {
     #[test]
     fn wrap_readonly_tx_uses_start_transaction_syntax() {
         let wrapped = wrap_in_ask_readonly_tx("select count(*) from users");
-        assert!(
-            wrapped.contains("start transaction read only"),
-            "must use start transaction read only syntax"
+        assert_eq!(
+            wrapped,
+            "start transaction read only;\nselect count(*) from users;\ncommit;"
         );
-        assert!(
-            !wrapped.contains("begin;"),
-            "must not use the older begin; syntax"
-        );
+        // Verify the old syntax is absent.
+        assert!(!wrapped.contains("begin;"), "must not use begin; syntax");
         assert!(
             !wrapped.contains("set transaction"),
             "must not use set transaction"
@@ -2109,18 +2118,42 @@ mod tests {
     #[test]
     fn wrap_readonly_tx_multiline_sql() {
         let sql = "select\n    id,\n    name\nfrom users\nwhere active = true";
-        let wrapped = wrap_in_ask_readonly_tx(sql);
-        assert!(wrapped.starts_with("start transaction read only;"));
-        assert!(wrapped.ends_with("commit;"));
-        // The full SQL must be present in between.
-        assert!(wrapped.contains(sql));
+        assert_eq!(
+            wrap_in_ask_readonly_tx(sql),
+            "start transaction read only;\nselect\n    id,\n    name\nfrom users\nwhere active = true;\ncommit;"
+        );
     }
 
     /// SQL with only trailing whitespace/semicolons is handled cleanly.
     #[test]
     fn wrap_readonly_tx_trailing_whitespace() {
-        let wrapped = wrap_in_ask_readonly_tx("select 1   ;  ");
-        assert!(!wrapped.contains(";;"), "no double semicolons");
-        assert!(wrapped.contains("select 1"), "SQL body preserved");
+        assert_eq!(
+            wrap_in_ask_readonly_tx("select 1   ;  "),
+            "start transaction read only;\nselect 1;\ncommit;"
+        );
+    }
+
+    // -- rollback-on-error for read-only tx ------------------------------------
+
+    /// Verify that `wrap_in_ask_readonly_tx` produces SQL that can be rolled
+    /// back: the wrapped output starts a transaction, so a subsequent
+    /// `rollback;` is valid.  This tests the invariant relied upon by the
+    /// `if read_only && !ok { rollback }` path in `handle_ai_ask`.
+    #[test]
+    fn wrap_readonly_tx_rollback_path_produces_valid_rollback_target() {
+        let wrapped = wrap_in_ask_readonly_tx("select 1/0");
+        // The wrapped SQL opens a transaction — so rollback is valid.
+        assert!(
+            wrapped.starts_with("start transaction read only;"),
+            "transaction must be opened so rollback is valid on error"
+        );
+        // Simulating the error path: when execute_query_interactive fails
+        // on the wrapped SQL, the code issues `client.simple_query("rollback")`.
+        // The rollback target is the `start transaction` we opened.
+        // Verify the commit at the end is present (only reached on success).
+        assert!(
+            wrapped.ends_with("commit;"),
+            "commit present; on error the code issues rollback instead"
+        );
     }
 }
