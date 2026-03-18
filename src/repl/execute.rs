@@ -1862,9 +1862,7 @@ mod tests {
     #[test]
     fn split_not_needed_two_regular_stmts() {
         // Two normal statements: no split needed (server handles them fine).
-        assert!(!needs_split_execution(
-            "SELECT 1; SELECT 2"
-        ));
+        assert!(!needs_split_execution("SELECT 1; SELECT 2"));
     }
 
     #[test]
