@@ -85,7 +85,7 @@ pub async fn execute(
         }
         "waits" | "wait" => dba_waits(client, verbose).await,
         "progress" | "prog" => {
-            dba_progress(client, None).await;
+            dba_progress(client, None, capabilities).await;
             None
         }
         "io" => {
@@ -102,7 +102,7 @@ pub async fn execute(
                 .strip_prefix("progress ")
                 .or_else(|| subcommand.strip_prefix("prog "))
             {
-                dba_progress(client, Some(rest.trim())).await;
+                dba_progress(client, Some(rest.trim()), capabilities).await;
                 return None;
             }
             eprintln!("\\dba: unknown subcommand \"{subcommand}\"");
@@ -151,7 +151,11 @@ async fn run_and_print(client: &Client, sql: &str) {
             print_table(&col_names, &rows);
         }
         Err(e) => {
-            eprintln!("\\dba: {e}");
+            if let Some(db_err) = e.as_db_error() {
+                eprintln!("\\dba: {}", db_err.message());
+            } else {
+                eprintln!("\\dba: {e}");
+            }
         }
     }
 }
@@ -485,7 +489,11 @@ async fn collect_lock_edges(
     let messages = match client.simple_query(&sql).await {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("\\dba locks: {e}");
+            if let Some(db_err) = e.as_db_error() {
+                eprintln!("\\dba locks: {}", db_err.message());
+            } else {
+                eprintln!("\\dba locks: {e}");
+            }
             return Vec::new();
         }
     };
@@ -499,7 +507,7 @@ async fn collect_lock_edges(
 /// `query_start` fallback for the wait-duration calculation.
 fn build_locks_sql(has_waitstart: bool) -> String {
     let wait_expr = if has_waitstart {
-        "extract(epoch from (now() - blocked_activity.waitstart))"
+        "extract(epoch from (now() - blocked_locks.waitstart))"
     } else {
         "extract(epoch from (now() - blocked_activity.query_start))"
     };
@@ -981,7 +989,7 @@ async fn dba_redundant_indexes(client: &Client, _verbose: bool) {
     let sql = "\
         select \
             s.schemaname, \
-            s.tablename, \
+            s.relname, \
             s.indexname as redundant_index, \
             s.idx_scan as redundant_scans, \
             pg_size_pretty(pg_relation_size(s.indexrelid)) as redundant_size, \
@@ -1148,17 +1156,21 @@ async fn dba_waits(client: &Client, verbose: bool) -> Option<String> {
 ///
 /// If `filter` is `None`, shows all in-progress operations.
 /// If `filter` is `Some("vacuum")`, shows only VACUUM progress, etc.
-async fn dba_progress(client: &Client, filter: Option<&str>) {
+async fn dba_progress(
+    client: &Client,
+    filter: Option<&str>,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
+) {
     match filter {
         None | Some("all") => {
-            dba_progress_vacuum(client).await;
+            dba_progress_vacuum(client, capabilities).await;
             dba_progress_analyze(client).await;
             dba_progress_create_index(client).await;
             dba_progress_cluster(client).await;
             dba_progress_copy(client).await;
             dba_progress_basebackup(client).await;
         }
-        Some("vacuum" | "vac") => dba_progress_vacuum(client).await,
+        Some("vacuum" | "vac") => dba_progress_vacuum(client, capabilities).await,
         Some("analyze") => dba_progress_analyze(client).await,
         Some("create_index" | "index" | "idx") => dba_progress_create_index(client).await,
         Some("cluster") => dba_progress_cluster(client).await,
@@ -1171,8 +1183,24 @@ async fn dba_progress(client: &Client, filter: Option<&str>) {
     }
 }
 
-async fn dba_progress_vacuum(client: &Client) {
-    let sql = "\
+async fn dba_progress_vacuum(
+    client: &Client,
+    capabilities: Option<&crate::capabilities::DbCapabilities>,
+) {
+    // In PG 17 max_dead_tuples/num_dead_tuples were renamed to
+    // max_dead_item_ids/num_dead_item_ids.
+    let use_item_ids = capabilities
+        .and_then(|c| c.pg_major_version())
+        .map_or(false, |v| v >= 17);
+    let dead_cols = if use_item_ids {
+        "p.max_dead_item_ids, \
+            p.num_dead_item_ids"
+    } else {
+        "p.max_dead_tuples, \
+            p.num_dead_tuples"
+    };
+    let sql = format!(
+        "\
         select \
             p.pid, \
             a.datname, \
@@ -1186,14 +1214,14 @@ async fn dba_progress_vacuum(client: &Client) {
                           / p.heap_blks_total, 1) \
                  else 0 end as pct_done, \
             p.index_vacuum_count, \
-            p.max_dead_tuples, \
-            p.num_dead_tuples \
+            {dead_cols} \
         from pg_stat_progress_vacuum as p \
         join pg_stat_activity as a \
             on a.pid = p.pid \
-        order by p.pid";
+        order by p.pid"
+    );
     eprintln!("-- VACUUM progress --");
-    run_and_print(client, sql).await;
+    run_and_print(client, &sql).await;
 }
 
 async fn dba_progress_analyze(client: &Client) {
