@@ -782,10 +782,7 @@ async fn describe_df_lists_functions() {
 #[test]
 fn cli_csv_flag_produces_csv_output() {
     let (stdout, _stderr, code) = run_rpg(&["--csv", "-c", "select 1 as n, 2 as m"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with --csv flag\nstdout: {stdout}"
-    );
+    assert_eq!(code, 0, "expected exit 0 with --csv flag\nstdout: {stdout}");
     // CSV output must contain a comma separator somewhere.
     assert!(
         stdout.contains(','),
@@ -821,10 +818,7 @@ fn cli_json_flag_produces_json_output() {
 #[test]
 fn cli_tuples_only_suppresses_header_and_footer() {
     let (stdout, _stderr, code) = run_rpg(&["-t", "-c", "select 42 as answer"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with -t flag\nstdout: {stdout}"
-    );
+    assert_eq!(code, 0, "expected exit 0 with -t flag\nstdout: {stdout}");
     // Header column name must not appear.
     assert!(
         !stdout.contains("answer"),
@@ -846,10 +840,7 @@ fn cli_tuples_only_suppresses_header_and_footer() {
 #[test]
 fn cli_no_align_produces_unaligned_output() {
     let (stdout, _stderr, code) = run_rpg(&["-A", "-c", "select 1 as a, 2 as b"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with -A flag\nstdout: {stdout}"
-    );
+    assert_eq!(code, 0, "expected exit 0 with -A flag\nstdout: {stdout}");
     // Unaligned output must not contain table-border dashes.
     assert!(
         !stdout.contains("-----"),
@@ -866,10 +857,7 @@ fn cli_no_align_produces_unaligned_output() {
 #[test]
 fn cli_expanded_produces_expanded_output() {
     let (stdout, _stderr, code) = run_rpg(&["-x", "-c", "select 1 as answer"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with -x flag\nstdout: {stdout}"
-    );
+    assert_eq!(code, 0, "expected exit 0 with -x flag\nstdout: {stdout}");
     // Expanded output uses key-value layout; column name must appear.
     assert!(
         stdout.contains("answer"),
@@ -906,10 +894,7 @@ fn cli_output_flag_redirects_to_file() {
 #[test]
 fn cli_quiet_flag_runs_query() {
     let (stdout, _stderr, code) = run_rpg(&["-q", "-c", "select 1 as n"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with -q flag\nstdout: {stdout}"
-    );
+    assert_eq!(code, 0, "expected exit 0 with -q flag\nstdout: {stdout}");
     assert!(
         stdout.contains('1'),
         "expected query result '1' with -q flag:\n{stdout}"
@@ -922,10 +907,8 @@ fn cli_piped_stdin_executes_query() {
     let host = std::env::var("TEST_PGHOST").unwrap_or_else(|_| "localhost".to_owned());
     let port = std::env::var("TEST_PGPORT").unwrap_or_else(|_| "15432".to_owned());
     let user = std::env::var("TEST_PGUSER").unwrap_or_else(|_| "testuser".to_owned());
-    let password =
-        std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
-    let dbname =
-        std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
+    let password = std::env::var("TEST_PGPASSWORD").unwrap_or_else(|_| "testpass".to_owned());
+    let dbname = std::env::var("TEST_PGDATABASE").unwrap_or_else(|_| "testdb".to_owned());
 
     let bin = env!("CARGO_BIN_EXE_rpg");
     let mut child = std::process::Command::new(bin)
@@ -951,10 +934,7 @@ fn cli_piped_stdin_executes_query() {
         return;
     }
 
-    assert_eq!(
-        code, 0,
-        "expected exit 0 for piped stdin\nstdout: {stdout}"
-    );
+    assert_eq!(code, 0, "expected exit 0 for piped stdin\nstdout: {stdout}");
     assert!(
         stdout.contains("99"),
         "expected value '99' in piped stdin output:\n{stdout}"
@@ -964,12 +944,8 @@ fn cli_piped_stdin_executes_query() {
 /// `-F / --field-separator` sets a custom separator for unaligned output.
 #[test]
 fn cli_field_separator_flag() {
-    let (stdout, _stderr, code) =
-        run_rpg(&["-A", "-t", "-F", "|", "-c", "select 1 as a, 2 as b"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with -F flag\nstdout: {stdout}"
-    );
+    let (stdout, _stderr, code) = run_rpg(&["-A", "-t", "-F", "|", "-c", "select 1 as a, 2 as b"]);
+    assert_eq!(code, 0, "expected exit 0 with -F flag\nstdout: {stdout}");
     // With -t (tuples only) and custom separator, output should be "1|2".
     assert!(
         stdout.contains("1|2") || stdout.contains('|'),
@@ -980,12 +956,8 @@ fn cli_field_separator_flag() {
 /// `-v NAME=VALUE` sets a psql variable accessible via `:name` syntax.
 #[test]
 fn cli_variable_flag_sets_psql_variable() {
-    let (stdout, _stderr, code) =
-        run_rpg(&["-v", "myvar=hello", "-c", "select :'myvar' as val"]);
-    assert_eq!(
-        code, 0,
-        "expected exit 0 with -v flag\nstdout: {stdout}"
-    );
+    let (stdout, _stderr, code) = run_rpg(&["-v", "myvar=hello", "-c", "select :'myvar' as val"]);
+    assert_eq!(code, 0, "expected exit 0 with -v flag\nstdout: {stdout}");
     assert!(
         stdout.contains("hello"),
         "expected variable value 'hello' in output:\n{stdout}"
@@ -995,8 +967,7 @@ fn cli_variable_flag_sets_psql_variable() {
 /// `-P format=csv` sets CSV format via the --pset flag.
 #[test]
 fn cli_pset_format_csv() {
-    let (stdout, _stderr, code) =
-        run_rpg(&["-P", "format=csv", "-c", "select 1 as n, 2 as m"]);
+    let (stdout, _stderr, code) = run_rpg(&["-P", "format=csv", "-c", "select 1 as n, 2 as m"]);
     assert_eq!(
         code, 0,
         "expected exit 0 with -P format=csv\nstdout: {stdout}"
@@ -1010,8 +981,7 @@ fn cli_pset_format_csv() {
 /// `-P null=NULL` causes NULL cells to display as the literal string "NULL".
 #[test]
 fn cli_pset_null_string() {
-    let (stdout, _stderr, code) =
-        run_rpg(&["-P", "null=NULL", "-c", "select null::text as val"]);
+    let (stdout, _stderr, code) = run_rpg(&["-P", "null=NULL", "-c", "select null::text as val"]);
     assert_eq!(
         code, 0,
         "expected exit 0 with -P null=NULL\nstdout: {stdout}"
