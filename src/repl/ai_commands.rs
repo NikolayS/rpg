@@ -1232,16 +1232,26 @@ pub(super) async fn handle_ai_fix(
     }
 }
 
-/// Detect whether a query is a data-modifying statement that must be
-/// wrapped in a rolled-back transaction before `EXPLAIN ANALYZE`.
+/// Detect whether a query is a write or schema-changing statement.
 ///
 /// Returns `true` for:
 /// - **DML**: `INSERT`, `UPDATE`, `DELETE`, `MERGE`
 /// - **DDL**: `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `RENAME`
+<<<<<<< HEAD
 /// - **Privilege control**: `GRANT`, `REVOKE`
 /// - **Maintenance**: `VACUUM`, `CLUSTER`, `REINDEX`, `REFRESH`
 /// - **CTEs** (`WITH`): treated conservatively as writes to prevent
 ///   DML-prefixed CTE bypass.
+=======
+/// - **DCL**: `GRANT`, `REVOKE`
+/// - **Maintenance**: `VACUUM`, `CLUSTER`, `REINDEX`, `REFRESH`
+/// - **CTEs**: any query starting with `WITH` (treated conservatively as a
+///   potential write, since CTEs may wrap DML)
+///
+/// Used to decide whether to wrap a query in `BEGIN`/`ROLLBACK` for
+/// `EXPLAIN ANALYZE`, and whether to require confirmation before
+/// auto-executing in `/ask` and yolo modes.
+>>>>>>> e1525cc (docs(ai): update is_write_query doc to list all keywords)
 pub(super) fn is_write_query(sql: &str) -> bool {
     let first = sql
         .split_whitespace()
