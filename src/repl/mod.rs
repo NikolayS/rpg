@@ -7463,4 +7463,75 @@ mod tests {
         let result = super::unescape_echo("\\400");
         assert_eq!(result.as_bytes(), &[0x00]);
     }
+
+    // -- postgres_dba patterns (Copyright 2026) --------------------------------
+    //
+    // These tests replicate the exact \echo calls from
+    // https://github.com/NikolayS/postgres_dba/blob/master/start.psql
+    // to verify that split_params + unescape_echo together produce the
+    // correct ANSI output, matching what psql does.
+
+    #[test]
+    fn postgres_dba_menu_header_split_then_unescape() {
+        // start.psql line 2: \echo '\033[1;35mMenu:\033[0m'
+        // split_params strips the surrounding single quotes, then
+        // unescape_echo converts \033 to ESC (0x1b).
+        let raw = "'\\033[1;35mMenu:\\033[0m'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        assert_eq!(joined, "\\033[1;35mMenu:\\033[0m");
+        let result = super::unescape_echo(&joined);
+        // First byte must be ESC (0x1b = 27).
+        assert_eq!(result.as_bytes()[0], 0x1b);
+        // Bold magenta on: [1;35m
+        assert!(result.contains("[1;35m"));
+        // Reset: ESC[0m
+        assert!(result.ends_with("\x1b[0m"));
+        // The literal text "Menu:" must be present.
+        assert!(result.contains("Menu:"));
+    }
+
+    #[test]
+    fn postgres_dba_error_banner_split_then_unescape() {
+        // start.psql line 219:
+        //   \echo '\033[1;31mError:\033[0m Unknown option! Try again.'
+        // split_params strips quotes; unescape_echo resolves \033.
+        let raw = "'\\033[1;31mError:\\033[0m Unknown option! Try again.'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        assert_eq!(
+            joined,
+            "\\033[1;31mError:\\033[0m Unknown option! Try again."
+        );
+        let result = super::unescape_echo(&joined);
+        // First byte is ESC.
+        assert_eq!(result.as_bytes()[0], 0x1b);
+        // Bold red on: [1;31m
+        assert!(result.contains("[1;31m"));
+        // The literal error text must survive.
+        assert!(result.contains("Error:"));
+        assert!(result.contains("Unknown option! Try again."));
+        // Reset sequence present.
+        assert!(result.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn postgres_dba_plain_echo_no_escape() {
+        // start.psql line 79: \echo 'Bye!'
+        // No escape sequences; split_params strips quotes, output is literal.
+        let raw = "'Bye!'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        let result = super::unescape_echo(&joined);
+        assert_eq!(result, "Bye!");
+    }
+
+    #[test]
+    fn postgres_dba_menu_item_echo_preserves_spacing() {
+        // start.psql line 3 (representative plain menu line):
+        //   \echo '   0 – Node and current database information'
+        // Spaces inside quotes must be preserved.
+        let raw = "'   0 \u{2013} Node and current database information'";
+        let joined = crate::metacmd::split_params(raw).join(" ");
+        let result = super::unescape_echo(&joined);
+        assert!(result.starts_with("   0"));
+        assert!(result.contains("Node and current database information"));
+    }
 }
