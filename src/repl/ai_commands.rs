@@ -718,12 +718,16 @@ pub(super) async fn handle_ai_ask(
     for segment in &segments {
         match segment {
             AiResponseSegment::Text(text) => {
-                // Always show text segments — in text2sql mode the system
-                // prompt now allows plain-text answers for conversational
-                // questions, and we want those to reach the user.
-                let text = text.trim();
-                if !text.is_empty() {
-                    println!("{text}");
+                // In yolo mode only query results should appear — suppress
+                // the AI's explanatory text so the terminal stays clean.
+                // In text2sql mode the system prompt allows plain-text
+                // answers for conversational questions, and we want those
+                // to reach the user (unless yolo overrides).
+                if !yolo {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        println!("{text}");
+                    }
                 }
             }
             AiResponseSegment::Sql(sql) => {
