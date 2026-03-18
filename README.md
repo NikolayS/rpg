@@ -80,9 +80,11 @@ Execute? [Y/n/e]
 (1 row)
 ```
 
-### \yolo — silent auto-execute
+### \yolo — fast natural-language mode
 
-`\yolo` hides the SQL box and executes immediately without confirmation:
+`\yolo` combines text2sql and silent auto-execute in one command: it enables
+text2sql input, hides the SQL preview box, and executes immediately without
+confirmation.
 
 ```
 postgres=# \yolo
@@ -94,7 +96,8 @@ postgres=# what is DB size?
 (1 row)
 ```
 
-Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview in text2sql mode with `\set TEXT2SQL_SHOW_SQL off`.
+Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview box with
+`\set TEXT2SQL_SHOW_SQL on`.
 
 ### /fix — auto-correct errors
 

@@ -1439,7 +1439,7 @@ fn parse_shell(input: &str) -> ParsedMeta {
 /// token.  Inside a single-quoted token both `''` (doubled) and `\'`
 /// (backslash-escaped) produce a literal `'`, matching psql behaviour.
 /// Unquoted tokens are delimited by ASCII whitespace.
-pub fn split_params(s: &str) -> Vec<String> {
+pub(crate) fn split_params(s: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut chars = s.chars().peekable();
 

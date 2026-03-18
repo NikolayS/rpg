@@ -1689,7 +1689,7 @@ Input/execution modes:
   \sql              switch to SQL input mode (default)
   \text2sql / \t2s  switch to text2sql input mode
   \plan             enter plan execution mode
-  \yolo             enter YOLO execution mode (hides SQL box, auto-executes)
+  \yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
   \interactive      return to interactive mode (default)
   \mode             show current input and execution mode
   \\set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
@@ -2506,7 +2506,8 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::QEcho => {
-            let text = parsed.pattern.as_deref().unwrap_or("");
+            let raw = parsed.pattern.as_deref().unwrap_or("");
+            let text = unescape_echo(&crate::metacmd::split_params(raw).join(" "));
             if let Some(ref mut w) = settings.output_target {
                 let _ = writeln!(w, "{text}");
             } else {
@@ -2515,7 +2516,8 @@ async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::Warn => {
-            eprintln!("{}", parsed.pattern.as_deref().unwrap_or(""));
+            let raw = parsed.pattern.as_deref().unwrap_or("");
+            eprintln!("{}", unescape_echo(&crate::metacmd::split_params(raw).join(" ")));
             Some(MetaResult::Continue)
         }
         MetaCmd::Encoding => {
@@ -2789,8 +2791,10 @@ fn unescape_echo(s: &str) -> String {
                     .iter()
                     .map(|&b| b as char)
                     .collect();
-                if let Ok(val) = u8::from_str_radix(&octal, 8) {
-                    out.push(val);
+                if let Ok(val) = u32::from_str_radix(&octal, 8) {
+                    // Truncate to 8 bits, matching psql behaviour (\400 → 0x00).
+                    #[allow(clippy::cast_possible_truncation)]
+                    out.push((val & 0xFF) as u8);
                     i = start + end;
                 } else {
                     out.push(b'\\');
@@ -7448,5 +7452,12 @@ mod tests {
         let result = super::unescape_echo(text);
         assert_eq!(result.as_bytes()[0], 27);
         assert!(result.ends_with("Menu:\x1b[0m"));
+    }
+
+    #[test]
+    fn unescape_echo_octal_overflow_truncates() {
+        // \400 = 256 decimal; psql truncates mod 256 → 0x00.
+        let result = super::unescape_echo("\\400");
+        assert_eq!(result.as_bytes(), &[0x00]);
     }
 }
