@@ -1614,10 +1614,11 @@ pub(crate) async fn exec_lines(
 // Interactive REPL
 // ---------------------------------------------------------------------------
 
-/// Print the backslash command help text.
-fn print_help() {
-    println!("{}", crate::version_string());
-    println!(
+/// Build the backslash command help text and return it as a `String`.
+fn help_text() -> String {
+    format!(
+        "{}\n{}",
+        crate::version_string(),
         r"
 Backslash commands:
   \q              quit rpg
@@ -1706,7 +1707,7 @@ Function keys (interactive mode):
   F4 / \\f4       toggle Vi/Emacs editing mode (next session)
   F5 / \\f5       toggle auto-EXPLAIN on/off
   Ctrl-T          toggle SQL/text2sql input mode"
-    );
+    )
 }
 
 /// Print all configured connection profiles in a table format.
@@ -2887,7 +2888,31 @@ async fn dispatch_meta(
 
     match parsed.cmd {
         MetaCmd::Quit => return MetaResult::Quit,
-        MetaCmd::Help => print_help(),
+        MetaCmd::Help => {
+            let text = help_text();
+            let term_rows = crossterm::terminal::size()
+                .map(|(_, h)| h as usize)
+                .unwrap_or(24);
+            if settings.pager_enabled
+                && crate::pager::needs_paging_with_min(
+                    &text,
+                    term_rows.saturating_sub(2),
+                    settings.pager_min_lines,
+                )
+            {
+                if let Some(ref sl) = settings.statusline {
+                    sl.clear();
+                    sl.teardown_scroll_region();
+                }
+                run_pager_for_text(settings, &text, text.as_bytes());
+                if let Some(ref sl) = settings.statusline {
+                    sl.setup_scroll_region();
+                    sl.render();
+                }
+            } else {
+                println!("{text}");
+            }
+        }
         MetaCmd::Timing(mode) => apply_timing(settings, mode),
         MetaCmd::Expanded(mode) => apply_expanded(settings, mode),
         MetaCmd::ConnInfo => {
