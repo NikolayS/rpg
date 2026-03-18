@@ -3191,6 +3191,48 @@ mod tests {
         assert_eq!(m.pattern, Some("progress vacuum".to_owned()));
     }
 
+    #[test]
+    fn parse_dba_invalid_idx() {
+        let m = parse("\\dba invalid-idx");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("invalid-idx".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_iidx_alias() {
+        let m = parse("\\dba iidx");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("iidx".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_redundant_idx() {
+        let m = parse("\\dba redundant-idx");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("redundant-idx".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_ridx_alias() {
+        let m = parse("\\dba ridx");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("ridx".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_missing_fk_idx() {
+        let m = parse("\\dba missing-fk-idx");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("missing-fk-idx".to_owned()));
+    }
+
+    #[test]
+    fn parse_dba_mfk_alias() {
+        let m = parse("\\dba mfk");
+        assert_eq!(m.cmd, MetaCmd::Dba);
+        assert_eq!(m.pattern, Some("mfk".to_owned()));
+    }
+
     // -- Named queries (#69) ------------------------------------------------
 
     #[test]

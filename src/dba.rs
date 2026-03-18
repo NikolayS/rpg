@@ -55,6 +55,18 @@ pub async fn execute(
             dba_unused_indexes(client, verbose).await;
             None
         }
+        "invalid-idx" | "iidx" => {
+            dba_invalid_indexes(client, verbose).await;
+            None
+        }
+        "redundant-idx" | "ridx" => {
+            dba_redundant_indexes(client, verbose).await;
+            None
+        }
+        "missing-fk-idx" | "mfk" => {
+            dba_missing_fk_indexes(client, verbose).await;
+            None
+        }
         "seq-scans" | "seq" => {
             dba_seq_scans(client, verbose).await;
             None
@@ -248,6 +260,9 @@ fn print_dba_help() {
     println!("  \\dba tablesize   Largest tables");
     println!("  \\dba connections Connection counts by state");
     println!("  \\dba unused-idx  Unused indexes");
+    println!("  \\dba invalid-idx Invalid indexes with drop/recreate DDL");
+    println!("  \\dba redundant-idx Indexes covered by a broader index");
+    println!("  \\dba missing-fk-idx FK constraints without a supporting index");
     println!("  \\dba seq-scans   Tables with high sequential scan ratio");
     println!("  \\dba cache-hit   Buffer cache hit ratios");
     println!("  \\dba replication Replication slot status");
@@ -257,7 +272,7 @@ fn print_dba_help() {
     println!();
     println!(
         "Aliases: act, lock, wait, vac, ts, conn, \
-         unused, seq, cache, repl, conf, prog"
+         unused, iidx, ridx, mfk, seq, cache, repl, conf, prog"
     );
     println!();
     println!("Progress sub-commands:");
@@ -935,6 +950,97 @@ async fn dba_unused_indexes(client: &Client, _verbose: bool) {
       and indexrelname not like 'pg_%' \
     order by pg_relation_size(indexrelid) desc \
     limit 20";
+    run_and_print(client, sql).await;
+}
+
+async fn dba_invalid_indexes(client: &Client, _verbose: bool) {
+    let sql = "\
+        select \
+            n.nspname as schema_name, \
+            t.relname as table_name, \
+            i.relname as index_name, \
+            pg_size_pretty(pg_relation_size(ix.indexrelid)) as index_size, \
+            'drop index concurrently ' \
+                || quote_ident(n.nspname) || '.' \
+                || quote_ident(i.relname) || ';' as drop_code, \
+            pg_get_indexdef(ix.indexrelid) || ';' as revert_code \
+        from \
+            pg_catalog.pg_index as ix \
+            join pg_catalog.pg_class as t on t.oid = ix.indrelid \
+            join pg_catalog.pg_class as i on i.oid = ix.indexrelid \
+            join pg_catalog.pg_namespace as n on n.oid = t.relnamespace \
+        where \
+            not ix.indisvalid \
+            and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') \
+        order by \
+            pg_relation_size(ix.indexrelid) desc";
+    run_and_print(client, sql).await;
+}
+
+async fn dba_redundant_indexes(client: &Client, _verbose: bool) {
+    let sql = "\
+        select \
+            s.schemaname, \
+            s.tablename, \
+            s.indexname as redundant_index, \
+            s.idx_scan as redundant_scans, \
+            pg_size_pretty(pg_relation_size(s.indexrelid)) as redundant_size, \
+            s2.indexname as covering_index, \
+            s2.idx_scan as covering_scans \
+        from \
+            pg_catalog.pg_stat_user_indexes as s \
+            join pg_catalog.pg_index as i on i.indexrelid = s.indexrelid \
+            join pg_catalog.pg_stat_user_indexes as s2 \
+                on s2.relid = s.relid \
+                and s2.indexrelid <> s.indexrelid \
+            join pg_catalog.pg_index as i2 on i2.indexrelid = s2.indexrelid \
+        where \
+            s.schemaname not in ('pg_catalog', 'information_schema') \
+            and not i.indisprimary \
+            and not i2.indisprimary \
+            and i.indkey::text like (i2.indkey::text || '%') \
+            and i.indkey <> i2.indkey \
+        order by \
+            pg_relation_size(s.indexrelid) desc \
+        limit 20";
+    run_and_print(client, sql).await;
+}
+
+async fn dba_missing_fk_indexes(client: &Client, _verbose: bool) {
+    let sql = "\
+        select \
+            n.nspname as schema_name, \
+            t.relname as table_name, \
+            array_to_string( \
+                array_agg(a.attname order by x.n), \
+                ', ' \
+            ) as fk_columns, \
+            c.conname as fk_constraint, \
+            pg_size_pretty(pg_relation_size(t.oid)) as table_size \
+        from \
+            pg_catalog.pg_constraint as c \
+            join pg_catalog.pg_class as t on t.oid = c.conrelid \
+            join pg_catalog.pg_namespace as n on n.oid = t.relnamespace \
+            join lateral unnest(c.conkey) with ordinality as x(attnum, n) on true \
+            join pg_catalog.pg_attribute as a \
+                on a.attrelid = t.oid and a.attnum = x.attnum \
+        where \
+            c.contype = 'f' \
+            and n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast') \
+            and not exists ( \
+                select 1 \
+                from pg_catalog.pg_index as i \
+                where \
+                    i.indrelid = t.oid \
+                    and (i.indkey::int2[])[0:array_length(c.conkey, 1) - 1] @> c.conkey \
+            ) \
+        group by \
+            n.nspname, t.relname, c.conname, t.oid \
+        having \
+            pg_relation_size(t.oid) > 1048576 \
+        order by \
+            pg_relation_size(t.oid) desc \
+        limit 20";
     run_and_print(client, sql).await;
 }
 
