@@ -1031,6 +1031,13 @@ pub struct ReplSettings {
     /// at the top of the readline loop so that the next REPL cycle starts
     /// clean.
     pub prompt_interrupted: bool,
+    /// The most-recent natural-language query entered in text2sql mode.
+    ///
+    /// Stored whenever `handle_ai_ask` is called while
+    /// `input_mode == InputMode::Text2Sql` so that `/fix` can include the
+    /// original intent in its prompt, preventing the AI from regenerating
+    /// the same broken SQL instead of fixing the actual error.
+    pub last_t2s_nl_query: Option<String>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1127,6 +1134,10 @@ impl std::fmt::Debug for ReplSettings {
             .field("last_was_fix", &self.last_was_fix)
             .field("text2sql_show_sql", &self.text2sql_show_sql)
             .field("prompt_interrupted", &self.prompt_interrupted)
+            .field(
+                "last_t2s_nl_query",
+                &self.last_t2s_nl_query.as_deref().map(|_| "<nl-query>"),
+            )
             .finish()
     }
 }
@@ -1189,6 +1200,7 @@ impl Default for ReplSettings {
             last_was_fix: false,
             text2sql_show_sql: true,
             prompt_interrupted: false,
+            last_t2s_nl_query: None,
         }
     }
 }

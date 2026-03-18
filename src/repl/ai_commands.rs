@@ -692,6 +692,12 @@ pub(super) async fn handle_ai_ask(
         }
     };
 
+    // In text2sql mode, remember the natural-language query so that /fix
+    // can include the original intent in its prompt.
+    if settings.input_mode == InputMode::Text2Sql {
+        settings.last_t2s_nl_query = Some(prompt.to_owned());
+    }
+
     // Record the exchange in conversation context for follow-ups.
     settings.conversation.push_user(prompt.to_owned());
     settings.conversation.push_assistant(ai_response.clone());
@@ -1129,13 +1135,40 @@ pub(super) async fn handle_ai_fix(
         schema = schema_ctx,
     );
 
-    let user_content = format!(
-        "The following query failed{sqlstate_hint}:\n\n\
-         ```sql\n{query}\n```\n\n\
-         Error: {error}",
-        query = last_error.query,
-        error = last_error.error_message,
-    );
+    // In text2sql mode, include the original natural-language query so the
+    // AI understands the intent behind the SQL and can fix it correctly
+    // instead of regenerating the same broken query from scratch.
+    let user_content = if settings.input_mode == InputMode::Text2Sql {
+        if let Some(ref nl_query) = settings.last_t2s_nl_query.clone() {
+            format!(
+                "The following SQL was generated from this user request: \"{nl_query}\"\n\n\
+                 The generated SQL failed{sqlstate_hint}:\n\n\
+                 ```sql\n{query}\n```\n\n\
+                 Error: {error}\n\n\
+                 Fix the SQL to resolve the error while satisfying \
+                 the original request.",
+                nl_query = nl_query,
+                query = last_error.query,
+                error = last_error.error_message,
+            )
+        } else {
+            format!(
+                "The following query failed{sqlstate_hint}:\n\n\
+                 ```sql\n{query}\n```\n\n\
+                 Error: {error}",
+                query = last_error.query,
+                error = last_error.error_message,
+            )
+        }
+    } else {
+        format!(
+            "The following query failed{sqlstate_hint}:\n\n\
+             ```sql\n{query}\n```\n\n\
+             Error: {error}",
+            query = last_error.query,
+            error = last_error.error_message,
+        )
+    };
 
     // Build messages: system + any prior /fix attempts from the conversation
     // history (so repeated /fix calls carry forward what was tried before and
