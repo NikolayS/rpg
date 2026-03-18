@@ -177,7 +177,7 @@ pub async fn execute_query(
         if let Some(ref r) = reason {
             if !crate::safety::confirm_destructive(r) {
                 eprintln!("Statement cancelled.");
-                return true; // skipped — not an error
+                return false; // not executed — caller must not assume DDL ran
             }
         }
     }
@@ -444,7 +444,7 @@ pub async fn execute_query_extended(
         if let Some(ref r) = reason {
             if !crate::safety::confirm_destructive(r) {
                 eprintln!("Statement cancelled.");
-                return true; // skipped — not an error
+                return false; // not executed — caller must not assume DDL ran
             }
         }
     }
