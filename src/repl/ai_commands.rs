@@ -139,13 +139,18 @@ pub(super) async fn suggest_error_fix_inline(
     };
 
     // Use non-streaming for lower latency on a short response.
-    if let Ok(result) = provider.complete(&messages, &options).await {
-        record_token_usage(settings, &result);
-        let suggestion = result.content.trim();
-        if !suggestion.is_empty() {
-            // Print dimmed (ANSI escape: dim = \x1b[2m, reset = \x1b[0m).
-            eprintln!("\x1b[2mHint: {suggestion}\x1b[0m");
+    // Race against Ctrl-C so the user can cancel without waiting.
+    match with_ctrl_c_cancel(provider.complete(&messages, &options)).await {
+        Ok(result) => {
+            record_token_usage(settings, &result);
+            let suggestion = result.content.trim();
+            if !suggestion.is_empty() {
+                // Print dimmed (ANSI escape: dim = \x1b[2m, reset = \x1b[0m).
+                eprintln!("\x1b[2mHint: {suggestion}\x1b[0m");
+            }
         }
+        Err(e) if e == CANCELLED => {} // silently ignore cancellation for auto-hints
+        Err(_) => {}                   // silently ignore errors for auto-hints
     }
 }
 
@@ -189,12 +194,16 @@ pub(super) async fn interpret_auto_explain(
         temperature: 0.0,
     };
 
-    if let Ok(result) = provider.complete(&messages, &options).await {
-        record_token_usage(settings, &result);
-        let interpretation = result.content.trim();
-        if !interpretation.is_empty() {
-            eprintln!("\x1b[2m{interpretation}\x1b[0m");
+    match with_ctrl_c_cancel(provider.complete(&messages, &options)).await {
+        Ok(result) => {
+            record_token_usage(settings, &result);
+            let interpretation = result.content.trim();
+            if !interpretation.is_empty() {
+                eprintln!("\x1b[2m{interpretation}\x1b[0m");
+            }
         }
+        Err(e) if e == CANCELLED => {} // silently ignore cancellation for auto-hints
+        Err(_) => {}                   // silently ignore errors for auto-hints
     }
 }
 
@@ -239,12 +248,38 @@ pub(super) async fn interpret_dba_output(
     };
 
     eprintln!("-- AI interpreting wait events...");
-    if let Ok(result) = provider.complete(&messages, &options).await {
-        record_token_usage(settings, &result);
-        let interpretation = result.content.trim();
-        if !interpretation.is_empty() {
-            eprintln!("\x1b[2m{interpretation}\x1b[0m");
+    match with_ctrl_c_cancel(provider.complete(&messages, &options)).await {
+        Ok(result) => {
+            record_token_usage(settings, &result);
+            let interpretation = result.content.trim();
+            if !interpretation.is_empty() {
+                eprintln!("\x1b[2m{interpretation}\x1b[0m");
+            }
         }
+        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
+        Err(e) => eprintln!("AI error: {e}"),
+    }
+}
+
+/// Sentinel error string returned when an LLM request is cancelled by Ctrl-C.
+///
+/// Callers that want to distinguish a user-initiated cancel from a real
+/// error should compare `err == CANCELLED` rather than printing an error
+/// message.
+pub(super) const CANCELLED: &str = "__cancelled__";
+
+/// Run a future, aborting it when Ctrl-C (SIGINT) is received.
+///
+/// Returns `Err(CANCELLED)` if Ctrl-C fires before the future completes.
+/// Otherwise propagates the future's result unchanged.
+async fn with_ctrl_c_cancel<F, T>(fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
+        result = fut => result,
     }
 }
 
@@ -257,6 +292,9 @@ pub(super) async fn interpret_dba_output(
 ///
 /// When `no_highlight` is `true` the raw text is streamed directly to
 /// stdout token by token (original behaviour).
+///
+/// If Ctrl-C is pressed while the request is in flight the HTTP connection
+/// is dropped (cancelling the request) and `Err(CANCELLED)` is returned.
 pub(super) async fn stream_completion(
     provider: &dyn crate::ai::LlmProvider,
     messages: &[crate::ai::Message],
@@ -267,16 +305,15 @@ pub(super) async fn stream_completion(
 
     if no_highlight {
         // Raw streaming — emit each token immediately as it arrives.
-        let result = provider
-            .complete_streaming(
-                messages,
-                options,
-                Box::new(|token| {
-                    print!("{token}");
-                    let _ = io::stdout().flush();
-                }),
-            )
-            .await?;
+        let result = with_ctrl_c_cancel(provider.complete_streaming(
+            messages,
+            options,
+            Box::new(|token| {
+                print!("{token}");
+                let _ = io::stdout().flush();
+            }),
+        ))
+        .await?;
         println!();
         return Ok(result);
     }
@@ -293,21 +330,22 @@ pub(super) async fn stream_completion(
     eprint!("\x1b[2m…\x1b[0m");
     let _ = io::stderr().flush();
 
-    let result = provider
-        .complete_streaming(
-            messages,
-            options,
-            Box::new(move |token| {
-                if let Ok(mut b) = buf_clone.lock() {
-                    b.push_str(token);
-                }
-            }),
-        )
-        .await?;
+    let result = with_ctrl_c_cancel(provider.complete_streaming(
+        messages,
+        options,
+        Box::new(move |token| {
+            if let Ok(mut b) = buf_clone.lock() {
+                b.push_str(token);
+            }
+        }),
+    ))
+    .await;
 
     // Erase the progress indicator (carriage return clears the line).
     eprint!("\r\x1b[K");
     let _ = io::stderr().flush();
+
+    let result = result?;
 
     // Render markdown on the fully-collected content and print.
     let content = buf.lock().map(|b| b.clone()).unwrap_or_default();
@@ -714,10 +752,14 @@ pub(super) async fn handle_ai_ask(
         temperature: 0.0,
     };
 
-    let ai_response = match provider.complete(&messages, &options).await {
+    let ai_response = match with_ctrl_c_cancel(provider.complete(&messages, &options)).await {
         Ok(result) => {
             record_token_usage(settings, &result);
             result.content
+        }
+        Err(e) if e == CANCELLED => {
+            eprintln!("-- AI request cancelled");
+            return;
         }
         Err(e) => {
             eprintln!("AI error: {e}");
@@ -1047,6 +1089,10 @@ pub(super) async fn handle_ai_plan(
     .await
     {
         Ok(r) => r,
+        Err(e) if e == CANCELLED => {
+            eprintln!("-- AI request cancelled");
+            return;
+        }
         Err(e) => {
             eprintln!("AI error: {e}");
             return;
@@ -1272,6 +1318,10 @@ pub(super) async fn handle_ai_fix(
     .await
     {
         Ok(r) => r,
+        Err(e) if e == CANCELLED => {
+            eprintln!("-- AI request cancelled");
+            return;
+        }
         Err(e) => {
             eprintln!("AI error: {e}");
             return;
@@ -1565,6 +1615,7 @@ pub(super) async fn handle_ai_explain(
     .await
     {
         Ok(result) => record_token_usage(settings, &result),
+        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -1775,6 +1826,7 @@ pub(super) async fn handle_ai_optimize(
     .await
     {
         Ok(result) => record_token_usage(settings, &result),
+        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -1935,6 +1987,7 @@ pub(super) async fn handle_ai_describe(
     .await
     {
         Ok(result) => record_token_usage(settings, &result),
+        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
         Err(e) => eprintln!("AI error: {e}"),
     }
 }
@@ -2499,6 +2552,72 @@ mod tests {
         assert!(
             has_sql,
             "write query must be parsed as a SQL segment so it can be shown to the user"
+        );
+    }
+
+    // -- Ctrl-C cancellation ---------------------------------------------------
+
+    /// `CANCELLED` sentinel is a stable string value that callers can match on.
+    #[test]
+    fn cancelled_sentinel_value() {
+        assert_eq!(CANCELLED, "__cancelled__");
+    }
+
+    /// `with_ctrl_c_cancel` propagates `Ok` results when no signal fires.
+    #[tokio::test]
+    async fn with_ctrl_c_cancel_propagates_ok() {
+        let result: Result<i32, String> = with_ctrl_c_cancel(async { Ok(42) }).await;
+        assert_eq!(result, Ok(42));
+    }
+
+    /// `with_ctrl_c_cancel` propagates `Err` results from the future itself.
+    #[tokio::test]
+    async fn with_ctrl_c_cancel_propagates_err() {
+        let result: Result<i32, String> =
+            with_ctrl_c_cancel(async { Err("provider error".to_owned()) }).await;
+        assert_eq!(result, Err("provider error".to_owned()));
+    }
+
+    /// The `CANCELLED` sentinel is distinct from any plausible provider error.
+    #[test]
+    fn cancelled_sentinel_is_distinct_from_provider_errors() {
+        let ai_errors = [
+            "provider error",
+            "HTTP 429",
+            "connection refused",
+            "invalid api key",
+            "",
+        ];
+        for e in &ai_errors {
+            assert_ne!(*e, CANCELLED, "'{e}' should not equal CANCELLED sentinel");
+        }
+    }
+
+    /// After a query is cancelled the `TxState` transitions to `Failed` when
+    /// inside an explicit transaction, and stays `Idle` otherwise.
+    #[test]
+    fn tx_state_after_query_cancel_in_transaction() {
+        use super::super::TxState;
+        let mut tx = TxState::InTransaction;
+        // A cancellation returns an error — on_error() is called.
+        tx.on_error();
+        assert_eq!(
+            tx,
+            TxState::Failed,
+            "cancelling a query inside a transaction must leave session in Failed state"
+        );
+    }
+
+    #[test]
+    fn tx_state_after_query_cancel_outside_transaction() {
+        use super::super::TxState;
+        let mut tx = TxState::Idle;
+        // A cancellation outside a transaction does not change state.
+        tx.on_error();
+        assert_eq!(
+            tx,
+            TxState::Idle,
+            "cancelling a query outside a transaction must leave session in Idle state"
         );
     }
 }
