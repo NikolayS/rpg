@@ -37,6 +37,7 @@
 
 pub mod issues;
 pub mod render;
+pub mod share;
 
 use std::fmt;
 

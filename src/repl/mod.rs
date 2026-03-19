@@ -1050,6 +1050,12 @@ pub struct ReplSettings {
     /// `/ask` transaction (which SHOULD be rolled back if it leaks into the
     /// next command due to an error or interruption).
     pub internal_tx: bool,
+    /// Raw text of the last EXPLAIN output (plain text format).
+    ///
+    /// Populated whenever an EXPLAIN query succeeds, so that
+    /// `\explain share` can upload it to explain.depesz.com or
+    /// explain.dalibo.com.  `None` if no EXPLAIN has been run yet.
+    pub last_explain_text: Option<String>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1152,6 +1158,10 @@ impl std::fmt::Debug for ReplSettings {
                 &self.last_t2s_nl_query.as_deref().map(|_| "<nl-query>"),
             )
             .field("internal_tx", &self.internal_tx)
+            .field(
+                "last_explain_text",
+                &self.last_explain_text.as_deref().map(|_| "<explain>"),
+            )
             .finish()
     }
 }
@@ -1217,6 +1227,7 @@ impl Default for ReplSettings {
             prompt_interrupted: false,
             last_t2s_nl_query: None,
             internal_tx: false,
+            last_explain_text: None,
         }
     }
 }
@@ -1726,6 +1737,10 @@ Auto-EXPLAIN:
   \\set EXPLAIN analyze  show EXPLAIN ANALYZE for every query
   \\set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
   \\set EXPLAIN off      disable auto-EXPLAIN
+
+EXPLAIN sharing:
+  \\explain share depesz  upload last EXPLAIN plan to explain.depesz.com
+  \\explain share dalibo   upload last EXPLAIN plan to explain.dalibo.com
 
 Function keys (interactive mode):
   F2 / \\f2       toggle schema-aware tab completion on/off
@@ -3471,6 +3486,10 @@ async fn dispatch_meta(
                 return result;
             }
         }
+        // Explain share (#655).
+        MetaCmd::ExplainShare(ref service) => {
+            dispatch_explain_share(settings, service).await;
+        }
         // Large object commands (#400).
         MetaCmd::LoImport(ref filename, ref comment) => {
             let filename = filename.clone();
@@ -3495,6 +3514,49 @@ async fn dispatch_meta(
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// Explain share helper (#655)
+// ---------------------------------------------------------------------------
+
+/// Handle `\explain share <service>`.
+///
+/// Uploads the last stored EXPLAIN plan to the chosen external visualiser,
+/// prints the resulting URL, and copies it to the system clipboard.
+async fn dispatch_explain_share(settings: &mut ReplSettings, service: &str) {
+    let plan_text = match settings.last_explain_text.as_deref() {
+        Some(t) if !t.is_empty() => t.to_owned(),
+        _ => {
+            eprintln!(
+                "\\explain share: no EXPLAIN plan available.\n\
+                 Run an EXPLAIN query first, then use \\explain share."
+            );
+            return;
+        }
+    };
+
+    if service.is_empty() {
+        eprintln!(
+            "\\explain share: service name required.\n\
+             Usage: \\explain share depesz\n\
+             Usage: \\explain share dalibo"
+        );
+        return;
+    }
+
+    println!("Uploading EXPLAIN plan to {service}…");
+
+    match crate::explain::share::share_explain_plan(&plan_text, service).await {
+        Ok(url) => {
+            println!("Plan URL: {url}");
+            crate::explain::share::copy_to_clipboard(&url);
+            println!("(URL copied to clipboard)");
+        }
+        Err(e) => {
+            eprintln!("\\explain share: {e}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

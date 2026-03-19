@@ -209,6 +209,8 @@ pub async fn execute_query(
 
     // Capture auto-EXPLAIN plan text for optional AI interpretation.
     let mut auto_explain_plan: Option<String> = None;
+    // Whether the original SQL is a manual EXPLAIN statement (not auto-explain).
+    let is_manual_explain = is_explain_statement(sql_to_send) && !auto_explain_active;
 
     let success = match client.simple_query(sql_to_send).await {
         Ok(messages) => {
@@ -251,7 +253,7 @@ pub async fn execute_query(
                     SimpleQueryMessage::CommandComplete(n) => {
                         // Capture plan text from auto-EXPLAIN before clearing
                         // rows. EXPLAIN output is a single-column result set.
-                        if auto_explain_active && result_set_index == 0 {
+                        if (auto_explain_active || is_manual_explain) && result_set_index == 0 {
                             let plan_text: String = rows
                                 .iter()
                                 .filter_map(|r| {
@@ -260,7 +262,11 @@ pub async fn execute_query(
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             if !plan_text.is_empty() {
-                                auto_explain_plan = Some(plan_text);
+                                if auto_explain_active {
+                                    auto_explain_plan = Some(plan_text.clone());
+                                }
+                                // Store for `\explain share` regardless of mode.
+                                settings.last_explain_text = Some(plan_text);
                             }
                         }
 
@@ -1011,6 +1017,8 @@ pub(super) async fn execute_query_interactive(
         && explain_format != crate::explain::ExplainFormat::Raw
     {
         let raw_text = String::from_utf8_lossy(&captured);
+        // Store the stripped plain-text EXPLAIN output for `\explain share`.
+        settings.last_explain_text = Some(strip_psql_table_format(&raw_text));
         if let Some(rendered) = try_render_explain(&raw_text, explain_format) {
             enhanced = rendered;
             display = std::borrow::Cow::Borrowed(b"");
@@ -1020,6 +1028,13 @@ pub(super) async fn execute_query_interactive(
             let s = std::str::from_utf8(&captured).unwrap_or("");
             (s, captured.as_slice())
         }
+    } else if ok && is_explain_statement(sql) {
+        // Raw format: still store the stripped text for `\explain share`.
+        let raw_text = String::from_utf8_lossy(&captured);
+        settings.last_explain_text = Some(strip_psql_table_format(&raw_text));
+        display = std::borrow::Cow::Borrowed(captured.as_slice());
+        let s = std::str::from_utf8(&captured).unwrap_or("");
+        (s, captured.as_slice())
     } else {
         display = std::borrow::Cow::Borrowed(captured.as_slice());
         let s = std::str::from_utf8(&captured).unwrap_or("");
