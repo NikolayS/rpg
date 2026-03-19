@@ -625,16 +625,22 @@ pub(super) fn wrap_in_ask_readonly_tx(sql: &str) -> String {
 ///
 /// # Read-only protection
 ///
-/// Every query executed by `/ask` — across all execution paths (interactive,
-/// text2sql, yolo, and the edit path) — is wrapped in
-/// `start transaction read only` / `commit`.  This is a second line of
-/// defence: even in yolo mode, the database rejects any mutation that slips
-/// past [`is_write_query`].
+/// Queries executed by `/ask` are wrapped in `start transaction read only` /
+/// `commit` in all cases except text2sql write queries (see below).  This is
+/// a second line of defence: even in yolo mode, the database rejects any
+/// mutation that slips past [`is_write_query`] for `/ask`-originated queries.
 ///
-/// In non-yolo mode write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) are
-/// refused before execution (`AskChoice::No`).  In yolo mode they reach
+/// In non-yolo `/ask` mode write queries (`INSERT`/`UPDATE`/`DELETE`/`MERGE`)
+/// are refused before execution (`AskChoice::No`).  In yolo mode they reach
 /// `AskChoice::Yes` but the read-only transaction wrapper causes `PostgreSQL`
 /// to reject them at the wire level.
+///
+/// **Exception — text2sql write queries (non-yolo):** when the user is in
+/// `\t2s` mode and the AI generates a write query, the user is prompted
+/// `Execute write query? [y/N/e]` (default NO).  If confirmed, the query runs
+/// directly without the read-only wrapper so it can actually mutate the
+/// database.  Yolo mode in text2sql still uses the read-only wrapper (yolo is
+/// primarily a convenience for read-only exploration, not mass writes).
 #[allow(clippy::too_many_lines)]
 pub(super) async fn handle_ai_ask(
     client: &Client,
@@ -874,11 +880,11 @@ pub(super) async fn handle_ai_ask(
                     AskChoice::Yes
                 };
 
-                // Whether to skip the read-only transaction wrapper.
-                // Write queries confirmed in text2sql mode must execute
-                // directly — wrapping them in a read-only tx would reject
-                // every DML/DDL the user intended to run.
-                let t2s_write = in_text2sql && !read_only;
+                // Whether to skip the read-only transaction wrapper for
+                // this query.  Only text2sql non-yolo write queries execute
+                // directly; yolo mode always uses the read-only wrapper so
+                // that accidental writes are still rejected at the DB level.
+                let t2s_write = in_text2sql && !read_only && !yolo;
 
                 match choice {
                     AskChoice::Yes => {
@@ -928,14 +934,18 @@ pub(super) async fn handle_ai_ask(
                             if edited.is_empty() {
                                 eprintln!("(empty — skipped)");
                             } else {
-                                let edited_read_only = !is_write_query(edited);
-                                let ok = if t2s_write && !edited_read_only {
+                                // Re-evaluate write/read-only from the
+                                // edited SQL — user may have changed the
+                                // query type in the editor.  Yolo mode always
+                                // uses the read-only wrapper (same as above).
+                                let edited_write = in_text2sql && is_write_query(edited) && !yolo;
+                                let ok = if edited_write {
                                     // text2sql write query (possibly modified):
                                     // execute directly.
                                     execute_query_interactive(client, edited, settings, tx).await
                                 } else {
-                                    // /ask or read-only edited query: wrap in
-                                    // a read-only transaction.
+                                    // /ask, yolo, or read-only edited query:
+                                    // wrap in a read-only transaction.
                                     let exec_edited =
                                         std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited));
                                     settings.internal_tx = true;
