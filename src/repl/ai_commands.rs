@@ -830,11 +830,19 @@ pub(super) async fn handle_ai_ask(
                         // database itself will reject any mutation that slips
                         // past the is_write_query advisory check.
                         let exec_sql = std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(sql));
+                        // Mark this as an internal /ask transaction so that
+                        // auto_rollback_stale_tx can clean it up if the query
+                        // is interrupted before commit.
+                        settings.internal_tx = true;
                         let ok = execute_query_interactive(client, &exec_sql, settings, tx).await;
                         if !ok {
                             // Roll back on error to leave the session clean.
                             let _ = client.simple_query("rollback").await;
+                            *tx = TxState::Idle;
                         }
+                        // Clear the internal-tx flag — the transaction has
+                        // been committed or rolled back.
+                        settings.internal_tx = false;
                         if ok {
                             settings.conversation.push_query_result(sql, "(executed)");
                         } else if let Some(err) = &settings.last_error {
@@ -860,12 +868,17 @@ pub(super) async fn handle_ai_ask(
                                 // regardless of what is_write_query says.
                                 let exec_edited =
                                     std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited));
+                                // Mark as internal /ask transaction.
+                                settings.internal_tx = true;
                                 let ok =
                                     execute_query_interactive(client, &exec_edited, settings, tx)
                                         .await;
                                 if !ok {
                                     let _ = client.simple_query("rollback").await;
+                                    *tx = TxState::Idle;
                                 }
+                                // Clear the internal-tx flag.
+                                settings.internal_tx = false;
                                 if ok {
                                     settings
                                         .conversation

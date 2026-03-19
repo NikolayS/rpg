@@ -1038,6 +1038,14 @@ pub struct ReplSettings {
     /// original intent in its prompt, preventing the AI from regenerating
     /// the same broken SQL instead of fixing the actual error.
     pub last_t2s_nl_query: Option<String>,
+    /// `true` while an internally-managed `/ask` read-only transaction is
+    /// open (i.e. between `start transaction read only` and `commit`).
+    ///
+    /// Used by the auto-rollback logic to distinguish between a user's
+    /// explicit `BEGIN` (which must NOT be auto-rolled back) and an internal
+    /// `/ask` transaction (which SHOULD be rolled back if it leaks into the
+    /// next command due to an error or interruption).
+    pub internal_tx: bool,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1138,6 +1146,7 @@ impl std::fmt::Debug for ReplSettings {
                 "last_t2s_nl_query",
                 &self.last_t2s_nl_query.as_deref().map(|_| "<nl-query>"),
             )
+            .field("internal_tx", &self.internal_tx)
             .finish()
     }
 }
@@ -1201,6 +1210,7 @@ impl Default for ReplSettings {
             text2sql_show_sql: true,
             prompt_interrupted: false,
             last_t2s_nl_query: None,
+            internal_tx: false,
         }
     }
 }
@@ -4514,6 +4524,38 @@ fn is_quit_exit(trimmed: &str, buf_empty: bool) -> bool {
     lower == "quit" || lower == "exit"
 }
 
+/// Roll back a stale internal transaction if one is detected.
+///
+/// After a `/ask` query is interrupted or errors, the read-only transaction
+/// that `/ask` opened can remain open, leaving the session in an
+/// `InTransaction` or `Failed` state.  At the start of each REPL command we
+/// check for this condition:
+///
+/// - `tx` is `InTransaction` or `Failed` (not `Idle`), **and**
+/// - `settings.internal_tx` is `true` — meaning the open transaction was
+///   started by the internal `/ask` machinery, not by the user typing `BEGIN`.
+///
+/// When both conditions hold we issue `ROLLBACK` automatically and print a
+/// one-line warning so the user knows what happened.  The `internal_tx` flag
+/// ensures we never auto-roll back a transaction the user opened deliberately.
+///
+/// Returns `true` when a rollback was issued (so callers can log or act on
+/// it), `false` otherwise.
+async fn auto_rollback_stale_tx(
+    client: &Client,
+    tx: &mut TxState,
+    settings: &mut ReplSettings,
+) -> bool {
+    if settings.internal_tx && matches!(*tx, TxState::InTransaction | TxState::Failed) {
+        eprintln!("-- auto-rolled back stale transaction");
+        let _ = client.simple_query("rollback").await;
+        *tx = TxState::Idle;
+        settings.internal_tx = false;
+        return true;
+    }
+    false
+}
+
 /// Process one line of input in the readline loop.
 ///
 /// `stmt_buf` accumulates the full multi-line statement for history recording.
@@ -4529,6 +4571,10 @@ async fn handle_line(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> HandleLineResult {
+    // Auto-rollback any stale internal transaction left by a previous
+    // interrupted or failed `/ask` command, before processing this command.
+    auto_rollback_stale_tx(client, tx, settings).await;
+
     // AI commands use a `/` prefix and are handled before backslash commands.
     let trimmed = line.trim();
 
@@ -5189,6 +5235,73 @@ mod tests {
         let mut tx = TxState::InTransaction;
         tx.update_from_sql("rollback to sp1;");
         assert_eq!(tx, TxState::InTransaction);
+    }
+
+    // -- auto-rollback stale internal transaction detection --------------------
+
+    /// When `internal_tx` is `true` and the session is `InTransaction`,
+    /// the stale-tx condition is detected (requires rollback).
+    #[test]
+    fn auto_rollback_stale_detected_in_transaction() {
+        let settings = ReplSettings {
+            internal_tx: true,
+            ..ReplSettings::default()
+        };
+        let tx = TxState::InTransaction;
+        // Stale: internal flag set and tx is open.
+        assert!(
+            settings.internal_tx && matches!(tx, TxState::InTransaction | TxState::Failed),
+            "stale internal tx should be detected"
+        );
+    }
+
+    /// When `internal_tx` is `true` and the session is `Failed`,
+    /// the stale-tx condition is also detected.
+    #[test]
+    fn auto_rollback_stale_detected_failed() {
+        let settings = ReplSettings {
+            internal_tx: true,
+            ..ReplSettings::default()
+        };
+        let tx = TxState::Failed;
+        assert!(
+            settings.internal_tx && matches!(tx, TxState::InTransaction | TxState::Failed),
+            "stale failed internal tx should be detected"
+        );
+    }
+
+    /// When `internal_tx` is `false`, a stale tx is NOT auto-rolled back —
+    /// this protects user-initiated `BEGIN` blocks.
+    #[test]
+    fn auto_rollback_not_triggered_for_user_begin() {
+        let settings = ReplSettings {
+            internal_tx: false,
+            ..ReplSettings::default()
+        };
+        let tx = TxState::InTransaction;
+        // Not stale: user opened the transaction, `internal_tx` is false.
+        assert!(
+            !settings.internal_tx || !matches!(tx, TxState::InTransaction | TxState::Failed),
+            "user-initiated tx must NOT be auto-rolled back"
+        );
+    }
+
+    /// When the session is `Idle`, no rollback is needed regardless of the
+    /// `internal_tx` flag.
+    #[test]
+    fn auto_rollback_not_triggered_when_idle() {
+        let settings = ReplSettings {
+            internal_tx: true,
+            ..ReplSettings::default()
+        };
+        let tx = TxState::Idle;
+        // Not stale: already idle.
+        assert!(
+            !matches!(tx, TxState::InTransaction | TxState::Failed),
+            "idle session needs no rollback"
+        );
+        // The flag value is irrelevant when tx is Idle.
+        let _ = settings.internal_tx;
     }
 
     // -- dollar-quote tag validation --------------------------------------------
