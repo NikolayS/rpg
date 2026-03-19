@@ -29,7 +29,7 @@ impl OllamaProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build HTTP client");
         Self {
             base_url,
             client,

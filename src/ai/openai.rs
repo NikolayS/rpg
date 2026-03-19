@@ -29,7 +29,7 @@ impl OpenAiProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build HTTP client");
         Self {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com".to_owned()),
