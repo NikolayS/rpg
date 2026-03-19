@@ -15,6 +15,8 @@ use futures::StreamExt;
 pub struct OllamaProvider {
     base_url: String,
     client: reqwest::Client,
+    /// Timeout in seconds for each HTTP request.
+    timeout_secs: u64,
 }
 
 impl OllamaProvider {
@@ -22,10 +24,16 @@ impl OllamaProvider {
     ///
     /// `base_url` should be the full URL of the Ollama server, e.g.
     /// `http://localhost:11434`.
-    pub fn new(base_url: String) -> Self {
+    /// `timeout_secs` sets the HTTP request timeout; must be > 0.
+    pub fn new(base_url: String, timeout_secs: u64) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
             base_url,
-            client: reqwest::Client::new(),
+            client,
+            timeout_secs,
         }
     }
 }
@@ -72,6 +80,7 @@ impl LlmProvider for OllamaProvider {
                 "stream": false,
             });
 
+            let timeout_secs = self.timeout_secs;
             let resp = self
                 .client
                 .post(format!("{}/api/chat", self.base_url))
@@ -79,7 +88,13 @@ impl LlmProvider for OllamaProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Ollama API error: {e}"))?;
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        format!("AI request timed out after {timeout_secs}s")
+                    } else {
+                        format!("Ollama API error: {e}")
+                    }
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -141,6 +156,7 @@ impl LlmProvider for OllamaProvider {
                 "stream": true,
             });
 
+            let timeout_secs = self.timeout_secs;
             let resp = self
                 .client
                 .post(format!("{}/api/chat", self.base_url))
@@ -148,7 +164,13 @@ impl LlmProvider for OllamaProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Ollama API error: {e}"))?;
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        format!("AI request timed out after {timeout_secs}s")
+                    } else {
+                        format!("Ollama API error: {e}")
+                    }
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -213,19 +235,25 @@ mod tests {
 
     #[test]
     fn provider_name() {
-        let p = OllamaProvider::new("http://localhost:11434".to_owned());
+        let p = OllamaProvider::new("http://localhost:11434".to_owned(), 30);
         assert_eq!(p.name(), "ollama");
     }
 
     #[test]
     fn default_model() {
-        let p = OllamaProvider::new("http://localhost:11434".to_owned());
+        let p = OllamaProvider::new("http://localhost:11434".to_owned(), 30);
         assert_eq!(p.default_model(), "llama3");
     }
 
     #[test]
     fn custom_url_stored() {
-        let p = OllamaProvider::new("http://myhost:11434".to_owned());
+        let p = OllamaProvider::new("http://myhost:11434".to_owned(), 30);
         assert_eq!(p.base_url, "http://myhost:11434");
+    }
+
+    #[test]
+    fn timeout_stored() {
+        let p = OllamaProvider::new("http://localhost:11434".to_owned(), 120);
+        assert_eq!(p.timeout_secs, 120);
     }
 }

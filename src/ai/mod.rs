@@ -127,6 +127,9 @@ pub trait LlmProvider: Send + Sync + std::fmt::Debug {
 
 /// Create an [`LlmProvider`] from configuration values.
 ///
+/// `timeout_secs` sets the HTTP request timeout applied to every LLM call.
+/// Pass `0` to use the default (30 s).
+///
 /// # Errors
 ///
 /// Returns an error string when the provider name is unknown or a required
@@ -135,13 +138,16 @@ pub fn create_provider(
     provider_name: &str,
     api_key: Option<&str>,
     base_url: Option<&str>,
+    timeout_secs: u64,
 ) -> Result<Box<dyn LlmProvider>, String> {
+    let timeout_secs = if timeout_secs == 0 { 30 } else { timeout_secs };
     match provider_name {
         "anthropic" | "claude" => {
             let key = api_key.ok_or("ANTHROPIC_API_KEY not set")?;
             Ok(Box::new(anthropic::AnthropicProvider::new(
                 key.to_owned(),
                 base_url.map(str::to_owned),
+                timeout_secs,
             )))
         }
         "openai" => {
@@ -149,11 +155,15 @@ pub fn create_provider(
             Ok(Box::new(openai::OpenAiProvider::new(
                 key.to_owned(),
                 base_url.map(str::to_owned),
+                timeout_secs,
             )))
         }
         "ollama" => {
             let url = base_url.unwrap_or("http://localhost:11434");
-            Ok(Box::new(ollama::OllamaProvider::new(url.to_owned())))
+            Ok(Box::new(ollama::OllamaProvider::new(
+                url.to_owned(),
+                timeout_secs,
+            )))
         }
         other => Err(format!("unknown AI provider: {other}")),
     }
@@ -197,51 +207,61 @@ mod tests {
 
     #[test]
     fn create_provider_unknown() {
-        let err = create_provider("unknown_xyz", None, None).unwrap_err();
+        let err = create_provider("unknown_xyz", None, None, 30).unwrap_err();
         assert!(err.contains("unknown AI provider"));
     }
 
     #[test]
     fn create_provider_anthropic_missing_key() {
-        let err = create_provider("anthropic", None, None).unwrap_err();
+        let err = create_provider("anthropic", None, None, 30).unwrap_err();
         assert!(err.contains("ANTHROPIC_API_KEY"));
     }
 
     #[test]
     fn create_provider_openai_missing_key() {
-        let err = create_provider("openai", None, None).unwrap_err();
+        let err = create_provider("openai", None, None, 30).unwrap_err();
         assert!(err.contains("OPENAI_API_KEY"));
     }
 
     #[test]
     fn create_provider_anthropic_with_key() {
-        let p =
-            create_provider("anthropic", Some("sk-test"), None).expect("should succeed with key");
+        let p = create_provider("anthropic", Some("sk-test"), None, 30)
+            .expect("should succeed with key");
         assert_eq!(p.name(), "anthropic");
     }
 
     #[test]
     fn create_provider_claude_alias() {
-        let p = create_provider("claude", Some("sk-test"), None).expect("claude alias should work");
+        let p =
+            create_provider("claude", Some("sk-test"), None, 30).expect("claude alias should work");
         assert_eq!(p.name(), "anthropic");
     }
 
     #[test]
     fn create_provider_openai_with_key() {
-        let p = create_provider("openai", Some("sk-test"), None).expect("should succeed with key");
+        let p =
+            create_provider("openai", Some("sk-test"), None, 30).expect("should succeed with key");
         assert_eq!(p.name(), "openai");
     }
 
     #[test]
     fn create_provider_ollama_no_key_needed() {
-        let p = create_provider("ollama", None, None).expect("ollama needs no key");
+        let p = create_provider("ollama", None, None, 30).expect("ollama needs no key");
         assert_eq!(p.name(), "ollama");
     }
 
     #[test]
     fn create_provider_ollama_custom_url() {
-        let p = create_provider("ollama", None, Some("http://myhost:11434"))
+        let p = create_provider("ollama", None, Some("http://myhost:11434"), 30)
             .expect("ollama custom url");
         assert_eq!(p.name(), "ollama");
+    }
+
+    #[test]
+    fn create_provider_zero_timeout_uses_default() {
+        // timeout_secs = 0 should fall back to 30 s (no panic/error).
+        let p = create_provider("anthropic", Some("sk-test"), None, 0)
+            .expect("zero timeout should succeed");
+        assert_eq!(p.name(), "anthropic");
     }
 }

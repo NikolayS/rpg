@@ -87,6 +87,7 @@ pub(super) fn get_ai_provider(
         provider_name,
         api_key.as_deref(),
         settings.config.ai.base_url.as_deref(),
+        settings.config.ai.timeout,
     )
 }
 

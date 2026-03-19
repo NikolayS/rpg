@@ -249,10 +249,29 @@ pub struct AiConfig {
     /// highlighting) before its results are displayed — similar to psql's
     /// `ECHO_HIDDEN` behaviour.  Defaults to `false` (SQL is hidden).
     pub show_sql: bool,
+    /// Timeout in seconds for LLM HTTP requests.
+    ///
+    /// When the AI provider does not respond within this many seconds the
+    /// request is cancelled and an error is shown.  Defaults to `30`.
+    ///
+    /// ```toml
+    /// [ai]
+    /// timeout = 60
+    /// ```
+    #[serde(default = "default_ai_timeout")]
+    pub timeout: u64,
 }
 
 fn default_context_window() -> u32 {
     128_000
+}
+
+fn default_ai_timeout() -> u64 {
+    30
+}
+
+fn default_ssh_connect_timeout() -> u64 {
+    15
 }
 
 fn default_true() -> bool {
@@ -274,6 +293,7 @@ impl Default for AiConfig {
             project_system_prompt: None,
             project_context_files: Vec::new(),
             show_sql: false,
+            timeout: default_ai_timeout(),
         }
     }
 }
@@ -434,6 +454,17 @@ pub struct SshTunnelConfig {
     /// use (TOFU) and recorded in `known_hosts`; key mismatches emit a
     /// warning but still fail the connection.
     pub strict_host_key_checking: bool,
+    /// Timeout in seconds for establishing the SSH connection.
+    ///
+    /// If the SSH handshake does not complete within this many seconds the
+    /// attempt is cancelled.  Defaults to `15`.
+    ///
+    /// ```toml
+    /// [connections.production.ssh_tunnel]
+    /// connect_timeout = 30
+    /// ```
+    #[serde(default = "default_ssh_connect_timeout")]
+    pub connect_timeout: u64,
 }
 
 impl Default for SshTunnelConfig {
@@ -445,6 +476,7 @@ impl Default for SshTunnelConfig {
             key: None,
             password: None,
             strict_host_key_checking: true,
+            connect_timeout: default_ssh_connect_timeout(),
         }
     }
 }
@@ -859,6 +891,11 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             project_system_prompt: base.ai.project_system_prompt,
             project_context_files: base.ai.project_context_files,
             show_sql: overlay.ai.show_sql || base.ai.show_sql,
+            timeout: if overlay.ai.timeout == default_ai_timeout() {
+                base.ai.timeout
+            } else {
+                overlay.ai.timeout
+            },
         },
         logging: LoggingConfig {
             max_file_size_mb: if overlay.logging.max_file_size_mb
@@ -1851,5 +1888,87 @@ protected_tables = ["users", "payments", "audit_log"]
             // A .rpg.toml exists somewhere above the temp dir — that is fine.
             assert!(path.file_name().unwrap() == ".rpg.toml");
         }
+    }
+
+    // -- AI timeout ----------------------------------------------------------
+
+    #[test]
+    fn ai_timeout_default_is_30() {
+        let cfg = AiConfig::default();
+        assert_eq!(cfg.timeout, 30, "AI timeout should default to 30 seconds");
+    }
+
+    #[test]
+    fn parse_ai_timeout() {
+        let toml_str = r"
+[ai]
+timeout = 60
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ai.timeout, 60);
+    }
+
+    #[test]
+    fn merge_ai_timeout_overlay_wins_when_non_default() {
+        let base = Config {
+            ai: AiConfig {
+                timeout: 10,
+                ..AiConfig::default()
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            ai: AiConfig {
+                timeout: 90,
+                ..AiConfig::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.ai.timeout, 90);
+    }
+
+    #[test]
+    fn merge_ai_timeout_base_preserved_when_overlay_is_default() {
+        let base = Config {
+            ai: AiConfig {
+                timeout: 10,
+                ..AiConfig::default()
+            },
+            ..Default::default()
+        };
+        // overlay has timeout = 30 (default)
+        let overlay = Config::default();
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.ai.timeout, 10);
+    }
+
+    // -- SSH connect_timeout -------------------------------------------------
+
+    #[test]
+    fn ssh_connect_timeout_default_is_15() {
+        let cfg = SshTunnelConfig::default();
+        assert_eq!(
+            cfg.connect_timeout, 15,
+            "SSH connect_timeout should default to 15 seconds"
+        );
+    }
+
+    #[test]
+    fn parse_ssh_connect_timeout() {
+        let toml_str = r#"
+[connections.prod.ssh_tunnel]
+host = "bastion.example.com"
+port = 22
+user = "deploy"
+connect_timeout = 30
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let tunnel = cfg
+            .connections
+            .get("prod")
+            .and_then(|p| p.ssh_tunnel.as_ref())
+            .expect("prod ssh_tunnel should be present");
+        assert_eq!(tunnel.connect_timeout, 30);
     }
 }
