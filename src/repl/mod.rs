@@ -892,6 +892,10 @@ pub struct ReplSettings {
     pub exec_mode: ExecMode,
     /// Auto-EXPLAIN level — prepend EXPLAIN to queries when not Off.
     pub auto_explain: AutoExplain,
+    /// Controls how EXPLAIN output is rendered in the interactive REPL.
+    ///
+    /// Set via `\pset explain_format enhanced|raw|compact`.
+    pub explain_format: crate::explain::ExplainFormat,
     /// Context from the most-recently failed query.
     ///
     /// Populated whenever a query returns an error; cleared on the next
@@ -1092,6 +1096,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("input_mode", &self.input_mode)
             .field("exec_mode", &self.exec_mode)
             .field("auto_explain", &self.auto_explain)
+            .field("explain_format", &self.explain_format)
             .field(
                 "last_error",
                 &self.last_error.as_ref().map(|e| e.error_message.as_str()),
@@ -1184,6 +1189,7 @@ impl Default for ReplSettings {
             input_mode: InputMode::default(),
             exec_mode: ExecMode::default(),
             auto_explain: AutoExplain::default(),
+            explain_format: crate::explain::ExplainFormat::default(),
             last_error: None,
             conversation: ConversationContext::new(),
             tokens_used: 0,
@@ -2363,6 +2369,23 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 eprintln!("\\pset: invalid pager_min_lines value");
             }
         }
+        "explain_format" => {
+            use crate::explain::ExplainFormat;
+            let fmt = match value.unwrap_or("enhanced") {
+                "enhanced" => ExplainFormat::Enhanced,
+                "raw" => ExplainFormat::Raw,
+                "compact" => ExplainFormat::Compact,
+                other => {
+                    eprintln!(
+                        "\\pset: unknown explain_format \"{other}\"\n\
+                         Valid: enhanced, raw, compact"
+                    );
+                    return;
+                }
+            };
+            settings.explain_format = fmt;
+            println!("EXPLAIN format is {}.", fmt.as_str());
+        }
         other => {
             eprintln!("\\pset: unknown option \"{other}\"");
         }
@@ -2430,6 +2453,7 @@ fn pset_status_text(settings: &ReplSettings) -> String {
             let _ = writeln!(out, "title          = (not set)");
         }
     }
+    let _ = writeln!(out, "explain_format = {}", settings.explain_format.as_str());
     out
 }
 

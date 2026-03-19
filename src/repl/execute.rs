@@ -865,6 +865,85 @@ pub(super) async fn execute_piped(
     }
 }
 
+/// Return `true` if `sql` is an EXPLAIN statement (any variant).
+fn is_explain_statement(sql: &str) -> bool {
+    sql.trim_start().to_uppercase().starts_with("EXPLAIN")
+}
+
+/// Strip psql's aligned table formatting from EXPLAIN output.
+///
+/// When EXPLAIN results come back through `print_result_set_pset`, they are
+/// rendered as an aligned table with a `QUERY PLAN` header, border lines, and
+/// a `(N rows)` footer.  The EXPLAIN text parser expects plain lines without
+/// this decoration.
+fn strip_psql_table_format(formatted: &str) -> String {
+    let mut lines = Vec::new();
+    for line in formatted.lines() {
+        let trimmed = line.trim();
+        // Skip table border lines: "---+---", "------", etc.
+        if trimmed.starts_with('-') && trimmed.chars().all(|c| c == '-' || c == '+') {
+            continue;
+        }
+        // Skip the QUERY PLAN header line.
+        if trimmed == "QUERY PLAN" {
+            continue;
+        }
+        // Skip (N rows) / (N row) footer lines.
+        if trimmed.starts_with('(') && (trimmed.ends_with("rows)") || trimmed.ends_with("row)")) {
+            continue;
+        }
+        // Skip blank lines.
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Strip leading "| " and trailing " |" that the aligned format adds.
+        let content = if let Some(inner) = trimmed.strip_prefix("| ") {
+            inner.strip_suffix(" |").unwrap_or(inner).trim_end()
+        } else if let Some(inner) = trimmed.strip_prefix('|') {
+            inner.strip_suffix('|').unwrap_or(inner).trim()
+        } else {
+            trimmed
+        };
+        if !content.is_empty() {
+            lines.push(content.to_owned());
+        }
+    }
+    lines.join("\n")
+}
+
+/// Given the raw (psql-formatted) output of an EXPLAIN query, parse and render
+/// it as an enhanced view.  Returns `Some(enhanced_text)` on success, or
+/// `None` if parsing fails (caller falls back to raw output).
+fn try_render_explain(raw_text: &str, format: crate::explain::ExplainFormat) -> Option<String> {
+    use crate::explain::{self, ExplainFormat};
+
+    let stripped = strip_psql_table_format(raw_text);
+    let parsed = explain::parse(&stripped).ok()?;
+
+    let issues_plan = explain::to_issues_plan(&parsed);
+    let raw_issues = crate::explain::issues::detect_issues(&issues_plan);
+    let render_issues = explain::issues_to_render(&raw_issues);
+    let render_plan = explain::to_render_plan(&parsed, &issues_plan);
+
+    match format {
+        ExplainFormat::Raw => None,
+        ExplainFormat::Compact => Some(crate::explain::render::render_summary(
+            &render_plan,
+            &render_issues,
+        )),
+        ExplainFormat::Enhanced => {
+            let term_width = crossterm::terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80);
+            Some(crate::explain::render::render_enhanced(
+                &render_plan,
+                &render_issues,
+                term_width,
+            ))
+        }
+    }
+}
+
 /// Execute a SQL string in interactive mode, routing output through the
 /// built-in pager when appropriate.
 ///
@@ -874,6 +953,7 @@ pub(super) async fn execute_piped(
 ///
 /// This wrapper is used only by the interactive REPL loops.  Non-interactive
 /// paths (`-c`, `-f`, piped stdin) call `execute_query` directly.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn execute_query_interactive(
     client: &Client,
     sql: &str,
@@ -922,7 +1002,30 @@ pub(super) async fn execute_query_interactive(
         .into_inner()
         .unwrap_or_default();
 
-    let text = String::from_utf8_lossy(&captured);
+    // For EXPLAIN queries with format != Raw, attempt enhanced rendering.
+    let explain_format = settings.explain_format;
+    let display: std::borrow::Cow<'_, [u8]>;
+    let enhanced: String;
+    let (text, display_bytes) = if ok
+        && is_explain_statement(sql)
+        && explain_format != crate::explain::ExplainFormat::Raw
+    {
+        let raw_text = String::from_utf8_lossy(&captured);
+        if let Some(rendered) = try_render_explain(&raw_text, explain_format) {
+            enhanced = rendered;
+            display = std::borrow::Cow::Borrowed(b"");
+            (enhanced.as_str(), enhanced.as_bytes())
+        } else {
+            display = std::borrow::Cow::Borrowed(captured.as_slice());
+            let s = std::str::from_utf8(&captured).unwrap_or("");
+            (s, captured.as_slice())
+        }
+    } else {
+        display = std::borrow::Cow::Borrowed(captured.as_slice());
+        let s = std::str::from_utf8(&captured).unwrap_or("");
+        (s, captured.as_slice())
+    };
+    let _ = &display; // suppress unused warning
 
     // Determine terminal height; fall back to 24 if unavailable.
     let term_rows = crossterm::terminal::size()
@@ -930,7 +1033,7 @@ pub(super) async fn execute_query_interactive(
         .unwrap_or(24);
 
     if crate::pager::needs_paging_with_min(
-        &text,
+        text,
         term_rows.saturating_sub(2),
         settings.pager_min_lines,
     ) {
@@ -939,7 +1042,7 @@ pub(super) async fn execute_query_interactive(
             sl.clear();
             sl.teardown_scroll_region();
         }
-        run_pager_for_text(settings, &text, &captured);
+        run_pager_for_text(settings, text, display_bytes);
         // Re-establish scroll region, reposition cursor to bottom of scroll
         // region, and re-render status bar after pager exits.
         if let Some(ref sl) = settings.statusline {
@@ -947,7 +1050,7 @@ pub(super) async fn execute_query_interactive(
             sl.render();
         }
     } else {
-        let _ = io::stdout().write_all(&captured);
+        let _ = io::stdout().write_all(display_bytes);
     }
 
     if ok && is_ddl_statement(sql) {
