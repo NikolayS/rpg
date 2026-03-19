@@ -17,6 +17,7 @@ mod copy;
 mod crosstab;
 mod dba;
 mod describe;
+mod explain;
 mod highlight;
 mod init;
 mod io;
