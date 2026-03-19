@@ -1446,6 +1446,8 @@ pub(super) fn is_write_query(sql: &str) -> bool {
         .split_whitespace()
         .next()
         .unwrap_or("")
+        .trim_end_matches(';')
+        .trim_end_matches(',')
         .to_ascii_uppercase();
     // WITH starts a CTE which may wrap DML (INSERT/UPDATE/DELETE/MERGE).
     // Treat all CTEs as potentially mutating to prevent silent auto-execution
@@ -2417,6 +2419,18 @@ mod tests {
         // Leading comments before SELECT must not flip the result.
         assert!(!is_write_query("-- read only\nSELECT 1;"));
         assert!(!is_write_query("/* read */\nselect * from t;"));
+    }
+
+    #[test]
+    fn is_write_trailing_semicolon_is_true() {
+        // A bare keyword followed immediately by a semicolon (no whitespace)
+        // must still be classified as a write query.
+        assert!(is_write_query("VACUUM;"));
+        assert!(is_write_query("vacuum;"));
+        assert!(is_write_query("DELETE;"));
+        assert!(is_write_query("delete;"));
+        assert!(is_write_query("CREATE;"));
+        assert!(is_write_query("create;"));
     }
 
     // -- parse_ai_response_segments + is_write_query: DDL detection ---------
