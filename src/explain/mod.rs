@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! EXPLAIN plan analysis: parsing and issue detection.
+//! EXPLAIN plan analysis: parsing, issue detection, and rendering.
 
 pub mod issues;
+pub mod render;
