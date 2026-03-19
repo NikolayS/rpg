@@ -100,6 +100,10 @@ postgres=# what is DB size?
 Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
+![\\t2s text-to-SQL mode and \\yolo auto-execute mode in action](demos/gif3_t2s.gif)
+
+*`\t2s` shows a SQL preview with confirmation; `\yolo` skips the preview and executes immediately.*
+
 ### /fix — auto-correct errors
 
 ```
@@ -122,6 +126,10 @@ Execute? [Y/n/e]
 (1 row)
 ```
 
+![/fix auto-corrects a typo in the table name and re-runs the query](demos/gif2_typo.gif)
+
+*`/fix` detects a misspelled table name, suggests the corrected query, and executes it after confirmation.*
+
 ### /optimize — index and performance suggestions
 
 ```
@@ -135,6 +143,10 @@ postgres=# /optimize
 2. Run ANALYZE on t1 — statistics may be stale
    ANALYZE public.t1;
 ```
+
+![/explain and /optimize workflow: slow query, AI analysis, index creation, re-run](demos/gif1_optimize.gif)
+
+*`/explain` interprets the query plan; `/optimize` suggests an index. After creating it, the same query runs dramatically faster.*
 
 ## psql-compatible display settings
 
