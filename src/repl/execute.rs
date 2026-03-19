@@ -33,13 +33,18 @@ pub(super) fn print_result_set_pset(
     use crate::output::format_rowset_pset;
     use crate::query::{ColumnMeta, RowSet};
 
-    if is_select && !col_names.is_empty() {
+    if is_select {
         // Heuristic: psql right-aligns numeric columns using type OIDs from
         // the wire protocol.  The simple query protocol does not expose OIDs,
         // so we infer numeric columns by inspecting cell values.  A column is
         // treated as numeric if every non-NULL, non-empty cell in that column
         // parses as an f64 (covers integers, decimals, and scientific notation).
         // Columns that are entirely NULL/empty are NOT marked numeric.
+        //
+        // Note: `col_names` may be empty for zero-column SELECTs such as
+        // `SELECT FROM t WHERE ...`.  These are valid PostgreSQL queries that
+        // return rows with no columns.  We must still render the row-count
+        // footer (e.g. `(1 row)`) to match psql behaviour.
         let columns: Vec<ColumnMeta> = col_names
             .iter()
             .enumerate()
@@ -1705,7 +1710,8 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_no_tx_statement, needs_split_execution};
+    use super::{is_no_tx_statement, needs_split_execution, print_result_set_pset};
+    use crate::output::PsetConfig;
 
     // -- is_no_tx_statement ---------------------------------------------------
 
@@ -1886,5 +1892,87 @@ mod tests {
     #[test]
     fn split_not_needed_empty() {
         assert!(!needs_split_execution(""));
+    }
+
+    // -- print_result_set_pset — zero-column SELECT (issue #643) --------------
+
+    /// `SELECT FROM t WHERE i = 10` is valid SQL that returns 1 row with zero
+    /// columns.  Before the fix, `print_result_set_pset` skipped the display
+    /// block entirely, producing no output.  After the fix it must emit the
+    /// row-count footer to match psql.
+    #[test]
+    fn zero_col_select_one_row_shows_row_count() {
+        let mut buf: Vec<u8> = Vec::new();
+        print_result_set_pset(
+            &mut buf,
+            &[],       // zero column names
+            &[vec![]], // one row, no cells
+            true,      // is_select
+            1,         // rows_affected (not used for SELECT)
+            true,      // is_first
+            &PsetConfig::default(),
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("(1 row)"),
+            "zero-col SELECT must show row-count footer: {out:?}"
+        );
+    }
+
+    #[test]
+    fn zero_col_select_zero_rows_shows_row_count() {
+        let mut buf: Vec<u8> = Vec::new();
+        print_result_set_pset(
+            &mut buf,
+            &[], // zero column names
+            &[], // zero rows
+            true,
+            0,
+            true,
+            &PsetConfig::default(),
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("(0 rows)"),
+            "zero-col zero-row SELECT must show footer: {out:?}"
+        );
+    }
+
+    #[test]
+    fn zero_col_select_shows_separator() {
+        let mut buf: Vec<u8> = Vec::new();
+        print_result_set_pset(
+            &mut buf,
+            &[],
+            &[vec![]],
+            true,
+            1,
+            true,
+            &PsetConfig::default(),
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("--"),
+            "zero-col SELECT must show `--` separator: {out:?}"
+        );
+    }
+
+    #[test]
+    fn non_select_zero_rows_affected_produces_no_output() {
+        let mut buf: Vec<u8> = Vec::new();
+        print_result_set_pset(
+            &mut buf,
+            &[],
+            &[],
+            false, // not a SELECT
+            0,     // zero rows affected (e.g. UPDATE that matched nothing)
+            true,
+            &PsetConfig::default(),
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.is_empty(),
+            "non-SELECT with 0 rows affected must produce no output: {out:?}"
+        );
     }
 }

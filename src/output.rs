@@ -245,8 +245,11 @@ pub fn format_aligned(out: &mut String, rs: &RowSet, cfg: &OutputConfig) -> usiz
     let rows = &rs.rows;
 
     if cols.is_empty() {
-        // No columns: just print the row count footer (suppressed in tuples-only).
+        // Zero-column SELECT (e.g. `SELECT FROM t`): psql renders a bare
+        // `--` separator line in the header position followed by the row-count
+        // footer.  Tuples-only mode suppresses both.
         if !cfg.tuples_only {
+            out.push_str("--\n");
             write_row_count(out, rows.len());
         }
         return rows.len();
@@ -818,8 +821,14 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg
     let null_str = &pcfg.null_display;
 
     if cols.is_empty() {
-        if !pcfg.tuples_only && pcfg.footer {
-            write_row_count(out, rows.len());
+        // Zero-column SELECT (e.g. `SELECT FROM t`): psql renders a bare
+        // `--` separator line in the header position followed by the row-count
+        // footer.  Tuples-only mode suppresses both header and footer.
+        if !pcfg.tuples_only {
+            out.push_str("--\n");
+            if pcfg.footer {
+                write_row_count(out, rows.len());
+            }
         }
         return;
     }
@@ -1805,6 +1814,99 @@ mod tests {
         assert!(
             out.ends_with('\n'),
             "output should end with newline: {out:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Zero-column SELECT rendering (issue #643)
+    // -----------------------------------------------------------------------
+
+    /// `SELECT FROM t WHERE i = 10` returns rows with zero columns.
+    /// psql renders `--\n(1 row)\n` — we must match that.
+    #[test]
+    fn test_aligned_zero_columns_one_row() {
+        let rs = RowSet {
+            columns: vec![],
+            // One row with no cells — matches `SELECT FROM t WHERE i = 10`
+            // when exactly one row is found.
+            rows: vec![vec![]],
+        };
+        let mut out = String::new();
+        format_aligned_pset(
+            &mut out,
+            &rs,
+            &OutputConfig::default(),
+            &PsetConfig::default(),
+        );
+        assert!(
+            out.contains("--"),
+            "zero-col header separator missing: {out:?}"
+        );
+        assert!(out.contains("(1 row)"), "row-count footer missing: {out:?}");
+    }
+
+    #[test]
+    fn test_aligned_zero_columns_zero_rows() {
+        let rs = RowSet {
+            columns: vec![],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        format_aligned_pset(
+            &mut out,
+            &rs,
+            &OutputConfig::default(),
+            &PsetConfig::default(),
+        );
+        assert!(
+            out.contains("--"),
+            "zero-col header separator missing: {out:?}"
+        );
+        assert!(
+            out.contains("(0 rows)"),
+            "row-count footer missing: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_aligned_zero_columns_many_rows() {
+        let rs = RowSet {
+            columns: vec![],
+            rows: vec![vec![]; 10],
+        };
+        let mut out = String::new();
+        format_aligned_pset(
+            &mut out,
+            &rs,
+            &OutputConfig::default(),
+            &PsetConfig::default(),
+        );
+        assert!(
+            out.contains("--"),
+            "zero-col header separator missing: {out:?}"
+        );
+        assert!(
+            out.contains("(10 rows)"),
+            "row-count footer missing: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_aligned_zero_columns_tuples_only_suppresses_all() {
+        let rs = RowSet {
+            columns: vec![],
+            rows: vec![vec![]; 3],
+        };
+        let cfg = PsetConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_aligned_pset(&mut out, &rs, &OutputConfig::default(), &cfg);
+        // tuples-only suppresses both the `--` header and the row-count footer.
+        assert!(
+            out.is_empty(),
+            "tuples-only must produce no output: {out:?}"
         );
     }
 }
