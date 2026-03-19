@@ -823,6 +823,192 @@ fn parse_trigger_line(line: &str) -> Option<TriggerInfo> {
 }
 
 // ---------------------------------------------------------------------------
+// ExplainFormat setting
+// ---------------------------------------------------------------------------
+
+/// Controls how EXPLAIN output is rendered in the REPL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExplainFormat {
+    /// Enhanced view: summary header + colored tree (default).
+    #[default]
+    Enhanced,
+    /// Raw psql-compatible passthrough (no enhancement).
+    Raw,
+    /// Compact: summary header only, no tree.
+    Compact,
+}
+
+impl ExplainFormat {
+    /// Return the string representation of the format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enhanced => "enhanced",
+            Self::Raw => "raw",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adapter: canonical ExplainPlan → issues::ExplainPlan
+// ---------------------------------------------------------------------------
+
+/// Convert the canonical parser [`ExplainPlan`] into the type expected by
+/// [`issues::detect_issues`], computing time percentages along the way.
+pub fn to_issues_plan(plan: &ExplainPlan) -> issues::ExplainPlan {
+    #[allow(clippy::cast_precision_loss)]
+    let total_ms = plan.execution_time_ms.unwrap_or_else(|| {
+        plan.nodes
+            .first()
+            .and_then(|n| n.actual_time_ms.map(|(_, t)| t * n.loops as f64))
+            .unwrap_or(0.0)
+    });
+
+    let root = if let Some(first) = plan.nodes.first() {
+        to_issues_node(first, total_ms)
+    } else {
+        issues::ExplainNode::default()
+    };
+
+    let mut issues_plan = issues::ExplainPlan {
+        root,
+        total_execution_ms: total_ms,
+    };
+    issues_plan.compute_time_percents();
+    issues_plan.assign_indexes();
+    issues_plan
+}
+
+fn to_issues_node(node: &ExplainNode, total_ms: f64) -> issues::ExplainNode {
+    #[allow(clippy::cast_precision_loss)]
+    let loops_f = node.loops as f64;
+    let actual_rows = node.actual_rows.unwrap_or(0.0);
+    let actual_total_ms = node.actual_time_ms.map_or(0.0, |(_, t)| t);
+
+    let time_percent = if total_ms > 0.0 {
+        actual_total_ms / total_ms * 100.0
+    } else {
+        0.0
+    };
+
+    // Parse sort space type from the combined "Memory: 25kB" / "Disk: 38kB" string.
+    let sort_space_type = node.sort_space.as_deref().and_then(|s| {
+        if s.starts_with("Disk") {
+            Some("Disk".to_owned())
+        } else if s.starts_with("Memory") {
+            Some("Memory".to_owned())
+        } else {
+            None
+        }
+    });
+
+    issues::ExplainNode {
+        index: 0, // will be assigned by assign_indexes()
+        node_type: node.node_type.clone(),
+        relation_name: node.relation.clone(),
+        estimated_rows: node.estimated_rows.unwrap_or(0.0),
+        actual_rows,
+        actual_total_ms,
+        time_percent,
+        loops: loops_f,
+        #[allow(clippy::cast_precision_loss)]
+        rows_removed_by_filter: node.rows_removed_by_filter.unwrap_or(0) as f64,
+        sort_space_type,
+        hash_batches: node.hash_batches,
+        workers_planned: node.workers_planned,
+        workers_launched: node.workers_launched,
+        children: node
+            .children
+            .iter()
+            .map(|c| to_issues_node(c, total_ms))
+            .collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adapter: canonical ExplainPlan → render::ExplainPlan
+// ---------------------------------------------------------------------------
+
+/// Convert the canonical parser [`ExplainPlan`] and the issues-module
+/// plan (used for `time_percent` values) into the type expected by
+/// [`render::render_enhanced`].
+pub fn to_render_plan(
+    plan: &ExplainPlan,
+    issues_plan: &issues::ExplainPlan,
+) -> render::ExplainPlan {
+    let root = if let Some(first) = plan.nodes.first() {
+        to_render_node(first, &issues_plan.root)
+    } else {
+        render::ExplainNode::default()
+    };
+
+    render::ExplainPlan {
+        root,
+        execution_time_ms: plan.execution_time_ms,
+        planning_time_ms: plan.planning_time_ms,
+        is_analyze: plan.execution_time_ms.is_some(),
+    }
+}
+
+fn to_render_node(node: &ExplainNode, issues_node: &issues::ExplainNode) -> render::ExplainNode {
+    // Extract the sort space size from the combined "Memory: 25kB" / "Disk: 38kB"
+    // string, stripping the prefix so render.rs gets just the raw size token.
+    let sort_space = node.sort_space.as_deref().map(|s| {
+        if let Some(rest) = s.strip_prefix("Memory: ") {
+            rest.to_owned()
+        } else if let Some(rest) = s.strip_prefix("Disk: ") {
+            rest.to_owned()
+        } else {
+            s.to_owned()
+        }
+    });
+
+    let default_issues_node = issues::ExplainNode::default();
+    let children: Vec<render::ExplainNode> = node
+        .children
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let ic = issues_node.children.get(i).unwrap_or(&default_issues_node);
+            to_render_node(c, ic)
+        })
+        .collect();
+
+    render::ExplainNode {
+        node_type: node.node_type.clone(),
+        relation: node.relation.clone(),
+        actual_time_ms: node.actual_time_ms,
+        actual_rows: node.actual_rows,
+        exclusive_time_ms: node.exclusive_time_ms,
+        time_percent: issues_node.time_percent,
+        loops: node.loops,
+        shared_hit: node.shared_hit,
+        shared_read: node.shared_read,
+        filter: node.filter.clone(),
+        rows_removed_by_filter: node.rows_removed_by_filter,
+        sort_method: node.sort_method.clone(),
+        sort_space,
+        children,
+    }
+}
+
+/// Convert [`issues::PlanIssue`] values into [`render::PlanIssue`] values.
+///
+/// The render module uses a simpler `message` field; we map from `title`.
+pub fn issues_to_render(src: &[issues::PlanIssue]) -> Vec<render::PlanIssue> {
+    src.iter()
+        .map(|i| render::PlanIssue {
+            severity: match i.severity {
+                issues::IssueSeverity::Slow => render::IssueSeverity::Slow,
+                issues::IssueSeverity::Warn => render::IssueSeverity::Warn,
+                issues::IssueSeverity::Info => render::IssueSeverity::Info,
+            },
+            message: i.title.clone(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
