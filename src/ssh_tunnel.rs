@@ -360,8 +360,15 @@ pub async fn open_tunnel(
         strict: cfg.strict_host_key_checking,
     };
 
-    let mut handle = client::connect(ssh_config, ssh_addr.as_str(), handler)
+    let connect_future = client::connect(ssh_config, ssh_addr.as_str(), handler);
+    let connect_timeout = std::time::Duration::from_secs(cfg.connect_timeout);
+    let mut handle = tokio::time::timeout(connect_timeout, connect_future)
         .await
+        .map_err(|_| SshTunnelError::Connect {
+            host: cfg.host.clone(),
+            port: cfg.port,
+            reason: format!("connection timed out after {}s", cfg.connect_timeout),
+        })?
         .map_err(|e| SshTunnelError::Connect {
             host: cfg.host.clone(),
             port: cfg.port,
@@ -781,5 +788,31 @@ mod tests {
             cfg.strict_host_key_checking,
             "strict_host_key_checking should default to true"
         );
+    }
+
+    #[test]
+    fn config_default_connect_timeout_is_15() {
+        let cfg = SshTunnelConfig {
+            host: "bastion.example.com".into(),
+            port: 22,
+            user: "deploy".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.connect_timeout, 15,
+            "connect_timeout should default to 15 seconds"
+        );
+    }
+
+    #[test]
+    fn config_custom_connect_timeout_parsed_from_toml() {
+        let toml_str = r#"
+host = "bastion.example.com"
+port = 22
+user = "deploy"
+connect_timeout = 30
+"#;
+        let cfg: SshTunnelConfig = toml::from_str(toml_str).expect("should parse SshTunnelConfig");
+        assert_eq!(cfg.connect_timeout, 30);
     }
 }

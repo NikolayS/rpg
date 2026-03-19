@@ -13,17 +13,25 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     client: reqwest::Client,
+    /// Timeout in seconds for each HTTP request.
+    timeout_secs: u64,
 }
 
 impl AnthropicProvider {
     /// Create a new `AnthropicProvider`.
     ///
     /// `base_url` defaults to `https://api.anthropic.com` when `None`.
-    pub fn new(api_key: String, base_url: Option<String>) -> Self {
+    /// `timeout_secs` sets the HTTP request timeout; must be > 0.
+    pub fn new(api_key: String, base_url: Option<String>, timeout_secs: u64) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .unwrap_or_default();
         Self {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".to_owned()),
-            client: reqwest::Client::new(),
+            client,
+            timeout_secs,
         }
     }
 }
@@ -80,6 +88,7 @@ impl LlmProvider for AnthropicProvider {
                 body["system"] = serde_json::Value::String(sys);
             }
 
+            let timeout_secs = self.timeout_secs;
             let resp = self
                 .client
                 .post(format!("{}/v1/messages", self.base_url))
@@ -89,7 +98,13 @@ impl LlmProvider for AnthropicProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Anthropic API error: {e}"))?;
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        format!("AI request timed out after {timeout_secs}s")
+                    } else {
+                        format!("Anthropic API error: {e}")
+                    }
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -161,6 +176,7 @@ impl LlmProvider for AnthropicProvider {
                 body["system"] = serde_json::Value::String(sys);
             }
 
+            let timeout_secs = self.timeout_secs;
             let resp = self
                 .client
                 .post(format!("{}/v1/messages", self.base_url))
@@ -170,7 +186,13 @@ impl LlmProvider for AnthropicProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Anthropic API error: {e}"))?;
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        format!("AI request timed out after {timeout_secs}s")
+                    } else {
+                        format!("Anthropic API error: {e}")
+                    }
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -241,19 +263,19 @@ mod tests {
 
     #[test]
     fn provider_name() {
-        let p = AnthropicProvider::new("key".to_owned(), None);
+        let p = AnthropicProvider::new("key".to_owned(), None, 30);
         assert_eq!(p.name(), "anthropic");
     }
 
     #[test]
     fn default_model() {
-        let p = AnthropicProvider::new("key".to_owned(), None);
+        let p = AnthropicProvider::new("key".to_owned(), None, 30);
         assert_eq!(p.default_model(), "claude-sonnet-4-6");
     }
 
     #[test]
     fn default_base_url() {
-        let p = AnthropicProvider::new("key".to_owned(), None);
+        let p = AnthropicProvider::new("key".to_owned(), None, 30);
         assert_eq!(p.base_url, "https://api.anthropic.com");
     }
 
@@ -262,7 +284,14 @@ mod tests {
         let p = AnthropicProvider::new(
             "key".to_owned(),
             Some("https://proxy.example.com".to_owned()),
+            30,
         );
         assert_eq!(p.base_url, "https://proxy.example.com");
+    }
+
+    #[test]
+    fn timeout_stored() {
+        let p = AnthropicProvider::new("key".to_owned(), None, 60);
+        assert_eq!(p.timeout_secs, 60);
     }
 }
