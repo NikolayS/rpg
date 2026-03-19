@@ -23,6 +23,8 @@ mod init;
 mod io;
 mod large_object;
 mod logging;
+#[cfg(feature = "lua")]
+mod lua_engine;
 mod markdown;
 mod metacmd;
 mod named;

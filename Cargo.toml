@@ -9,6 +9,7 @@ repository = "https://github.com/NikolayS/project-alpha"
 
 [features]
 integration = []
+lua = ["dep:mlua"]
 
 [profile.release]
 strip = true
@@ -42,6 +43,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signa
 tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26", default-features = false }
 x509-certificate = { version = "0.23", default-features = false }
+mlua = { version = "0.10", features = ["lua54", "send", "vendored"], optional = true }
 unicode-width = "0.2"
 webpki-roots = "0.26"
 

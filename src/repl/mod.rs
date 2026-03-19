@@ -1046,6 +1046,15 @@ pub struct ReplSettings {
     /// `/ask` transaction (which SHOULD be rolled back if it leaks into the
     /// next command due to an error or interruption).
     pub internal_tx: bool,
+
+    // -- Lua scripting (#659) -----------------------------------------------
+    /// Optional Lua scripting engine for user-defined meta commands.
+    ///
+    /// Present only when compiled with `--features lua` and initialised at
+    /// REPL startup.  Shared via `Arc<Mutex<..>>` so that tab completion
+    /// can read registered command names.
+    #[cfg(feature = "lua")]
+    pub lua_engine: Option<std::sync::Arc<std::sync::Mutex<crate::lua_engine::LuaEngine>>>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1211,6 +1220,8 @@ impl Default for ReplSettings {
             prompt_interrupted: false,
             last_t2s_nl_query: None,
             internal_tx: false,
+            #[cfg(feature = "lua")]
+            lua_engine: None,
         }
     }
 }
@@ -3067,6 +3078,18 @@ async fn dispatch_meta(
         return MetaResult::Continue;
     }
 
+    // -- Reclassify Unknown → LuaCustom if a Lua command matches -----------
+    #[cfg(feature = "lua")]
+    let mut parsed = parsed;
+    #[cfg(feature = "lua")]
+    if let Some(ref engine) = settings.lua_engine {
+        if let Ok(guard) = engine.lock() {
+            let names: std::collections::HashSet<String> =
+                guard.command_names().into_iter().collect();
+            parsed.reclassify_lua(&names);
+        }
+    }
+
     // Try I/O commands first (they are the most numerous).
     if let Some(result) = dispatch_io(&parsed, client, params, settings, tx).await {
         return result;
@@ -3173,6 +3196,82 @@ async fn dispatch_meta(
         }
         MetaCmd::ToggleAutoExplain => {
             apply_fkey_toggle(FKeyAction::AutoExplain, settings);
+        }
+        // -- Lua scripting (#659) -------------------------------------------
+        #[cfg(feature = "lua")]
+        MetaCmd::Lua => {
+            match parsed.pattern.as_deref() {
+                Some(code) => {
+                    if let Some(ref engine) = settings.lua_engine {
+                        match engine.lock() {
+                            Ok(mut eng) => match eng.exec_inline(code) {
+                                Ok(lines) => {
+                                    for line in &lines {
+                                        println!("{line}");
+                                    }
+                                }
+                                Err(e) => eprintln!("\\lua: {e}"),
+                            },
+                            Err(e) => eprintln!("\\lua: engine lock failed: {e}"),
+                        }
+                    } else {
+                        eprintln!("\\lua: Lua engine not initialised");
+                    }
+                }
+                None => eprintln!("\\lua: code argument required"),
+            }
+        }
+        #[cfg(feature = "lua")]
+        MetaCmd::LuaFile => {
+            match parsed.pattern.as_deref() {
+                Some(path) => {
+                    if let Some(ref engine) = settings.lua_engine {
+                        match engine.lock() {
+                            Ok(mut eng) => match eng.exec_file(path) {
+                                Ok(lines) => {
+                                    for line in &lines {
+                                        println!("{line}");
+                                    }
+                                }
+                                Err(e) => eprintln!("\\luafile: {e}"),
+                            },
+                            Err(e) => eprintln!("\\luafile: engine lock failed: {e}"),
+                        }
+                    } else {
+                        eprintln!("\\luafile: Lua engine not initialised");
+                    }
+                }
+                None => eprintln!("\\luafile: file path required"),
+            }
+        }
+        #[cfg(feature = "lua")]
+        MetaCmd::LuaCustom(ref cmd_name) => {
+            let args = parsed.pattern.as_deref().unwrap_or("");
+            // Call the Lua callback while holding the engine lock, then
+            // drop the lock before executing any returned SQL (which needs
+            // `&mut settings`).
+            let lua_result = settings.lua_engine.as_ref().and_then(|engine| {
+                match engine.lock() {
+                    Ok(mut eng) => Some(eng.call_command(cmd_name, args)),
+                    Err(e) => {
+                        eprintln!("\\{cmd_name}: engine lock failed: {e}");
+                        None
+                    }
+                }
+            });
+            if let Some(result) = lua_result {
+                match result {
+                    Ok((lines, sql)) => {
+                        for line in &lines {
+                            println!("{line}");
+                        }
+                        if let Some(query) = sql {
+                            execute_query(client, &query, settings, tx).await;
+                        }
+                    }
+                    Err(e) => eprintln!("\\{cmd_name}: {e}"),
+                }
+            }
         }
         MetaCmd::Unknown(ref name) => {
             eprintln!("Invalid command \\{name}. Try \\? for help.");
@@ -3706,6 +3805,30 @@ pub async fn run_repl(
         }
     }
 
+    // -- Initialise Lua scripting engine (#659) ----------------------------
+    #[cfg(feature = "lua")]
+    {
+        match crate::lua_engine::LuaEngine::new() {
+            Ok(mut engine) => {
+                engine.load_user_scripts();
+                let cmd_count = engine.command_names().len();
+                if cmd_count > 0 && !settings.quiet {
+                    eprintln!(
+                        "rpg: lua: loaded {cmd_count} custom command{}",
+                        if cmd_count == 1 { "" } else { "s" }
+                    );
+                }
+                settings.lua_engine =
+                    Some(std::sync::Arc::new(std::sync::Mutex::new(engine)));
+            }
+            Err(e) => {
+                if !settings.quiet {
+                    eprintln!("rpg: lua: failed to initialise: {e}");
+                }
+            }
+        }
+    }
+
     // Build rustyline editor (skip if --no-readline).
     let use_readline = !no_readline && io::stdin().is_terminal();
 
@@ -3834,6 +3957,11 @@ async fn run_readline_loop(
     // Enable syntax highlighting unless the user opted out or $TERM is dumb.
     let highlight = !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb");
     let mut helper = RpgHelper::new(Arc::clone(&cache), highlight);
+    // Wire Lua engine into tab completion.
+    #[cfg(feature = "lua")]
+    if let Some(ref engine) = settings.lua_engine {
+        helper.set_lua_engine(std::sync::Arc::clone(engine));
+    }
     // Apply the experimental dropdown flag from config (disabled by default).
     helper.set_dropdown_completion(settings.config.display.dropdown_completion);
 

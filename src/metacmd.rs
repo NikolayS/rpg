@@ -355,6 +355,17 @@ pub enum MetaCmd {
     /// Payload: the OID as a string.
     LoUnlink(String),
 
+    // -- Lua scripting (#659) -----------------------------------------------
+    /// `\lua <code>` — execute inline Lua code.
+    #[cfg(feature = "lua")]
+    Lua,
+    /// `\luafile <path>` — execute a Lua script file.
+    #[cfg(feature = "lua")]
+    LuaFile,
+    /// A Lua-registered custom command: `\<name> [args]`.
+    #[cfg(feature = "lua")]
+    LuaCustom(String),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -448,6 +459,27 @@ impl ParsedMeta {
             system: false,
             pattern: None,
             echo_hidden: false,
+        }
+    }
+
+    /// If this is an `Unknown` command whose name matches a Lua-registered
+    /// custom command, reclassify it as `LuaCustom`.
+    ///
+    /// `lua_names` should be the set of registered Lua command names.
+    #[cfg(feature = "lua")]
+    pub fn reclassify_lua(&mut self, lua_names: &std::collections::HashSet<String>) {
+        if let MetaCmd::Unknown(ref raw) = self.cmd {
+            // `raw` is e.g. `"mycmd some args"`.  Extract the command token.
+            let token = raw.split_whitespace().next().unwrap_or(raw);
+            if lua_names.contains(token) {
+                let args = raw[token.len()..].trim_start();
+                self.pattern = if args.is_empty() {
+                    None
+                } else {
+                    Some(args.to_owned())
+                };
+                self.cmd = MetaCmd::LuaCustom(token.to_owned());
+            }
         }
     }
 }
@@ -1010,6 +1042,44 @@ fn parse_l(input: &str) -> ParsedMeta {
     // `\log-file` and bare `\l` (longest prefix first).
     if let Some(rest) = input.strip_prefix("lo_") {
         return parse_lo_family(rest);
+    }
+
+    // `\luafile <path>` — must be checked before `\lua` (longer prefix).
+    #[cfg(feature = "lua")]
+    if let Some(rest) = input.strip_prefix("luafile") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let path = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::LuaFile,
+                plus: false,
+                system: false,
+                pattern: if path.is_empty() {
+                    None
+                } else {
+                    Some(path.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
+    }
+
+    // `\lua <code>` — execute inline Lua code.
+    #[cfg(feature = "lua")]
+    if let Some(rest) = input.strip_prefix("lua") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let code = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::Lua,
+                plus: false,
+                system: false,
+                pattern: if code.is_empty() {
+                    None
+                } else {
+                    Some(code.to_owned())
+                },
+                echo_hidden: false,
+            };
+        }
     }
 
     // `\log-file [path]` — must be checked before bare `\l` (longer prefix).

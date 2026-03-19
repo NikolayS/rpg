@@ -1021,6 +1021,9 @@ pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
     highlight: bool,
+    /// Lua engine handle for completing Lua-registered command names.
+    #[cfg(feature = "lua")]
+    lua_engine: Option<std::sync::Arc<std::sync::Mutex<crate::lua_engine::LuaEngine>>>,
     /// Current input mode — SQL highlighting is suppressed in `Text2Sql` mode
     /// because the user is typing natural language, not SQL.
     input_mode: crate::repl::InputMode,
@@ -1059,12 +1062,23 @@ impl RpgHelper {
         Self {
             cache,
             highlight,
+            #[cfg(feature = "lua")]
+            lua_engine: None,
             input_mode: crate::repl::InputMode::Sql,
             completion_enabled: true,
             dropdown_completion_enabled: false,
             dropdown: Arc::new(Mutex::new(DropdownState::default())),
             prompt_width: 0,
         }
+    }
+
+    /// Set the Lua engine handle for tab completion of Lua commands.
+    #[cfg(feature = "lua")]
+    pub fn set_lua_engine(
+        &mut self,
+        engine: std::sync::Arc<std::sync::Mutex<crate::lua_engine::LuaEngine>>,
+    ) {
+        self.lua_engine = Some(engine);
     }
 
     /// Return a clone of the shared dropdown state handle.
@@ -1217,12 +1231,40 @@ impl Completer for RpgHelper {
                 .filter_map(|d| fuzzy_match(&completion_prefix, d).map(|s| (d.clone(), s)))
                 .collect(),
 
-            CompletionContext::BackslashCmd => BACKSLASH_CMDS
-                .iter()
-                .filter_map(|cmd| {
-                    fuzzy_match(&completion_prefix, cmd).map(|s| ((*cmd).to_owned(), s))
-                })
-                .collect(),
+            CompletionContext::BackslashCmd => {
+                #[allow(unused_mut)]
+                let mut cands: Vec<(String, i32)> = BACKSLASH_CMDS
+                    .iter()
+                    .filter_map(|cmd| {
+                        fuzzy_match(&completion_prefix, cmd).map(|s| ((*cmd).to_owned(), s))
+                    })
+                    .collect();
+
+                // Append Lua-registered custom commands when available.
+                #[cfg(feature = "lua")]
+                if let Some(ref engine) = self.lua_engine {
+                    if let Ok(guard) = engine.lock() {
+                        for name in guard.command_names() {
+                            if let Some(score) = fuzzy_match(&completion_prefix, &name) {
+                                cands.push((name, score));
+                            }
+                        }
+                    }
+                }
+
+                // Also add the built-in lua commands when the feature is
+                // enabled.
+                #[cfg(feature = "lua")]
+                {
+                    for extra in &["lua", "luafile"] {
+                        if let Some(score) = fuzzy_match(&completion_prefix, extra) {
+                            cands.push(((*extra).to_owned(), score));
+                        }
+                    }
+                }
+
+                cands
+            }
 
             // FileName: delegate to the OS (no DB lookup needed).  For now we
             // return nothing and let the user type the path manually.
