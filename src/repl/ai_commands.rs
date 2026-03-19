@@ -833,6 +833,11 @@ pub(super) async fn handle_ai_ask(
                 }
 
                 // Decide whether to prompt before executing.
+                //
+                // `in_text2sql` means the user is in \t2s mode and typed a
+                // natural-language prompt — they explicitly want SQL executed,
+                // including write queries (with confirmation).  `/ask` is a
+                // question command and must never execute write queries.
                 let read_only = !is_write_query(sql);
                 let choice = if yolo {
                     // Yolo: auto-execute.  Write queries still go through the
@@ -846,46 +851,64 @@ pub(super) async fn handle_ai_ask(
                         );
                     }
                     AskChoice::Yes
+                } else if !read_only && in_text2sql {
+                    // text2sql mode: user asked for a write operation — show
+                    // the SQL box (printed above) and ask for confirmation.
+                    // Default is NO so accidental Enter does not mutate data.
+                    ask_yne_prompt("Execute write query? [y/N/e] ", false)
                 } else if !read_only {
-                    // /ask is a question command — show the SQL but do not execute
-                    // DML or DDL in any mode (including text2sql).  Write queries
-                    // require the user to copy and run them manually, or use raw
-                    // SQL input / a direct \t2s prompt — not /ask.
+                    // /ask is a question command — show the SQL but do not
+                    // execute DML or DDL.  The user can copy and run it
+                    // manually or use raw SQL input / a direct \t2s prompt.
                     eprintln!(
                         "-- (write query — not executed in /ask mode; \
                          use \\t2s to execute)"
                     );
                     AskChoice::No
                 } else if text2sql_show {
-                    // text2sql interactive mode, read-only query: show the SQL box
-                    // (already printed above) and ask for confirmation.
+                    // text2sql interactive mode, read-only query: show the SQL
+                    // box (already printed above) and ask for confirmation.
                     ask_yne_prompt("Execute? [Y/n/e] ", true)
                 } else {
                     // /ask interactive mode, read-only: auto-execute.
                     AskChoice::Yes
                 };
 
+                // Whether to skip the read-only transaction wrapper.
+                // Write queries confirmed in text2sql mode must execute
+                // directly — wrapping them in a read-only tx would reject
+                // every DML/DDL the user intended to run.
+                let t2s_write = in_text2sql && !read_only;
+
                 match choice {
                     AskChoice::Yes => {
-                        // Always wrap in a read-only transaction regardless of
-                        // is_write_query classification.  This provides a
-                        // second line of defence: even in yolo mode, the
-                        // database itself will reject any mutation that slips
-                        // past the is_write_query advisory check.
-                        let exec_sql = std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(sql));
-                        // Mark this as an internal /ask transaction so that
-                        // auto_rollback_stale_tx can clean it up if the query
-                        // is interrupted before commit.
-                        settings.internal_tx = true;
-                        let ok = execute_query_interactive(client, &exec_sql, settings, tx).await;
-                        if !ok {
-                            // Roll back on error to leave the session clean.
-                            let _ = client.simple_query("rollback").await;
-                            *tx = TxState::Idle;
-                        }
-                        // Clear the internal-tx flag — the transaction has
-                        // been committed or rolled back.
-                        settings.internal_tx = false;
+                        let ok = if t2s_write {
+                            // text2sql write query: execute directly without
+                            // the read-only transaction wrapper.
+                            execute_query_interactive(client, sql, settings, tx).await
+                        } else {
+                            // /ask or text2sql read-only query: wrap in a
+                            // read-only transaction as a defence-in-depth
+                            // guard.  The database will reject any mutation
+                            // that slips past the is_write_query check.
+                            let exec_sql = std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(sql));
+                            // Mark this as an internal /ask transaction so
+                            // that auto_rollback_stale_tx can clean it up if
+                            // the query is interrupted before commit.
+                            settings.internal_tx = true;
+                            let ok =
+                                execute_query_interactive(client, &exec_sql, settings, tx).await;
+                            if !ok {
+                                // Roll back on error to leave the session
+                                // clean.
+                                let _ = client.simple_query("rollback").await;
+                                *tx = TxState::Idle;
+                            }
+                            // Clear the internal-tx flag — the transaction
+                            // has been committed or rolled back.
+                            settings.internal_tx = false;
+                            ok
+                        };
                         if ok {
                             settings.conversation.push_query_result(sql, "(executed)");
                         } else if let Some(err) = &settings.last_error {
@@ -905,23 +928,31 @@ pub(super) async fn handle_ai_ask(
                             if edited.is_empty() {
                                 eprintln!("(empty — skipped)");
                             } else {
-                                // Always wrap the edited query in a read-only
-                                // transaction — same policy as the non-edit
-                                // path.  The database enforces read-only
-                                // regardless of what is_write_query says.
-                                let exec_edited =
-                                    std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited));
-                                // Mark as internal /ask transaction.
-                                settings.internal_tx = true;
-                                let ok =
-                                    execute_query_interactive(client, &exec_edited, settings, tx)
-                                        .await;
-                                if !ok {
-                                    let _ = client.simple_query("rollback").await;
-                                    *tx = TxState::Idle;
-                                }
-                                // Clear the internal-tx flag.
-                                settings.internal_tx = false;
+                                let edited_read_only = !is_write_query(edited);
+                                let ok = if t2s_write && !edited_read_only {
+                                    // text2sql write query (possibly modified):
+                                    // execute directly.
+                                    execute_query_interactive(client, edited, settings, tx).await
+                                } else {
+                                    // /ask or read-only edited query: wrap in
+                                    // a read-only transaction.
+                                    let exec_edited =
+                                        std::borrow::Cow::Owned(wrap_in_ask_readonly_tx(edited));
+                                    settings.internal_tx = true;
+                                    let ok = execute_query_interactive(
+                                        client,
+                                        &exec_edited,
+                                        settings,
+                                        tx,
+                                    )
+                                    .await;
+                                    if !ok {
+                                        let _ = client.simple_query("rollback").await;
+                                        *tx = TxState::Idle;
+                                    }
+                                    settings.internal_tx = false;
+                                    ok
+                                };
                                 if ok {
                                     settings
                                         .conversation
@@ -2566,6 +2597,36 @@ mod tests {
         assert!(
             has_sql,
             "write query must be parsed as a SQL segment so it can be shown to the user"
+        );
+    }
+
+    // -- text2sql write query classification ----------------------------------
+
+    /// In `\t2s` mode the AI may generate an INSERT or other write query in
+    /// response to a natural-language prompt (e.g. "fill orders table with
+    /// sample data").  The query must be classified as a write query so the
+    /// caller can route it to the `ask_yne_prompt("Execute write query?…")`
+    /// path rather than silently blocking it the way `/ask` mode does.
+    #[test]
+    fn t2s_insert_classified_as_write_query() {
+        let sql = "INSERT INTO public.orders (user_id, amount, status) SELECT \
+             (random() * 10000)::bigint, (random() * 1000)::numeric(10,2), \
+             'pending' FROM generate_series(1, 1000000);";
+        assert!(
+            is_write_query(sql),
+            "INSERT must be classified as a write query for the \
+             text2sql confirmation prompt"
+        );
+    }
+
+    /// A SELECT generated by text2sql is NOT a write query — it goes through
+    /// the read-only transaction wrapper and prompts `Execute? [Y/n/e]`.
+    #[test]
+    fn t2s_select_not_write_query() {
+        let sql = "SELECT count(*) FROM public.orders;";
+        assert!(
+            !is_write_query(sql),
+            "SELECT must not be classified as a write query in text2sql mode"
         );
     }
 
