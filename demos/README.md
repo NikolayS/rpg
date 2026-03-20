@@ -8,6 +8,7 @@ the [VHS](https://github.com/charmbracelet/vhs) tape files used to render them.
 | `gif1_optimize.gif` | Slow query → `/explain` → `/optimize` → index creation → fast re-run |
 | `gif2_typo.gif` | Typo in table name → `/fix` corrects and re-executes |
 | `gif3_t2s.gif` | `\t2s` text-to-SQL with confirmation, then `\yolo` auto-execute |
+| `gif4_pspg.gif` | Built-in pager → `\set PAGER pspg` → same query routed through pspg |
 
 ## Prerequisites
 
@@ -41,6 +42,7 @@ Render each GIF individually:
 vhs demos/gif1_optimize.tape
 vhs demos/gif2_typo.tape
 vhs demos/gif3_t2s.tape
+vhs demos/gif4_pspg.tape
 ```
 
 Or render all at once:
