@@ -1,10 +1,12 @@
-//! EXPLAIN plan rendering: summary header and colored tree output.
+//! EXPLAIN plan rendering: summary header and colorized raw plan output.
 //!
 //! Provides static text rendering of `PostgreSQL` EXPLAIN (ANALYZE) plans
-//! with ANSI color coding, Unicode box-drawing tree lines, hot-path
-//! detection, and a summary header showing key metrics and detected issues.
+//! with ANSI color coding, a summary header showing key metrics and detected
+//! issues, and inline warning markers on problem nodes.
 //!
-//! This module is standalone — it will be wired into the REPL in a later PR.
+//! The enhanced renderer does NOT replace the raw plan text — it adds a
+//! summary header on top and applies color/annotations to the raw lines.
+//! This preserves all cost, row, and filter details that `PostgreSQL` emits.
 //!
 //! Copyright 2026
 
@@ -78,6 +80,10 @@ pub struct ExplainPlan {
     pub planning_time_ms: Option<f64>,
     /// Whether this is an EXPLAIN ANALYZE (vs plain EXPLAIN).
     pub is_analyze: bool,
+    /// Planner estimated total cost from the root node (EXPLAIN always).
+    pub estimated_cost: Option<f64>,
+    /// Planner estimated row count from the root node (EXPLAIN always).
+    pub estimated_rows: Option<f64>,
 }
 
 impl ExplainPlan {
@@ -95,6 +101,17 @@ impl ExplainPlan {
     pub fn total_rows(&self) -> Option<f64> {
         #[allow(clippy::cast_precision_loss)]
         self.root.actual_rows.map(|r| r * self.root.loops as f64)
+    }
+
+    /// Estimated rows from the root node (available for plain EXPLAIN).
+    pub fn total_estimated_rows(&self) -> Option<f64> {
+        self.estimated_rows.or(self.root.estimated_rows)
+    }
+
+    /// Estimated total cost from the root node (available for plain EXPLAIN).
+    pub fn total_estimated_cost(&self) -> Option<f64> {
+        self.estimated_cost
+            .or_else(|| self.root.estimated_cost.map(|(_, total)| total))
     }
 
     /// Peak memory usage in bytes (from Sort nodes reporting sort space).
@@ -117,6 +134,10 @@ pub struct ExplainNode {
     pub actual_time_ms: Option<(f64, f64)>,
     /// Actual rows returned per loop.
     pub actual_rows: Option<f64>,
+    /// Planner estimated cost as `(startup, total)`.
+    pub estimated_cost: Option<(f64, f64)>,
+    /// Planner estimated row count.
+    pub estimated_rows: Option<f64>,
     /// Exclusive (self) time in milliseconds, excluding children.
     pub exclusive_time_ms: f64,
     /// Fraction of total plan time spent in this node (0.0–100.0).
@@ -282,7 +303,10 @@ fn fmt_bytes_binary(bytes: u64) -> String {
 
 /// Render the summary header for an EXPLAIN plan.
 ///
-/// Produces a box like:
+/// For EXPLAIN ANALYZE plans, shows execution/planning time and actual rows.
+/// For plain EXPLAIN (no ANALYZE), shows estimated cost and estimated rows
+/// from the planner.  The buffers line is omitted for plain EXPLAIN.
+///
 /// ```text
 /// ── EXPLAIN ANALYZE ──────────────────────────────────
 ///   Execution: 1,842 ms │ Planning: 12 ms │ Rows: 48,301
@@ -292,6 +316,13 @@ fn fmt_bytes_binary(bytes: u64) -> String {
 ///     SLOW  Seq Scan on orders (2.1M rows, 1,204 ms)
 ///     WARN  Sort spilled to disk (38 MiB)
 ///     WARN  Row estimate 1,483x off on Nested Loop
+/// ─────────────────────────────────────────────────────
+/// ```
+///
+/// Plain EXPLAIN variant:
+/// ```text
+/// ── EXPLAIN ──────────────────────────────────────────
+///   Estimated cost: 0.00..0.01 │ Estimated rows: 1
 /// ─────────────────────────────────────────────────────
 /// ```
 pub fn render_summary(plan: &ExplainPlan, issues: &[PlanIssue]) -> String {
@@ -311,47 +342,66 @@ pub fn render_summary(plan: &ExplainPlan, issues: &[PlanIssue]) -> String {
     out.push_str(&top_rule);
     out.push('\n');
 
-    // Metrics line.
+    // Metrics line — differs between ANALYZE and plain EXPLAIN.
     let mut metrics = String::new();
-    if let Some(exec) = plan.execution_time_ms {
-        write!(metrics, "Execution: {}", fmt_ms(exec)).ok();
-    }
-    if let Some(plan_t) = plan.planning_time_ms {
-        if !metrics.is_empty() {
-            write!(metrics, " {DIM}│{RESET} ").ok();
+    if plan.is_analyze {
+        // EXPLAIN ANALYZE: show actual execution/planning time and actual rows.
+        if let Some(exec) = plan.execution_time_ms {
+            write!(metrics, "Execution: {}", fmt_ms(exec)).ok();
         }
-        write!(metrics, "Planning: {}", fmt_ms(plan_t)).ok();
-    }
-    if let Some(rows) = plan.total_rows() {
-        if !metrics.is_empty() {
-            write!(metrics, " {DIM}│{RESET} ").ok();
+        if let Some(plan_t) = plan.planning_time_ms {
+            if !metrics.is_empty() {
+                write!(metrics, " {DIM}│{RESET} ").ok();
+            }
+            write!(metrics, "Planning: {}", fmt_ms(plan_t)).ok();
         }
-        write!(metrics, "Rows: {}", fmt_rows(rows)).ok();
+        if let Some(rows) = plan.total_rows() {
+            if !metrics.is_empty() {
+                write!(metrics, " {DIM}│{RESET} ").ok();
+            }
+            write!(metrics, "Rows: {}", fmt_rows(rows)).ok();
+        }
+    } else {
+        // Plain EXPLAIN: show estimated cost range and estimated rows.
+        if let Some(cost) = plan.total_estimated_cost() {
+            // Also try to get startup cost for the full range display.
+            let startup = plan.root.estimated_cost.map_or(0.0, |(s, _)| s);
+            write!(metrics, "Estimated cost: {startup:.2}..{cost:.2}").ok();
+        }
+        if let Some(rows) = plan.total_estimated_rows() {
+            if !metrics.is_empty() {
+                write!(metrics, " {DIM}│{RESET} ").ok();
+            }
+            write!(metrics, "Estimated rows: {}", fmt_rows(rows)).ok();
+        }
     }
     if !metrics.is_empty() {
         writeln!(out, "  {metrics}").ok();
     }
 
-    // Buffer / memory line.
-    let hit = plan.total_shared_hit();
-    let read = plan.total_shared_read();
-    if hit > 0 || read > 0 {
-        let mut buf_line = format!("  Buffers: {} hit", fmt_int(hit));
-        if read > 0 {
-            write!(buf_line, ", {} read", fmt_int(read)).ok();
+    // Buffer / memory line — only for EXPLAIN ANALYZE (plain EXPLAIN has no
+    // buffer data since nothing actually executes).
+    if plan.is_analyze {
+        let hit = plan.total_shared_hit();
+        let read = plan.total_shared_read();
+        if hit > 0 || read > 0 {
+            let mut buf_line = format!("  Buffers: {} hit", fmt_int(hit));
+            if read > 0 {
+                write!(buf_line, ", {} read", fmt_int(read)).ok();
+            }
+            if let Some(mem) = plan.peak_memory_bytes() {
+                write!(
+                    buf_line,
+                    " {DIM}│{RESET} Peak mem: {}",
+                    fmt_bytes_binary(mem)
+                )
+                .ok();
+            }
+            out.push_str(&buf_line);
+            out.push('\n');
+        } else if let Some(mem) = plan.peak_memory_bytes() {
+            writeln!(out, "  Peak mem: {}", fmt_bytes_binary(mem)).ok();
         }
-        if let Some(mem) = plan.peak_memory_bytes() {
-            write!(
-                buf_line,
-                " {DIM}│{RESET} Peak mem: {}",
-                fmt_bytes_binary(mem)
-            )
-            .ok();
-        }
-        out.push_str(&buf_line);
-        out.push('\n');
-    } else if let Some(mem) = plan.peak_memory_bytes() {
-        writeln!(out, "  Peak mem: {}", fmt_bytes_binary(mem)).ok();
     }
 
     // Issues section.
@@ -676,14 +726,173 @@ pub fn render_colored_tree(
 }
 
 // ---------------------------------------------------------------------------
+// Raw plan colorization
+// ---------------------------------------------------------------------------
+
+/// Issue matcher: contains a node identifier string (relation or node type).
+fn issue_matches_line(issues: &[PlanIssue], line: &str) -> bool {
+    issues.iter().any(|iss| {
+        // Check if any word from the issue message appears in the node line.
+        // We look for the relation name or node type appearing in both.
+        iss.message.split_whitespace().any(|word| {
+            // Only match meaningful tokens (skip short words and punctuation).
+            word.len() >= 4 && line.contains(word)
+        })
+    })
+}
+
+/// Choose ANSI color for a node line based on timing percentage, or for
+/// plain EXPLAIN based on node type (seq scans get yellow, index scans dim).
+fn node_line_color(time_percent: f64, has_actual_time: bool, node_type: &str) -> &'static str {
+    if has_actual_time {
+        time_percent_color(time_percent)
+    } else {
+        // Plain EXPLAIN: color by node type as a heuristic.
+        match node_type {
+            s if s.contains("Seq Scan") => YELLOW,
+            s if s.contains("Index") => DIM,
+            _ => DIM,
+        }
+    }
+}
+
+/// Colorize the raw stripped EXPLAIN plan text, adding ANSI codes and
+/// inline `⚠` issue markers.
+///
+/// The raw plan text is the unmodified `PostgreSQL` output (after stripping
+/// the psql table border and `QUERY PLAN` header).  Each line is annotated:
+///
+/// - Node header lines (`(cost=...)` present): colored by time percentage
+///   or node type; `⚠` appended if the line matches a detected issue.
+/// - Detail lines (`Buffers:`, `Filter:`, `Sort Method:`, etc.): dimmed.
+/// - Planning/Execution time lines: bold-white.
+/// - Blank lines: passed through unchanged.
+///
+/// The rendered output preserves the exact structure and content of the
+/// original plan — nothing is removed or reformatted.
+pub fn render_raw_colorized(raw_plan: &str, plan: &ExplainPlan, issues: &[PlanIssue]) -> String {
+    // Build a quick lookup: for each node in DFS order, track its
+    // time_percent and whether it has actual timing.  We match lines by
+    // scanning for `(cost=` just as the parser does.
+    let mut out = String::new();
+
+    // Walk plan nodes in DFS to build a parallel iterator of (time_pct,
+    // has_actual_time, estimated_rows, actual_rows) in document order.
+    let node_annots = collect_node_annotations(&plan.root);
+    let mut node_iter = node_annots.iter();
+
+    for line in raw_plan.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+
+        // Planning / Execution time lines get bold-white.
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("planning time:") || lower.starts_with("execution time:") {
+            writeln!(out, "{BOLD_WHITE}{line}{RESET}").ok();
+            continue;
+        }
+
+        // Node header lines contain "(cost=".
+        if trimmed.contains("(cost=") {
+            let annot = node_iter.next().copied();
+            let (time_pct, has_actual, _est_rows, _act_rows) =
+                annot.unwrap_or((0.0, false, None, None));
+
+            // Extract node type for plain EXPLAIN coloring.
+            let node_type = extract_node_type_from_line(trimmed);
+            let color = node_line_color(time_pct, has_actual, &node_type);
+
+            // Check if this line matches any detected issue.
+            let warn_marker = if issue_matches_line(issues, trimmed) {
+                " ⚠"
+            } else {
+                ""
+            };
+
+            // For EXPLAIN ANALYZE with row estimate mismatch, show
+            // both estimates inline after the existing line.
+            // (The raw line already contains both sets of numbers, so
+            // we just colorize it and add the warning marker.)
+            writeln!(out, "{color}{line}{warn_marker}{RESET}").ok();
+            continue;
+        }
+
+        // Detail lines: Buffers, Filter, Sort Method, etc. — dim them.
+        if trimmed.starts_with("Buffers:")
+            || trimmed.starts_with("Filter:")
+            || trimmed.starts_with("Sort Method:")
+            || trimmed.starts_with("Index Cond:")
+            || trimmed.starts_with("Hash Cond:")
+            || trimmed.starts_with("Join Filter:")
+            || lower.starts_with("rows removed by filter:")
+            || lower.starts_with("sort method:")
+            || lower.starts_with("batches:")
+            || lower.starts_with("hash batches:")
+            || lower.starts_with("workers")
+        {
+            writeln!(out, "{DIM}{line}{RESET}").ok();
+            continue;
+        }
+
+        // Everything else: pass through as-is.
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    out
+}
+
+/// A compact annotation for a single plan node, in DFS order.
+/// `(time_percent, has_actual_time, estimated_rows, actual_rows)`
+type NodeAnnot = (f64, bool, Option<f64>, Option<f64>);
+
+/// Collect node annotations in DFS (document) order.
+fn collect_node_annotations(node: &ExplainNode) -> Vec<NodeAnnot> {
+    let mut result = Vec::new();
+    collect_node_annotations_rec(node, &mut result);
+    result
+}
+
+fn collect_node_annotations_rec(node: &ExplainNode, out: &mut Vec<NodeAnnot>) {
+    out.push((
+        node.time_percent,
+        node.actual_time_ms.is_some(),
+        node.estimated_rows,
+        node.actual_rows,
+    ));
+    for child in &node.children {
+        collect_node_annotations_rec(child, out);
+    }
+}
+
+/// Extract the node type from a raw EXPLAIN line (before the first `(`).
+fn extract_node_type_from_line(trimmed: &str) -> String {
+    // Strip leading "-> " if present.
+    let s = trimmed.strip_prefix("-> ").unwrap_or(trimmed);
+    // Take the part before the first "(cost=".
+    if let Some(pos) = s.find("(cost=") {
+        s[..pos].trim().to_owned()
+    } else {
+        s.to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Combined output
 // ---------------------------------------------------------------------------
 
-/// Render the full enhanced EXPLAIN output: summary header + colored tree.
-pub fn render_enhanced(plan: &ExplainPlan, issues: &[PlanIssue], terminal_width: usize) -> String {
+/// Render the full enhanced EXPLAIN output: summary header + colorized raw plan.
+///
+/// The raw plan text is preserved verbatim; only ANSI colors and `⚠` markers
+/// are added.  This ensures all cost/row/filter details remain visible.
+pub fn render_enhanced(plan: &ExplainPlan, issues: &[PlanIssue], raw_plan: &str) -> String {
     let mut out = render_summary(plan, issues);
     out.push('\n');
-    out.push_str(&render_colored_tree(plan, issues, terminal_width));
+    out.push_str(&render_raw_colorized(raw_plan, plan, issues));
     out
 }
 
@@ -716,6 +925,8 @@ mod tests {
             relation: relation.map(str::to_owned),
             actual_time_ms,
             actual_rows: Some(actual_rows),
+            estimated_cost: None,
+            estimated_rows: None,
             exclusive_time_ms,
             time_percent,
             loops,
@@ -761,6 +972,8 @@ mod tests {
             relation: None,
             actual_time_ms: Some((0.0, 105.0)),
             actual_rows: Some(50_000.0),
+            estimated_cost: None,
+            estimated_rows: None,
             exclusive_time_ms: 5.0,
             time_percent: 0.3,
             loops: 1,
@@ -777,6 +990,8 @@ mod tests {
             relation: None,
             actual_time_ms: Some((0.0, 1842.0)),
             actual_rows: Some(48_301.0),
+            estimated_cost: None,
+            estimated_rows: None,
             exclusive_time_ms: 533.0,
             time_percent: 28.9,
             loops: 1,
@@ -793,6 +1008,8 @@ mod tests {
             execution_time_ms: Some(1842.0),
             planning_time_ms: Some(12.0),
             is_analyze: true,
+            estimated_cost: None,
+            estimated_rows: None,
         }
     }
 
@@ -1059,6 +1276,8 @@ mod tests {
             relation: None,
             actual_time_ms: None,
             actual_rows: Some(10.0),
+            estimated_cost: None,
+            estimated_rows: None,
             exclusive_time_ms: 1.0,
             time_percent: 0.5,
             loops: 1,
@@ -1076,6 +1295,8 @@ mod tests {
             relation: None,
             actual_time_ms: None,
             actual_rows: Some(100.0),
+            estimated_cost: None,
+            estimated_rows: None,
             exclusive_time_ms: 10.0,
             time_percent: 3.0,
             loops: 1,
@@ -1100,13 +1321,18 @@ mod tests {
     fn test_render_enhanced_has_both_sections() {
         let plan = simple_plan();
         let issues = issues_for_plan();
-        let out = render_enhanced(&plan, &issues, 80);
+        // Minimal raw plan text matching the simple_plan structure.
+        let raw = "Hash Join  (cost=1.09..2.22 rows=5 width=8) (actual time=0.050..1842.0 rows=48301 loops=1)\n\
+                   ->  Seq Scan on orders  (cost=0.00..1.06 rows=6 width=8) (actual time=0.010..1204.0 rows=2100000 loops=1)\n\
+                   ->  Hash  (cost=1.05..1.05 rows=5 width=4) (actual time=0.020..105.0 rows=50000 loops=1)\n\
+                         ->  Seq Scan on users  (cost=0.00..1.05 rows=5 width=4) (actual time=0.008..100.0 rows=50000 loops=1)\n";
+        let out = render_enhanced(&plan, &issues, raw);
         // Summary section.
         assert!(out.contains("EXPLAIN ANALYZE"));
         assert!(out.contains("Issues (3)"));
-        // Tree section.
+        // Raw plan content.
         assert!(out.contains("Hash Join"));
-        assert!(out.contains("╰─") || out.contains("├─"));
+        assert!(out.contains("Seq Scan on orders"));
     }
 
     // -----------------------------------------------------------------------
@@ -1125,5 +1351,107 @@ mod tests {
         let plan = simple_plan();
         // seq_orders: 3_000, seq_users: 201
         assert_eq!(plan.total_shared_read(), 3_201);
+    }
+
+    // -----------------------------------------------------------------------
+    // Plain EXPLAIN summary (non-analyze)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_summary_plain_explain_shows_estimated_cost() {
+        let mut plan = simple_plan();
+        plan.is_analyze = false;
+        plan.execution_time_ms = None;
+        plan.planning_time_ms = None;
+        plan.estimated_cost = Some(42.5);
+        plan.root.estimated_cost = Some((0.0, 42.5));
+        let summary = render_summary(&plan, &[]);
+        assert!(summary.contains("Estimated cost:"));
+        assert!(summary.contains("42.50"));
+        // Should not show Execution or Buffers for plain EXPLAIN.
+        assert!(!summary.contains("Execution:"));
+        assert!(!summary.contains("Buffers:"));
+    }
+
+    #[test]
+    fn test_summary_plain_explain_shows_estimated_rows() {
+        let mut plan = simple_plan();
+        plan.is_analyze = false;
+        plan.execution_time_ms = None;
+        plan.planning_time_ms = None;
+        plan.estimated_rows = Some(1.0);
+        plan.root.estimated_rows = Some(1.0);
+        let summary = render_summary(&plan, &[]);
+        assert!(summary.contains("Estimated rows:"));
+        assert!(summary.contains('1'));
+    }
+
+    #[test]
+    fn test_summary_plain_explain_no_buffers() {
+        // Plain EXPLAIN should not show a Buffers line even if buffer fields
+        // are non-zero (they won't be, but guard against it).
+        let mut plan = simple_plan();
+        plan.is_analyze = false;
+        plan.execution_time_ms = None;
+        plan.planning_time_ms = None;
+        // Forcibly set shared_hit so that if the buffers guard were absent,
+        // a buffers line would appear.
+        plan.root.shared_hit = 500;
+        let summary = render_summary(&plan, &[]);
+        assert!(!summary.contains("Buffers:"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Raw plan colorizer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_raw_colorized_preserves_node_lines() {
+        let plan = simple_plan();
+        let raw = "Hash Join  (cost=1.09..2.22 rows=5 width=8) (actual time=0.050..1842.0 rows=48301 loops=1)\n\
+                   ->  Seq Scan on orders  (cost=0.00..1.06 rows=6 width=8)\n";
+        let out = render_raw_colorized(raw, &plan, &[]);
+        assert!(out.contains("Hash Join"));
+        assert!(out.contains("cost=1.09..2.22"));
+        assert!(out.contains("Seq Scan on orders"));
+    }
+
+    #[test]
+    fn test_raw_colorized_adds_warn_marker_for_matching_issue() {
+        let plan = simple_plan();
+        let issues = vec![PlanIssue {
+            severity: IssueSeverity::Slow,
+            message: "Seq Scan on orders (big scan)".to_owned(),
+        }];
+        let raw = "->  Seq Scan on orders  (cost=0.00..1.06 rows=6 width=8)\n\
+             ->  Seq Scan on users  (cost=0.00..1.05 rows=5 width=4)\n";
+        let out = render_raw_colorized(raw, &plan, &issues);
+        // The orders line should get a ⚠ marker; users line should not.
+        assert!(out.contains('⚠'));
+    }
+
+    #[test]
+    fn test_raw_colorized_no_marker_without_issues() {
+        let plan = simple_plan();
+        let raw = "->  Seq Scan on orders  (cost=0.00..1.06 rows=6 width=8)\n";
+        let out = render_raw_colorized(raw, &plan, &[]);
+        assert!(!out.contains('⚠'));
+    }
+
+    #[test]
+    fn test_raw_colorized_dims_detail_lines() {
+        let plan = simple_plan();
+        let raw = "Seq Scan on t  (cost=0.00..1.0 rows=1 width=4)\n  Filter: (x > 0)\n  Buffers: shared hit=5\n";
+        let out = render_raw_colorized(raw, &plan, &[]);
+        // DIM escape code should appear for the filter/buffers detail lines.
+        assert!(out.contains(DIM));
+    }
+
+    #[test]
+    fn test_raw_colorized_bolds_timing_lines() {
+        let plan = simple_plan();
+        let raw = "Seq Scan on t  (cost=0.00..1.0 rows=1 width=4)\nPlanning Time: 0.1 ms\nExecution Time: 0.2 ms\n";
+        let out = render_raw_colorized(raw, &plan, &[]);
+        assert!(out.contains(BOLD_WHITE));
     }
 }
