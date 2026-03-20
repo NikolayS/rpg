@@ -1681,6 +1681,7 @@ Backslash commands:
   \copyright      show rpg copyright information
   \version        show rpg version and build information
   \?              show this help
+  \s [file|pattern]    show history (numbered + highlighted); save to file or filter by pattern
 
 Session commands:
   \c [db [user [host [port]]]]  reconnect to database
@@ -3575,12 +3576,145 @@ async fn dispatch_meta(
             let loid = loid.clone();
             crate::large_object::lo_unlink(client, &loid).await;
         }
+        // History (#history).
+        MetaCmd::History(ref arg) => {
+            dispatch_history(settings, arg.as_deref());
+        }
         ref stub => {
             eprintln!("{}: not yet implemented (see #27)", stub.label());
         }
     }
 
     MetaResult::Continue
+}
+
+// ---------------------------------------------------------------------------
+// History command helper (#history)
+// ---------------------------------------------------------------------------
+
+/// Decide whether `arg` looks like a file path (save mode) or a pattern
+/// (filter mode).
+///
+/// A path heuristic: contains `/`, starts with `.` or `~`, or contains a `.`
+/// after the last `/` (has a file extension).  Everything else is a pattern.
+fn arg_is_filepath(arg: &str) -> bool {
+    if arg.contains('/') {
+        return true;
+    }
+    if arg.starts_with('~') || arg.starts_with('.') {
+        return true;
+    }
+    // Has a file extension (a dot somewhere in the last component).
+    arg.contains('.')
+}
+
+/// Read history entries from the history file.
+///
+/// Returns a `Vec` of history lines in chronological order (oldest first).
+/// Returns an empty `Vec` when the file cannot be read.
+fn read_history_entries() -> Vec<String> {
+    let Some(path) = history_file() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Handle `\s [filename | pattern]`.
+///
+/// - `\s` — display numbered, syntax-highlighted history through the pager.
+/// - `\s filename` — save raw history to a file.
+/// - `\s pattern` — filter history by substring (case-insensitive) and
+///   display through the pager.
+fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
+    use std::fmt::Write as FmtWrite;
+
+    let entries = read_history_entries();
+
+    match arg {
+        // ---- Save to file ------------------------------------------------
+        Some(path) if arg_is_filepath(path) => {
+            // Expand leading `~`.
+            let resolved = if let Some(rest) = path.strip_prefix("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(rest)
+                } else {
+                    std::path::PathBuf::from(path)
+                }
+            } else {
+                std::path::PathBuf::from(path)
+            };
+
+            match std::fs::write(&resolved, entries.join("\n") + "\n") {
+                Ok(()) => {
+                    if !settings.quiet {
+                        eprintln!("History saved to {}.", resolved.display());
+                    }
+                }
+                Err(e) => eprintln!("\\s: {e}"),
+            }
+        }
+
+        // ---- Filter by pattern (or show all) -----------------------------
+        arg => {
+            let pattern = arg.map(str::to_lowercase);
+            let filtered: Vec<(usize, &str)> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    pattern
+                        .as_deref()
+                        .is_none_or(|p| entry.to_lowercase().contains(p))
+                })
+                .map(|(i, entry)| (i + 1, entry.as_str()))
+                .collect();
+
+            if filtered.is_empty() {
+                if let Some(ref p) = pattern {
+                    eprintln!("\\s: no history entries match \"{p}\"");
+                } else {
+                    eprintln!("\\s: history is empty");
+                }
+                return;
+            }
+
+            // Width of the highest line number for alignment.
+            let num_width = filtered.last().map(|(n, _)| n).copied().unwrap_or(1);
+            let width = num_width.to_string().len();
+
+            let use_color = !settings.no_highlight
+                && std::env::var("TERM").as_deref() != Ok("dumb")
+                && std::io::stdout().is_terminal();
+
+            let mut out = String::new();
+            for (num, entry) in &filtered {
+                let highlighted = if use_color && !entry.starts_with('\\') {
+                    crate::highlight::highlight_sql(entry, None).into_owned()
+                } else {
+                    (*entry).to_owned()
+                };
+                let _ = writeln!(out, "{num:>width$}  {highlighted}");
+            }
+
+            if let Some(ref p) = pattern {
+                let total = entries.len();
+                let shown = filtered.len();
+                let _ = writeln!(
+                    out,
+                    "-- {shown} of {total} entr{} match \"{p}\"",
+                    if shown == 1 { "y" } else { "ies" }
+                );
+            }
+
+            maybe_page(settings, &out);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

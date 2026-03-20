@@ -368,6 +368,23 @@ pub enum MetaCmd {
     /// `~/.config/rpg/commands/*.lua`.
     ListCustomCommands,
 
+    // -- History (#history) ------------------------------------------------
+    /// `\s [filename | pattern]` — display or save command history.
+    ///
+    /// Behaviour:
+    /// - `\s` — display numbered history on screen (through pager).
+    /// - `\s filename` — save history to a file (path contains `/` or `.`
+    ///   or starts with `~`; or the argument has a file extension).
+    /// - `\s pattern` — filter and display history entries that contain
+    ///   the pattern (case-insensitive grep-like search).
+    ///
+    /// Unlike plain psql, rpg numbers entries and applies SQL syntax
+    /// highlighting when writing to the screen.
+    ///
+    /// The argument is `None` for bare `\s`; otherwise it carries the raw
+    /// argument string (filename or pattern).
+    History(Option<String>),
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -561,7 +578,7 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     }
 }
 
-/// Dispatch `s`-family commands: `\set`, `\sf`, `\sv`, `\session`.
+/// Dispatch `s`-family commands: `\s`, `\set`, `\sf`, `\sv`, `\session`.
 fn parse_s_family(input: &str) -> ParsedMeta {
     // \sql — switch to SQL mode (check before \set)
     if let Some(rest) = input.strip_prefix("sql") {
@@ -579,6 +596,17 @@ fn parse_s_family(input: &str) -> ParsedMeta {
         if after.is_empty() || after.starts_with(char::is_whitespace) {
             return parse_set(input);
         }
+    }
+    // \s [filename | pattern] — show/save/filter history.
+    // Must be checked after the longer prefixes above (sql, session, set,
+    // sf, sv) so those still match.
+    if input == "s" || input.starts_with("s ") || input.starts_with("s\t") {
+        let arg = input.strip_prefix("s").unwrap_or("").trim();
+        return ParsedMeta::simple(MetaCmd::History(if arg.is_empty() {
+            None
+        } else {
+            Some(arg.to_owned())
+        }));
     }
     parse_sf_sv(input)
 }
@@ -3737,5 +3765,62 @@ mod tests {
     fn parse_commands_not_confused_with_c_reconnect() {
         // Bare `\c` must still be Reconnect.
         assert_eq!(parse("\\c").cmd, MetaCmd::Reconnect);
+    }
+
+    // -- History (#history) -------------------------------------------------
+
+    #[test]
+    fn parse_history_bare() {
+        // Bare `\s` — show all history.
+        assert_eq!(parse("\\s").cmd, MetaCmd::History(None));
+    }
+
+    #[test]
+    fn parse_history_with_filename() {
+        // `\s /tmp/history.txt` — save to file.
+        assert_eq!(
+            parse("\\s /tmp/history.txt").cmd,
+            MetaCmd::History(Some("/tmp/history.txt".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_history_with_pattern() {
+        // `\s orders` — filter history by pattern.
+        assert_eq!(
+            parse("\\s orders").cmd,
+            MetaCmd::History(Some("orders".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_history_not_confused_with_set() {
+        // `\set` must not match `\s`.
+        let m = parse("\\set FOO bar");
+        assert_eq!(m.cmd, MetaCmd::Set("FOO".to_owned(), "bar".to_owned()));
+    }
+
+    #[test]
+    fn parse_history_not_confused_with_session() {
+        // `\session` must not match `\s`.
+        assert_eq!(parse("\\session").cmd, MetaCmd::SessionList);
+    }
+
+    #[test]
+    fn parse_history_not_confused_with_sql_mode() {
+        // `\sql` must not match `\s`.
+        assert_eq!(parse("\\sql").cmd, MetaCmd::SqlMode);
+    }
+
+    #[test]
+    fn parse_history_not_confused_with_sf() {
+        // `\sf` must not match `\s`.
+        assert_eq!(parse("\\sf myfunc").cmd, MetaCmd::ShowFunctionSource);
+    }
+
+    #[test]
+    fn parse_history_not_confused_with_sv() {
+        // `\sv` must not match `\s`.
+        assert_eq!(parse("\\sv myview").cmd, MetaCmd::ShowViewDef);
     }
 }
