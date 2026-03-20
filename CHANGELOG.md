@@ -103,7 +103,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Renamed project from Samo to Rpg across all source and deploy files (#453)
+- Renamed project to rpg across all source and deploy files (#453)
 - Connector config unified with daemon integration (#481)
 - Per-feature autonomy granularity replaces single global setting (#527)
 - Refactored to explicit Tokio runtime construction (#541)
@@ -116,5 +116,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Internal
 
 - CI connection test suite comparing rpg vs psql output (golden file tests) (#379)
-- Deploy files and scripts renamed from `samo` to `rpg` (#453)
+- Deploy files and scripts updated to rpg naming (#453)
 - Stale infrastructure comments removed (#538)
