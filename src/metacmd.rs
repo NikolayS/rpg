@@ -363,6 +363,11 @@ pub enum MetaCmd {
     /// `"dalibo"` (explain.dalibo.com).
     ExplainShare(String),
 
+    // -- Custom Lua commands (#659) ----------------------------------------
+    /// `\commands` — list all custom Lua meta-commands loaded from
+    /// `~/.config/rpg/commands/*.lua`.
+    ListCustomCommands,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -885,6 +890,13 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     echo_hidden: false,
                 };
             }
+        }
+    }
+    // `\commands` — list custom Lua meta-commands.  Must be checked before
+    // `\copy`, `\cd`, and `\c` to avoid a spurious match.
+    if let Some(rest) = input.strip_prefix("commands") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return ParsedMeta::simple(MetaCmd::ListCustomCommands);
         }
     }
     // `\crosstabview [args]` — must be checked before `\copy` and `\c` (longest match).
@@ -3681,5 +3693,37 @@ mod tests {
         // `\encoding` must still parse correctly.
         let m = parse("\\encoding UTF8");
         assert_eq!(m.cmd, MetaCmd::Encoding);
+    }
+
+    // -- Custom Lua commands (#659) -----------------------------------------
+
+    #[test]
+    fn parse_list_custom_commands() {
+        assert_eq!(parse("\\commands").cmd, MetaCmd::ListCustomCommands);
+    }
+
+    #[test]
+    fn parse_list_custom_commands_bare() {
+        // `\commands` with trailing whitespace is still valid.
+        assert_eq!(parse("\\commands ").cmd, MetaCmd::ListCustomCommands);
+    }
+
+    #[test]
+    fn parse_commands_not_confused_with_conninfo() {
+        // `\conninfo` must not match `\commands`.
+        assert_eq!(parse("\\conninfo").cmd, MetaCmd::ConnInfo);
+    }
+
+    #[test]
+    fn parse_commands_not_confused_with_copy() {
+        // `\copy` must still work.
+        let m = parse("\\copy t from stdin");
+        assert_eq!(m.cmd, MetaCmd::Copy("t from stdin".to_owned()));
+    }
+
+    #[test]
+    fn parse_commands_not_confused_with_c_reconnect() {
+        // Bare `\c` must still be Reconnect.
+        assert_eq!(parse("\\c").cmd, MetaCmd::Reconnect);
     }
 }

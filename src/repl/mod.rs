@@ -1056,6 +1056,14 @@ pub struct ReplSettings {
     /// `\explain share` can upload it to explain.depesz.com or
     /// explain.dalibo.com.  `None` if no EXPLAIN has been run yet.
     pub last_explain_text: Option<String>,
+
+    // -- Custom Lua commands (#659) ----------------------------------------
+    /// Registry of custom backslash commands loaded from Lua scripts.
+    ///
+    /// Populated once at startup from `~/.config/rpg/commands/*.lua`.
+    /// When the `lua` feature is not compiled in, this registry is always
+    /// empty and custom-command execution returns a feature-absent error.
+    pub lua_registry: crate::lua_commands::LuaRegistry,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1162,6 +1170,10 @@ impl std::fmt::Debug for ReplSettings {
                 "last_explain_text",
                 &self.last_explain_text.as_deref().map(|_| "<explain>"),
             )
+            .field(
+                "lua_commands",
+                &format!("{} loaded", self.lua_registry.commands.len()),
+            )
             .finish()
     }
 }
@@ -1228,6 +1240,7 @@ impl Default for ReplSettings {
             last_t2s_nl_query: None,
             internal_tx: false,
             last_explain_text: None,
+            lua_registry: crate::lua_commands::LuaRegistry::load(""),
         }
     }
 }
@@ -3213,8 +3226,49 @@ async fn dispatch_meta(
         MetaCmd::ToggleAutoExplain => {
             apply_fkey_toggle(FKeyAction::AutoExplain, settings);
         }
+        // Custom Lua commands (#659).
+        MetaCmd::ListCustomCommands => {
+            let cmds = &settings.lua_registry.commands;
+            if cmds.is_empty() {
+                println!(
+                    "No custom commands loaded.\n\
+                     Add Lua scripts to ~/.config/rpg/commands/*.lua"
+                );
+            } else {
+                let mut out = String::from("Custom commands:\n");
+                for cmd in cmds {
+                    use std::fmt::Write as _;
+                    let _ = writeln!(out, "  \\{:<20} {}", cmd.name, cmd.description);
+                }
+                maybe_page(settings, &out);
+            }
+        }
         MetaCmd::Unknown(ref name) => {
-            eprintln!("Invalid command \\{name}. Try \\? for help.");
+            // Before reporting "unknown command", check whether a custom Lua
+            // command with this name exists.  The Unknown token stores the raw
+            // string after `\`; it may include arguments after the first word.
+            let (cmd_name, rest) = name
+                .split_once(char::is_whitespace)
+                .map_or((name.as_str(), ""), |(n, r)| (n, r));
+            if settings.lua_registry.get(cmd_name).is_some() {
+                let args: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let dbname = params.dbname.clone();
+                let cmd_name_owned = cmd_name.to_owned();
+                let result = tokio::task::block_in_place(|| {
+                    settings.lua_registry.execute_command(
+                        &cmd_name_owned,
+                        &arg_refs,
+                        &dbname,
+                        client,
+                    )
+                });
+                if let Err(e) = result {
+                    eprintln!("{e}");
+                }
+            } else {
+                eprintln!("Invalid command \\{name}. Try \\? for help.");
+            }
         }
         MetaCmd::SqlHelp => match crate::session::sql_help_text(parsed.pattern.as_deref()) {
             Ok(text) => maybe_page(settings, &text),
@@ -3751,6 +3805,9 @@ pub async fn run_repl(
     // Populate audit connection context from the resolved params.
     settings.audit_dbname = params.dbname.clone();
     settings.audit_user = params.user.clone();
+
+    // Load custom Lua commands now that we know the database name.
+    settings.lua_registry = crate::lua_commands::LuaRegistry::load(&params.dbname);
 
     // Open audit log file from config if one is configured.
     if settings.audit_log_file.is_none() {
