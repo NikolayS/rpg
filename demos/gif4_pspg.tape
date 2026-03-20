@@ -7,7 +7,7 @@ Set Shell "zsh"
 Set TypingSpeed 30ms
 
 Hide
-Type "export PATH=/Users/nik/github/project-alpha/.claude/worktrees/agent-a55051e3/target/debug:$PATH"
+Type "export PATH=/Users/nik/github/project-alpha/target/debug:$PATH"
 Enter
 Sleep 500ms
 Type "clear"
@@ -20,60 +20,42 @@ Sleep 500ms
 Enter
 Sleep 2s
 
-Type "\version"
+# Set pspg immediately — no native pager demo
+# --menu-always shows the F9 menu bar on every page
+Type "\set PAGER 'pspg --style=22 --menu-always'"
 Enter
-Sleep 2s
+Sleep 1s
 
-Enter
-Sleep 300ms
-
+# Run a wide query — menu bar is always visible (F9 effect)
 Type "select * from customers limit 50;"
 Enter
 Sleep 3s
 
-Down
+# Show horizontal scroll (killer feature)
+Right
 Sleep 400ms
-Down
+Right
 Sleep 400ms
-PageDown
-Sleep 800ms
+Right
+Sleep 400ms
 
-Type "q"
-Sleep 1s
-
-Enter
-Sleep 300ms
-
-# Switch to pspg with Relational pipes theme (style 22 — clean dark theme)
-Type "\set PAGER 'pspg --style=22'"
-Enter
-Sleep 1s
-
-Type "select * from customers limit 50;"
-Enter
-Sleep 3s
-
-# Alt+n — toggle line numbers on (visible change, like F6)
-Alt+n
-Sleep 1500ms
-
-# Alt+n — toggle line numbers off
-Alt+n
-Sleep 800ms
-
-# Alt+v — toggle vertical column cursor (like F5)
+# Show column cursor (Alt+v)
 Alt+v
 Sleep 1500ms
 
-# Right arrow — horizontal scroll (pspg's killer feature)
-Right
-Sleep 500ms
-Right
-Sleep 500ms
-Right
-Sleep 500ms
-Right
-Sleep 500ms
+# Exit pspg
+Type "q"
+Sleep 1s
 
+# Demo theme switching — switch to a lighter theme (style 3)
+Type "\set PAGER 'pspg --style=3 --menu-always'"
+Enter
+Sleep 800ms
+
+Type "select * from customers limit 50;"
+Enter
+Sleep 3s
+
+# Exit
 Type "q"
 Sleep 2s
