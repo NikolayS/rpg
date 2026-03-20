@@ -1743,25 +1743,34 @@ Input/execution modes:
   \yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
   \interactive      return to interactive mode (default)
   \mode             show current input and execution mode
-  \\set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
+  \set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
 
 Auto-EXPLAIN:
-  \\set EXPLAIN on       show EXPLAIN for every query
-  \\set EXPLAIN analyze  show EXPLAIN ANALYZE for every query
-  \\set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
-  \\set EXPLAIN off      disable auto-EXPLAIN
+  \set EXPLAIN on       show EXPLAIN for every query
+  \set EXPLAIN analyze  show EXPLAIN ANALYZE for every query
+  \set EXPLAIN verbose  show EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING)
+  \set EXPLAIN off      disable auto-EXPLAIN
 
 EXPLAIN sharing:
-  \\explain share depesz    upload last EXPLAIN plan to explain.depesz.com
-  \\explain share dalibo    upload last EXPLAIN plan to explain.dalibo.com
-  \\explain share pgmustard upload last EXPLAIN plan to app.pgmustard.com
-                            (requires PGMUSTARD_API_KEY env var or config)
+  \explain share depesz    upload last EXPLAIN plan to explain.depesz.com
+  \explain share dalibo    upload last EXPLAIN plan to explain.dalibo.com
+  \explain share pgmustard upload last EXPLAIN plan to app.pgmustard.com
+                           (requires PGMUSTARD_API_KEY env var or config)
+
+Output format:
+  \pset format markdown       switch output to Markdown table format
+  \pset explain_format raw     show raw EXPLAIN text (default)
+  \pset explain_format enhanced show EXPLAIN with visual highlights
+  \pset explain_format compact  show compact EXPLAIN summary
+
+Lua commands:
+  \commands         list custom Lua meta-commands (if any are configured)
 
 Function keys (interactive mode):
-  F2 / \\f2       toggle schema-aware tab completion on/off
-  F3 / \\f3       toggle single-line mode on/off
-  F4 / \\f4       toggle Vi/Emacs editing mode (next session)
-  F5 / \\f5       toggle auto-EXPLAIN on/off
+  F2 / \f2       toggle schema-aware tab completion on/off
+  F3 / \f3       toggle single-line mode on/off
+  F4 / \f4       toggle Vi/Emacs editing mode (next session)
+  F5 / \f5       toggle auto-EXPLAIN on/off
   Ctrl-T          toggle SQL/text2sql input mode"
     )
 }

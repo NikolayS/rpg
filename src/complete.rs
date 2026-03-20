@@ -480,6 +480,30 @@ const BACKSLASH_CMDS: &[&str] = &[
     "watch",
     "x",
     "z",
+    // rpg-specific commands
+    "version",
+    "explain",
+    "commands",
+    "text2sql",
+    "t2s",
+    "plan",
+    "yolo",
+    "interactive",
+    "mode",
+    "sql",
+    "n",
+    "ns",
+    "nd",
+    "np",
+    "profiles",
+    "dba",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "refresh",
+    "session",
+    "log-file",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1163,11 +1187,18 @@ impl Completer for RpgHelper {
 
         // For schema-qualified or dot-preceded words, the replacement should
         // start after the dot, not at the beginning of the whole word.
+        // For backslash commands, the replacement starts after the `\` so
+        // that the leading backslash is preserved and only the command name
+        // portion is replaced (e.g., `\vers` → keeps `\`, replaces `vers`
+        // with `version`).
         let (completion_start, completion_prefix) =
             if let CompletionContext::SchemaObject { ref schema } = context {
                 // "public.us" → start after the dot
                 let dot_offset = start + schema.len() + 1;
                 (dot_offset, prefix[schema.len() + 1..].to_owned())
+            } else if context == CompletionContext::BackslashCmd && prefix.starts_with('\\') {
+                // "\vers" → start after the backslash, prefix = "vers"
+                (start + 1, prefix[1..].to_owned())
             } else {
                 (start, prefix.clone())
             };
