@@ -3546,7 +3546,7 @@ async fn dispatch_meta(
         }
         // Explain share (#655).
         MetaCmd::ExplainShare(ref service) => {
-            dispatch_explain_share(settings, service).await;
+            dispatch_explain_share(client, settings, service).await;
         }
         // Large object commands (#400).
         MetaCmd::LoImport(ref filename, ref comment) => {
@@ -3582,7 +3582,12 @@ async fn dispatch_meta(
 ///
 /// Uploads the last stored EXPLAIN plan to the chosen external visualiser,
 /// prints the resulting URL, and copies it to the system clipboard.
-async fn dispatch_explain_share(settings: &mut ReplSettings, service: &str) {
+///
+/// For pgMustard the plan must be in JSON format.  When the stored plan is
+/// plain text (which is the common case), the function extracts the inner
+/// query from `last_query`, re-executes it as
+/// `EXPLAIN (ANALYZE, FORMAT JSON) <inner_query>`, and uploads the JSON.
+async fn dispatch_explain_share(client: &Client, settings: &mut ReplSettings, service: &str) {
     let plan_text = match settings.last_explain_text.as_deref() {
         Some(t) if !t.is_empty() => t.to_owned(),
         _ => {
@@ -3606,8 +3611,60 @@ async fn dispatch_explain_share(settings: &mut ReplSettings, service: &str) {
 
     println!("Uploading EXPLAIN plan to {service}…");
 
+    // For pgMustard we need the plan as a JSON array and the original query.
+    let mut plan_json: Option<serde_json::Value> = None;
+    let mut query_text: Option<String> = None;
+
+    if service == "pgmustard" {
+        let Some(inner) = settings
+            .last_query
+            .as_deref()
+            .and_then(strip_explain_prefix)
+        else {
+            eprintln!(
+                "\\explain share: cannot determine the inner query.\n\
+                 Run an EXPLAIN query first, then use \\explain share pgmustard."
+            );
+            return;
+        };
+        query_text = Some(inner.clone());
+
+        let json_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {inner}");
+        match client.simple_query(&json_sql).await {
+            Ok(messages) => {
+                // Collect the single-column rows into one string (the JSON plan).
+                let mut json_text = String::new();
+                for msg in &messages {
+                    if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                        if let Some(val) = row.get(0) {
+                            json_text.push_str(val);
+                        }
+                    }
+                }
+                match serde_json::from_str::<serde_json::Value>(&json_text) {
+                    Ok(val) => plan_json = Some(val),
+                    Err(e) => {
+                        eprintln!("\\explain share: failed to parse JSON EXPLAIN output: {e}");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("\\explain share: failed to re-run EXPLAIN with FORMAT JSON: {e}");
+                return;
+            }
+        }
+    }
+
     let pgmustard_cfg = &settings.config.pgmustard;
-    match crate::explain::share::share_explain_plan(&plan_text, service, Some(pgmustard_cfg)).await
+    match crate::explain::share::share_explain_plan(
+        &plan_text,
+        service,
+        Some(pgmustard_cfg),
+        plan_json.as_ref(),
+        query_text.as_deref(),
+    )
+    .await
     {
         Ok(url) => {
             println!("Plan URL: {url}");
@@ -3618,6 +3675,53 @@ async fn dispatch_explain_share(settings: &mut ReplSettings, service: &str) {
             eprintln!("\\explain share: {e}");
         }
     }
+}
+
+/// Strip the `EXPLAIN ...` prefix from a SQL statement, returning the inner
+/// query.
+///
+/// Handles `EXPLAIN <query>`, `EXPLAIN ANALYZE <query>`,
+/// `EXPLAIN (options...) <query>`, etc.  Returns `None` if the input does
+/// not look like an EXPLAIN statement.
+fn strip_explain_prefix(sql: &str) -> Option<String> {
+    let trimmed = sql.trim();
+    let upper = trimmed.to_uppercase();
+    if !upper.starts_with("EXPLAIN") {
+        return None;
+    }
+    let rest = trimmed["EXPLAIN".len()..].trim_start();
+    // EXPLAIN (options...) <query>
+    if rest.starts_with('(') {
+        if let Some(close) = rest.find(')') {
+            let inner = rest[close + 1..].trim_start();
+            if inner.is_empty() {
+                return None;
+            }
+            return Some(inner.to_owned());
+        }
+        return None;
+    }
+    // EXPLAIN ANALYZE [VERBOSE] <query>
+    let upper_rest = rest.to_uppercase();
+    let after_kw = if upper_rest.starts_with("ANALYZE") {
+        rest["ANALYZE".len()..].trim_start()
+    } else if upper_rest.starts_with("ANALYSE") {
+        rest["ANALYSE".len()..].trim_start()
+    } else {
+        // Plain EXPLAIN <query>
+        rest
+    };
+    // Optional VERBOSE after ANALYZE
+    let upper_after = after_kw.to_uppercase();
+    let after_verbose = if upper_after.starts_with("VERBOSE") {
+        after_kw["VERBOSE".len()..].trim_start()
+    } else {
+        after_kw
+    };
+    if after_verbose.is_empty() {
+        return None;
+    }
+    Some(after_verbose.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -8353,5 +8457,65 @@ mod tests {
         assert!(ai_commands::is_write_query(
             "WITH x AS (SELECT 1) SELECT * FROM x"
         ));
+    }
+
+    // -- strip_explain_prefix --------------------------------------------------
+
+    #[test]
+    fn strip_explain_plain() {
+        assert_eq!(
+            strip_explain_prefix("EXPLAIN select 1"),
+            Some("select 1".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_explain_analyze() {
+        assert_eq!(
+            strip_explain_prefix("explain analyze select * from t"),
+            Some("select * from t".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_explain_analyse_british() {
+        assert_eq!(
+            strip_explain_prefix("EXPLAIN ANALYSE select 1"),
+            Some("select 1".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_explain_analyze_verbose() {
+        assert_eq!(
+            strip_explain_prefix("explain analyze verbose select * from t"),
+            Some("select * from t".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_explain_parenthesised_options() {
+        assert_eq!(
+            strip_explain_prefix("EXPLAIN (ANALYZE, BUFFERS) select * from orders limit 10"),
+            Some("select * from orders limit 10".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_explain_format_json() {
+        assert_eq!(
+            strip_explain_prefix("EXPLAIN (ANALYZE, FORMAT JSON) select 1"),
+            Some("select 1".to_owned())
+        );
+    }
+
+    #[test]
+    fn strip_explain_not_explain_returns_none() {
+        assert!(strip_explain_prefix("select 1").is_none());
+    }
+
+    #[test]
+    fn strip_explain_empty_returns_none() {
+        assert!(strip_explain_prefix("EXPLAIN").is_none());
     }
 }

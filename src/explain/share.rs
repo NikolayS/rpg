@@ -29,10 +29,15 @@
 ///
 /// For pgMustard, the API key is resolved from config (via `api_key_env`)
 /// or directly from the `PGMUSTARD_API_KEY` environment variable.
+/// `plan_json` must be provided for pgMustard — it is the JSON array output
+/// of `EXPLAIN (ANALYZE, FORMAT JSON)`.  `query_text` is the original SQL
+/// that was explained.
 pub async fn share_explain_plan(
     plan_text: &str,
     service: &str,
     cfg: Option<&crate::config::PgMustardConfig>,
+    plan_json: Option<&serde_json::Value>,
+    query_text: Option<&str>,
 ) -> Result<String, String> {
     match service {
         "depesz" => upload_depesz(plan_text).await,
@@ -53,7 +58,12 @@ pub async fn share_explain_plan(
                      api_key_env = \"PGMUSTARD_API_KEY\""
                         .to_owned()
                 })?;
-            upload_pgmustard(plan_text, &api_key).await
+            let json = plan_json.ok_or_else(|| {
+                "pgMustard requires JSON plan output.\n\
+                 Run an EXPLAIN query first, then use \\explain share pgmustard."
+                    .to_owned()
+            })?;
+            upload_pgmustard(json, query_text.unwrap_or(""), &api_key).await
         }
         other => Err(format!(
             "unknown service \"{other}\"; valid options: depesz, dalibo, pgmustard"
@@ -203,19 +213,25 @@ async fn upload_dalibo(plan_text: &str) -> Result<String, String> {
 
 /// POST to app.pgmustard.com and return the plan URL.
 ///
-/// pgMustard accepts a JSON body with `plan` and `query` fields and an
-/// `Authorization: Bearer <api_key>` header.  On success it returns JSON
-/// containing a `url` field with the shareable plan URL.
-async fn upload_pgmustard(plan_text: &str, api_key: &str) -> Result<String, String> {
+/// pgMustard expects a JSON body with `plan` (a JSON array from
+/// `EXPLAIN (ANALYZE, FORMAT JSON)`), `query_text`, and `name` fields,
+/// plus an `Authorization: Bearer <api_key>` header.  On success the
+/// response JSON contains an `explore_url` field with the shareable URL.
+async fn upload_pgmustard(
+    plan_json: &serde_json::Value,
+    query_text: &str,
+    api_key: &str,
+) -> Result<String, String> {
     let client = reqwest::Client::new();
 
     let payload = serde_json::json!({
-        "plan": plan_text,
-        "query": ""
+        "plan": plan_json,
+        "query_text": query_text,
+        "name": "rpg"
     });
 
     let response = client
-        .post("https://app.pgmustard.com/api/query-plan")
+        .post("https://app.pgmustard.com/api/v1/save")
         .bearer_auth(api_key)
         .json(&payload)
         .send()
@@ -223,23 +239,6 @@ async fn upload_pgmustard(plan_text: &str, api_key: &str) -> Result<String, Stri
         .map_err(|e| format!("request to app.pgmustard.com failed: {e}"))?;
 
     let status = response.status();
-
-    // Handle redirect responses.
-    if status.is_redirection() {
-        let location = response
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !location.is_empty() {
-            let url = if location.starts_with("http") {
-                location.to_owned()
-            } else {
-                format!("https://app.pgmustard.com{location}")
-            };
-            return Ok(url);
-        }
-    }
 
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err(format!(
@@ -249,8 +248,9 @@ async fn upload_pgmustard(plan_text: &str, api_key: &str) -> Result<String, Stri
     }
 
     if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
         return Err(format!(
-            "app.pgmustard.com returned unexpected status {status}"
+            "app.pgmustard.com returned unexpected status {status}: {body}"
         ));
     }
 
@@ -259,16 +259,11 @@ async fn upload_pgmustard(plan_text: &str, api_key: &str) -> Result<String, Stri
         .await
         .map_err(|e| format!("failed to read app.pgmustard.com response: {e}"))?;
 
-    // Parse JSON response and look for the URL.
+    // Parse JSON response — pgMustard returns `explore_url` with the full URL.
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        for key in &["url", "permalink", "link", "id"] {
-            if let Some(val) = json.get(key).and_then(|v| v.as_str()) {
-                let url = if val.starts_with("http") {
-                    val.to_owned()
-                } else {
-                    format!("https://app.pgmustard.com/{val}")
-                };
-                return Ok(url);
+        if let Some(url) = json.get("explore_url").and_then(|v| v.as_str()) {
+            if !url.is_empty() {
+                return Ok(url.to_owned());
             }
         }
     }
