@@ -81,6 +81,8 @@ pub enum OutputFormat {
     Html,
     /// Like aligned but wraps long values (same as aligned for now).
     Wrapped,
+    /// GitHub-flavored Markdown table.
+    Markdown,
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +169,7 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         OutputFormat::Csv => format_csv(out, rs, cfg),
         OutputFormat::Json => format_json(out, rs, cfg),
         OutputFormat::Html => format_html(out, rs, cfg),
+        OutputFormat::Markdown => format_markdown(out, rs, cfg),
     }
 
     // psql always prints a blank line after each result set (the trailing
@@ -1093,6 +1096,91 @@ fn html_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Markdown formatter
+// ---------------------------------------------------------------------------
+
+/// Render a [`RowSet`] as a GitHub-flavored Markdown table.
+///
+/// ```text
+/// | id | name       | plan    |
+/// |----|------------|---------|
+/// | 1  | Sam Martin | starter |
+/// ```
+///
+/// Column widths are padded to the maximum content width per column.
+/// NULL values use the configured null display string.
+/// Footer `(N rows)` is printed after the table when not in tuples-only mode.
+pub fn format_markdown(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+    let null_str = &cfg.null_display;
+
+    if cols.is_empty() {
+        if !cfg.tuples_only && cfg.footer {
+            write_row_count(out, rows.len());
+        }
+        return;
+    }
+
+    // Compute per-column widths: max(header width, max data cell width).
+    let widths = column_widths_with_null(cols, rows, null_str);
+
+    if !cfg.tuples_only {
+        // Header row.
+        out.push('|');
+        for (i, col) in cols.iter().enumerate() {
+            let w = widths[i];
+            let val_w = display_width(&col.name);
+            let padding = w.saturating_sub(val_w);
+            out.push(' ');
+            out.push_str(&col.name);
+            for _ in 0..padding {
+                out.push(' ');
+            }
+            out.push_str(" |");
+        }
+        out.push('\n');
+
+        // Separator row: `|----|------------|`
+        out.push('|');
+        for &w in &widths {
+            // Each cell: `-` repeated for width + 2 spaces of padding.
+            for _ in 0..w + 2 {
+                out.push('-');
+            }
+            out.push('|');
+        }
+        out.push('\n');
+    }
+
+    // Data rows.
+    for row in rows {
+        out.push('|');
+        for (i, _col) in cols.iter().enumerate() {
+            let val = row
+                .get(i)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(null_str.as_str());
+            let w = widths[i];
+            let val_w = display_width(val);
+            let padding = w.saturating_sub(val_w);
+            out.push(' ');
+            out.push_str(val);
+            for _ in 0..padding {
+                out.push(' ');
+            }
+            out.push_str(" |");
+        }
+        out.push('\n');
+    }
+
+    // Footer: `(N rows)` — outside the table, on its own line.
+    if !cfg.tuples_only && cfg.footer {
+        write_row_count(out, rows.len());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1908,5 +1996,148 @@ mod tests {
             out.is_empty(),
             "tuples-only must produce no output: {out:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Markdown format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_markdown_basic() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", true), mk_col("name", false)],
+            rows: vec![
+                mk_row(&[Some("1"), Some("Alice")]),
+                mk_row(&[Some("2"), Some("Bob")]),
+            ],
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &PsetConfig::default());
+        // Header row must contain column names delimited by `|`.
+        assert!(out.contains("| id |"), "header missing 'id': {out}");
+        assert!(
+            out.contains("| name |") || out.contains("name"),
+            "header missing 'name': {out}"
+        );
+        // Separator row: dashes between pipes.
+        assert!(out.contains("|----"), "separator missing: {out}");
+        // Data rows present.
+        assert!(out.contains("Alice"), "missing Alice: {out}");
+        assert!(out.contains("Bob"), "missing Bob: {out}");
+        // Row count footer.
+        assert!(out.contains("(2 rows)"), "missing footer: {out}");
+    }
+
+    #[test]
+    fn test_markdown_structure() {
+        // Verify exact output structure for a known input.
+        let rs = RowSet {
+            columns: vec![mk_col("id", false), mk_col("name", false)],
+            rows: vec![mk_row(&[Some("1"), Some("Sam Martin")])],
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &PsetConfig::default());
+        let lines: Vec<&str> = out.lines().collect();
+        // Line 0: header
+        assert!(
+            lines[0].starts_with('|') && lines[0].ends_with('|'),
+            "header must start and end with '|': {out}"
+        );
+        // Line 1: separator (all dashes and pipes)
+        assert!(
+            lines[1].chars().all(|c| c == '-' || c == '|'),
+            "separator must only contain '-' and '|': {:?}",
+            lines[1]
+        );
+        // Line 2: data row
+        assert!(
+            lines[2].starts_with('|') && lines[2].ends_with('|'),
+            "data row must start and end with '|': {out}"
+        );
+        // Line 3: row count footer
+        assert_eq!(lines[3], "(1 row)", "footer mismatch: {out}");
+    }
+
+    #[test]
+    fn test_markdown_null_display() {
+        let rs = RowSet {
+            columns: vec![mk_col("val", false)],
+            rows: vec![mk_row(&[None])],
+        };
+        let cfg = PsetConfig {
+            null_display: "(null)".to_owned(),
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &cfg);
+        assert!(out.contains("(null)"), "null display missing: {out}");
+    }
+
+    #[test]
+    fn test_markdown_empty_rows() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", false)],
+            rows: vec![],
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &PsetConfig::default());
+        assert!(out.contains("| id |"), "header missing: {out}");
+        assert!(out.contains("|----"), "separator missing: {out}");
+        assert!(out.contains("(0 rows)"), "footer missing: {out}");
+    }
+
+    #[test]
+    fn test_markdown_tuples_only_suppresses_header_and_footer() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", false), mk_col("name", false)],
+            rows: vec![mk_row(&[Some("1"), Some("Alice")])],
+        };
+        let cfg = PsetConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &cfg);
+        // Data must be present.
+        assert!(out.contains("Alice"), "data row missing: {out}");
+        // Header and footer must be absent.
+        assert!(!out.contains("| id |"), "header must be suppressed: {out}");
+        assert!(!out.contains("(1 row)"), "footer must be suppressed: {out}");
+    }
+
+    #[test]
+    fn test_markdown_column_width_wider_than_header() {
+        // Data wider than header: separator dashes must match data width.
+        let rs = RowSet {
+            columns: vec![mk_col("x", false)],
+            rows: vec![mk_row(&[Some("hello world")])],
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &PsetConfig::default());
+        assert!(out.contains("hello world"), "data not truncated: {out}");
+        // Separator should have at least 11 dashes (len of "hello world").
+        let sep_line = out.lines().nth(1).expect("separator line must exist");
+        let dash_count = sep_line.chars().filter(|&c| c == '-').count();
+        assert!(
+            dash_count >= 11,
+            "separator must cover data width (11): got {dash_count} dashes in {sep_line:?}"
+        );
+    }
+
+    #[test]
+    fn test_markdown_footer_suppressed_when_footer_off() {
+        let rs = RowSet {
+            columns: vec![mk_col("id", false)],
+            rows: vec![mk_row(&[Some("1")])],
+        };
+        let cfg = PsetConfig {
+            footer: false,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_markdown(&mut out, &rs, &cfg);
+        // Column name "id" is 2 chars; value "1" is padded to 2 chars.
+        assert!(out.contains("| 1"), "data missing: {out}");
+        assert!(!out.contains("(1 row)"), "footer must be suppressed: {out}");
     }
 }

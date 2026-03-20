@@ -881,7 +881,12 @@ fn is_explain_statement(sql: &str) -> bool {
 /// When EXPLAIN results come back through `print_result_set_pset`, they are
 /// rendered as an aligned table with a `QUERY PLAN` header, border lines, and
 /// a `(N rows)` footer.  The EXPLAIN text parser expects plain lines without
-/// this decoration.
+/// this decoration, but WITH the original indentation preserved.
+///
+/// `PostgreSQL`'s aligned format adds a single leading space before each
+/// column value.  Plan node indentation (2+ spaces) is part of the plan
+/// text itself and must be preserved so that [`super::explain::parse`] can
+/// reconstruct the parent-child tree from raw indent levels.
 fn strip_psql_table_format(formatted: &str) -> String {
     let mut lines = Vec::new();
     for line in formatted.lines() {
@@ -902,13 +907,24 @@ fn strip_psql_table_format(formatted: &str) -> String {
         if trimmed.is_empty() {
             continue;
         }
-        // Strip leading "| " and trailing " |" that the aligned format adds.
-        let content = if let Some(inner) = trimmed.strip_prefix("| ") {
+
+        // Strip table decoration while PRESERVING internal indentation.
+        //
+        // psql aligned format:
+        //   - Pipe-delimited: "| <content> |" — strip the "| " prefix and " |" suffix.
+        //   - Space-padded:   " <content>  " — strip exactly one leading space.
+        //     psql adds a single space before column content; the plan's own
+        //     indentation (2+ spaces) follows that single space and must be kept.
+        let content: &str = if let Some(inner) = trimmed.strip_prefix("| ") {
+            // Pipe-delimited format: strip the leading "| " and trailing " |".
             inner.strip_suffix(" |").unwrap_or(inner).trim_end()
         } else if let Some(inner) = trimmed.strip_prefix('|') {
             inner.strip_suffix('|').unwrap_or(inner).trim()
         } else {
-            trimmed
+            // Space-padded format: psql adds exactly one space before column
+            // content.  Strip that single leading space to get the raw plan
+            // text.  Additional leading spaces are the plan's own indentation.
+            line.strip_prefix(' ').unwrap_or(line).trim_end()
         };
         if !content.is_empty() {
             lines.push(content.to_owned());
@@ -920,6 +936,9 @@ fn strip_psql_table_format(formatted: &str) -> String {
 /// Given the raw (psql-formatted) output of an EXPLAIN query, parse and render
 /// it as an enhanced view.  Returns `Some(enhanced_text)` on success, or
 /// `None` if parsing fails (caller falls back to raw output).
+///
+/// Enhanced mode: summary header (timing/cost, issues) + full raw plan text
+/// with ANSI color and inline `⚠` markers — nothing is hidden or removed.
 fn try_render_explain(raw_text: &str, format: crate::explain::ExplainFormat) -> Option<String> {
     use crate::explain::{self, ExplainFormat};
 
@@ -937,16 +956,11 @@ fn try_render_explain(raw_text: &str, format: crate::explain::ExplainFormat) -> 
             &render_plan,
             &render_issues,
         )),
-        ExplainFormat::Enhanced => {
-            let term_width = crossterm::terminal::size()
-                .map(|(w, _)| w as usize)
-                .unwrap_or(80);
-            Some(crate::explain::render::render_enhanced(
-                &render_plan,
-                &render_issues,
-                term_width,
-            ))
-        }
+        ExplainFormat::Enhanced => Some(crate::explain::render::render_enhanced(
+            &render_plan,
+            &render_issues,
+            &stripped,
+        )),
     }
 }
 
@@ -1017,8 +1031,10 @@ pub(super) async fn execute_query_interactive(
         && explain_format != crate::explain::ExplainFormat::Raw
     {
         let raw_text = String::from_utf8_lossy(&captured);
-        // Store the stripped plain-text EXPLAIN output for `\explain share`.
-        settings.last_explain_text = Some(strip_psql_table_format(&raw_text));
+        // `last_explain_text` was already stored with correct indentation by
+        // `execute_query` (from the raw row values).  Do not overwrite it here
+        // with the psql-table-stripped version, which loses indentation and
+        // causes depesz/dalibo to reject the plan.
         if let Some(rendered) = try_render_explain(&raw_text, explain_format) {
             enhanced = rendered;
             display = std::borrow::Cow::Borrowed(b"");
@@ -1029,9 +1045,7 @@ pub(super) async fn execute_query_interactive(
             (s, captured.as_slice())
         }
     } else if ok && is_explain_statement(sql) {
-        // Raw format: still store the stripped text for `\explain share`.
-        let raw_text = String::from_utf8_lossy(&captured);
-        settings.last_explain_text = Some(strip_psql_table_format(&raw_text));
+        // Raw format: `last_explain_text` already set by `execute_query`.
         display = std::borrow::Cow::Borrowed(captured.as_slice());
         let s = std::str::from_utf8(&captured).unwrap_or("");
         (s, captured.as_slice())

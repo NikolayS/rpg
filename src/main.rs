@@ -252,6 +252,10 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Markdown table output format.
+    #[arg(long)]
+    markdown: bool,
+
     /// Enable debug output.
     #[arg(short = 'D', long)]
     debug: bool,
@@ -343,6 +347,7 @@ fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
                 "json" => output::OutputFormat::Json,
                 "html" => output::OutputFormat::Html,
                 "wrapped" => output::OutputFormat::Wrapped,
+                "markdown" => output::OutputFormat::Markdown,
                 other => {
                     eprintln!("rpg: invalid value for -P format: \"{other}\"");
                     std::process::exit(2);
@@ -401,6 +406,8 @@ fn build_settings(
         pset.format = output::OutputFormat::Csv;
     } else if cli.json {
         pset.format = output::OutputFormat::Json;
+    } else if cli.markdown {
+        pset.format = output::OutputFormat::Markdown;
     } else if cli.no_align {
         pset.format = output::OutputFormat::Unaligned;
     }

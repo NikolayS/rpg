@@ -3,15 +3,15 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # ---------------------------------------------------------------------------
-# psql vs samo golden output comparison
+# psql vs rpg golden output comparison
 #
-# Usage: test-compat.sh <path-to-samo-binary>
+# Usage: test-compat.sh <path-to-rpg-binary>
 #
-# Runs the same commands through both psql and samo, diffs the outputs, and
+# Runs the same commands through both psql and rpg, diffs the outputs, and
 # exits non-zero if any comparison fails.
 # ---------------------------------------------------------------------------
 
-SAMO="${1:?Usage: test-compat.sh <samo-binary>}"
+RPG="${1:?Usage: test-compat.sh <rpg-binary>}"
 
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
@@ -54,11 +54,11 @@ normalize() {
 }
 
 # compare DESC CMD
-#   Runs CMD through both psql and samo using -c, diffs the result.
+#   Runs CMD through both psql and rpg using -c, diffs the result.
 compare() {
   local desc="${1}"
   local cmd="${2}"
-  local psql_out samo_out
+  local psql_out rpg_out
 
   psql_out=$(
     psql \
@@ -71,8 +71,8 @@ compare() {
       2>/dev/null | normalize
   ) || true
 
-  samo_out=$(
-    "${SAMO}" \
+  rpg_out=$(
+    "${RPG}" \
       -h "${PGHOST}" \
       -p "${PGPORT}" \
       -U "${PGUSER}" \
@@ -81,29 +81,29 @@ compare() {
       2>/dev/null | normalize
   ) || true
 
-  if [[ "${psql_out}" == "${samo_out}" ]]; then
+  if [[ "${psql_out}" == "${rpg_out}" ]]; then
     echo "PASS: ${desc}"
     (( PASS++ )) || true
   else
     echo "FAIL: ${desc}"
     echo "--- psql ---"
     echo "${psql_out}"
-    echo "--- samo ---"
-    echo "${samo_out}"
+    echo "--- rpg ---"
+    echo "${rpg_out}"
     echo "--- diff ---"
-    diff <(echo "${psql_out}") <(echo "${samo_out}") || true
+    diff <(echo "${psql_out}") <(echo "${rpg_out}") || true
     echo "---"
     (( FAIL++ )) || true
   fi
 }
 
 # compare_flags DESC [ARGS...]
-#   Like compare but passes the given args directly to both psql and samo.
+#   Like compare but passes the given args directly to both psql and rpg.
 #   The caller is responsible for including -c / -f / etc. in the args.
 compare_flags() {
   local desc="${1}"
   shift
-  local psql_out samo_out
+  local psql_out rpg_out
 
   psql_out=$(
     psql \
@@ -116,8 +116,8 @@ compare_flags() {
       2>/dev/null | normalize
   ) || true
 
-  samo_out=$(
-    "${SAMO}" \
+  rpg_out=$(
+    "${RPG}" \
       -h "${PGHOST}" \
       -p "${PGPORT}" \
       -U "${PGUSER}" \
@@ -126,29 +126,29 @@ compare_flags() {
       2>/dev/null | normalize
   ) || true
 
-  if [[ "${psql_out}" == "${samo_out}" ]]; then
+  if [[ "${psql_out}" == "${rpg_out}" ]]; then
     echo "PASS: ${desc}"
     (( PASS++ )) || true
   else
     echo "FAIL: ${desc}"
     echo "--- psql ---"
     echo "${psql_out}"
-    echo "--- samo ---"
-    echo "${samo_out}"
+    echo "--- rpg ---"
+    echo "${rpg_out}"
     echo "--- diff ---"
-    diff <(echo "${psql_out}") <(echo "${samo_out}") || true
+    diff <(echo "${psql_out}") <(echo "${rpg_out}") || true
     echo "---"
     (( FAIL++ )) || true
   fi
 }
 
 # compare_err DESC CMD
-#   Compares stderr output for CMD from both psql and samo.
+#   Compares stderr output for CMD from both psql and rpg.
 #   Used to verify error messages match for intentional bad SQL.
 compare_err() {
   local desc="${1}"
   local cmd="${2}"
-  local psql_out samo_out
+  local psql_out rpg_out
 
   psql_out=$(
     psql \
@@ -161,8 +161,8 @@ compare_err() {
       2>&1 >/dev/null | normalize
   ) || true
 
-  samo_out=$(
-    "${SAMO}" \
+  rpg_out=$(
+    "${RPG}" \
       -h "${PGHOST}" \
       -p "${PGPORT}" \
       -U "${PGUSER}" \
@@ -171,17 +171,17 @@ compare_err() {
       2>&1 >/dev/null | normalize
   ) || true
 
-  if [[ "${psql_out}" == "${samo_out}" ]]; then
+  if [[ "${psql_out}" == "${rpg_out}" ]]; then
     echo "PASS: ${desc}"
     (( PASS++ )) || true
   else
     echo "FAIL: ${desc}"
     echo "--- psql stderr ---"
     echo "${psql_out}"
-    echo "--- samo stderr ---"
-    echo "${samo_out}"
+    echo "--- rpg stderr ---"
+    echo "${rpg_out}"
     echo "--- diff ---"
-    diff <(echo "${psql_out}") <(echo "${samo_out}") || true
+    diff <(echo "${psql_out}") <(echo "${rpg_out}") || true
     echo "---"
     (( FAIL++ )) || true
   fi
@@ -189,19 +189,19 @@ compare_err() {
 
 # compare_file DESC FILE_CMD
 #   Runs FILE_CMD (which uses \o to redirect output to a file) via both
-#   psql and samo, then compares the contents of the two output files.
+#   psql and rpg, then compares the contents of the two output files.
 compare_file() {
   local desc="${1}"
   local cmd="${2}"
-  local psql_file samo_file
+  local psql_file rpg_file
 
   psql_file="${TMPDIR_COMPAT}/psql_$$.txt"
-  samo_file="${TMPDIR_COMPAT}/samo_$$.txt"
+  rpg_file="${TMPDIR_COMPAT}/rpg_$$.txt"
 
   # Replace the placeholder __OUTFILE__ with each tool's output path.
-  local psql_cmd samo_cmd
+  local psql_cmd rpg_cmd
   psql_cmd="${cmd//__OUTFILE__/${psql_file}}"
-  samo_cmd="${cmd//__OUTFILE__/${samo_file}}"
+  rpg_cmd="${cmd//__OUTFILE__/${rpg_file}}"
 
   psql \
     --no-psqlrc \
@@ -212,31 +212,31 @@ compare_file() {
     -c "${psql_cmd}" \
     >/dev/null 2>&1 || true
 
-  "${SAMO}" \
+  "${RPG}" \
     -h "${PGHOST}" \
     -p "${PGPORT}" \
     -U "${PGUSER}" \
     -d "${PGDATABASE}" \
-    -c "${samo_cmd}" \
+    -c "${rpg_cmd}" \
     >/dev/null 2>&1 || true
 
-  local psql_content samo_content
+  local psql_content rpg_content
   psql_content="$(normalize < "${psql_file}" 2>/dev/null || true)"
-  samo_content="$(normalize < "${samo_file}" 2>/dev/null || true)"
+  rpg_content="$(normalize < "${rpg_file}" 2>/dev/null || true)"
 
-  rm -f "${psql_file}" "${samo_file}"
+  rm -f "${psql_file}" "${rpg_file}"
 
-  if [[ "${psql_content}" == "${samo_content}" ]]; then
+  if [[ "${psql_content}" == "${rpg_content}" ]]; then
     echo "PASS: ${desc}"
     (( PASS++ )) || true
   else
     echo "FAIL: ${desc}"
     echo "--- psql file ---"
     echo "${psql_content}"
-    echo "--- samo file ---"
-    echo "${samo_content}"
+    echo "--- rpg file ---"
+    echo "${rpg_content}"
     echo "--- diff ---"
-    diff <(echo "${psql_content}") <(echo "${samo_content}") || true
+    diff <(echo "${psql_content}") <(echo "${rpg_content}") || true
     echo "---"
     (( FAIL++ )) || true
   fi
@@ -257,7 +257,7 @@ psql \
   -f tests/fixtures/schema.sql \
   2>/dev/null || true
 
-echo "=== psql vs samo compatibility tests ==="
+echo "=== psql vs rpg compatibility tests ==="
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ compare_flags "unaligned csv from table" \
 # CLI flag combinations
 # ---------------------------------------------------------------------------
 
-## --json is a samo-specific extension — psql doesn't support it
+## --json is a rpg-specific extension — psql doesn't support it
 # compare_flags "json output" \
 #   --json -c "select 1 as a, 'hello' as b"
 

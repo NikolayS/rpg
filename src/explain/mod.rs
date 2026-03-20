@@ -943,11 +943,21 @@ pub fn to_render_plan(
         render::ExplainNode::default()
     };
 
+    // Pull estimated cost and rows from the root node for the summary header.
+    let estimated_cost = plan
+        .nodes
+        .first()
+        .and_then(|n| n.estimated_cost)
+        .map(|(_, total)| total);
+    let estimated_rows = plan.nodes.first().and_then(|n| n.estimated_rows);
+
     render::ExplainPlan {
         root,
         execution_time_ms: plan.execution_time_ms,
         planning_time_ms: plan.planning_time_ms,
         is_analyze: plan.execution_time_ms.is_some(),
+        estimated_cost,
+        estimated_rows,
     }
 }
 
@@ -980,6 +990,8 @@ fn to_render_node(node: &ExplainNode, issues_node: &issues::ExplainNode) -> rend
         relation: node.relation.clone(),
         actual_time_ms: node.actual_time_ms,
         actual_rows: node.actual_rows,
+        estimated_cost: node.estimated_cost,
+        estimated_rows: node.estimated_rows,
         exclusive_time_ms: node.exclusive_time_ms,
         time_percent: issues_node.time_percent,
         loops: node.loops,

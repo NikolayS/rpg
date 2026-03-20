@@ -1,11 +1,11 @@
-# Samo container image — multi-stage, Alpine-based, minimal footprint.
+# rpg container image — multi-stage, Alpine-based, minimal footprint.
 #
 # Build:
-#   docker build -t samo:latest .
+#   docker build -t rpg:latest .
 #
 # Run (connect to host Postgres on macOS/Windows):
 #   docker run --rm \
-#     samo:latest \
+#     rpg:latest \
 #     -h host.docker.internal -p 5432 -U postgres -d postgres \
 #     -c "select 1"
 
@@ -33,6 +33,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY src/ src/
+COPY benches/ benches/
 
 RUN cargo build --release
 
@@ -44,11 +45,11 @@ FROM alpine:3.20
 # ca-certificates — needed for TLS connections to Postgres and AI APIs
 # libgcc          — runtime support for Rust/C code on musl Alpine
 RUN apk add --no-cache ca-certificates libgcc && \
-    adduser -D -H -s /sbin/nologin samo
+    adduser -D -H -s /sbin/nologin rpg
 
-COPY --from=builder /build/target/release/samo /usr/local/bin/samo
+COPY --from=builder /build/target/release/rpg /usr/local/bin/rpg
 
-USER samo
+USER rpg
 
-ENTRYPOINT ["samo"]
+ENTRYPOINT ["rpg"]
 CMD ["--help"]
