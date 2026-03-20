@@ -181,9 +181,9 @@ Or set `PAGER=pspg` in your environment before launching rpg.
 pspg adds horizontal scrolling (Right arrow), line numbers (Alt+n),
 and a vertical column cursor (Alt+v) — useful for wide result sets.
 
-![pspg external pager integration](demos/gif4_pspg.gif)
+![pspg external pager with theme menu](demos/pspg_screenshot.png)
 
-*Built-in pager, then pspg with style 22 — one command to switch.*
+*pspg with the theme selector menu — 20+ built-in themes, horizontal scrolling, column cursor.*
 
 ## DBA diagnostics
 
