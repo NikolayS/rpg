@@ -33,6 +33,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY src/ src/
+COPY benches/ benches/
 
 RUN cargo build --release
 
