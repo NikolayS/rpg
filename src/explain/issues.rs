@@ -393,6 +393,38 @@ fn collect_nodes<'a>(node: &'a ExplainNode, out: &mut Vec<&'a ExplainNode>) {
     }
 }
 
+/// Collect node indices that are descendants of a Limit node where the
+/// descendant's `actual_rows` equals the Limit's `actual_rows`.
+///
+/// A Limit node artificially truncates its children's output: the children
+/// may have high estimated row counts (the unfiltered estimate) while only
+/// returning exactly as many rows as the Limit allows.  Row estimate warnings
+/// on such children are false positives.
+fn collect_limit_constrained_indices(
+    node: &ExplainNode,
+    limit_rows: Option<f64>,
+    out: &mut std::collections::HashSet<usize>,
+) {
+    let effective_limit = if node.node_type == "Limit" {
+        // When entering a Limit node, its actual_rows is the cap for children.
+        Some(node.actual_rows)
+    } else {
+        limit_rows
+    };
+
+    if let Some(limit) = effective_limit {
+        if node.node_type != "Limit" && (node.actual_rows - limit).abs() < 0.5 {
+            // This node returned exactly the Limit's row count — its estimate
+            // is for the full un-limited result, so skip the row estimate check.
+            out.insert(node.index);
+        }
+    }
+
+    for child in &node.children {
+        collect_limit_constrained_indices(child, effective_limit, out);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -408,13 +440,26 @@ pub fn detect_issues(plan: &ExplainPlan) -> Vec<PlanIssue> {
     let mut nodes: Vec<&ExplainNode> = Vec::new();
     collect_nodes(&plan.root, &mut nodes);
 
+    // Build the set of nodes that are limit-constrained (descendants of a
+    // Limit node whose actual rows match the Limit's row count).  Row estimate
+    // warnings for these nodes are suppressed — the child's estimated rows
+    // reflect the full un-limited result set, not a planning error.
+    let mut limit_constrained = std::collections::HashSet::new();
+    collect_limit_constrained_indices(&plan.root, None, &mut limit_constrained);
+
     // Apply every heuristic to every node.
     let mut issues: Vec<PlanIssue> = nodes
         .iter()
         .flat_map(|node| {
+            // Skip row estimate check for limit-constrained nodes.
+            let row_est_issue = if limit_constrained.contains(&node.index) {
+                None
+            } else {
+                check_row_estimate_error(node)
+            };
             [
                 check_seq_scan_large(node),
-                check_row_estimate_error(node),
+                row_est_issue,
                 check_sort_spill(node),
                 check_hash_spill(node),
                 check_high_filter_removal(node),
@@ -1015,5 +1060,127 @@ mod tests {
         // Should not panic; time_percent stays 0.0.
         plan.compute_time_percents();
         assert!(plan.root.time_percent.abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // Limit node false-positive suppression
+    // -----------------------------------------------------------------------
+
+    /// A Limit node stops execution after N rows.  Children under a Limit may
+    /// have large estimated row counts (the full un-limited estimate) while
+    /// returning only as many rows as the Limit allows.  The row estimate check
+    /// must not fire for these nodes — they are not a planning error.
+    #[test]
+    fn row_estimate_under_limit_no_false_positive() {
+        // Limit(10) → Index Only Scan  estimated=1_000_000, actual=10
+        // Without the fix, this would fire with "overestimated 100000x".
+        let index_scan = ExplainNode {
+            index: 1,
+            node_type: "Index Only Scan".to_owned(),
+            estimated_rows: 1_000_000.0,
+            actual_rows: 10.0,
+            actual_total_ms: 0.1,
+            time_percent: 1.0,
+            ..Default::default()
+        };
+        let limit_node = ExplainNode {
+            index: 0,
+            node_type: "Limit".to_owned(),
+            estimated_rows: 10.0,
+            actual_rows: 10.0,
+            actual_total_ms: 0.1,
+            time_percent: 1.0,
+            children: vec![index_scan],
+            ..Default::default()
+        };
+        let plan = ExplainPlan {
+            root: limit_node,
+            total_execution_ms: 0.1,
+        };
+
+        let issues = detect_issues(&plan);
+        // The index scan under Limit should NOT generate a row estimate issue.
+        let row_est_issues: Vec<&PlanIssue> = issues
+            .iter()
+            .filter(|i| i.title.contains("estimate"))
+            .collect();
+        assert!(
+            row_est_issues.is_empty(),
+            "expected no row estimate false positive under Limit, got: {row_est_issues:?}"
+        );
+    }
+
+    /// A node with a genuine estimate error NOT under a Limit should still fire.
+    #[test]
+    fn row_estimate_not_under_limit_still_fires() {
+        // No Limit ancestor: genuine row estimate error should be detected.
+        let bad_scan = ExplainNode {
+            index: 0,
+            node_type: "Seq Scan".to_owned(),
+            estimated_rows: 1_000_000.0,
+            actual_rows: 10.0,
+            actual_total_ms: 100.0,
+            time_percent: 50.0,
+            ..Default::default()
+        };
+        let plan = ExplainPlan {
+            root: bad_scan,
+            total_execution_ms: 200.0,
+        };
+
+        let issues = detect_issues(&plan);
+        let row_est_issues: Vec<&PlanIssue> = issues
+            .iter()
+            .filter(|i| i.title.contains("estimate"))
+            .collect();
+        assert!(
+            !row_est_issues.is_empty(),
+            "expected row estimate issue for genuine mismatch without Limit"
+        );
+    }
+
+    /// End-to-end: parse a real EXPLAIN ANALYZE plan with Limit, verify no
+    /// false-positive row estimate warning from the Limit-constrained child.
+    #[test]
+    fn limit_false_positive_suppressed_via_parse() {
+        // This is the text PostgreSQL emits for:
+        //   EXPLAIN ANALYZE SELECT * FROM orders WHERE status = 'pending' LIMIT 10;
+        // The Seq Scan estimates 203200 rows but only returns 10 (limited by
+        // the Limit node).  Without the fix, a "20320x overestimated" warning
+        // fires on the Seq Scan — which is a false positive.
+        let plan_text = "Limit  (cost=0.00..2.32 rows=10 width=61) (actual time=0.040..0.044 rows=10 loops=1)\n  ->  Seq Scan on orders  (cost=0.00..47139.00 rows=203200 width=61) (actual time=0.040..0.043 rows=10 loops=1)\n        Filter: (status = 'pending'::text)\n        Rows Removed by Filter: 66\n        Buffers: shared hit=2\nPlanning Time: 0.050 ms\nExecution Time: 0.034 ms\n";
+
+        let parsed = crate::explain::parse(plan_text).expect("parse should succeed");
+
+        // Verify parse tree structure.
+        assert_eq!(parsed.nodes.len(), 1, "should have one root node (Limit)");
+        let root = &parsed.nodes[0];
+        assert_eq!(root.node_type, "Limit");
+        assert_eq!(root.estimated_rows, Some(10.0));
+        assert_eq!(root.children.len(), 1, "Limit should have one child");
+        let seq_scan = &root.children[0];
+        assert_eq!(seq_scan.node_type, "Seq Scan");
+        assert_eq!(seq_scan.estimated_rows, Some(203_200.0));
+        assert_eq!(seq_scan.actual_rows, Some(10.0));
+
+        let issues_plan = crate::explain::to_issues_plan(&parsed);
+
+        // Verify issues plan structure.
+        assert_eq!(issues_plan.root.node_type, "Limit");
+        assert_eq!(issues_plan.root.index, 0);
+        assert_eq!(issues_plan.root.children.len(), 1);
+        assert_eq!(issues_plan.root.children[0].node_type, "Seq Scan");
+        assert_eq!(issues_plan.root.children[0].index, 1);
+
+        let issues = detect_issues(&issues_plan);
+
+        let row_est_issues: Vec<&PlanIssue> = issues
+            .iter()
+            .filter(|i| i.title.contains("estimate"))
+            .collect();
+        assert!(
+            row_est_issues.is_empty(),
+            "expected no row estimate false positive under Limit, got: {row_est_issues:?}"
+        );
     }
 }
