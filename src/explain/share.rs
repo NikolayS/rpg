@@ -17,20 +17,46 @@
 //! Supports:
 //! - `explain.depesz.com` — classic Hubert Lubaczewski visualiser
 //! - `explain.dalibo.com`  — Dalibo's EXPLAIN visualiser
+//! - `app.pgmustard.com`  — pgMustard EXPLAIN analyser (requires API key)
 //!
 //! After a successful upload the shareable URL is printed and copied to the
 //! system clipboard when a suitable clipboard tool is available.
 
 /// Upload `plan_text` to the chosen service and return the shareable URL.
 ///
-/// `service` must be `"depesz"` or `"dalibo"` (case-insensitive).
-/// Returns an error string on failure.
-pub async fn share_explain_plan(plan_text: &str, service: &str) -> Result<String, String> {
+/// `service` must be `"depesz"`, `"dalibo"`, or `"pgmustard"`
+/// (case-insensitive).  Returns an error string on failure.
+///
+/// For pgMustard, the API key is resolved from config (via `api_key_env`)
+/// or directly from the `PGMUSTARD_API_KEY` environment variable.
+pub async fn share_explain_plan(
+    plan_text: &str,
+    service: &str,
+    cfg: Option<&crate::config::PgMustardConfig>,
+) -> Result<String, String> {
     match service {
         "depesz" => upload_depesz(plan_text).await,
         "dalibo" => upload_dalibo(plan_text).await,
+        "pgmustard" => {
+            let api_key = cfg
+                .and_then(crate::config::PgMustardConfig::resolve_api_key)
+                .or_else(|| match std::env::var("PGMUSTARD_API_KEY") {
+                    Ok(val) if !val.is_empty() => Some(val),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    "pgMustard API key not found.\n\
+                     Set PGMUSTARD_API_KEY in your environment, or add to \
+                     ~/.config/rpg/config.toml:\n\
+                     \n\
+                     [pgmustard]\n\
+                     api_key_env = \"PGMUSTARD_API_KEY\""
+                        .to_owned()
+                })?;
+            upload_pgmustard(plan_text, &api_key).await
+        }
         other => Err(format!(
-            "unknown service \"{other}\"; valid options: depesz, dalibo"
+            "unknown service \"{other}\"; valid options: depesz, dalibo, pgmustard"
         )),
     }
 }
@@ -172,6 +198,84 @@ async fn upload_dalibo(plan_text: &str) -> Result<String, String> {
 
     Err(format!(
         "explain.dalibo.com returned unexpected status {status}"
+    ))
+}
+
+/// POST to app.pgmustard.com and return the plan URL.
+///
+/// pgMustard accepts a JSON body with `plan` and `query` fields and an
+/// `Authorization: Bearer <api_key>` header.  On success it returns JSON
+/// containing a `url` field with the shareable plan URL.
+async fn upload_pgmustard(plan_text: &str, api_key: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let payload = serde_json::json!({
+        "plan": plan_text,
+        "query": ""
+    });
+
+    let response = client
+        .post("https://app.pgmustard.com/api/query-plan")
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("request to app.pgmustard.com failed: {e}"))?;
+
+    let status = response.status();
+
+    // Handle redirect responses.
+    if status.is_redirection() {
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !location.is_empty() {
+            let url = if location.starts_with("http") {
+                location.to_owned()
+            } else {
+                format!("https://app.pgmustard.com{location}")
+            };
+            return Ok(url);
+        }
+    }
+
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "app.pgmustard.com returned {status}: invalid or missing API key.\n\
+             Check that PGMUSTARD_API_KEY is set correctly."
+        ));
+    }
+
+    if !status.is_success() {
+        return Err(format!(
+            "app.pgmustard.com returned unexpected status {status}"
+        ));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read app.pgmustard.com response: {e}"))?;
+
+    // Parse JSON response and look for the URL.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        for key in &["url", "permalink", "link", "id"] {
+            if let Some(val) = json.get(key).and_then(|v| v.as_str()) {
+                let url = if val.starts_with("http") {
+                    val.to_owned()
+                } else {
+                    format!("https://app.pgmustard.com/{val}")
+                };
+                return Ok(url);
+            }
+        }
+    }
+
+    Err(format!(
+        "app.pgmustard.com returned status {status} \
+         but the URL could not be extracted from the response"
     ))
 }
 

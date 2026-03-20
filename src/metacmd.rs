@@ -3682,6 +3682,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_explain_share_pgmustard() {
+        let m = parse("\\explain share pgmustard");
+        assert_eq!(m.cmd, MetaCmd::ExplainShare("pgmustard".to_owned()));
+    }
+
+    #[test]
+    fn parse_explain_share_pgmustard_normalises_case() {
+        let m = parse("\\explain share PGMUSTARD");
+        assert_eq!(m.cmd, MetaCmd::ExplainShare("pgmustard".to_owned()));
+    }
+
+    #[test]
     fn parse_explain_share_not_confused_with_echo() {
         // `\echo` must still parse correctly.
         let m = parse("\\echo hello");

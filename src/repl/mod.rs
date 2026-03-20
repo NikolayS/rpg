@@ -1752,8 +1752,10 @@ Auto-EXPLAIN:
   \\set EXPLAIN off      disable auto-EXPLAIN
 
 EXPLAIN sharing:
-  \\explain share depesz  upload last EXPLAIN plan to explain.depesz.com
-  \\explain share dalibo   upload last EXPLAIN plan to explain.dalibo.com
+  \\explain share depesz    upload last EXPLAIN plan to explain.depesz.com
+  \\explain share dalibo    upload last EXPLAIN plan to explain.dalibo.com
+  \\explain share pgmustard upload last EXPLAIN plan to app.pgmustard.com
+                            (requires PGMUSTARD_API_KEY env var or config)
 
 Function keys (interactive mode):
   F2 / \\f2       toggle schema-aware tab completion on/off
@@ -3596,14 +3598,17 @@ async fn dispatch_explain_share(settings: &mut ReplSettings, service: &str) {
         eprintln!(
             "\\explain share: service name required.\n\
              Usage: \\explain share depesz\n\
-             Usage: \\explain share dalibo"
+             Usage: \\explain share dalibo\n\
+             Usage: \\explain share pgmustard"
         );
         return;
     }
 
     println!("Uploading EXPLAIN plan to {service}…");
 
-    match crate::explain::share::share_explain_plan(&plan_text, service).await {
+    let pgmustard_cfg = &settings.config.pgmustard;
+    match crate::explain::share::share_explain_plan(&plan_text, service, Some(pgmustard_cfg)).await
+    {
         Ok(url) => {
             println!("Plan URL: {url}");
             crate::explain::share::copy_to_clipboard(&url);

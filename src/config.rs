@@ -29,6 +29,8 @@ pub struct Config {
     pub safety: SafetyConfig,
     /// AI/LLM provider settings.
     pub ai: AiConfig,
+    /// pgMustard EXPLAIN visualiser settings.
+    pub pgmustard: PgMustardConfig,
     /// Structured-log file rotation settings.
     pub logging: LoggingConfig,
     /// Named connection profiles (keyed by profile name).
@@ -362,6 +364,49 @@ impl AiConfig {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pgMustard settings
+// ---------------------------------------------------------------------------
+
+/// pgMustard EXPLAIN visualiser settings.
+///
+/// pgMustard requires an API key to upload plans.  Set the name of the
+/// environment variable that holds the key:
+///
+/// ```toml
+/// [pgmustard]
+/// api_key_env = "PGMUSTARD_API_KEY"
+/// ```
+///
+/// When `api_key_env` is not set in the config file, the implementation
+/// falls back to reading `PGMUSTARD_API_KEY` directly from the environment.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct PgMustardConfig {
+    /// Name of the environment variable holding the pgMustard API key.
+    ///
+    /// Example: `"PGMUSTARD_API_KEY"`.
+    ///
+    /// When absent the code looks up `PGMUSTARD_API_KEY` directly.
+    pub api_key_env: Option<String>,
+}
+
+impl PgMustardConfig {
+    /// Resolve the API key.
+    ///
+    /// Reads from the env-var named by `api_key_env`, falling back to the
+    /// default `PGMUSTARD_API_KEY` variable when `api_key_env` is not set.
+    ///
+    /// Returns `None` when the variable is unset or empty.
+    pub fn resolve_api_key(&self) -> Option<String> {
+        let var_name = self.api_key_env.as_deref().unwrap_or("PGMUSTARD_API_KEY");
+        match std::env::var(var_name) {
+            Ok(val) if !val.is_empty() => Some(val),
+            _ => None,
         }
     }
 }
@@ -896,6 +941,9 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             } else {
                 overlay.ai.timeout
             },
+        },
+        pgmustard: PgMustardConfig {
+            api_key_env: overlay.pgmustard.api_key_env.or(base.pgmustard.api_key_env),
         },
         logging: LoggingConfig {
             max_file_size_mb: if overlay.logging.max_file_size_mb
@@ -1970,5 +2018,56 @@ connect_timeout = 30
             .and_then(|p| p.ssh_tunnel.as_ref())
             .expect("prod ssh_tunnel should be present");
         assert_eq!(tunnel.connect_timeout, 30);
+    }
+
+    // -- PgMustardConfig -----------------------------------------------------
+
+    #[test]
+    fn pgmustard_default_has_no_api_key_env() {
+        let cfg = PgMustardConfig::default();
+        assert!(cfg.api_key_env.is_none());
+    }
+
+    #[test]
+    fn pgmustard_resolve_api_key_from_default_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("PGMUSTARD_API_KEY", "test-key-123");
+        let cfg = PgMustardConfig::default();
+        let key = cfg.resolve_api_key();
+        std::env::remove_var("PGMUSTARD_API_KEY");
+        assert_eq!(key, Some("test-key-123".to_owned()));
+    }
+
+    #[test]
+    fn pgmustard_resolve_api_key_from_custom_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("MY_MUSTARD_KEY", "custom-key-456");
+        let cfg = PgMustardConfig {
+            api_key_env: Some("MY_MUSTARD_KEY".to_owned()),
+        };
+        let key = cfg.resolve_api_key();
+        std::env::remove_var("MY_MUSTARD_KEY");
+        assert_eq!(key, Some("custom-key-456".to_owned()));
+    }
+
+    #[test]
+    fn pgmustard_resolve_api_key_missing_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PGMUSTARD_API_KEY");
+        let cfg = PgMustardConfig::default();
+        assert!(cfg.resolve_api_key().is_none());
+    }
+
+    #[test]
+    fn parse_pgmustard_config_from_toml() {
+        let toml_str = r#"
+[pgmustard]
+api_key_env = "PGMUSTARD_API_KEY"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(
+            cfg.pgmustard.api_key_env,
+            Some("PGMUSTARD_API_KEY".to_owned())
+        );
     }
 }
