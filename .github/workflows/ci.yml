@@ -16,6 +16,7 @@ jobs:
   checks:
     name: Checks
     uses: ./.github/workflows/checks.yml
+    secrets: inherit
 
   build:
     name: Build (${{ matrix.artifact }})
