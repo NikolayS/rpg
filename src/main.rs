@@ -23,6 +23,7 @@ mod init;
 mod io;
 mod large_object;
 mod logging;
+mod lua_commands;
 mod markdown;
 mod metacmd;
 mod named;
