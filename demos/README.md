@@ -9,12 +9,14 @@ the [VHS](https://github.com/charmbracelet/vhs) tape files used to render them.
 | `gif2_typo.gif` | Typo in table name → `/fix` corrects and re-executes |
 | `gif3_t2s.gif` | `\t2s` text-to-SQL with confirmation, then `\yolo` auto-execute |
 | `gif4_pspg.gif` | Built-in pager → `\set PAGER pspg` → same query routed through pspg |
+| `gif5_lua.gif` | Custom Lua commands: `\commands`, `\slow_mean`, `\slow_total`, `\table_info` |
 
 ## Prerequisites
 
 - [VHS](https://github.com/charmbracelet/vhs) installed (`brew install vhs` on macOS)
-- rpg built from source (see top-level README)
+- rpg built from source with Lua support: `cargo build --features lua`
 - PostgreSQL running locally with a `demo_saas` database
+- For `gif5_lua`: `pg_stat_statements` loaded via `shared_preload_libraries`
 
 ## Setting up the demo database
 
@@ -43,6 +45,7 @@ vhs demos/gif1_optimize.tape
 vhs demos/gif2_typo.tape
 vhs demos/gif3_t2s.tape
 vhs demos/gif4_pspg.tape
+vhs demos/gif5_lua.tape
 ```
 
 Or render all at once:
