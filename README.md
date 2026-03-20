@@ -67,6 +67,18 @@ select * from orders where status = 'pending';
 /optimize
 ```
 
+| Command | Description |
+|---------|-------------|
+| `/ask <prompt>` | Natural language to SQL |
+| `/explain` | Interpret the last query plan |
+| `/fix` | Diagnose and fix the last error |
+| `/optimize` | Suggest query optimizations |
+| `/describe <table>` | AI-generated table description |
+| `/init` | Generate `.rpg.toml` and `POSTGRES.md` in current directory |
+| `/clear` | Clear AI conversation context |
+| `/compact [focus]` | Compact conversation context (optional focus topic) |
+| `/budget` | Show token usage and remaining budget |
+
 ### \text2sql — natural language to SQL
 
 By default, the generated SQL is shown in a preview box and you confirm before it runs:
@@ -152,6 +164,26 @@ postgres=# /optimize
 
 *`/explain` interprets the query plan; `/optimize` suggests an index. After creating it, the same query runs dramatically faster.*
 
+### Share EXPLAIN plans
+
+Upload the last EXPLAIN plan to an external visualizer:
+
+```
+\explain share depesz     → posts to explain.depesz.com
+\explain share dalibo     → posts to explain.dalibo.com
+\explain share pgmustard  → posts to pgMustard (requires PGMUSTARD_API_KEY)
+```
+
+### EXPLAIN display format
+
+Toggle between enhanced and raw (psql-compatible) views:
+
+```
+\pset explain_format raw
+\pset explain_format enhanced
+\pset explain_format compact
+```
+
 ## psql-compatible display settings
 
 ### \pset — display settings
@@ -167,6 +199,23 @@ postgres=# select id, name, deleted_at from users limit 3;
   3 | Carol | ∅
 (3 rows)
 ```
+
+### Markdown output
+
+Switch to Markdown table format for easy copy-paste into docs or chat:
+
+```
+\pset format markdown
+select id, name from customers limit 3;
+| id | name       |
+|----|------------|
+| 1  | Sam Martin |
+| 2  | Alice Zhou |
+| 3  | Bob Patel  |
+(3 rows)
+```
+
+Also available as a CLI flag: `rpg --markdown -c "select id, name from customers limit 3"`.
 
 ### External pager support
 
@@ -184,6 +233,45 @@ and a vertical column cursor (Alt+v) — useful for wide result sets.
 ![pspg external pager with theme menu](demos/pspg_screenshot.png)
 
 *pspg with the theme selector menu — 20+ built-in themes, horizontal scrolling, column cursor.*
+
+### \s — command history
+
+Browse, search, and save your query history:
+
+```
+\s                  show full history (numbered, syntax-highlighted)
+\s pattern          filter history by pattern
+\s /path/to/file    save history to a file
+```
+
+### Lua custom commands
+
+Extend rpg with custom meta-commands written in Lua. Build with `--features lua`,
+then place `.lua` files in `~/.config/rpg/commands/`:
+
+```lua
+-- ~/.config/rpg/commands/slow_mean.lua
+local rpg = require("rpg")
+
+rpg.register_command({
+    name = "slow_mean",
+    description = "Top 10 slowest queries by avg time",
+    handler = function()
+        rpg.print(rpg.query([[
+            select
+                calls,
+                round(mean_exec_time::numeric, 2) as avg_ms,
+                left(query, 80) as query
+            from pg_stat_statements
+            order by mean_exec_time desc limit 10
+        ]]))
+    end,
+})
+```
+
+Run the command with `\slow_mean`. List all loaded custom commands with `\commands`.
+
+More examples are in the [`examples/commands/`](examples/commands/) directory.
 
 ## DBA diagnostics
 
