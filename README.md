@@ -170,17 +170,20 @@ postgres=# select id, name, deleted_at from users limit 3;
 
 ### External pager support
 
-rpg includes a built-in TUI pager, but also supports external pagers like [pspg](https://github.com/okbob/pspg):
+rpg includes a built-in TUI pager, but also supports external pagers like [pspg](https://github.com/okbob/pspg).
+Switch in one command — no restart needed:
 
 ```
-\set PAGER pspg
+\set PAGER 'pspg --style=22'
 ```
 
 Or set `PAGER=pspg` in your environment before launching rpg.
+pspg adds horizontal scrolling (Right arrow), line numbers (Alt+n),
+and a vertical column cursor (Alt+v) — useful for wide result sets.
 
 ![pspg external pager integration](demos/gif4_pspg.gif)
 
-*Switch between the built-in pager and pspg with a single command.*
+*Built-in pager, then pspg with style 22 — one command to switch.*
 
 ## DBA diagnostics
 
