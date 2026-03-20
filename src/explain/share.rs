@@ -126,9 +126,15 @@ fn extract_depesz_url(body: &str) -> Option<String> {
 /// POST to explain.dalibo.com and return the plan URL.
 ///
 /// Dalibo accepts a JSON body with `plan`, `query`, and `title` fields
-/// and responds with JSON containing the plan URL.
+/// and responds with a 302 redirect to the plan page.  We use
+/// `redirect::Policy::none()` to capture the `Location` header directly
+/// instead of following the redirect automatically (which would give us
+/// the rendered HTML page with status 200, making URL extraction fail).
 async fn upload_dalibo(plan_text: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
     let payload = serde_json::json!({
         "plan": plan_text,
@@ -145,73 +151,28 @@ async fn upload_dalibo(plan_text: &str) -> Result<String, String> {
 
     let status = response.status();
 
-    // Dalibo may redirect to the plan page on success.
+    // Dalibo returns 302 on success with Location pointing to the plan.
     if status.is_redirection() {
         let location = response
             .headers()
             .get("location")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if !location.is_empty() {
-            let url = if location.starts_with("http") {
-                location.to_owned()
-            } else {
-                format!("https://explain.dalibo.com{location}")
-            };
-            return Ok(url);
+        if location.is_empty() {
+            return Err("explain.dalibo.com returned a redirect with no Location header".into());
         }
-    }
-
-    if !status.is_success() {
-        return Err(format!("explain.dalibo.com returned status {status}"));
-    }
-
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("failed to read explain.dalibo.com response: {e}"))?;
-
-    // Try to parse JSON response first.
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-        // Look for common URL fields in the JSON response.
-        for key in &["url", "permalink", "link", "id"] {
-            if let Some(val) = json.get(key).and_then(|v| v.as_str()) {
-                let url = if val.starts_with("http") {
-                    val.to_owned()
-                } else {
-                    format!("https://explain.dalibo.com/{val}")
-                };
-                return Ok(url);
-            }
-        }
-    }
-
-    // Fallback: try to extract a URL from the raw body text.
-    if let Some(url) = extract_dalibo_url(&body) {
+        // Location may be relative (e.g. "/plan/abc123") — make it absolute.
+        let url = if location.starts_with("http") {
+            location.to_owned()
+        } else {
+            format!("https://explain.dalibo.com{location}")
+        };
         return Ok(url);
     }
 
     Err(format!(
-        "explain.dalibo.com returned status {status} \
-         but the URL could not be extracted from the response"
+        "explain.dalibo.com returned unexpected status {status}"
     ))
-}
-
-/// Extract the plan URL from a dalibo response body.
-fn extract_dalibo_url(body: &str) -> Option<String> {
-    for line in body.lines() {
-        let line = line.trim();
-        if line.contains("explain.dalibo.com/") {
-            if let Some(start) = line.find("https://explain.dalibo.com/") {
-                let rest = &line[start..];
-                let end = rest
-                    .find(|c: char| c == '"' || c == '\'' || c.is_whitespace())
-                    .unwrap_or(rest.len());
-                return Some(rest[..end].to_owned());
-            }
-        }
-    }
-    None
 }
 
 /// Copy `text` to the system clipboard.

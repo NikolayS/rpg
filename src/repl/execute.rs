@@ -1017,8 +1017,10 @@ pub(super) async fn execute_query_interactive(
         && explain_format != crate::explain::ExplainFormat::Raw
     {
         let raw_text = String::from_utf8_lossy(&captured);
-        // Store the stripped plain-text EXPLAIN output for `\explain share`.
-        settings.last_explain_text = Some(strip_psql_table_format(&raw_text));
+        // `last_explain_text` was already stored with correct indentation by
+        // `execute_query` (from the raw row values).  Do not overwrite it here
+        // with the psql-table-stripped version, which loses indentation and
+        // causes depesz/dalibo to reject the plan.
         if let Some(rendered) = try_render_explain(&raw_text, explain_format) {
             enhanced = rendered;
             display = std::borrow::Cow::Borrowed(b"");
@@ -1029,9 +1031,7 @@ pub(super) async fn execute_query_interactive(
             (s, captured.as_slice())
         }
     } else if ok && is_explain_statement(sql) {
-        // Raw format: still store the stripped text for `\explain share`.
-        let raw_text = String::from_utf8_lossy(&captured);
-        settings.last_explain_text = Some(strip_psql_table_format(&raw_text));
+        // Raw format: `last_explain_text` already set by `execute_query`.
         display = std::borrow::Cow::Borrowed(captured.as_slice());
         let s = std::str::from_utf8(&captured).unwrap_or("");
         (s, captured.as_slice())
