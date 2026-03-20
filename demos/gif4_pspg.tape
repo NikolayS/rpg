@@ -27,54 +27,37 @@ Sleep 2s
 Enter
 Sleep 300ms
 
-# Built-in pager — show it works
-Type "select id, name, email, plan, org_id, signed_up_at from customers limit 200;"
+Type "select * from customers limit 50;"
 Enter
 Sleep 3s
 
-Sleep 1500ms
 Down
-Sleep 300ms
+Sleep 400ms
 Down
-Sleep 300ms
+Sleep 400ms
 PageDown
-Sleep 600ms
-PageDown
-Sleep 600ms
+Sleep 800ms
 
 Type "q"
-Sleep 800ms
+Sleep 1s
 
 Enter
 Sleep 300ms
 
-# Switch to pspg
 Type "\set PAGER pspg"
 Enter
-Sleep 800ms
+Sleep 1s
 
-Enter
-Sleep 300ms
-
-# Same query — now routed through pspg
-Type "select id, name, email, plan, org_id, signed_up_at from customers limit 200;"
+Type "select * from customers limit 50;"
 Enter
 Sleep 3s
 
-# pspg is running — show horizontal scroll (Right arrow) and vertical scroll
-Sleep 1500ms
 Right
-Sleep 300ms
+Sleep 500ms
 Right
-Sleep 300ms
+Sleep 500ms
 Right
-Sleep 300ms
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-PageDown
-Sleep 600ms
+Sleep 500ms
 
 Type "q"
-Sleep 3s
+Sleep 2s

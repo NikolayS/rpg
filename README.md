@@ -168,15 +168,19 @@ postgres=# select id, name, deleted_at from users limit 3;
 (3 rows)
 ```
 
-### External pager (pspg)
+### External pager support
 
-[pspg](https://github.com/okbob/pspg) is supported as an external pager:
+rpg includes a built-in TUI pager, but also supports external pagers like [pspg](https://github.com/okbob/pspg):
 
 ```
 \set PAGER pspg
 ```
 
 Or set `PAGER=pspg` in your environment before launching rpg.
+
+![pspg external pager integration](demos/gif4_pspg.gif)
+
+*Switch between the built-in pager and pspg with a single command.*
 
 ## DBA diagnostics
 
