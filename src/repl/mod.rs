@@ -2323,6 +2323,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 "json" => OutputFormat::Json,
                 "html" => OutputFormat::Html,
                 "wrapped" => OutputFormat::Wrapped,
+                "markdown" => OutputFormat::Markdown,
                 other => {
                     eprintln!("\\pset: unknown format \"{other}\"");
                     return;
@@ -2442,6 +2443,7 @@ fn format_name(fmt: &crate::output::OutputFormat) -> &'static str {
         OutputFormat::Json => "json",
         OutputFormat::Html => "html",
         OutputFormat::Wrapped => "wrapped",
+        OutputFormat::Markdown => "markdown",
     }
 }
 
