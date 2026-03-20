@@ -641,13 +641,20 @@ async fn async_main() {
     let project_result = config::load_project_config();
     let cfg = config::merge_project_config(base_cfg, &project_result.config);
 
-    // Print project config startup messages (suppressed by --quiet).
-    if !cli.quiet {
-        if let Some(ref p) = project_result.config_path {
-            eprintln!("Using project config: {}", p.display());
-        }
-        if let Some(ref p) = project_result.postgres_md_path {
-            eprintln!("Loaded project context: {}", p.display());
+    // Print project config startup messages only in interactive mode.
+    // Suppress when: --quiet, -c/-f scripting flags, or stdin is not a TTY.
+    {
+        use std::io::IsTerminal;
+        let is_scripting = !cli.command.is_empty() || cli.file.is_some();
+        let is_piped = !cli.interactive && !std::io::stdin().is_terminal();
+        let show = !cli.quiet && !is_scripting && !is_piped;
+        if show {
+            if let Some(ref p) = project_result.config_path {
+                eprintln!("Using project config: {}", p.display());
+            }
+            if let Some(ref p) = project_result.postgres_md_path {
+                eprintln!("Loaded project context: {}", p.display());
+            }
         }
     }
 
