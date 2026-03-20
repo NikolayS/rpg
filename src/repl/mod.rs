@@ -1665,6 +1665,7 @@ pub(crate) async fn exec_lines(
 // ---------------------------------------------------------------------------
 
 /// Build the backslash command help text and return it as a `String`.
+#[allow(clippy::too_many_lines)]
 fn help_text() -> String {
     format!(
         "{}\n{}",
@@ -1763,6 +1764,24 @@ Output format:
   \pset explain_format raw     show raw EXPLAIN text (default)
   \pset explain_format enhanced show EXPLAIN with visual highlights
   \pset explain_format compact  show compact EXPLAIN summary
+  --markdown                   start with Markdown output format (CLI flag)
+
+DBA diagnostics:
+  \dba               show available diagnostics
+  \dba activity      pg_stat_activity summary
+  \dba bloat         table bloat estimates
+  \dba cache-hit     buffer cache hit ratios
+  \dba config        non-default configuration
+  \dba connections   connection counts by state
+  \dba indexes       index health (unused, redundant, invalid)
+  \dba io            I/O statistics (PG 16+)
+  \dba locks         lock tree (blocked/blocking)
+  \dba progress      long-running operation progress
+  \dba replication   replication slot status
+  \dba seq-scans     tables with high sequential scan ratio
+  \dba tablesize     largest tables
+  \dba vacuum        vacuum status and dead tuples
+  \dba waits         wait event breakdown
 
 Lua commands:
   \commands         list custom Lua meta-commands (if any are configured)
