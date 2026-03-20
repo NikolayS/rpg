@@ -463,16 +463,25 @@ impl LuaRegistry {
         dbname: &str,
         client: &tokio_postgres::Client,
     ) -> Result<(), String> {
+        // RAII guard: clears the thread-local client pointer on return *and*
+        // on panic, preventing a dangling pointer if `invoke` unwinds.
+        struct ClientPtrGuard;
+        impl Drop for ClientPtrGuard {
+            fn drop(&mut self) {
+                lua_impl::clear_client_ptr();
+            }
+        }
+
         lua_impl::update_dbname(&self.lua, dbname).map_err(|e| format!("rpg: lua: {e}"))?;
 
-        // Safety: client lives for the duration of the `block_in_place` call
-        // in `dispatch_meta`.  We clear the pointer before returning.
+        // Safety: `client` lives for the duration of the `block_in_place`
+        // call in `dispatch_meta`.  `ClientPtrGuard` ensures the pointer is
+        // cleared on both normal return and panic.
         unsafe {
             lua_impl::set_client_ptr(std::ptr::from_ref(client));
         }
-        let result = lua_impl::invoke(&self.lua, name, args);
-        lua_impl::clear_client_ptr();
-        result
+        let _guard = ClientPtrGuard;
+        lua_impl::invoke(&self.lua, name, args)
     }
 
     #[cfg(not(feature = "lua"))]
