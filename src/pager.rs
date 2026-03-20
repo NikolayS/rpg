@@ -126,6 +126,20 @@ impl Drop for TerminalGuard {
         // the terminal is always restored, including during panics.
         let _ = terminal::disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
+
+        // After returning to the main screen buffer, ghost characters from
+        // prior pager content can bleed into the visible area if the main
+        // buffer still holds old output at those positions.  Move the cursor
+        // to the top-left corner and erase the entire screen so the REPL
+        // always starts from a clean slate.
+        //
+        // \x1b[H  — cursor to home (row 1, col 1)
+        // \x1b[2J — erase entire display
+        // \x1b[H  — cursor back to home so callers position correctly
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(b"\x1b[H\x1b[2J\x1b[H");
+        let _ = stdout.flush();
+
         // Reset the scroll region on the main screen buffer so the REPL can
         // re-install its own DECSTBM constraint.  Without this the main buffer
         // inherits whatever scroll region was set before the pager launched,
