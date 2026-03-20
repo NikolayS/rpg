@@ -7,7 +7,7 @@ Set Shell "zsh"
 Set TypingSpeed 30ms
 
 Hide
-Type "export PATH=/Users/nik/github/project-alpha/.claude/worktrees/agent-ae56767d/.claude/worktrees/agent-a07c24b0/target/debug:$PATH"
+Type "export PATH=/Users/nik/github/project-alpha/target/debug:$PATH"
 Enter
 Sleep 500ms
 Type "clear"
