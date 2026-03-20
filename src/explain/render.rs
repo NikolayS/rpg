@@ -476,6 +476,82 @@ fn build_prefix(stack: &[bool], is_last: bool) -> String {
     s
 }
 
+/// Build the gutter prefix for detail lines rendered below a node line.
+///
+/// Detail lines (filter, buffers, sort) are indented to align under the node
+/// content, matching the tree gutter continuation columns.
+fn build_detail_indent(prefix_stack: &[bool], is_last: bool, is_root: bool) -> String {
+    if is_root {
+        return "  ".to_owned();
+    }
+    let mut s = String::new();
+    for &was_last in prefix_stack {
+        if was_last {
+            s.push_str("   ");
+        } else {
+            s.push_str("│  ");
+        }
+    }
+    // Continuation column for the current node.
+    if is_last {
+        s.push_str("   ");
+    } else {
+        s.push_str("│  ");
+    }
+    // Extra indent so content aligns inside the node, not at the gutter edge.
+    s.push_str("  ");
+    s
+}
+
+/// Render per-node detail lines (filter, buffers, sort) below the main node line.
+///
+/// `detail_indent` is the gutter prefix that aligns detail content under the node.
+fn render_node_details(node: &ExplainNode, detail_indent: &str, out: &mut String) {
+    // Filter condition.
+    if let Some(filter) = &node.filter {
+        writeln!(out, "{detail_indent}{DIM}Filter: {filter}{RESET}").ok();
+    }
+
+    // Rows removed by filter.
+    if let Some(removed) = node.rows_removed_by_filter {
+        if removed > 0 {
+            writeln!(
+                out,
+                "{detail_indent}{DIM}Rows removed by filter: {}{RESET}",
+                fmt_int(removed)
+            )
+            .ok();
+        }
+    }
+
+    // Buffer info per node (shared hit / read).
+    if node.shared_hit > 0 || node.shared_read > 0 {
+        let mut buf = format!(
+            "{detail_indent}{DIM}Buffers: {} hit",
+            fmt_int(node.shared_hit)
+        );
+        if node.shared_read > 0 {
+            write!(buf, ", {} read", fmt_int(node.shared_read)).ok();
+        }
+        write!(buf, "{RESET}").ok();
+        out.push_str(&buf);
+        out.push('\n');
+    }
+
+    // Sort method and space.
+    if let Some(method) = &node.sort_method {
+        if let Some(space) = &node.sort_space {
+            writeln!(
+                out,
+                "{detail_indent}{DIM}Sort Method: {method}  {space}{RESET}"
+            )
+            .ok();
+        } else {
+            writeln!(out, "{detail_indent}{DIM}Sort Method: {method}{RESET}").ok();
+        }
+    }
+}
+
 /// Render a single node line and recurse into children.
 fn render_node(
     node: &ExplainNode,
@@ -561,6 +637,11 @@ fn render_node(
 
     out.push_str(&line);
     out.push('\n');
+
+    // Render per-node detail lines: filter, buffers, sort.
+    // Indent is the tree gutter prefix for detail content under this node.
+    let detail_indent = build_detail_indent(&state.prefix_stack, is_last, is_root);
+    render_node_details(node, &detail_indent, out);
 
     // Render children recursively.
     let n = node.children.len();

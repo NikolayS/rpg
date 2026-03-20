@@ -188,10 +188,11 @@ pub fn check_seq_scan_large(node: &ExplainNode) -> Option<PlanIssue> {
 ///
 /// Fires when the ratio `actual_rows / estimated_rows` is outside
 /// `[0.1, 10.0]` (i.e. the planner is off by more than 10x in either
-/// direction).  Nodes with `estimated_rows == 0` are skipped to avoid
-/// division by zero.
+/// direction).  Nodes with `estimated_rows == 0` or `actual_rows == 0`
+/// are skipped to avoid division by zero (the latter also covers plain
+/// EXPLAIN without ANALYZE, where no actual rows are available).
 pub fn check_row_estimate_error(node: &ExplainNode) -> Option<PlanIssue> {
-    if node.estimated_rows <= 0.0 {
+    if node.estimated_rows <= 0.0 || node.actual_rows <= 0.0 {
         return None;
     }
 
@@ -587,6 +588,18 @@ mod tests {
             ..Default::default()
         };
         // Must not panic; should return None.
+        assert!(check_row_estimate_error(&node).is_none());
+    }
+
+    #[test]
+    fn row_estimate_zero_actual_no_crash() {
+        // Covers plain EXPLAIN without ANALYZE (actual_rows stays 0.0).
+        // Must not produce "inf" or panic.
+        let node = ExplainNode {
+            estimated_rows: 1_000.0,
+            actual_rows: 0.0,
+            ..Default::default()
+        };
         assert!(check_row_estimate_error(&node).is_none());
     }
 
