@@ -1665,6 +1665,7 @@ pub(crate) async fn exec_lines(
 // ---------------------------------------------------------------------------
 
 /// Build the backslash command help text and return it as a `String`.
+#[allow(clippy::too_many_lines)]
 fn help_text() -> String {
     format!(
         "{}\n{}",
