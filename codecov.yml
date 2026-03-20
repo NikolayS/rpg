@@ -1,0 +1,41 @@
+# Copyright 2026
+# Codecov configuration for NikolayS/rpg.
+#
+# Key goal: prevent the badge from showing "unknown" when Codecov's
+# processing queue is slow or when a commit only touches non-code files.
+# We achieve this via carryforward: true on the default flag so Codecov
+# reuses coverage data from the last successful upload when no new
+# report has been processed for the HEAD commit yet.
+#
+# https://docs.codecov.com/docs/carryforward-flags
+
+codecov:
+  notify:
+    after_n_builds: 1
+
+coverage:
+  precision: 2
+  round: nearest
+  range: "50...100"
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        # If the commit has no coverage report yet, do not mark as failed.
+        if_not_found: success
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+        if_not_found: success
+
+flags:
+  unit:
+    carryforward: true
+
+ignore:
+  - "benches/**"
+  - "tests/**"
+  - "examples/**"
+  - "demos/**"
