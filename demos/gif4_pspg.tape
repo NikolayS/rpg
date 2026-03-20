@@ -7,7 +7,7 @@ Set Shell "zsh"
 Set TypingSpeed 30ms
 
 Hide
-Type "export PATH=/Users/nik/github/project-alpha/target/debug:$PATH"
+Type "export PATH=/Users/nik/github/project-alpha/.claude/worktrees/agent-a55051e3/target/debug:$PATH"
 Enter
 Sleep 500ms
 Type "clear"
@@ -27,54 +27,53 @@ Sleep 2s
 Enter
 Sleep 300ms
 
-# Built-in pager — show it works
-Type "select id, name, email, plan, org_id, signed_up_at from customers limit 200;"
+Type "select * from customers limit 50;"
 Enter
 Sleep 3s
 
-Sleep 1500ms
 Down
-Sleep 300ms
+Sleep 400ms
 Down
-Sleep 300ms
+Sleep 400ms
 PageDown
-Sleep 600ms
-PageDown
-Sleep 600ms
-
-Type "q"
 Sleep 800ms
 
+Type "q"
+Sleep 1s
+
 Enter
 Sleep 300ms
 
-# Switch to pspg
-Type "\set PAGER pspg"
+# Switch to pspg with Relational pipes theme (style 22 — clean dark theme)
+Type "\set PAGER 'pspg --style=22'"
 Enter
+Sleep 1s
+
+Type "select * from customers limit 50;"
+Enter
+Sleep 3s
+
+# Alt+n — toggle line numbers on (visible change, like F6)
+Alt+n
+Sleep 1500ms
+
+# Alt+n — toggle line numbers off
+Alt+n
 Sleep 800ms
 
-Enter
-Sleep 300ms
-
-# Same query — now routed through pspg
-Type "select id, name, email, plan, org_id, signed_up_at from customers limit 200;"
-Enter
-Sleep 3s
-
-# pspg is running — show horizontal scroll (Right arrow) and vertical scroll
+# Alt+v — toggle vertical column cursor (like F5)
+Alt+v
 Sleep 1500ms
+
+# Right arrow — horizontal scroll (pspg's killer feature)
 Right
-Sleep 300ms
+Sleep 500ms
 Right
-Sleep 300ms
+Sleep 500ms
 Right
-Sleep 300ms
-Down
-Sleep 300ms
-Down
-Sleep 300ms
-PageDown
-Sleep 600ms
+Sleep 500ms
+Right
+Sleep 500ms
 
 Type "q"
-Sleep 3s
+Sleep 2s
