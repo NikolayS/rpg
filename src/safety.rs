@@ -83,7 +83,9 @@ fn check_segment(sql: &str) -> Option<&'static str> {
         "TRUNCATE" => Some("truncate"),
         "DELETE" => {
             // `delete` without `where` affects all rows.
-            if upper.contains(" WHERE ") {
+            // Use token-based check so multiline SQL (WHERE on its own line)
+            // is handled correctly.
+            if tokens.contains(&"WHERE") {
                 None
             } else {
                 Some("delete without where clause")
@@ -91,7 +93,9 @@ fn check_segment(sql: &str) -> Option<&'static str> {
         }
         "UPDATE" => {
             // `update` without `where` affects all rows.
-            if upper.contains(" WHERE ") {
+            // Use token-based check so multiline SQL (WHERE on its own line)
+            // is handled correctly.
+            if tokens.contains(&"WHERE") {
                 None
             } else {
                 Some("update without where clause")
@@ -258,6 +262,18 @@ mod tests {
         assert_eq!(is_destructive("delete from my_table where id = 1"), None);
     }
 
+    #[test]
+    fn delete_multiline_where_safe() {
+        // WHERE on its own line must not trigger the false positive.
+        assert_eq!(is_destructive("delete from orders\nwhere id = 5"), None);
+    }
+
+    #[test]
+    fn delete_multiline_where_indented_safe() {
+        // WHERE indented with spaces and tab-like whitespace.
+        assert_eq!(is_destructive("delete from orders\n  where id = 5"), None);
+    }
+
     // -- update --------------------------------------------------------------
 
     #[test]
@@ -272,6 +288,24 @@ mod tests {
     fn update_with_where_safe() {
         assert_eq!(
             is_destructive("update my_table set col = 'val' where id = 1"),
+            None
+        );
+    }
+
+    #[test]
+    fn update_multiline_where_safe() {
+        // WHERE on its own line must not trigger the false positive.
+        assert_eq!(
+            is_destructive("update orders\nset status = 'done'\nwhere id = 5"),
+            None
+        );
+    }
+
+    #[test]
+    fn update_multiline_where_indented_safe() {
+        // WHERE indented with spaces.
+        assert_eq!(
+            is_destructive("update orders\n  set status = 'done'\n  where id = 5"),
             None
         );
     }
