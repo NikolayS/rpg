@@ -97,6 +97,16 @@ impl StatusLine {
         self.render();
     }
 
+    /// Correct the displayed transaction state and re-render.
+    ///
+    /// Used when the REPL knows the true server-side state differs from what
+    /// the last `update()` recorded (e.g. after an internal read-only
+    /// transaction whose trailing `commit;` is invisible to `update_from_sql`).
+    pub fn set_tx_state(&mut self, state: TxState) {
+        self.tx_state = state;
+        self.render();
+    }
+
     /// Set the current auto-EXPLAIN level and re-render.
     pub fn set_auto_explain(&mut self, mode: AutoExplain) {
         self.auto_explain = mode;

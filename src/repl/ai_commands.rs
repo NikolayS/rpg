@@ -908,7 +908,15 @@ pub(super) async fn handle_ai_ask(
                                 // Roll back on error to leave the session
                                 // clean.
                                 let _ = client.simple_query("rollback").await;
-                                *tx = TxState::Idle;
+                            }
+                            // The wrapped query ends with `commit;` (or was
+                            // rolled back above) so the session is always idle
+                            // at this point regardless of outcome.
+                            // update_from_sql() only saw `start transaction`
+                            // and set InTransaction; correct it here.
+                            *tx = TxState::Idle;
+                            if let Some(ref mut sl) = settings.statusline {
+                                sl.set_tx_state(TxState::Idle);
                             }
                             // Clear the internal-tx flag — the transaction
                             // has been committed or rolled back.
@@ -958,7 +966,15 @@ pub(super) async fn handle_ai_ask(
                                     .await;
                                     if !ok {
                                         let _ = client.simple_query("rollback").await;
-                                        *tx = TxState::Idle;
+                                    }
+                                    // The wrapped query ends with `commit;` (or
+                                    // was rolled back above) so the session is
+                                    // always idle at this point.
+                                    // update_from_sql() only saw `start
+                                    // transaction`; correct it here.
+                                    *tx = TxState::Idle;
+                                    if let Some(ref mut sl) = settings.statusline {
+                                        sl.set_tx_state(TxState::Idle);
                                     }
                                     settings.internal_tx = false;
                                     ok
