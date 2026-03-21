@@ -248,7 +248,7 @@ jobs:
           restore-keys: |
             wasi-${{ runner.os }}-cargo-
       - name: Build (WASI target)
-        run: cargo build --target wasm32-wasip1 --features wasi
+        run: cargo build --target wasm32-wasip1 --features wasi --no-default-features
 
   coverage:
     name: Coverage

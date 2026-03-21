@@ -22,12 +22,6 @@ mod ai;
 #[cfg(not(feature = "wasi"))]
 mod capabilities;
 #[cfg(not(feature = "wasi"))]
-mod init;
-#[cfg(not(feature = "wasi"))]
-mod io;
-#[cfg(not(feature = "wasi"))]
-mod metacmd;
-#[cfg(not(feature = "wasi"))]
 mod compat;
 #[cfg(not(feature = "wasi"))]
 mod complete;
@@ -48,9 +42,15 @@ mod explain;
 #[cfg(not(feature = "wasi"))]
 mod history_picker;
 #[cfg(not(feature = "wasi"))]
+mod init;
+#[cfg(not(feature = "wasi"))]
+mod io;
+#[cfg(not(feature = "wasi"))]
 mod large_object;
 #[cfg(not(feature = "wasi"))]
 mod lua_commands;
+#[cfg(not(feature = "wasi"))]
+mod metacmd;
 #[cfg(not(feature = "wasi"))]
 mod named;
 #[cfg(not(feature = "wasi"))]
