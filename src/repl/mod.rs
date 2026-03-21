@@ -1193,6 +1193,7 @@ impl std::fmt::Debug for ReplSettings {
                 "lua_commands",
                 &format!("{} loaded", self.lua_registry.commands.len()),
             )
+            .field("initial_input", &self.initial_input)
             .finish()
     }
 }
