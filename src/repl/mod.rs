@@ -1069,6 +1069,14 @@ pub struct ReplSettings {
     /// When the `lua` feature is not compiled in, this registry is always
     /// empty and custom-command execution returns a feature-absent error.
     pub lua_registry: crate::lua_commands::LuaRegistry,
+
+    /// Query pre-filled into the readline prompt after a history picker
+    /// selection (`\s` with no arguments).
+    ///
+    /// When `Some`, the REPL loop uses `readline_with_initial` for the next
+    /// prompt so the user can edit or execute the chosen history entry.
+    /// Cleared to `None` after the prompt is shown.
+    pub initial_input: Option<String>,
 }
 
 impl std::fmt::Debug for ReplSettings {
@@ -1252,6 +1260,7 @@ impl Default for ReplSettings {
             internal_tx: false,
             last_explain_text: None,
             lua_registry: crate::lua_commands::LuaRegistry::load(""),
+            initial_input: None,
         }
     }
 }
@@ -3671,6 +3680,17 @@ fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
     let entries = read_history_entries();
 
     match arg {
+        // ---- Interactive TUI picker (no argument) ------------------------
+        None => {
+            match crate::history_picker::run(entries) {
+                Ok(Some(query)) => {
+                    settings.initial_input = Some(query);
+                }
+                Ok(None) => {} // user cancelled
+                Err(e) => eprintln!("\\s: {e}"),
+            }
+        }
+
         // ---- Save to file ------------------------------------------------
         Some(path) if arg_is_filepath(path) => {
             // Expand leading `~`.
@@ -3694,26 +3714,18 @@ fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
             }
         }
 
-        // ---- Filter by pattern (or show all) -----------------------------
-        arg => {
-            let pattern = arg.map(str::to_lowercase);
+        // ---- Filter by pattern -------------------------------------------
+        Some(pattern) => {
+            let pattern_lc = pattern.to_lowercase();
             let filtered: Vec<(usize, &str)> = entries
                 .iter()
                 .enumerate()
-                .filter(|(_, entry)| {
-                    pattern
-                        .as_deref()
-                        .is_none_or(|p| entry.to_lowercase().contains(p))
-                })
+                .filter(|(_, entry)| entry.to_lowercase().contains(&pattern_lc))
                 .map(|(i, entry)| (i + 1, entry.as_str()))
                 .collect();
 
             if filtered.is_empty() {
-                if let Some(ref p) = pattern {
-                    eprintln!("\\s: no history entries match \"{p}\"");
-                } else {
-                    eprintln!("\\s: history is empty");
-                }
+                eprintln!("\\s: no history entries match \"{pattern}\"");
                 return;
             }
 
@@ -3735,15 +3747,13 @@ fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
                 let _ = writeln!(out, "{num:>width$}  {highlighted}");
             }
 
-            if let Some(ref p) = pattern {
-                let total = entries.len();
-                let shown = filtered.len();
-                let _ = writeln!(
-                    out,
-                    "-- {shown} of {total} entr{} match \"{p}\"",
-                    if shown == 1 { "y" } else { "ies" }
-                );
-            }
+            let total = entries.len();
+            let shown = filtered.len();
+            let _ = writeln!(
+                out,
+                "-- {shown} of {total} entr{} match \"{pattern}\"",
+                if shown == 1 { "y" } else { "ies" }
+            );
 
             maybe_page(settings, &out);
         }
@@ -4394,7 +4404,12 @@ async fn run_readline_loop(
             helper.set_input_mode(settings.input_mode);
         }
 
-        match rl.readline(&prompt) {
+        let readline_result = if let Some(initial) = settings.initial_input.take() {
+            rl.readline_with_initial(&prompt, (&initial, ""))
+        } else {
+            rl.readline(&prompt)
+        };
+        match readline_result {
             Ok(line) => {
                 // Dismiss the dropdown so it does not intercept the next
                 // prompt's Up-arrow history navigation (fix for #552 bug 2).
