@@ -141,3 +141,10 @@ Do not merge until both pass.
 findings, they are not blocking for this project.
 
 **Copyright:** always `Copyright 2026` — never a year range.
+
+## Security rules
+
+- **NEVER put real API keys, tokens, or secrets in issue or PR comments** — not even for testing/demo purposes
+- Config file (`~/.config/rpg/config.toml`) or environment variables only
+- If you need to demonstrate a key works, show the *result* of using it, not the key itself
+- If a key is accidentally exposed in a comment, rotate it immediately and delete/minimize the comment
