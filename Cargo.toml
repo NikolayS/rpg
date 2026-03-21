@@ -10,6 +10,7 @@ repository = "https://github.com/NikolayS/project-alpha"
 [features]
 integration = []
 lua = ["dep:mlua"]
+wasi = ["dep:tungstenite"]
 
 [profile.release]
 strip = true
@@ -20,14 +21,23 @@ codegen-units = 1
 name = "rpg"
 path = "src/main.rs"
 
+# Universal dependencies — compile on all targets including WASI.
 [dependencies]
 bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+unicode-width = "0.2"
+
+# WASI WebSocket client (opt-in via `wasi` feature).
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"], optional = true }
+
+# Native-only dependencies — excluded from wasm32-wasip1 builds.
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 toml = "0.8"
 crossterm = "0.29"
 dirs = "6"
@@ -39,12 +49,10 @@ rustyline = "15"
 ring = { version = "0.17", default-features = false }
 rustls = "0.23"
 rustls-pemfile = "2"
-thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "process", "io-util"] }
 tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26", default-features = false }
 x509-certificate = { version = "0.23", default-features = false }
-unicode-width = "0.2"
 webpki-roots = "0.26"
 
 [[bench]]
