@@ -32,7 +32,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # All features except wasi; combining wasi+native produces meaningless dead-code
+        # warnings for every struct only used by cfg-gated native modules.
+        run: cargo clippy --all-targets --no-default-features --features ssh,lua,integration -- -D warnings
 
   test:
     name: Test
