@@ -10,6 +10,7 @@ repository = "https://github.com/NikolayS/project-alpha"
 [features]
 integration = []
 lua = ["dep:mlua"]
+wasi = []  # enables WSS proxy backend instead of native TCP
 
 [profile.release]
 strip = true

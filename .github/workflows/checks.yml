@@ -229,6 +229,27 @@ jobs:
           TEST_PG_SCRAM_DATABASE: postgres
         run: cargo test --release --test connection_paths -- --include-ignored
 
+  wasi:
+    name: WASI Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+          targets: wasm32-wasip1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasi-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            wasi-${{ runner.os }}-cargo-
+      - name: Build (WASI target)
+        run: cargo build --target wasm32-wasip1 --features wasi
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
