@@ -1036,8 +1036,10 @@ mod tests {
 
     #[test]
     fn apply_cli_pset_footer_on() {
-        let mut pset = output::PsetConfig::default();
-        pset.footer = false;
+        let mut pset = output::PsetConfig {
+            footer: false,
+            ..Default::default()
+        };
         apply_cli_pset(&mut pset, "footer=on");
         assert!(pset.footer);
     }
