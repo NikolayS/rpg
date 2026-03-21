@@ -867,3 +867,230 @@ async fn async_main() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- apply_cli_pset ------------------------------------------------------
+
+    #[test]
+    fn apply_cli_pset_format_aligned() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=aligned");
+        assert_eq!(pset.format, output::OutputFormat::Aligned);
+    }
+
+    #[test]
+    fn apply_cli_pset_format_csv() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=csv");
+        assert_eq!(pset.format, output::OutputFormat::Csv);
+    }
+
+    #[test]
+    fn apply_cli_pset_format_json() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=json");
+        assert_eq!(pset.format, output::OutputFormat::Json);
+    }
+
+    #[test]
+    fn apply_cli_pset_format_unaligned() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=unaligned");
+        assert_eq!(pset.format, output::OutputFormat::Unaligned);
+    }
+
+    #[test]
+    fn apply_cli_pset_format_markdown() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=markdown");
+        assert_eq!(pset.format, output::OutputFormat::Markdown);
+    }
+
+    #[test]
+    fn apply_cli_pset_format_html() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=html");
+        assert_eq!(pset.format, output::OutputFormat::Html);
+    }
+
+    #[test]
+    fn apply_cli_pset_format_wrapped() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "format=wrapped");
+        assert_eq!(pset.format, output::OutputFormat::Wrapped);
+    }
+
+    #[test]
+    fn apply_cli_pset_border_0() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "border=0");
+        assert_eq!(pset.border, 0);
+    }
+
+    #[test]
+    fn apply_cli_pset_border_1() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "border=1");
+        assert_eq!(pset.border, 1);
+    }
+
+    #[test]
+    fn apply_cli_pset_border_2() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "border=2");
+        assert_eq!(pset.border, 2);
+    }
+
+    #[test]
+    fn apply_cli_pset_border_clamped_to_2() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "border=5");
+        assert_eq!(pset.border, 2, "border must be clamped to max 2");
+    }
+
+    #[test]
+    fn apply_cli_pset_null_display_string() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "null=NULL");
+        assert_eq!(pset.null_display, "NULL");
+    }
+
+    #[test]
+    fn apply_cli_pset_null_display_empty() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "null=");
+        assert_eq!(pset.null_display, "");
+    }
+
+    #[test]
+    fn apply_cli_pset_fieldsep_comma() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "fieldsep=,");
+        assert_eq!(pset.field_sep, ",");
+    }
+
+    #[test]
+    fn apply_cli_pset_fieldsep_tab() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "fieldsep=\t");
+        assert_eq!(pset.field_sep, "\t");
+    }
+
+    #[test]
+    fn apply_cli_pset_tuples_only_on() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "tuples_only=on");
+        assert!(pset.tuples_only);
+    }
+
+    #[test]
+    fn apply_cli_pset_tuples_only_true() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "tuples_only=true");
+        assert!(pset.tuples_only);
+    }
+
+    #[test]
+    fn apply_cli_pset_tuples_only_1() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "tuples_only=1");
+        assert!(pset.tuples_only);
+    }
+
+    #[test]
+    fn apply_cli_pset_tuples_only_off() {
+        let mut pset = output::PsetConfig::default();
+        pset.tuples_only = true;
+        apply_cli_pset(&mut pset, "tuples_only=off");
+        assert!(!pset.tuples_only);
+    }
+
+    #[test]
+    fn apply_cli_pset_t_shorthand_for_tuples_only() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "t=on");
+        assert!(pset.tuples_only);
+    }
+
+    #[test]
+    fn apply_cli_pset_footer_off() {
+        let mut pset = output::PsetConfig::default();
+        assert!(pset.footer, "footer must default to true");
+        apply_cli_pset(&mut pset, "footer=off");
+        assert!(!pset.footer);
+    }
+
+    #[test]
+    fn apply_cli_pset_footer_false() {
+        let mut pset = output::PsetConfig::default();
+        apply_cli_pset(&mut pset, "footer=false");
+        assert!(!pset.footer);
+    }
+
+    #[test]
+    fn apply_cli_pset_footer_on() {
+        let mut pset = output::PsetConfig::default();
+        pset.footer = false;
+        apply_cli_pset(&mut pset, "footer=on");
+        assert!(pset.footer);
+    }
+
+    #[test]
+    fn apply_cli_pset_unknown_option_is_silently_ignored() {
+        let mut pset = output::PsetConfig::default();
+        let before_format = pset.format.clone();
+        apply_cli_pset(&mut pset, "unknownoption=somevalue");
+        assert_eq!(pset.format, before_format);
+    }
+
+    #[test]
+    fn apply_cli_pset_no_value_for_border_is_no_op() {
+        let mut pset = output::PsetConfig::default();
+        let before_border = pset.border;
+        // "border" with no value and no '=' — treated as (option="border", value=None).
+        apply_cli_pset(&mut pset, "border");
+        // No value → parse::<u8>().ok() returns None → no-op.
+        assert_eq!(pset.border, before_border);
+    }
+
+    // -- version_string ------------------------------------------------------
+
+    #[test]
+    fn version_string_starts_with_rpg() {
+        let v = version_string();
+        assert!(
+            v.starts_with("rpg "),
+            "version string must start with 'rpg ': {v:?}"
+        );
+    }
+
+    #[test]
+    fn version_string_contains_cargo_pkg_version() {
+        let v = version_string();
+        assert!(
+            v.contains(env!("CARGO_PKG_VERSION")),
+            "version string must contain package version: {v:?}",
+        );
+    }
+
+    #[test]
+    fn version_string_contains_built_keyword() {
+        let v = version_string();
+        assert!(
+            v.contains("built "),
+            "version string must contain 'built ': {v:?}"
+        );
+    }
+
+    #[test]
+    fn version_string_is_non_empty() {
+        assert!(!version_string().is_empty());
+    }
+}

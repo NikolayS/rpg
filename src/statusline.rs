@@ -311,3 +311,238 @@ impl StatusLine {
         let _ = stderr.flush();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repl::{AutoExplain, ExecMode, InputMode, TxState};
+
+    /// Build a non-rendering `StatusLine` with fixed terminal dimensions.
+    fn make_sl() -> StatusLine {
+        let mut sl = StatusLine::new(false);
+        sl.term_cols = 80;
+        sl.term_rows = 24;
+        sl
+    }
+
+    #[test]
+    fn format_status_default_contains_sql_and_idle() {
+        let sl = make_sl();
+        let s = sl.format_status();
+        assert!(s.contains("SQL"), "default mode should be SQL: {s:?}");
+        assert!(s.contains("tx:idle"), "default tx should be idle: {s:?}");
+    }
+
+    #[test]
+    fn format_status_with_connection_label() {
+        let mut sl = make_sl();
+        sl.set_connection("localhost", 5432, "mydb");
+        let s = sl.format_status();
+        assert!(
+            s.contains("localhost:5432/mydb"),
+            "connection label missing: {s:?}",
+        );
+    }
+
+    #[test]
+    fn format_status_no_duration_before_first_query() {
+        let sl = make_sl();
+        let s = sl.format_status();
+        assert!(
+            !s.contains("last:"),
+            "no duration before first query: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_duration_milliseconds() {
+        let mut sl = make_sl();
+        sl.last_duration_ms = Some(250);
+        let s = sl.format_status();
+        assert!(s.contains("250ms"), "ms duration should be shown: {s:?}");
+    }
+
+    #[test]
+    fn format_status_duration_999ms_uses_ms_suffix() {
+        let mut sl = make_sl();
+        sl.last_duration_ms = Some(999);
+        let s = sl.format_status();
+        assert!(s.contains("999ms"), "sub-second duration in ms: {s:?}");
+    }
+
+    #[test]
+    fn format_status_duration_1000ms_uses_seconds() {
+        let mut sl = make_sl();
+        sl.last_duration_ms = Some(1000);
+        let s = sl.format_status();
+        assert!(s.contains("1.0s"), "1000ms should display as 1.0s: {s:?}");
+    }
+
+    #[test]
+    fn format_status_duration_seconds() {
+        let mut sl = make_sl();
+        sl.last_duration_ms = Some(2500);
+        let s = sl.format_status();
+        assert!(
+            s.contains("2.5s"),
+            "seconds duration should be shown: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_in_transaction_state() {
+        let mut sl = make_sl();
+        sl.tx_state = TxState::InTransaction;
+        let s = sl.format_status();
+        assert!(s.contains("tx:in-tx"), "in-tx state label: {s:?}");
+    }
+
+    #[test]
+    fn format_status_failed_transaction_state() {
+        let mut sl = make_sl();
+        sl.tx_state = TxState::Failed;
+        let s = sl.format_status();
+        assert!(s.contains("tx:failed"), "failed tx label: {s:?}");
+    }
+
+    #[test]
+    fn format_status_ai_tokens_shown_when_budget_configured() {
+        let mut sl = make_sl();
+        sl.ai_token_budget = 4096;
+        sl.ai_tokens_used = 100;
+        let s = sl.format_status();
+        assert!(s.contains("ai:"), "AI token section must appear: {s:?}");
+        assert!(s.contains("100"), "used token count must appear: {s:?}");
+        assert!(s.contains("4096"), "budget must appear: {s:?}");
+    }
+
+    #[test]
+    fn format_status_ai_tokens_shown_when_tokens_used_and_no_budget() {
+        let mut sl = make_sl();
+        sl.ai_tokens_used = 42;
+        // budget is 0 (default) but tokens were used
+        let s = sl.format_status();
+        assert!(
+            s.contains("ai:"),
+            "AI section must appear when tokens used: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_ai_tokens_hidden_by_default() {
+        let sl = make_sl();
+        let s = sl.format_status();
+        assert!(
+            !s.contains("ai:"),
+            "AI section must be hidden by default: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_auto_explain_on_shown() {
+        let mut sl = make_sl();
+        sl.auto_explain = AutoExplain::On;
+        let s = sl.format_status();
+        assert!(
+            s.contains("explain:on"),
+            "auto-explain:on should appear: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_auto_explain_analyze_shown() {
+        let mut sl = make_sl();
+        sl.auto_explain = AutoExplain::Analyze;
+        let s = sl.format_status();
+        assert!(
+            s.contains("explain:analyze"),
+            "explain:analyze should appear: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_auto_explain_off_hidden() {
+        let sl = make_sl();
+        let s = sl.format_status();
+        assert!(
+            !s.contains("explain:"),
+            "auto-explain:off must be hidden: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_exec_mode_plan() {
+        let mut sl = make_sl();
+        sl.exec_mode = ExecMode::Plan;
+        let s = sl.format_status();
+        assert!(s.contains("plan"), "plan mode label must appear: {s:?}");
+    }
+
+    #[test]
+    fn format_status_exec_mode_yolo() {
+        let mut sl = make_sl();
+        sl.exec_mode = ExecMode::Yolo;
+        let s = sl.format_status();
+        assert!(s.contains("yolo"), "yolo mode label must appear: {s:?}");
+    }
+
+    #[test]
+    fn format_status_input_mode_text2sql() {
+        let mut sl = make_sl();
+        sl.input_mode = InputMode::Text2Sql;
+        let s = sl.format_status();
+        assert!(
+            s.contains("text2sql"),
+            "text2sql mode label must appear: {s:?}"
+        );
+    }
+
+    #[test]
+    fn format_status_padded_to_terminal_width() {
+        let mut sl = make_sl();
+        sl.term_cols = 100;
+        let s = sl.format_status();
+        assert_eq!(
+            s.chars().count(),
+            100,
+            "status string must be padded to terminal width",
+        );
+    }
+
+    #[test]
+    fn format_status_truncated_when_content_exceeds_terminal_width() {
+        let mut sl = make_sl();
+        sl.term_cols = 10;
+        // A long connection label forces truncation.
+        sl.conn_label = "very-long-host-name:5432/very-long-database-name".to_owned();
+        let s = sl.format_status();
+        assert_eq!(
+            s.chars().count(),
+            10,
+            "status string must be truncated to terminal width",
+        );
+    }
+
+    #[test]
+    fn format_status_no_connection_label_when_empty() {
+        let sl = make_sl();
+        let s = sl.format_status();
+        // Without a connection the label separator " │" should not appear
+        // before the mode token.
+        assert!(
+            !s.starts_with(" │"),
+            "no leading separator without connection: {s:?}"
+        );
+    }
+
+    #[test]
+    fn set_connection_updates_label() {
+        let mut sl = make_sl();
+        sl.set_connection("db.example.com", 5433, "prod");
+        assert_eq!(sl.conn_label, "db.example.com:5433/prod");
+    }
+}

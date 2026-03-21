@@ -274,6 +274,147 @@ async fn upload_pgmustard(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- extract_depesz_url --------------------------------------------------
+
+    #[test]
+    fn extract_depesz_url_finds_url_in_href_attribute() {
+        let body = r#"<a href="https://explain.depesz.com/s/abc123">view plan</a>"#;
+        assert_eq!(
+            extract_depesz_url(body),
+            Some("https://explain.depesz.com/s/abc123".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_depesz_url_finds_bare_url_on_its_own_line() {
+        let body = "https://explain.depesz.com/s/xyz789";
+        assert_eq!(
+            extract_depesz_url(body),
+            Some("https://explain.depesz.com/s/xyz789".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_depesz_url_stops_at_closing_double_quote() {
+        let body = r#"href="https://explain.depesz.com/s/abc123" class="link""#;
+        assert_eq!(
+            extract_depesz_url(body),
+            Some("https://explain.depesz.com/s/abc123".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_depesz_url_stops_at_whitespace() {
+        let body = "see https://explain.depesz.com/s/abc123 for details";
+        assert_eq!(
+            extract_depesz_url(body),
+            Some("https://explain.depesz.com/s/abc123".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_depesz_url_stops_at_single_quote() {
+        let body = "href='https://explain.depesz.com/s/abc123' id='x'";
+        assert_eq!(
+            extract_depesz_url(body),
+            Some("https://explain.depesz.com/s/abc123".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_depesz_url_returns_none_for_unrelated_content() {
+        let body = "<html><p>No Depesz URL here</p></html>";
+        assert_eq!(extract_depesz_url(body), None);
+    }
+
+    #[test]
+    fn extract_depesz_url_returns_none_for_empty_body() {
+        assert_eq!(extract_depesz_url(""), None);
+    }
+
+    #[test]
+    fn extract_depesz_url_returns_none_when_only_domain_without_s_path() {
+        // A URL without the /s/ path should not match.
+        let body = "https://explain.depesz.com/about";
+        assert_eq!(extract_depesz_url(body), None);
+    }
+
+    #[test]
+    fn extract_depesz_url_picks_first_matching_line() {
+        let body = "https://explain.depesz.com/s/first\nhttps://explain.depesz.com/s/second";
+        assert_eq!(
+            extract_depesz_url(body),
+            Some("https://explain.depesz.com/s/first".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_depesz_url_handles_url_with_alphanumeric_slug() {
+        let body = "https://explain.depesz.com/s/xY3z-abc";
+        // The URL continues until whitespace/quote — dash is kept.
+        let result = extract_depesz_url(body);
+        assert!(result.is_some(), "expected Some, got None");
+        assert!(result.unwrap().contains("explain.depesz.com/s/"));
+    }
+
+    // -- share_explain_plan (paths that don't require network calls) ---------
+
+    #[test]
+    fn share_unknown_service_returns_descriptive_error() {
+        // The unknown-service branch returns immediately without network I/O.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let result = rt.block_on(share_explain_plan(
+            "plan text",
+            "bogusservice",
+            None,
+            None,
+            None,
+        ));
+        assert!(result.is_err(), "unknown service must return Err");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("bogusservice"),
+            "error message should name the unknown service: {msg}",
+        );
+        assert!(
+            msg.contains("depesz") && msg.contains("dalibo") && msg.contains("pgmustard"),
+            "error should list valid options: {msg}",
+        );
+    }
+
+    #[test]
+    fn share_unknown_service_case_sensitive() {
+        // "Depesz" (capitalised) is also rejected: the match is exact.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let result = rt.block_on(share_explain_plan("plan", "Depesz", None, None, None));
+        assert!(result.is_err(), "capitalised service name must return Err");
+    }
+
+    #[test]
+    fn share_empty_service_name_returns_error() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let result = rt.block_on(share_explain_plan("plan", "", None, None, None));
+        assert!(result.is_err(), "empty service name must return Err");
+    }
+}
+
 /// Copy `text` to the system clipboard.
 ///
 /// Tries the following tools in order:

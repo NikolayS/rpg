@@ -402,3 +402,183 @@ fn hex_digit(b: u8) -> Result<u8, String> {
         _ => Err(format!("invalid hex digit: '{}'", char::from(b))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- hex_encode ----------------------------------------------------------
+
+    #[test]
+    fn hex_encode_empty_slice() {
+        assert_eq!(hex_encode(&[]), "");
+    }
+
+    #[test]
+    fn hex_encode_single_zero_byte() {
+        assert_eq!(hex_encode(&[0x00]), "00");
+    }
+
+    #[test]
+    fn hex_encode_single_ff_byte() {
+        assert_eq!(hex_encode(&[0xff]), "ff");
+    }
+
+    #[test]
+    fn hex_encode_well_known_bytes() {
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn hex_encode_output_is_always_lowercase() {
+        let result = hex_encode(&[0xab, 0xcd, 0xef]);
+        assert_eq!(result, result.to_lowercase(), "hex must be lowercase");
+    }
+
+    #[test]
+    fn hex_encode_length_is_twice_input() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        let encoded = hex_encode(&data);
+        assert_eq!(encoded.len(), 512, "each byte becomes 2 hex chars");
+    }
+
+    #[test]
+    fn hex_encode_single_digit_values_are_zero_padded() {
+        assert_eq!(hex_encode(&[0x01]), "01");
+        assert_eq!(hex_encode(&[0x0f]), "0f");
+    }
+
+    // -- hex_digit -----------------------------------------------------------
+
+    #[test]
+    fn hex_digit_numeric_digits_0_through_9() {
+        for (b, expected) in (b'0'..=b'9').zip(0u8..=9) {
+            assert_eq!(hex_digit(b), Ok(expected), "digit '{}'", char::from(b));
+        }
+    }
+
+    #[test]
+    fn hex_digit_lowercase_a_through_f() {
+        for (b, expected) in (b'a'..=b'f').zip(10u8..=15) {
+            assert_eq!(hex_digit(b), Ok(expected), "digit '{}'", char::from(b));
+        }
+    }
+
+    #[test]
+    fn hex_digit_uppercase_a_through_f() {
+        for (b, expected) in (b'A'..=b'F').zip(10u8..=15) {
+            assert_eq!(hex_digit(b), Ok(expected), "digit '{}'", char::from(b));
+        }
+    }
+
+    #[test]
+    fn hex_digit_g_lowercase_returns_err() {
+        assert!(hex_digit(b'g').is_err());
+    }
+
+    #[test]
+    fn hex_digit_g_uppercase_returns_err() {
+        assert!(hex_digit(b'G').is_err());
+    }
+
+    #[test]
+    fn hex_digit_space_returns_err() {
+        assert!(hex_digit(b' ').is_err());
+    }
+
+    #[test]
+    fn hex_digit_special_chars_return_err() {
+        for &b in b"!@#$%^&*()_+-=" {
+            assert!(
+                hex_digit(b).is_err(),
+                "expected Err for '{}'",
+                char::from(b)
+            );
+        }
+    }
+
+    // -- decode_bytea_hex ----------------------------------------------------
+
+    #[test]
+    fn decode_bytea_hex_empty_bytea() {
+        assert_eq!(decode_bytea_hex("\\x"), Ok(vec![]));
+    }
+
+    #[test]
+    fn decode_bytea_hex_single_byte_zero() {
+        assert_eq!(decode_bytea_hex("\\x00"), Ok(vec![0x00]));
+    }
+
+    #[test]
+    fn decode_bytea_hex_single_byte_ff() {
+        assert_eq!(decode_bytea_hex("\\xff"), Ok(vec![0xff]));
+    }
+
+    #[test]
+    fn decode_bytea_hex_multi_byte_deadbeef() {
+        assert_eq!(
+            decode_bytea_hex("\\xdeadbeef"),
+            Ok(vec![0xde, 0xad, 0xbe, 0xef]),
+        );
+    }
+
+    #[test]
+    fn decode_bytea_hex_uppercase_digits_accepted() {
+        assert_eq!(decode_bytea_hex("\\xDEAD"), Ok(vec![0xde, 0xad]));
+    }
+
+    #[test]
+    fn decode_bytea_hex_mixed_case_accepted() {
+        assert_eq!(decode_bytea_hex("\\xDeAd"), Ok(vec![0xde, 0xad]));
+    }
+
+    #[test]
+    fn decode_bytea_hex_missing_prefix_returns_err() {
+        assert!(decode_bytea_hex("deadbeef").is_err());
+        assert!(decode_bytea_hex("ff").is_err());
+    }
+
+    #[test]
+    fn decode_bytea_hex_wrong_0x_prefix_returns_err() {
+        assert!(decode_bytea_hex("0xdeadbeef").is_err());
+    }
+
+    #[test]
+    fn decode_bytea_hex_odd_length_returns_err() {
+        assert!(
+            decode_bytea_hex("\\xabc").is_err(),
+            "odd-length hex must be an error"
+        );
+        assert!(decode_bytea_hex("\\xf").is_err());
+    }
+
+    #[test]
+    fn decode_bytea_hex_invalid_digit_returns_err() {
+        assert!(decode_bytea_hex("\\xgg").is_err());
+        assert!(decode_bytea_hex("\\xzz").is_err());
+    }
+
+    // -- roundtrip -----------------------------------------------------------
+
+    #[test]
+    fn hex_encode_decode_roundtrip_all_byte_values() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        let hex_str = format!("\\x{}", hex_encode(&data));
+        let decoded = decode_bytea_hex(&hex_str).expect("roundtrip decode must succeed");
+        assert_eq!(
+            decoded, data,
+            "roundtrip must be identity for all byte values"
+        );
+    }
+
+    #[test]
+    fn hex_encode_decode_roundtrip_empty() {
+        let hex_str = format!("\\x{}", hex_encode(&[]));
+        let decoded = decode_bytea_hex(&hex_str).expect("empty roundtrip");
+        assert_eq!(decoded, Vec::<u8>::new());
+    }
+}

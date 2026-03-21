@@ -1848,7 +1848,10 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_no_tx_statement, needs_split_execution, print_result_set_pset};
+    use super::{
+        is_explain_statement, is_no_tx_statement, needs_split_execution, print_result_set_pset,
+        strip_psql_table_format,
+    };
     use crate::output::PsetConfig;
 
     // -- is_no_tx_statement ---------------------------------------------------
@@ -2112,5 +2115,160 @@ mod tests {
             out.is_empty(),
             "non-SELECT with 0 rows affected must produce no output: {out:?}"
         );
+    }
+
+    // -- is_explain_statement ------------------------------------------------
+
+    #[test]
+    fn is_explain_plain() {
+        assert!(is_explain_statement("EXPLAIN SELECT 1"));
+    }
+
+    #[test]
+    fn is_explain_lowercase() {
+        assert!(is_explain_statement("explain select 1"));
+    }
+
+    #[test]
+    fn is_explain_with_analyze() {
+        assert!(is_explain_statement("EXPLAIN ANALYZE SELECT * FROM t"));
+    }
+
+    #[test]
+    fn is_explain_with_leading_whitespace() {
+        assert!(is_explain_statement("  EXPLAIN SELECT 1"));
+        assert!(is_explain_statement("\t\nexplain select 1"));
+    }
+
+    #[test]
+    fn is_explain_mixed_case() {
+        assert!(is_explain_statement("Explain Select 1"));
+    }
+
+    #[test]
+    fn is_explain_select_is_not_explain() {
+        assert!(!is_explain_statement("SELECT 1"));
+    }
+
+    #[test]
+    fn is_explain_insert_is_not_explain() {
+        assert!(!is_explain_statement("INSERT INTO t VALUES (1)"));
+    }
+
+    #[test]
+    fn is_explain_empty_is_not_explain() {
+        assert!(!is_explain_statement(""));
+    }
+
+    #[test]
+    fn is_explain_whitespace_only_is_not_explain() {
+        assert!(!is_explain_statement("   "));
+    }
+
+    // -- strip_psql_table_format ---------------------------------------------
+
+    #[test]
+    fn strip_psql_table_format_removes_header_and_footer() {
+        let formatted = " QUERY PLAN\n----------\n Seq Scan on t\n(1 row)\n";
+        let result = strip_psql_table_format(formatted);
+        assert!(
+            !result.contains("QUERY PLAN"),
+            "header must be stripped: {result:?}"
+        );
+        assert!(
+            !result.contains("(1 row)"),
+            "footer must be stripped: {result:?}"
+        );
+        assert!(
+            result.contains("Seq Scan on t"),
+            "plan content must be preserved: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_psql_table_format_removes_separator_lines() {
+        let formatted = " QUERY PLAN\n-----------\n Seq Scan on t\n(1 row)\n";
+        let result = strip_psql_table_format(formatted);
+        assert!(
+            !result.contains("---"),
+            "separator dashes must be stripped: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_psql_table_format_preserves_plan_indentation() {
+        // The space-padded format: psql adds one leading space before content.
+        // Internal indentation (2+ spaces for child nodes) must be preserved.
+        let formatted =
+            " QUERY PLAN\n----------\n Seq Scan on t  (cost=0..1 rows=1)\n   ->  Index Scan\n(2 rows)\n";
+        let result = strip_psql_table_format(formatted);
+        // "Seq Scan" should appear without leading space (the single psql space is stripped).
+        assert!(
+            result.contains("Seq Scan"),
+            "plan node must be present: {result:?}"
+        );
+        // Child node indentation ("  ->") should be preserved.
+        assert!(
+            result.contains("  ->"),
+            "child node indentation must be preserved: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_psql_table_format_handles_pipe_delimited_content() {
+        // Pipe-wrapped content has its "| " prefix and " |" suffix removed.
+        // Only lines starting with a bare '-' are treated as border separators.
+        let formatted = " QUERY PLAN\n----------\n| Seq Scan on t |\n(1 row)\n";
+        let result = strip_psql_table_format(formatted);
+        assert!(
+            result.contains("Seq Scan on t"),
+            "pipe-delimited plan content must be extracted: {result:?}"
+        );
+        assert!(
+            !result.contains("QUERY PLAN"),
+            "header must be stripped: {result:?}"
+        );
+        assert!(
+            !result.contains("(1 row)"),
+            "footer must be stripped: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_psql_table_format_empty_input() {
+        assert_eq!(strip_psql_table_format(""), "");
+    }
+
+    #[test]
+    fn strip_psql_table_format_skips_blank_lines() {
+        let formatted = " QUERY PLAN\n----------\n\n Seq Scan on t\n\n(1 row)\n";
+        let result = strip_psql_table_format(formatted);
+        assert!(
+            !result.contains("\n\n"),
+            "blank lines must be stripped: {result:?}"
+        );
+        assert!(result.contains("Seq Scan on t"));
+    }
+
+    #[test]
+    fn strip_psql_table_format_plural_rows_footer() {
+        let formatted = " QUERY PLAN\n----------\n Seq Scan\n(5 rows)\n";
+        let result = strip_psql_table_format(formatted);
+        assert!(
+            !result.contains("(5 rows)"),
+            "plural rows footer must be stripped: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_psql_table_format_separator_with_plus_sign() {
+        // Some psql border styles use '+' between column separators.
+        let formatted = " QUERY PLAN\n----+----\n Seq Scan\n(1 row)\n";
+        let result = strip_psql_table_format(formatted);
+        assert!(
+            !result.contains("----+----"),
+            "separator with '+' must be stripped: {result:?}"
+        );
+        assert!(result.contains("Seq Scan"));
     }
 }
