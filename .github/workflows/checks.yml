@@ -250,6 +250,9 @@ jobs:
           restore-keys: |
             wasi-${{ runner.os }}-cargo-
       - name: Build (WASI target)
+        # Override RUSTFLAGS: dead-code warnings are expected for cfg-gated native modules
+        env:
+          RUSTFLAGS: ""
         run: cargo build --target wasm32-wasip1 --features wasi --no-default-features
 
   coverage:
