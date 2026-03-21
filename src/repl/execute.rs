@@ -1,4 +1,5 @@
 //! Query execution helpers for the REPL.
+#![cfg(not(feature = "wasi"))]
 //!
 //! Extracted from `mod.rs` — `execute_query`, `execute_query_extended`,
 //! `execute_query_interactive`, `execute_query_extended_interactive`, and helpers.

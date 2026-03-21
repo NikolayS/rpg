@@ -491,9 +491,14 @@ fn leading_spaces(line: &str) -> usize {
 
 /// Return the current terminal width, defaulting to 80 if unavailable.
 fn terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
+    #[cfg(not(feature = "wasi"))]
+    {
+        crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80)
+    }
+    #[cfg(feature = "wasi")]
+    80
 }
 
 // ---------------------------------------------------------------------------

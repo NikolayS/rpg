@@ -1,4 +1,5 @@
 //! Watch loop implementation for the REPL.
+#![cfg(not(feature = "wasi"))]
 //!
 //! Extracted from `mod.rs` — `watch_query` and helpers.
 

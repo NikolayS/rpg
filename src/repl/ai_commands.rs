@@ -1,4 +1,5 @@
 //! AI command handlers for the REPL.
+#![cfg(not(feature = "wasi"))]
 //!
 //! Extracted from `mod.rs` — `handle_ai_*`, `get_ai_provider`, `resolve_api_key`,
 //! and related helpers.

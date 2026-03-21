@@ -3,45 +3,78 @@
 //! This is the CLI entry point. It parses psql-compatible flags and
 //! rpg-specific options, then dispatches to the appropriate subsystem.
 
+#[cfg(not(feature = "wasi"))]
 use clap::Parser;
 
-// Core modules.
-mod ai;
-mod capabilities;
-mod compat;
-mod complete;
-mod conditional;
+// WASI-safe modules (compile on all targets).
 mod config;
-mod connection;
-mod copy;
-mod crosstab;
-mod dba;
-mod describe;
-mod explain;
 mod highlight;
-mod history_picker;
-mod init;
-mod io;
-mod large_object;
+
 mod logging;
-mod lua_commands;
 mod markdown;
-mod metacmd;
-mod named;
-mod output;
-mod pager;
 mod pattern;
-mod query;
-mod repl;
-mod report;
-mod safety;
-mod session;
-mod session_store;
 mod setup;
-mod ssh_tunnel;
-mod statusline;
-mod update;
 mod vars;
+
+// Native-only modules (require TUI, TCP, or non-wasm32 system APIs).
+#[cfg(not(feature = "wasi"))]
+mod ai;
+#[cfg(not(feature = "wasi"))]
+mod capabilities;
+#[cfg(not(feature = "wasi"))]
+mod init;
+#[cfg(not(feature = "wasi"))]
+mod io;
+#[cfg(not(feature = "wasi"))]
+mod metacmd;
+#[cfg(not(feature = "wasi"))]
+mod compat;
+#[cfg(not(feature = "wasi"))]
+mod complete;
+#[cfg(not(feature = "wasi"))]
+mod conditional;
+#[cfg(not(feature = "wasi"))]
+mod connection;
+#[cfg(not(feature = "wasi"))]
+mod copy;
+#[cfg(not(feature = "wasi"))]
+mod crosstab;
+#[cfg(not(feature = "wasi"))]
+mod dba;
+#[cfg(not(feature = "wasi"))]
+mod describe;
+#[cfg(not(feature = "wasi"))]
+mod explain;
+#[cfg(not(feature = "wasi"))]
+mod history_picker;
+#[cfg(not(feature = "wasi"))]
+mod large_object;
+#[cfg(not(feature = "wasi"))]
+mod lua_commands;
+#[cfg(not(feature = "wasi"))]
+mod named;
+#[cfg(not(feature = "wasi"))]
+mod output;
+#[cfg(not(feature = "wasi"))]
+mod pager;
+#[cfg(not(feature = "wasi"))]
+mod query;
+#[cfg(not(feature = "wasi"))]
+mod repl;
+#[cfg(not(feature = "wasi"))]
+mod report;
+#[cfg(not(feature = "wasi"))]
+mod safety;
+#[cfg(not(feature = "wasi"))]
+mod session;
+#[cfg(not(feature = "wasi"))]
+mod session_store;
+#[cfg(not(feature = "wasi"))]
+mod ssh_tunnel;
+#[cfg(not(feature = "wasi"))]
+mod statusline;
+#[cfg(not(feature = "wasi"))]
+mod update;
 
 /// Build-time git commit hash injected by `build.rs`.
 const GIT_HASH: &str = env!("RPG_GIT_HASH");
@@ -71,6 +104,7 @@ pub fn version_string() -> &'static str {
 // CLI definition
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "wasi"))]
 /// Assemble the clap version string: delegates to [`version_string`].
 fn long_version() -> &'static str {
     version_string()
@@ -79,6 +113,7 @@ fn long_version() -> &'static str {
 /// Rpg — modern Postgres terminal with built-in diagnostics and AI assistant.
 ///
 /// A psql-compatible interface with built-in AI and database diagnostics.
+#[cfg(not(feature = "wasi"))]
 #[derive(Parser, Debug)]
 #[command(
     name = "rpg",
@@ -305,6 +340,7 @@ struct Cli {
     update_check: bool,
 }
 
+#[cfg(not(feature = "wasi"))]
 impl Cli {
     /// Convert CLI flags into connection-layer options.
     fn conn_opts(&self) -> connection::CliConnOpts {
@@ -331,6 +367,7 @@ impl Cli {
 // CLI pset helper
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "wasi"))]
 /// Apply a single `-P VAR[=ARG]` option to the initial `PsetConfig`.
 fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
     let (option, value) = if let Some((k, v)) = arg.split_once('=') {
@@ -380,6 +417,7 @@ fn apply_cli_pset(pset: &mut output::PsetConfig, arg: &str) {
 // Settings construction helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "wasi"))]
 /// Open the `-L` log file for append, exiting on failure.
 fn open_log_file(path: &str) -> Box<dyn std::io::Write> {
     use std::fs::OpenOptions;
@@ -392,6 +430,7 @@ fn open_log_file(path: &str) -> Box<dyn std::io::Write> {
     }
 }
 
+#[cfg(not(feature = "wasi"))]
 /// Build a [`repl::ReplSettings`] from the parsed CLI flags and loaded config.
 ///
 /// Config values set defaults; CLI flags take precedence and override them.
@@ -528,6 +567,13 @@ fn build_settings(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// WASI entry point — no TUI or TCP; browser frontend connects via WSS proxy.
+#[cfg(feature = "wasi")]
+fn main() {
+    println!("WASI build: connect via WSS proxy");
+}
+
+#[cfg(not(feature = "wasi"))]
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -536,12 +582,13 @@ fn main() {
     rt.block_on(async_main());
 }
 
+#[cfg(not(feature = "wasi"))]
 #[allow(clippy::too_many_lines)]
 async fn async_main() {
     // Install the default rustls CryptoProvider before any TLS operations.
     // Required because multiple dependencies (tokio-postgres-rustls, reqwest)
     // pull in different crypto backends, preventing auto-selection.
-    rustls::crypto::aws_lc_rs::default_provider()
+    rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
 

@@ -1,4 +1,5 @@
 //! Built-in TUI pager for query results.
+#![cfg(not(feature = "wasi"))]
 //!
 //! Enters alternate screen mode, displays pre-formatted text with vertical
 //! and horizontal scrolling, and returns to the REPL when the user presses

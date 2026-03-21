@@ -85,9 +85,12 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
         let _ = writeln!(w, "{text}");
         return;
     }
+    #[cfg(not(feature = "wasi"))]
     let term_rows = crossterm::terminal::size()
         .map(|(_, h)| h as usize)
         .unwrap_or(24);
+    #[cfg(feature = "wasi")]
+    let term_rows = 24_usize;
     if settings.pager_enabled
         && crate::pager::needs_paging_with_min(
             text,

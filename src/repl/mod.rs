@@ -1,4 +1,5 @@
 //! Interactive REPL loop for Rpg.
+#![cfg(not(feature = "wasi"))]
 #![allow(clippy::wildcard_imports)]
 //!
 //! Provides readline-based line editing with persistent history, multi-line

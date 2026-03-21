@@ -1,4 +1,5 @@
 //! Schema-aware tab completion for the Rpg REPL.
+#![cfg(not(feature = "wasi"))]
 //!
 //! Provides [`RpgHelper`], which implements rustyline's [`Helper`] trait,
 //! and [`SchemaCache`], which holds `pg_catalog` metadata used during

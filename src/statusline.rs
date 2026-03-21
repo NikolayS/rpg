@@ -1,4 +1,5 @@
 //! Persistent one-line status bar for the interactive REPL (FR-25).
+#![cfg(not(feature = "wasi"))]
 //!
 //! Renders a status line at the bottom of the terminal using direct ANSI
 //! escape sequences.  Uses the terminal scroll region (CSR) to reserve the
