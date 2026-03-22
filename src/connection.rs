@@ -2122,7 +2122,36 @@ async fn connect_tls_with_config(
 /// - Other SSL/TLS errors (bad cert, handshake failure) → `TlsError`
 /// - Everything else → `ConnectionFailed`
 fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> ConnectionError {
-    let msg = e.to_string();
+    // tokio-postgres displays non-DB errors as "db error", hiding the real cause.
+    // Walk the source chain to find the actual IO/network error when available.
+    let msg = {
+        use std::error::Error as StdError;
+        let raw = e.to_string();
+        if raw == "db error"
+            || raw == "error communicating with the server"
+            || raw == "error connecting to server"
+        {
+            // Walk the full source chain to find the deepest meaningful message
+            // (usually an IO error like "Connection refused (os error 111)").
+            let mut cause = e.source();
+            let mut found = raw.clone();
+            while let Some(src) = cause {
+                let s = src.to_string();
+                if !s.is_empty()
+                    && s != "db error"
+                    && s != "error communicating with the server"
+                    && s != "error connecting to server"
+                {
+                    found = s;
+                    // Keep going to get the deepest/most specific message
+                }
+                cause = src.source();
+            }
+            found
+        } else {
+            raw
+        }
+    };
 
     if msg.contains("authentication")
         || msg.contains("password")
