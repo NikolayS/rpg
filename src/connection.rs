@@ -1056,8 +1056,6 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                 TokioHost::Tcp(s) => s.clone(),
                 #[cfg(unix)]
                 TokioHost::Unix(p) => p.to_string_lossy().into_owned(),
-                #[cfg(not(unix))]
-                _ => String::new(),
             };
             host_list.push((host_str, port_for(i)));
         }
