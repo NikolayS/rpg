@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.1] - 2026-03-24
+
+### Fixed
+
+- **Connection errors now show the real cause** instead of the opaque "db error" or "error connecting to server" messages. rpg walks the error source chain to surface the underlying OS/network error, e.g. "Connection refused (os error 111)" or "No such host is known" — matching psql behavior. (#708)
+- **`sslmode=require` now works correctly** with self-signed certificates and non-public-CA servers. Previously, rpg verified the server certificate even in `require` mode, causing a TLS handshake failure. `sslmode=require` means encrypt only — no certificate verification — which is the correct psql semantics. SSL error messages are also improved: "SSL error: server does not support SSL" when connecting with require to a non-TLS server. (#711)
+
 ## [0.3.0] - 2026-03-14
 
 ### Added
