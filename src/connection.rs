@@ -2039,15 +2039,21 @@ async fn connect_one(
             Err(e) => return Err(e),
         },
 
-        SslMode::Prefer => match connect_tls_default(pg_config, params).await {
-            Ok((c, info)) => (c, Some(info)),
-            Err(_) => {
-                // sslmode=prefer: silently fall back to a plain connection
-                // when TLS is unavailable. This matches psql's default
-                // behavior — no warning is shown to the user.
-                (connect_plain(pg_config, params).await?, None)
+        SslMode::Prefer => {
+            // sslmode=prefer: try TLS without certificate verification, then
+            // fall back to plaintext only if the server does not support TLS.
+            // This matches psql / libpq semantics: prefer encrypts when
+            // possible but does not reject self-signed certificates.
+            let tls_cfg = make_tls_config_require(params)?;
+            match connect_tls_with_config(pg_config, params, tls_cfg).await {
+                Ok((c, info)) => (c, Some(info)),
+                Err(_) => {
+                    // Fall back to plaintext only if TLS is truly unavailable.
+                    // No warning is shown — matching psql's default behaviour.
+                    (connect_plain(pg_config, params).await?, None)
+                }
             }
-        },
+        }
 
         SslMode::Require => {
             let mut cfg = pg_config.clone();
