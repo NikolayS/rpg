@@ -10,12 +10,24 @@ IFS=$'\n\t'
 # Runs the same connection forms through both psql and rpg, compares
 # output, and verifies error-path behaviour.  Exits non-zero on any
 # failure.
+#
+# Optional env vars:
+#   TEST_PG_SCRAM_HOST      host for SCRAM-auth Postgres (A7 wrong-password)
+#   TEST_PG_SCRAM_PORT      port for SCRAM-auth Postgres (A7 wrong-password)
+#   TEST_PG_SCRAM_USER      user for SCRAM-auth Postgres (default: postgres)
+#   TEST_PG_SCRAM_PASSWORD  correct password for the SCRAM instance
+#   TEST_PG_SCRAM_DATABASE  database for SCRAM-auth Postgres (default: postgres)
+# If TEST_PG_SCRAM_PORT is not set, A7 is skipped.
 # ---------------------------------------------------------------------------
 
 PASS=0
 FAIL=0
 RPG=""
 TMPDIR_CONN=""
+
+# Stable SQL used in place of \conninfo for A1-A5.
+# Returns identical output from both psql and rpg across all versions.
+CONN_QUERY="SELECT current_database() AS db, current_user AS usr, inet_server_port() AS port"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,7 +37,7 @@ cleanup() {
   rm -rf "${TMPDIR_CONN}"
 }
 
-# Strip binary name ("rpg" / "psql") so \conninfo output compares equal.
+# Strip binary name ("rpg" / "psql") so output compares equal.
 # Also normalise trailing whitespace and non-deterministic lines.
 normalize() {
   expand | \
@@ -111,7 +123,7 @@ test_tcp_flags() {
     -p "${TEST_PGPORT}" \
     -U "${TEST_PGUSER}" \
     -d "${TEST_PGDATABASE}" \
-    -c '\conninfo'
+    -c "${CONN_QUERY}"
 }
 
 # (b) Bare positional args: dbname user (psql only supports 2 positional
@@ -123,7 +135,7 @@ test_positional_args() {
       "${RPG}" \
         -h "${TEST_PGHOST}" \
         -p "${TEST_PGPORT}" \
-        -c '\conninfo' \
+        -c "${CONN_QUERY}" \
         "${TEST_PGDATABASE}" \
         "${TEST_PGUSER}" \
         2>&1 | normalize
@@ -133,7 +145,7 @@ test_positional_args() {
       psql --no-psqlrc \
         -h "${TEST_PGHOST}" \
         -p "${TEST_PGPORT}" \
-        -c '\conninfo' \
+        -c "${CONN_QUERY}" \
         "${TEST_PGDATABASE}" \
         "${TEST_PGUSER}" \
         2>&1 | normalize
@@ -151,10 +163,10 @@ test_uri() {
   local uri="postgresql://${TEST_PGUSER}:${TEST_PGPASSWORD}@${TEST_PGHOST}:${TEST_PGPORT}/${TEST_PGDATABASE}"
   local rpg_out psql_out
   rpg_out=$(
-    "${RPG}" "${uri}" -c '\conninfo' 2>&1 | normalize
+    "${RPG}" "${uri}" -c "${CONN_QUERY}" 2>&1 | normalize
   ) || true
   psql_out=$(
-    psql --no-psqlrc "${uri}" -c '\conninfo' 2>&1 | normalize
+    psql --no-psqlrc "${uri}" -c "${CONN_QUERY}" 2>&1 | normalize
   ) || true
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
     pass_test "URI connection string"
@@ -169,10 +181,10 @@ test_conninfo_string() {
   conninfo_str="host=${TEST_PGHOST} port=${TEST_PGPORT} dbname=${TEST_PGDATABASE} user=${TEST_PGUSER} password=${TEST_PGPASSWORD}"
   local rpg_out psql_out
   rpg_out=$(
-    "${RPG}" "${conninfo_str}" -c '\conninfo' 2>&1 | normalize
+    "${RPG}" "${conninfo_str}" -c "${CONN_QUERY}" 2>&1 | normalize
   ) || true
   psql_out=$(
-    psql --no-psqlrc "${conninfo_str}" -c '\conninfo' 2>&1 | normalize
+    psql --no-psqlrc "${conninfo_str}" -c "${CONN_QUERY}" 2>&1 | normalize
   ) || true
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
     pass_test "conninfo keyword=value string"
@@ -190,7 +202,7 @@ test_env_vars_only() {
     PGUSER="${TEST_PGUSER}" \
     PGPASSWORD="${TEST_PGPASSWORD}" \
     PGDATABASE="${TEST_PGDATABASE}" \
-      "${RPG}" -c '\conninfo' 2>&1 | normalize
+      "${RPG}" -c "${CONN_QUERY}" 2>&1 | normalize
   ) || true
   psql_out=$(
     PGHOST="${TEST_PGHOST}" \
@@ -198,7 +210,7 @@ test_env_vars_only() {
     PGUSER="${TEST_PGUSER}" \
     PGPASSWORD="${TEST_PGPASSWORD}" \
     PGDATABASE="${TEST_PGDATABASE}" \
-      psql --no-psqlrc -c '\conninfo' 2>&1 | normalize
+      psql --no-psqlrc -c "${CONN_QUERY}" 2>&1 | normalize
   ) || true
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
     pass_test "env vars only (PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE)"
@@ -244,16 +256,28 @@ test_flag_overrides_positional() {
   fi
 }
 
-# (g) Wrong password fails with non-zero exit
+# (g) Wrong password fails with non-zero exit.
+#     Requires a SCRAM-auth Postgres instance; trust-auth instances ignore
+#     the password and would always return exit 0.
+#     Set TEST_PG_SCRAM_PORT to enable; otherwise skipped.
 test_wrong_password() {
+  if [[ -z "${TEST_PG_SCRAM_PORT:-}" ]]; then
+    echo "SKIP: wrong password test (TEST_PG_SCRAM_PORT not set)"
+    return
+  fi
+  local scram_host="${TEST_PG_SCRAM_HOST:-localhost}"
+  local scram_port="${TEST_PG_SCRAM_PORT}"
+  local scram_user="${TEST_PG_SCRAM_USER:-postgres}"
+  local scram_db="${TEST_PG_SCRAM_DATABASE:-postgres}"
+
   expect_failure "wrong password exits non-zero" \
     env PGPASSWORD=wrongpassword \
       "${RPG}" \
         -w \
-        -h "${TEST_PGHOST}" \
-        -p "${TEST_PGPORT}" \
-        -U "${TEST_PGUSER}" \
-        -d "${TEST_PGDATABASE}" \
+        -h "${scram_host}" \
+        -p "${scram_port}" \
+        -U "${scram_user}" \
+        -d "${scram_db}" \
         -c 'select 1'
 }
 
@@ -309,7 +333,7 @@ test_unix_socket() {
       -p "${TEST_PGPORT}" \
       -U "${TEST_PGUSER}" \
       -d "${TEST_PGDATABASE}" \
-      -c '\conninfo'
+      -c "${CONN_QUERY}"
   else
     echo "SKIP: Unix socket (${socket_file} not found)"
   fi
