@@ -63,8 +63,17 @@ pub enum ConnectionError {
     #[error("server requires SSL but sslmode=disable")]
     SslRequired,
 
-    /// General TLS failure (bad cert, handshake failure, etc.).
-    #[error("TLS error: {0}")]
+    /// Server does not support SSL/TLS (sslmode=require/verify-ca/verify-full
+    /// against a server with no TLS configured).
+    #[error("SSL error: server does not support SSL")]
+    SslNotSupported,
+
+    /// Certificate verification failed (verify-ca or verify-full).
+    #[error("SSL error: certificate verification failed: {0}")]
+    SslCertVerificationFailed(String),
+
+    /// General TLS failure (handshake or other TLS-layer error).
+    #[error("SSL error: {0}")]
     TlsError(String),
 
     #[error("pgpass error: {0}")]
@@ -1392,6 +1401,36 @@ fn make_tls_config_default() -> ClientConfig {
         .with_no_client_auth()
 }
 
+/// Build a `ClientConfig` for `sslmode=require`.
+///
+/// Encrypts the connection but performs no certificate or hostname verification.
+/// Supports optional client certificates (mutual TLS).
+fn make_tls_config_require(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
+    let verifier = Arc::new(NoVerifier::new());
+    let builder = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier);
+
+    match (&params.ssl_cert, &params.ssl_key) {
+        (Some(cert), Some(key)) => {
+            let (certs, private_key) = load_client_cert_and_key(cert, key)?;
+            Ok(builder
+                .with_client_auth_cert(certs, private_key)
+                .map_err(|e| {
+                    ConnectionError::SslClientCertError(format!("invalid client cert/key: {e}"))
+                })?)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            eprintln!(
+                "WARNING: both sslcert and sslkey must be set for \
+                 client certificate authentication; ignoring"
+            );
+            Ok(builder.with_no_client_auth())
+        }
+        (None, None) => Ok(builder.with_no_client_auth()),
+    }
+}
+
 /// Load PEM certificates from `path` into a `RootCertStore`.
 fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionError> {
     let pem = std::fs::read(path)
@@ -1522,6 +1561,76 @@ fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, Conn
             Ok(builder.with_no_client_auth())
         }
         (None, None) => Ok(builder.with_no_client_auth()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom certificate verifier: require (no verification at all)
+// ---------------------------------------------------------------------------
+
+/// A `ServerCertVerifier` that accepts any server certificate without
+/// performing any chain or hostname validation.
+///
+/// This implements `sslmode=require` semantics: the connection is encrypted
+/// but the server identity is not verified.  psql behaves identically.
+#[derive(Debug)]
+struct NoVerifier {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl NoVerifier {
+    fn new() -> Self {
+        Self {
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+}
+
+impl ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // sslmode=require: encrypt only, no cert verification.
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -1943,7 +2052,8 @@ async fn connect_one(
         SslMode::Require => {
             let mut cfg = pg_config.clone();
             cfg.ssl_mode(TokioSslMode::Require);
-            let (c, info) = connect_tls_default(&cfg, params).await?;
+            let tls_cfg = make_tls_config_require(params)?;
+            let (c, info) = connect_tls_with_config(&cfg, params, tls_cfg).await?;
             (c, Some(info))
         }
 
@@ -2113,43 +2223,11 @@ async fn connect_tls_with_config(
     Ok((client, info))
 }
 
-/// Map a `tokio_postgres::Error` into our `ConnectionError`.
+/// Classify an error message string into a `ConnectionError`.
 ///
-/// Classification rules:
-/// - Authentication keywords → `AuthenticationFailed`
-/// - SSL-required signal (server rejects non-TLS when sslmode=disable) →
-///   `SslRequired`
-/// - Other SSL/TLS errors (bad cert, handshake failure) → `TlsError`
-/// - Everything else → `ConnectionFailed`
-fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> ConnectionError {
-    // tokio-postgres surfaces many errors as the opaque string "db error".
-    // Walk the source chain first to get the real message for all checks below.
-    let msg = {
-        use std::error::Error as StdError;
-        let raw = e.to_string();
-        if raw == "db error"
-            || raw == "error communicating with the server"
-            || raw == "error connecting to server"
-        {
-            let mut cause = e.source();
-            let mut found = raw.clone();
-            while let Some(src) = cause {
-                let s = src.to_string();
-                if !s.is_empty()
-                    && s != "db error"
-                    && s != "error communicating with the server"
-                    && s != "error connecting to server"
-                {
-                    found = s;
-                }
-                cause = src.source();
-            }
-            found
-        } else {
-            raw
-        }
-    };
-
+/// Extracted from `map_connect_error` so that the classification rules can
+/// be unit-tested without a live database connection.
+fn classify_connect_error(msg: String, params: &ConnParams) -> ConnectionError {
     if msg.contains("authentication")
         || msg.contains("password")
         || msg.contains("no password")
@@ -2170,7 +2248,20 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
         return ConnectionError::SslRequired;
     }
 
-    // General TLS failures: bad certificate, handshake errors, etc.
+    // tokio-postgres emits this exact string when the server responds with
+    // 'N' to the SSLRequest message (i.e., server has no TLS at all).
+    if msg.contains("server does not support TLS") {
+        return ConnectionError::SslNotSupported;
+    }
+
+    // rustls certificate verification failures: chain errors, expired certs,
+    // hostname mismatches.  "invalid peer certificate" is the rustls Display
+    // prefix for Error::InvalidCertificate.
+    if msg.contains("invalid peer certificate") || msg.contains("certificate verify failed") {
+        return ConnectionError::SslCertVerificationFailed(msg);
+    }
+
+    // General TLS failures: bad cipher, handshake alerts, etc.
     if msg.contains("SSL") || msg.contains("ssl") || msg.contains("TLS") || msg.contains("tls") {
         return ConnectionError::TlsError(msg);
     }
@@ -2180,6 +2271,40 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
         port: params.port,
         reason: msg,
     }
+}
+
+/// Map a `tokio_postgres::Error` into our `ConnectionError`.
+///
+/// Classification rules:
+/// - Authentication keywords → `AuthenticationFailed`
+/// - SSL-required signal (server rejects non-TLS when sslmode=disable) →
+///   `SslRequired`
+/// - Server has no TLS at all (sslmode=require/verify-ca/verify-full) →
+///   `SslNotSupported`
+/// - Certificate verification failure → `SslCertVerificationFailed`
+/// - Other SSL/TLS errors (handshake failure, etc.) → `TlsError`
+/// - Everything else → `ConnectionFailed`
+fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> ConnectionError {
+    // tokio-postgres wraps TLS errors as `Kind::Tls` with the real cause in
+    // the source chain.  The top-level `to_string()` returns "error performing
+    // TLS handshake" which is not actionable; walk the chain to find the
+    // innermost non-generic message.
+    let msg = {
+        use std::error::Error as StdError;
+        let raw = e.to_string();
+        let mut best = raw.clone();
+        let mut cause = e.source();
+        while let Some(src) = cause {
+            let s = src.to_string();
+            if !s.is_empty() && s != raw {
+                best = s;
+            }
+            cause = src.source();
+        }
+        best
+    };
+
+    classify_connect_error(msg, params)
 }
 
 /// Format a human-friendly connection-success message, matching psql output.
@@ -3808,5 +3933,103 @@ host=myhost
         };
         let params = resolve_params(&opts).unwrap();
         assert_eq!(params.hosts, vec![("myhost".to_owned(), 9999)]);
+    }
+
+    // -- SSL error classification -------------------------------------------
+
+    fn dummy_params() -> ConnParams {
+        ConnParams {
+            host: "testhost".to_owned(),
+            port: 5432,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_classify_ssl_not_supported() {
+        // tokio-postgres emits this when the server returns 'N' to SSLRequest.
+        let params = dummy_params();
+        let err = classify_connect_error("server does not support TLS".to_owned(), &params);
+        assert!(
+            matches!(err, ConnectionError::SslNotSupported),
+            "expected SslNotSupported, got: {err:?}"
+        );
+        assert_eq!(err.to_string(), "SSL error: server does not support SSL");
+    }
+
+    #[test]
+    fn test_classify_ssl_cert_verification_failed_invalid_peer() {
+        // rustls emits "invalid peer certificate: ..." for chain/CA errors.
+        let params = dummy_params();
+        let detail = "invalid peer certificate: UnknownIssuer".to_owned();
+        let err = classify_connect_error(detail.clone(), &params);
+        assert!(
+            matches!(err, ConnectionError::SslCertVerificationFailed(_)),
+            "expected SslCertVerificationFailed, got: {err:?}"
+        );
+        assert!(err.to_string().contains("certificate verification failed"));
+        assert!(err.to_string().contains("UnknownIssuer"));
+    }
+
+    #[test]
+    fn test_classify_ssl_cert_verification_failed_hostname() {
+        // rustls emits "invalid peer certificate: ..." for hostname mismatch.
+        let params = dummy_params();
+        let detail = "invalid peer certificate: NotValidForName".to_owned();
+        let err = classify_connect_error(detail, &params);
+        assert!(
+            matches!(err, ConnectionError::SslCertVerificationFailed(_)),
+            "expected SslCertVerificationFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_classify_ssl_required_by_server() {
+        // Server-side "require SSL" message (when client tries plain
+        // connection but server has ssl=on + pg_hba requires it).
+        let params = dummy_params();
+        let err = classify_connect_error("SSL connection is required".to_owned(), &params);
+        assert!(
+            matches!(err, ConnectionError::SslRequired),
+            "expected SslRequired, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_classify_generic_tls_error() {
+        // Any other TLS error falls through to the generic TlsError variant.
+        let params = dummy_params();
+        let err = classify_connect_error(
+            "received fatal TLS alert: HandshakeFailure".to_owned(),
+            &params,
+        );
+        assert!(
+            matches!(err, ConnectionError::TlsError(_)),
+            "expected TlsError, got: {err:?}"
+        );
+        assert!(err.to_string().starts_with("SSL error:"));
+    }
+
+    #[test]
+    fn test_classify_auth_error() {
+        let params = dummy_params();
+        let err = classify_connect_error(
+            "password authentication failed for user \"postgres\"".to_owned(),
+            &params,
+        );
+        assert!(
+            matches!(err, ConnectionError::AuthenticationFailed { .. }),
+            "expected AuthenticationFailed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_classify_connection_failed() {
+        let params = dummy_params();
+        let err = classify_connect_error("Connection refused (os error 111)".to_owned(), &params);
+        assert!(
+            matches!(err, ConnectionError::ConnectionFailed { .. }),
+            "expected ConnectionFailed, got: {err:?}"
+        );
     }
 }
