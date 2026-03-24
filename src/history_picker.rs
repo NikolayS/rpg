@@ -86,10 +86,10 @@ impl PickerState {
             .filter(|(_, e)| filter_lc.is_empty() || e.to_lowercase().contains(&filter_lc))
             .map(|(i, _)| i)
             .collect();
-        if !self.matches.is_empty() {
-            self.selected = self.selected.min(self.matches.len() - 1);
-        } else {
+        if self.matches.is_empty() {
             self.selected = 0;
+        } else {
+            self.selected = self.selected.min(self.matches.len() - 1);
         }
     }
 
@@ -144,6 +144,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// `None` when they cancel with Esc or Ctrl-C.
 ///
 /// Returns `Err` when terminal setup fails (e.g. stdin is not a TTY).
+#[allow(clippy::too_many_lines)]
 pub fn run(entries: Vec<String>) -> io::Result<Option<String>> {
     if !io::stdin().is_terminal() {
         return Err(io::Error::new(
