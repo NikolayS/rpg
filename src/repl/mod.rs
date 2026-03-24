@@ -5433,6 +5433,11 @@ async fn handle_line(
 mod tests {
     use super::*;
 
+    // Serialize all tests that mutate environment variables to prevent
+    // intermittent failures when tests run in parallel.
+    static ENV_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     // -- is_complete -----------------------------------------------------------
 
     #[test]
@@ -5748,6 +5753,7 @@ mod tests {
 
     #[test]
     fn startup_file_returns_psqlrc_env_when_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         // Override PSQLRC to a known path.
         std::env::set_var("PSQLRC", "/tmp/test_rpg_rc");
         let result = startup_file();
@@ -5757,6 +5763,7 @@ mod tests {
 
     #[test]
     fn startup_file_returns_none_when_no_rc_exists_and_no_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         // Remove PSQLRC env so the function falls through to file checks.
         std::env::remove_var("PSQLRC");
         // We cannot guarantee ~/.rpgrc or ~/.psqlrc don't exist on the test
@@ -7414,6 +7421,7 @@ mod tests {
 
     #[test]
     fn resolve_api_key_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var("RPG_TEST_API_KEY_12345", "test-secret-value");
         let result = resolve_api_key(Some("RPG_TEST_API_KEY_12345"));
         assert_eq!(result, Some("test-secret-value".to_owned()));
@@ -7422,6 +7430,7 @@ mod tests {
 
     #[test]
     fn resolve_api_key_missing_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var("NONEXISTENT_RPG_VAR_99999");
         let result = resolve_api_key(Some("NONEXISTENT_RPG_VAR_99999"));
         assert!(result.is_none());
@@ -7429,6 +7438,7 @@ mod tests {
 
     #[test]
     fn resolve_api_key_empty_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var("RPG_EMPTY_KEY_TEST", "");
         let result = resolve_api_key(Some("RPG_EMPTY_KEY_TEST"));
         assert!(result.is_none());
