@@ -335,7 +335,16 @@ impl fmt::Debug for ConnParams {
 impl Default for ConnParams {
     fn default() -> Self {
         let host = default_host();
-        let port = 5432u16;
+        // When the default host is a Unix-socket directory, detect the port
+        // from the socket filename so we don't assume 5432.
+        #[cfg(unix)]
+        let port: u16 = if host.starts_with('/') {
+            detect_socket_port_in_dir(&host).unwrap_or(5432)
+        } else {
+            5432
+        };
+        #[cfg(not(unix))]
+        let port: u16 = 5432u16;
         Self {
             hosts: vec![(host.clone(), port)],
             host,
@@ -358,24 +367,60 @@ impl Default for ConnParams {
 }
 
 /// Return the default host. On Unix, if a well-known socket directory
-/// contains the standard `PostgreSQL` socket file (`.s.PGSQL.5432`), return
-/// that directory; otherwise `"localhost"`.
+/// contains a PostgreSQL socket file (`.s.PGSQL.<port>`), return that
+/// directory; otherwise `"localhost"`.
 ///
-/// Checking for `.s.PGSQL.5432` directly (O(1), no directory scan) avoids
-/// false positives from lock files (`.s.PGSQL.5432.lock`) and from sockets
-/// belonging to a non-default port. Port 5432 is the standard default — the
-/// same assumption libpq makes.
+/// The standard default port is 5432.  This function also scans for sockets
+/// on other ports so that non-default installations (e.g. port 5437) are
+/// discovered automatically, matching the behaviour of libpq.
 fn default_host() -> String {
     #[cfg(unix)]
     {
         for dir in &["/var/run/postgresql", "/tmp"] {
+            // Fast path: standard port 5432.
             let path = PathBuf::from(dir);
             if path.join(".s.PGSQL.5432").exists() {
+                return (*dir).to_owned();
+            }
+            // Slow path: any port — scan the directory for `.s.PGSQL.<N>`.
+            if detect_socket_port_in_dir(dir).is_some() {
                 return (*dir).to_owned();
             }
         }
     }
     "localhost".to_owned()
+}
+
+/// Scan `dir` for a PostgreSQL Unix-domain socket file (`.s.PGSQL.<port>`)
+/// and return the port number of the first one found, or `None`.
+///
+/// Lock files (`.s.PGSQL.<port>.lock`) and non-numeric suffixes are ignored.
+#[cfg(unix)]
+fn detect_socket_port_in_dir(dir: &str) -> Option<u16> {
+    use std::fs;
+    let entries = fs::read_dir(dir).ok()?;
+    let mut found: Option<u16> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if let Some(rest) = name_str.strip_prefix(".s.PGSQL.") {
+            // Skip lock files (.s.PGSQL.<port>.lock)
+            if rest.contains('.') {
+                continue;
+            }
+            if let Ok(port) = rest.parse::<u16>() {
+                // Prefer port 5432 if present; otherwise take the smallest port found.
+                if port == 5432 {
+                    return Some(5432);
+                }
+                found = Some(match found {
+                    None => port,
+                    Some(prev) => prev.min(port),
+                });
+            }
+        }
+    }
+    found
 }
 
 /// Default user: `$USER` (or `$USERNAME` on Windows), falling back to
@@ -597,7 +642,17 @@ fn resolve_port(
         .or_else(|| conninfo.and_then(|c| c.get("port").and_then(|p| p.parse().ok())))
         .or_else(|| svc.and_then(|s| s.get("port").and_then(|p| p.parse().ok())))
         .or_else(|| env::var("PGPORT").ok().and_then(|p| p.parse().ok()))
-        .unwrap_or(5432);
+        .unwrap_or_else(|| {
+            // When connecting via a Unix-domain socket directory, detect the
+            // actual port from the socket filename rather than assuming 5432.
+            #[cfg(unix)]
+            if params.host.starts_with('/') {
+                if let Some(port) = detect_socket_port_in_dir(&params.host) {
+                    return port;
+                }
+            }
+            5432
+        });
 }
 
 fn resolve_user(
@@ -2453,7 +2508,22 @@ mod tests {
         let opts = CliConnOpts::default();
         let params = resolve_params(&opts).unwrap();
 
-        assert_eq!(params.port, 5432);
+        // When a Unix socket is available, the default port is detected from
+        // the socket filename rather than assumed to be 5432.
+        let expected_port: u16 = {
+            #[cfg(unix)]
+            {
+                let host = default_host();
+                if host.starts_with('/') {
+                    detect_socket_port_in_dir(&host).unwrap_or(5432)
+                } else {
+                    5432
+                }
+            }
+            #[cfg(not(unix))]
+            5432
+        };
+        assert_eq!(params.port, expected_port);
         // dbname defaults to user
         assert_eq!(params.dbname, params.user);
         assert_eq!(params.application_name, "rpg");
