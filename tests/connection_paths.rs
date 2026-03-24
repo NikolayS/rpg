@@ -145,16 +145,18 @@ fn tls_password() -> String {
 }
 
 fn tls_database() -> String {
-    std::env::var("CONN_TLS_DATABASE")
-        .unwrap_or_else(|_| "postgres".to_owned())
+    std::env::var("CONN_TLS_DATABASE").unwrap_or_else(|_| "postgres".to_owned())
 }
 
 /// Apply trust credentials to a command (host, port, user, optional password).
 fn apply_trust(cmd: &mut Command) {
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", &trust_user(),
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
     ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
@@ -187,11 +189,16 @@ fn a1_basic_tcp() {
 fn a2_tcp_pgpassword() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &scram_host(),
-        "-p", &scram_port(),
-        "-U", &scram_user(),
-        "-d", &scram_database(),
-        "-c", "SELECT 1",
+        "-h",
+        &scram_host(),
+        "-p",
+        &scram_port(),
+        "-U",
+        &scram_user(),
+        "-d",
+        &scram_database(),
+        "-c",
+        "SELECT 1",
     ])
     .env("PGPASSWORD", scram_password());
     let (stdout, stderr, code) = run(cmd);
@@ -233,8 +240,7 @@ fn a3_tcp_explicit_db() {
 #[test]
 fn b1_socket_explicit_host() {
     let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
-    let socket_dir =
-        std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
+    let socket_dir = std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
     let socket_path = format!("{socket_dir}/.s.PGSQL.{socket_port}");
 
     if !Path::new(&socket_path).exists() {
@@ -246,10 +252,14 @@ fn b1_socket_explicit_host() {
 
     let mut cmd = rpg();
     cmd.args([
-        "-h", &socket_dir,
-        "-p", &socket_port,
-        "-U", &socket_user,
-        "-c", "SELECT 1",
+        "-h",
+        &socket_dir,
+        "-p",
+        &socket_port,
+        "-U",
+        &socket_user,
+        "-c",
+        "SELECT 1",
     ]);
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
@@ -268,8 +278,7 @@ fn b1_socket_explicit_host() {
 #[test]
 fn b2_socket_pghost_env() {
     let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
-    let socket_dir =
-        std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
+    let socket_dir = std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
     let socket_path = format!("{socket_dir}/.s.PGSQL.{socket_port}");
 
     if !Path::new(&socket_path).exists() {
@@ -384,8 +393,7 @@ fn c3_uri_with_sslmode() {
 #[test]
 fn c4_uri_host_query_param() {
     let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
-    let socket_dir =
-        std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
+    let socket_dir = std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
     let socket_path = format!("{socket_dir}/.s.PGSQL.{socket_port}");
 
     if !Path::new(&socket_path).exists() {
@@ -394,9 +402,8 @@ fn c4_uri_host_query_param() {
     }
 
     let socket_user = std::env::var("CONN_SOCKET_USER").unwrap_or_else(|_| "tars".to_owned());
-    let uri = format!(
-        "postgres:///postgres?host={socket_dir}&port={socket_port}&user={socket_user}"
-    );
+    let uri =
+        format!("postgres:///postgres?host={socket_dir}&port={socket_port}&user={socket_user}");
     let mut cmd = rpg();
     cmd.arg(&uri).arg("-c").arg("SELECT 1");
     let (stdout, stderr, code) = run(cmd);
@@ -451,11 +458,16 @@ fn c5_key_value_connstring() {
 fn d1_sslmode_prefer_self_signed() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &tls_host(),
-        "-p", &tls_port(),
-        "-U", &tls_user(),
-        "--sslmode", "prefer",
-        "-c", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        "-h",
+        &tls_host(),
+        "-p",
+        &tls_port(),
+        "-U",
+        &tls_user(),
+        "--sslmode",
+        "prefer",
+        "-c",
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
     ])
     .env("PGPASSWORD", tls_password());
     let (stdout, stderr, code) = run(cmd);
@@ -476,11 +488,16 @@ fn d1_sslmode_prefer_self_signed() {
 fn d2_sslmode_require_self_signed() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &tls_host(),
-        "-p", &tls_port(),
-        "-U", &tls_user(),
-        "--sslmode", "require",
-        "-c", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        "-h",
+        &tls_host(),
+        "-p",
+        &tls_port(),
+        "-U",
+        &tls_user(),
+        "--sslmode",
+        "require",
+        "-c",
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
     ])
     .env("PGPASSWORD", tls_password());
     let (stdout, stderr, code) = run(cmd);
@@ -500,11 +517,16 @@ fn d2_sslmode_require_self_signed() {
 fn d3_sslmode_require_no_tls_server() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", &trust_user(),
-        "--sslmode", "require",
-        "-c", "SELECT 1",
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
+        "--sslmode",
+        "require",
+        "-c",
+        "SELECT 1",
     ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
@@ -526,11 +548,16 @@ fn d3_sslmode_require_no_tls_server() {
 fn d4_sslmode_prefer_no_tls_server() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", &trust_user(),
-        "--sslmode", "prefer",
-        "-c", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
+        "--sslmode",
+        "prefer",
+        "-c",
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
     ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
@@ -573,22 +600,19 @@ fn e1_pghost_pgport() {
     );
 }
 
-/// E2: `PGPASSWORD` supplies password for SCRAM auth.
+/// E2: PGPORT env var overrides default port.
 #[test]
-fn e2_pgpassword() {
+fn e2_pgport_env() {
     let mut cmd = rpg();
-    cmd.args([
-        "-h", &scram_host(),
-        "-p", &scram_port(),
-        "-U", &scram_user(),
-        "-d", &scram_database(),
-        "-c", "SELECT 1",
-    ])
-    .env("PGPASSWORD", scram_password());
+    cmd.args(["-h", &trust_host(), "-U", &trust_user(), "-c", "SELECT 1"])
+        .env("PGPORT", trust_port());
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
-        "e2: expected exit 0 via PGPASSWORD for SCRAM\nstdout: {stdout}\nstderr: {stderr}"
+        "e2: expected exit 0\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         stdout.contains('1'),
@@ -601,12 +625,14 @@ fn e2_pgpassword() {
 fn e3_pguser() {
     let user = trust_user();
     let mut cmd = rpg();
-    cmd.env("PGUSER", &user)
-        .args([
-            "-h", &trust_host(),
-            "-p", &trust_port(),
-            "-c", "SELECT current_user",
-        ]);
+    cmd.env("PGUSER", &user).args([
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-c",
+        "SELECT current_user",
+    ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
@@ -645,10 +671,14 @@ fn e4_pgappname() {
 fn e5_pgsslmode() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &tls_host(),
-        "-p", &tls_port(),
-        "-U", &tls_user(),
-        "-c", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        "-h",
+        &tls_host(),
+        "-p",
+        &tls_port(),
+        "-U",
+        &tls_user(),
+        "-c",
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
     ])
     .env("PGPASSWORD", tls_password())
     .env("PGSSLMODE", "require");
@@ -672,12 +702,17 @@ fn e5_pgsslmode() {
 fn f1_wrong_password_clear_error() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &scram_host(),
-        "-p", &scram_port(),
-        "-U", &scram_user(),
-        "-d", &scram_database(),
+        "-h",
+        &scram_host(),
+        "-p",
+        &scram_port(),
+        "-U",
+        &scram_user(),
+        "-d",
+        &scram_database(),
         "-w", // never prompt
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ])
     .env("PGPASSWORD", "definitely_wrong_password_xyz");
     let (stdout, stderr, code) = run(cmd);
@@ -702,12 +737,17 @@ fn f1_wrong_password_clear_error() {
 fn f2_connection_refused_clear_error() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", "127.0.0.1",
-        "-p", "19999",
-        "-U", "nobody",
-        "-d", "nobody",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "19999",
+        "-U",
+        "nobody",
+        "-d",
+        "nobody",
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
@@ -726,28 +766,29 @@ fn f2_connection_refused_clear_error() {
 fn f3_unknown_host_clear_error() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", "doesnotexist.invalid",
-        "-p", "5432",
-        "-U", "nobody",
-        "-d", "nobody",
+        "-h",
+        "doesnotexist.invalid",
+        "-p",
+        "5432",
+        "-U",
+        "nobody",
+        "-d",
+        "nobody",
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
         code, 0,
         "f3: expected nonzero exit for unknown host\nstdout: {stdout}\nstderr: {stderr}"
     );
-    let combined = format!("{stdout}{stderr}").to_lowercase();
-    // Accept any DNS-resolution-related message
-    let is_dns_error = combined.contains("name")
-        || combined.contains("resolve")
-        || combined.contains("lookup")
-        || combined.contains("address")
-        || combined.contains("host");
     assert!(
-        is_dns_error,
-        "f3: expected DNS resolution error in output\nstdout: {stdout}\nstderr: {stderr}"
+        stderr.contains("Name or service not known")
+            || stderr.contains("failed to lookup")
+            || stderr.contains("nodename nor servname provided")
+            || stderr.contains("No such host"),
+        "f3: expected DNS error in stderr\nstderr: {stderr}"
     );
 }
 
@@ -760,11 +801,15 @@ fn f3_unknown_host_clear_error() {
 fn g1_trust_auth() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", &trust_user(),
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
         "-w", // never prompt for password — must not need one
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     // Supply password only if CI needs it (testuser/testpass scenario)
     if let Some(pw) = trust_password() {
@@ -786,11 +831,16 @@ fn g1_trust_auth() {
 fn g2_scram_auth() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &scram_host(),
-        "-p", &scram_port(),
-        "-U", &scram_user(),
-        "-d", &scram_database(),
-        "-c", "SELECT current_user",
+        "-h",
+        &scram_host(),
+        "-p",
+        &scram_port(),
+        "-U",
+        &scram_user(),
+        "-d",
+        &scram_database(),
+        "-c",
+        "SELECT current_user",
     ])
     .env("PGPASSWORD", scram_password());
     let (stdout, stderr, code) = run(cmd);
