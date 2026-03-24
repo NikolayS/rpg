@@ -217,6 +217,17 @@ jobs:
           TEST_PG_SCRAM_PASSWORD: postgres
           TEST_PG_SCRAM_DATABASE: postgres
         run: bash tests/compat/test-connections.sh target/release/rpg
+      - name: Run connection path integration tests (#709)
+        env:
+          TEST_PG_TLS_HOST: localhost
+          TEST_PG_TLS_PORT: "5433"
+          TEST_PG_TLS_PASSWORD: testpass
+          TEST_PG_SCRAM_HOST: localhost
+          TEST_PG_SCRAM_PORT: "15433"
+          TEST_PG_SCRAM_USER: postgres
+          TEST_PG_SCRAM_PASSWORD: postgres
+          TEST_PG_SCRAM_DATABASE: postgres
+        run: cargo test --test connection_paths
 
   coverage:
     name: Coverage
