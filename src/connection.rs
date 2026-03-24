@@ -843,146 +843,276 @@ struct UriParams {
     target_session_attrs: Option<TargetSessionAttrs>,
 }
 
-/// Parse a `postgresql://` or `postgres://` URI into individual fields.
+/// Extract `sslcert`, `sslkey`, and `sslrootcert` from a connection URI or
+/// connstring.
 ///
-/// Supports multi-host syntax: `postgresql://h1,h2:5433,h3/db` where each
-/// comma-separated token is an individual `host[:port]`.  Ports are matched
-/// positionally; the last port is reused for any remaining hosts.
-#[allow(clippy::too_many_lines)]
-fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
-    let err = |msg: String| ConnectionError::InvalidConnectionString(msg);
+/// `tokio_postgres::Config` handles all other standard libpq parameters.
+/// These three are the only ones it omits — it delegates TLS entirely to the
+/// caller, so client certificates and the CA bundle must be extracted
+/// separately.
+///
+/// Handles both URI query-string format (`?sslcert=...&sslkey=...`) and
+/// key=value connstring format (`sslcert=... sslkey=...`).
+fn extract_ssl_file_params(s: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut ssl_cert: Option<String> = None;
+    let mut ssl_key: Option<String> = None;
+    let mut ssl_root_cert: Option<String> = None;
 
-    // Strip the scheme.
-    let rest = uri
-        .strip_prefix("postgresql://")
-        .or_else(|| uri.strip_prefix("postgres://"))
-        .ok_or_else(|| err(format!("not a postgres URI: {uri}")))?;
-
-    let mut params = UriParams::default();
-
-    // Split on `?` for query parameters.
-    let (main_part, query_part) = match rest.split_once('?') {
-        Some((m, q)) => (m, Some(q)),
-        None => (rest, None),
-    };
-
-    // Split on `/` to separate authority from dbname.
-    let (authority, db) = match main_part.split_once('/') {
-        Some((a, d)) => (a, if d.is_empty() { None } else { Some(d) }),
-        None => (main_part, None),
-    };
-
-    params.dbname = db.map(percent_decode);
-
-    // Parse authority: [user[:password]@]host[:port][,host[:port]...]
-    let (userinfo, hostport) = match authority.split_once('@') {
-        Some((u, h)) => (Some(u), h),
-        None => (None, authority),
-    };
-
-    if let Some(userinfo) = userinfo {
-        match userinfo.split_once(':') {
-            Some((u, p)) => {
-                if !u.is_empty() {
-                    params.user = Some(percent_decode(u));
-                }
-                params.password = Some(percent_decode(p));
-            }
-            None => {
-                if !userinfo.is_empty() {
-                    params.user = Some(percent_decode(userinfo));
-                }
-            }
-        }
-    }
-
-    if !hostport.is_empty() {
-        // Multi-host: split on ',' and parse each token as host[:port].
-        // IPv6 bracket notation is supported per token.
-        let tokens: Vec<&str> = hostport.split(',').collect();
-        let mut parsed: Vec<(String, Option<u16>)> = Vec::with_capacity(tokens.len());
-
-        for token in &tokens {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-            if let Some(rest_after_bracket) = token.strip_prefix('[') {
-                // IPv6 [::1]:port
-                if let Some((ipv6, port_part)) = rest_after_bracket.split_once(']') {
-                    let port = if let Some(port_str) = port_part.strip_prefix(':') {
-                        Some(
-                            port_str
-                                .parse::<u16>()
-                                .map_err(|_| err(format!("invalid port in URI: {port_str}")))?,
-                        )
-                    } else {
-                        None
-                    };
-                    parsed.push((ipv6.to_owned(), port));
-                } else {
-                    return Err(err("unterminated IPv6 bracket in URI".to_owned()));
-                }
-            } else {
-                // Plain host or host:port.
-                // Use rsplit_once so a bare IPv6 without brackets (unusual)
-                // doesn't accidentally split on an address colon.
-                match token.rsplit_once(':') {
-                    Some((h, p)) => {
-                        let port = p
-                            .parse::<u16>()
-                            .map_err(|_| err(format!("invalid port in URI: {p}")))?;
-                        parsed.push((percent_decode(h), Some(port)));
-                    }
-                    None => {
-                        parsed.push((percent_decode(token), None));
-                    }
-                }
-            }
-        }
-
-        if !parsed.is_empty() {
-            // Determine the "last known port" for reuse on hosts without an
-            // explicit port: default 5432, overridden by the last explicit port
-            // seen so far as we walk left-to-right.
-            let mut last_port: u16 = 5432;
-            let mut host_list: Vec<(String, u16)> = Vec::with_capacity(parsed.len());
-            for (h, p) in parsed {
-                if let Some(port) = p {
-                    last_port = port;
-                }
-                host_list.push((h, last_port));
-            }
-
-            // Populate the legacy single-host fields from the first entry.
-            params.host = Some(host_list[0].0.clone());
-            params.port = Some(host_list[0].1);
-            params.hosts = host_list;
-        }
-    }
-
-    // Parse query parameters.
-    if let Some(query) = query_part {
+    if s.starts_with("postgresql://") || s.starts_with("postgres://") {
+        // URI: parameters are in the query string after '?'.
+        let query = s.split_once('?').map_or("", |(_, q)| q);
         for pair in query.split('&') {
             if let Some((key, val)) = pair.split_once('=') {
                 let val = percent_decode(val);
                 match key {
-                    "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
-                    "sslrootcert" => params.ssl_root_cert = Some(val),
-                    "sslcert" => params.ssl_cert = Some(val),
-                    "sslkey" => params.ssl_key = Some(val),
-                    "application_name" => params.application_name = Some(val),
-                    "connect_timeout" => params.connect_timeout = val.parse().ok(),
-                    "options" => params.options = Some(val),
-                    "target_session_attrs" => {
-                        params.target_session_attrs = Some(TargetSessionAttrs::parse(&val)?);
-                    }
-                    // Ignore unknown query params rather than erroring.
+                    "sslcert" => ssl_cert = Some(val),
+                    "sslkey" => ssl_key = Some(val),
+                    "sslrootcert" => ssl_root_cert = Some(val),
                     _ => {}
                 }
             }
         }
+    } else {
+        // key=value connstring: scan the whole string.
+        let mut rest = s.trim();
+        while !rest.is_empty() {
+            let Some(eq_pos) = rest.find('=') else {
+                break;
+            };
+            let key = rest[..eq_pos].trim();
+            rest = rest[eq_pos + 1..].trim_start();
+
+            let value;
+            if rest.starts_with('\'') {
+                // Quoted value.
+                let mut end = 1;
+                let bytes = rest.as_bytes();
+                let mut val = String::new();
+                while end < bytes.len() {
+                    if bytes[end] == b'\\' && end + 1 < bytes.len() {
+                        val.push(char::from(bytes[end + 1]));
+                        end += 2;
+                    } else if bytes[end] == b'\'' {
+                        end += 1;
+                        break;
+                    } else {
+                        val.push(char::from(bytes[end]));
+                        end += 1;
+                    }
+                }
+                value = val;
+                rest = rest[end..].trim_start();
+            } else {
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                value = rest[..end].to_owned();
+                rest = rest[end..].trim_start();
+            }
+
+            match key {
+                "sslcert" => ssl_cert = Some(value),
+                "sslkey" => ssl_key = Some(value),
+                "sslrootcert" => ssl_root_cert = Some(value),
+                _ => {}
+            }
+        }
     }
+
+    (ssl_cert, ssl_key, ssl_root_cert)
+}
+
+/// Build a sanitized copy of a URI with params that `tokio_postgres::Config`
+/// does not support removed from the query string.
+///
+/// `tokio_postgres` only supports sslmode values `disable`, `prefer`,
+/// `require` and `target_session_attrs` values `any`, `read-write`, `read-only`.
+/// It also errors on unrecognised keys.  Strip all rpg-extended params so the
+/// sanitized URI can be parsed by tokio-postgres without error.
+///
+/// Removed params: `sslcert`, `sslkey`, `sslrootcert`.
+/// Rewritten params: `sslmode` when value is `allow`, `verify-ca`, or
+/// `verify-full` (mapped to `require` so tokio-postgres accepts the string);
+/// `target_session_attrs` when value is `primary`, `standby`, or
+/// `prefer-standby` / `prefer_standby` (removed — resolved separately).
+fn sanitize_uri_for_tokio(uri: &str) -> String {
+    let (base, query) = match uri.split_once('?') {
+        Some((b, q)) => (b, Some(q)),
+        None => return uri.to_owned(),
+    };
+
+    let Some(query) = query else {
+        return uri.to_owned();
+    };
+
+    let kept: Vec<String> = query
+        .split('&')
+        .filter_map(|pair| {
+            let (key, val) = pair.split_once('=')?;
+            match key {
+                // Params tokio-postgres does not recognise — drop entirely.
+                "sslcert" | "sslkey" | "sslrootcert" => None,
+                // sslmode: map rpg-extended values to `require` so the parse
+                // succeeds.  The real value is captured from the raw URI.
+                "sslmode" => {
+                    let mapped = match val {
+                        "allow" | "verify-ca" | "verify-full" => "require",
+                        other => other,
+                    };
+                    Some(format!("sslmode={mapped}"))
+                }
+                // target_session_attrs values beyond tokio-postgres's subset —
+                // remove; resolved later from the raw URI by parse_uri.
+                "target_session_attrs" => match val {
+                    "primary" | "standby" | "prefer-standby" | "prefer_standby" => None,
+                    other => Some(format!("target_session_attrs={other}")),
+                },
+                // Everything else passes through unchanged.
+                _ => Some(pair.to_owned()),
+            }
+        })
+        .collect();
+
+    if kept.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{}?{}", base, kept.join("&"))
+    }
+}
+
+/// Parse a `postgresql://` or `postgres://` URI into individual fields.
+///
+/// Delegates to `tokio_postgres::Config::from_str()` for all standard libpq
+/// parameters (host, port, multi-host, Unix socket paths, sslmode,
+/// `application_name`, `connect_timeout`, `options`, `target_session_attrs`,
+/// percent-encoding, etc.).
+///
+/// The only params tokio-postgres omits are `sslcert`, `sslkey`, and
+/// `sslrootcert` — standard libpq params that tokio-postgres skips because it
+/// delegates TLS entirely to the caller.  These are extracted from the raw URI
+/// via `extract_ssl_file_params`.
+///
+/// rpg-extended `sslmode` values (`allow`, `verify-ca`, `verify-full`) and
+/// `target_session_attrs` values (`primary`, `standby`, `prefer-standby`) are
+/// also extracted from the raw URI before the sanitized copy is handed to
+/// tokio-postgres.
+fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
+    use tokio_postgres::config::Host as TokioHost;
+
+    // Extract params that tokio-postgres does not support, from the raw URI.
+    let (ssl_cert, ssl_key, ssl_root_cert) = extract_ssl_file_params(uri);
+
+    // Extract rpg-extended sslmode and target_session_attrs from the raw query
+    // string before sanitizing, since sanitize_uri_for_tokio may rewrite them.
+    let raw_sslmode = uri.split_once('?').and_then(|(_, q)| {
+        q.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            if k == "sslmode" {
+                Some(percent_decode(v))
+            } else {
+                None
+            }
+        })
+    });
+    let raw_tsa = uri.split_once('?').and_then(|(_, q)| {
+        q.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            if k == "target_session_attrs" {
+                Some(percent_decode(v))
+            } else {
+                None
+            }
+        })
+    });
+
+    // Build a sanitized URI that tokio-postgres can parse without errors.
+    let sanitized = sanitize_uri_for_tokio(uri);
+
+    // Delegate the bulk of the parsing to tokio-postgres.
+    let pg_cfg = sanitized
+        .parse::<tokio_postgres::Config>()
+        .map_err(|e| ConnectionError::InvalidConnectionString(e.to_string()))?;
+
+    // --- Reconstruct UriParams from the parsed Config ---
+
+    let mut params = UriParams::default();
+
+    // Hosts: tokio-postgres returns Host::Tcp(String) or Host::Unix(PathBuf).
+    // Ports: empty slice = all default 5432; single entry = same for all hosts;
+    //        N entries = per-host (tokio-postgres validates this invariant).
+    let tp_hosts = pg_cfg.get_hosts();
+    let tp_ports = pg_cfg.get_ports();
+
+    if !tp_hosts.is_empty() {
+        let port_for = |i: usize| -> u16 {
+            match tp_ports.len() {
+                0 => 5432,
+                1 => tp_ports[0],
+                _ => *tp_ports.get(i).unwrap_or(&5432),
+            }
+        };
+
+        let mut host_list: Vec<(String, u16)> = Vec::with_capacity(tp_hosts.len());
+        for (i, h) in tp_hosts.iter().enumerate() {
+            let host_str = match h {
+                TokioHost::Tcp(s) => s.clone(),
+                #[cfg(unix)]
+                TokioHost::Unix(p) => p.to_string_lossy().into_owned(),
+                #[cfg(not(unix))]
+                _ => String::new(),
+            };
+            host_list.push((host_str, port_for(i)));
+        }
+
+        // Populate the legacy single-host fields from the first entry.
+        params.host = Some(host_list[0].0.clone());
+        params.port = Some(host_list[0].1);
+        params.hosts = host_list;
+    }
+
+    params.user = pg_cfg.get_user().map(str::to_owned);
+    params.password = pg_cfg
+        .get_password()
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .map(str::to_owned);
+    params.dbname = pg_cfg.get_dbname().map(str::to_owned);
+
+    // sslmode: prefer the raw value from the URI (which may be an rpg-extended
+    // variant like verify-ca/verify-full/allow) over the tokio-postgres parsed
+    // value, since we sanitized the URI before parsing.
+    params.sslmode = if let Some(ref s) = raw_sslmode {
+        Some(SslMode::parse(s)?)
+    } else {
+        // Map the tokio-postgres SslMode back to rpg's SslMode.
+        Some(match pg_cfg.get_ssl_mode() {
+            TokioSslMode::Disable => SslMode::Disable,
+            TokioSslMode::Require => SslMode::Require,
+            // tokio-postgres SslMode is #[non_exhaustive]; Prefer and unknown variants map to Prefer.
+            _ => SslMode::Prefer,
+        })
+    };
+
+    params.application_name = pg_cfg.get_application_name().map(str::to_owned);
+    params.connect_timeout = pg_cfg
+        .get_connect_timeout()
+        .map(std::time::Duration::as_secs);
+    params.options = pg_cfg.get_options().map(str::to_owned);
+
+    // target_session_attrs: prefer the raw URI value (rpg may have extended
+    // values like primary/standby) over tokio-postgres's parsed subset.
+    params.target_session_attrs = if let Some(ref s) = raw_tsa {
+        Some(TargetSessionAttrs::parse(s)?)
+    } else {
+        use tokio_postgres::config::TargetSessionAttrs as TokioTsa;
+        match pg_cfg.get_target_session_attrs() {
+            TokioTsa::ReadWrite => Some(TargetSessionAttrs::ReadWrite),
+            TokioTsa::ReadOnly => Some(TargetSessionAttrs::ReadOnly),
+            // Any is the default; other non_exhaustive variants also map to None.
+            _ => None,
+        }
+    };
+
+    params.ssl_cert = ssl_cert;
+    params.ssl_key = ssl_key;
+    params.ssl_root_cert = ssl_root_cert;
 
     Ok(params)
 }
@@ -3870,7 +4000,9 @@ host=myhost
             vec![
                 ("h1".to_owned(), 5432),
                 ("h2".to_owned(), 5433),
-                ("h3".to_owned(), 5433), // port reused
+                // tokio-postgres URI parser assigns 5432 to hosts without an explicit port,
+                // matching real libpq behavior (not the last-port-reuse behavior rpg previously had).
+                ("h3".to_owned(), 5432),
             ]
         );
         // host/port reflect the first entry.
