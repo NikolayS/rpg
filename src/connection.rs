@@ -358,13 +358,27 @@ impl Default for ConnParams {
 }
 
 /// Return the default host. On Unix, if a well-known socket directory
-/// exists, return that; otherwise `"localhost"`.
+/// contains an active `PostgreSQL` socket file (`.s.PGSQL.<port>`), return
+/// that directory; otherwise `"localhost"`.
+///
+/// Checking for the socket *file* rather than the directory prevents false
+/// positives when the directory exists but no Postgres instance is running.
 fn default_host() -> String {
     #[cfg(unix)]
     {
         for dir in &["/var/run/postgresql", "/tmp"] {
-            if PathBuf::from(dir).is_dir() {
-                return (*dir).to_owned();
+            let path = PathBuf::from(dir);
+            if path.is_dir() {
+                let has_socket = path.read_dir().ok().is_some_and(|mut entries| {
+                    entries.any(|entry| {
+                        entry.ok().is_some_and(|e| {
+                            e.file_name().to_string_lossy().starts_with(".s.PGSQL.")
+                        })
+                    })
+                });
+                if has_socket {
+                    return (*dir).to_owned();
+                }
             }
         }
     }
