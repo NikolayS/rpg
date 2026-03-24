@@ -274,6 +274,50 @@ async fn upload_pgmustard(
     ))
 }
 
+/// Copy `text` to the system clipboard.
+///
+/// Tries the following tools in order:
+/// - macOS: `pbcopy`
+/// - Linux (X11): `xclip -selection clipboard`
+/// - Linux (Wayland): `wl-clipboard` / `wl-copy`
+/// - Linux fallback: `xsel --clipboard --input`
+///
+/// Fails silently if no clipboard tool is available or the copy fails.
+pub fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let candidates: &[&[&str]] = &[&["pbcopy"]];
+
+    #[cfg(not(target_os = "macos"))]
+    let candidates: &[&[&str]] = &[
+        &["wl-copy"],
+        &["xclip", "-selection", "clipboard"],
+        &["xsel", "--clipboard", "--input"],
+    ];
+
+    for argv in candidates {
+        let (prog, args) = argv.split_first().unwrap();
+        let Ok(mut child) = Command::new(prog)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        // Ignore wait errors — clipboard is best-effort.
+        let _ = child.wait();
+        return;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -412,49 +456,5 @@ mod tests {
             .expect("tokio runtime");
         let result = rt.block_on(share_explain_plan("plan", "", None, None, None));
         assert!(result.is_err(), "empty service name must return Err");
-    }
-}
-
-/// Copy `text` to the system clipboard.
-///
-/// Tries the following tools in order:
-/// - macOS: `pbcopy`
-/// - Linux (X11): `xclip -selection clipboard`
-/// - Linux (Wayland): `wl-clipboard` / `wl-copy`
-/// - Linux fallback: `xsel --clipboard --input`
-///
-/// Fails silently if no clipboard tool is available or the copy fails.
-pub fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    #[cfg(target_os = "macos")]
-    let candidates: &[&[&str]] = &[&["pbcopy"]];
-
-    #[cfg(not(target_os = "macos"))]
-    let candidates: &[&[&str]] = &[
-        &["wl-copy"],
-        &["xclip", "-selection", "clipboard"],
-        &["xsel", "--clipboard", "--input"],
-    ];
-
-    for argv in candidates {
-        let (prog, args) = argv.split_first().unwrap();
-        let Ok(mut child) = Command::new(prog)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        // Ignore wait errors — clipboard is best-effort.
-        let _ = child.wait();
-        return;
     }
 }

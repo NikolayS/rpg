@@ -1006,8 +1006,10 @@ mod tests {
 
     #[test]
     fn apply_cli_pset_tuples_only_off() {
-        let mut pset = output::PsetConfig::default();
-        pset.tuples_only = true;
+        let mut pset = output::PsetConfig {
+            tuples_only: true,
+            ..Default::default()
+        };
         apply_cli_pset(&mut pset, "tuples_only=off");
         assert!(!pset.tuples_only);
     }
