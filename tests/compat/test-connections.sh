@@ -355,22 +355,32 @@ test_ssl_disable() {
   fi
 }
 
-# D2 - sslmode=prefer: must connect successfully
+# D2 - sslmode=prefer: must connect and report ssl=t in pg_stat_ssl.
+# A TLS-capable server should negotiate TLS even with sslmode=prefer.
 test_ssl_prefer() {
-  local exit_code=0
-  PGSSLMODE=prefer \
-  PGPASSWORD="${TEST_PG_TLS_PASSWORD}" \
-    "${RPG}" \
-      -h "${TEST_PG_TLS_HOST}" \
-      -p "${TEST_PG_TLS_PORT}" \
-      -U postgres \
-      -d postgres \
-      -c "select 1" \
-      >/dev/null 2>&1 || exit_code=$?
-  if [[ "${exit_code}" -eq 0 ]]; then
-    pass_test "D2 sslmode=prefer (connected)"
-  else
+  local out exit_code=0
+  out=$(
+    PGSSLMODE=prefer \
+    PGPASSWORD="${TEST_PG_TLS_PASSWORD}" \
+      "${RPG}" \
+        -h "${TEST_PG_TLS_HOST}" \
+        -p "${TEST_PG_TLS_PORT}" \
+        -U postgres \
+        -d postgres \
+        -c "select ssl from pg_stat_ssl where pid = pg_backend_pid()" \
+        2>&1
+  ) || exit_code=$?
+  if [[ "${exit_code}" -ne 0 ]]; then
     echo "FAIL: D2 sslmode=prefer (rpg exited ${exit_code})"
+    echo "${out}"
+    (( FAIL++ )) || true
+    return
+  fi
+  if echo "${out}" | grep -q "^[[:space:]]*t"; then
+    pass_test "D2 sslmode=prefer (ssl=t confirmed)"
+  else
+    echo "FAIL: D2 sslmode=prefer (ssl=t not found in output)"
+    echo "${out}"
     (( FAIL++ )) || true
   fi
 }
@@ -409,15 +419,19 @@ test_ssl_require_ok() {
 # D4 - sslmode=require against a plain (no-TLS) server: must exit non-zero
 # and emit a message referencing SSL.
 test_ssl_require_fail() {
+  if [[ -z "${TEST_PGHOST:-}" ]]; then
+    echo "SKIP: D4 sslmode=require vs plain server (TEST_PGHOST not set)"
+    return
+  fi
   local out exit_code=0
   out=$(
     PGSSLMODE=require \
-    PGPASSWORD="${TEST_PGPASSWORD}" \
+    PGPASSWORD="${TEST_PGPASSWORD:-}" \
       "${RPG}" \
-        -h "${TEST_PGHOST}" \
-        -p "${TEST_PGPORT}" \
-        -U "${TEST_PGUSER}" \
-        -d "${TEST_PGDATABASE}" \
+        -h "${TEST_PGHOST:-}" \
+        -p "${TEST_PGPORT:-5432}" \
+        -U "${TEST_PGUSER:-postgres}" \
+        -d "${TEST_PGDATABASE:-postgres}" \
         -c "select 1" \
         2>&1
   ) || exit_code=$?
@@ -499,7 +513,7 @@ main() {
   test_ssl_section
 
   echo ""
-  echo "=== Results: ${PASS} passed, ${FAIL} failed ===" 
+  echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
   local total=$(( PASS + FAIL ))
   echo "=== Total: ${total} tests ==="
 

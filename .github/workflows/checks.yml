@@ -193,6 +193,7 @@ jobs:
           for i in $(seq 1 20); do
             docker exec pg-tls pg_isready -U postgres && break || sleep 1
           done
+          docker exec pg-tls pg_isready -U postgres || { echo "ERROR: pg-tls container never became ready" >&2; exit 1; }
       - name: Run connection tests
         env:
           TEST_PG_TLS_HOST: localhost
