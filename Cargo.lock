@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "rpg"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytes",

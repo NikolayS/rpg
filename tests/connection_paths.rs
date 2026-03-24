@@ -19,11 +19,11 @@
 //! ## CI env vars (set by the connection-tests job in checks.yml)
 //!
 //! Override local defaults via environment:
-//!   CONN_TRUST_HOST   / CONN_TRUST_PORT   / CONN_TRUST_USER
-//!   CONN_SCRAM_HOST   / CONN_SCRAM_PORT   / CONN_SCRAM_USER / CONN_SCRAM_PASSWORD / CONN_SCRAM_DATABASE
-//!   CONN_TLS_HOST     / CONN_TLS_PORT     / CONN_TLS_USER   / CONN_TLS_PASSWORD
+//!   `CONN_TRUST_HOST`   / `CONN_TRUST_PORT`   / `CONN_TRUST_USER`
+//!   `CONN_SCRAM_HOST`   / `CONN_SCRAM_PORT`   / `CONN_SCRAM_USER` / `CONN_SCRAM_PASSWORD` / `CONN_SCRAM_DATABASE`
+//!   `CONN_TLS_HOST`     / `CONN_TLS_PORT`     / `CONN_TLS_USER`   / `CONN_TLS_PASSWORD`
 //!
-//! These are mapped from the CI job's TEST_PG_* vars by the helper functions below.
+//! These are mapped from the CI job's `TEST_PG_*` vars by the helper functions below.
 //!
 //! Run locally:
 //! ```sh
@@ -169,6 +169,7 @@ fn apply_trust(cmd: &mut Command) {
 
 /// A1: basic TCP connection — SELECT 1 returns "1".
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn a1_basic_tcp() {
     let mut cmd = rpg();
     apply_trust(&mut cmd);
@@ -186,6 +187,7 @@ fn a1_basic_tcp() {
 
 /// A2: TCP with PGPASSWORD — SCRAM auth succeeds.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn a2_tcp_pgpassword() {
     let mut cmd = rpg();
     cmd.args([
@@ -212,8 +214,9 @@ fn a2_tcp_pgpassword() {
     );
 }
 
-/// A3: TCP with explicit -d flag — current_database() returns the named db.
+/// A3: TCP with explicit -d flag — `current_database()` returns the named db.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn a3_tcp_explicit_db() {
     let db = trust_database();
     let mut cmd = rpg();
@@ -238,6 +241,7 @@ fn a3_tcp_explicit_db() {
 ///
 /// Skipped when `/tmp/.s.PGSQL.5437` is absent.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn b1_socket_explicit_host() {
     let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
     let socket_dir = std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
@@ -276,6 +280,7 @@ fn b1_socket_explicit_host() {
 ///
 /// Skipped when socket file is absent.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn b2_socket_pghost_env() {
     let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
     let socket_dir = std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
@@ -311,6 +316,7 @@ fn b2_socket_pghost_env() {
 
 /// C1: `postgres://` URI scheme.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn c1_postgres_uri() {
     let uri = format!(
         "postgres://{}@{}:{}/{}",
@@ -337,6 +343,7 @@ fn c1_postgres_uri() {
 
 /// C2: `postgresql://` scheme (alias for `postgres://`).
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn c2_postgresql_scheme() {
     let uri = format!(
         "postgresql://{}@{}:{}/{}",
@@ -361,8 +368,9 @@ fn c2_postgresql_scheme() {
     );
 }
 
-/// C3: URI with `?sslmode=require` against a TLS server — pg_stat_ssl.ssl=t.
+/// C3: URI with `?sslmode=require` against a TLS server — `pg_stat_ssl.ssl=t`.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn c3_uri_with_sslmode() {
     let uri = format!(
         "postgres://{}:{}@{}:{}/{}?sslmode=require",
@@ -391,6 +399,7 @@ fn c3_uri_with_sslmode() {
 ///
 /// Skipped when socket file is absent.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn c4_uri_host_query_param() {
     let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
     let socket_dir = std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/tmp".to_owned());
@@ -419,6 +428,7 @@ fn c4_uri_host_query_param() {
 
 /// C5: key=value connstring passed as positional argument.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn c5_key_value_connstring() {
     let connstr = format!(
         "host={} port={} user={} dbname={}",
@@ -455,6 +465,7 @@ fn c5_key_value_connstring() {
 ///
 /// This is the v0.8.2 fix (#726): prefer must succeed even with self-signed cert.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn d1_sslmode_prefer_self_signed() {
     let mut cmd = rpg();
     cmd.args([
@@ -485,6 +496,7 @@ fn d1_sslmode_prefer_self_signed() {
 ///
 /// This is the v0.8.1 fix (#711): require must succeed even with self-signed cert.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn d2_sslmode_require_self_signed() {
     let mut cmd = rpg();
     cmd.args([
@@ -514,6 +526,7 @@ fn d2_sslmode_require_self_signed() {
 /// D3: `sslmode=require` against a plain (no-TLS) server — must fail with SSL
 /// error in stderr.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn d3_sslmode_require_no_tls_server() {
     let mut cmd = rpg();
     cmd.args([
@@ -545,6 +558,7 @@ fn d3_sslmode_require_no_tls_server() {
 
 /// D4: `sslmode=prefer` against a plain server — plaintext fallback, exit 0.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn d4_sslmode_prefer_no_tls_server() {
     let mut cmd = rpg();
     cmd.args([
@@ -579,6 +593,7 @@ fn d4_sslmode_prefer_no_tls_server() {
 
 /// E1: `PGHOST` + `PGPORT` + `PGUSER` env vars — no CLI connection flags.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e1_pghost_pgport() {
     let mut cmd = rpg();
     cmd.env("PGHOST", trust_host())
@@ -602,6 +617,7 @@ fn e1_pghost_pgport() {
 
 /// E2: PGPORT env var overrides default port.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e2_pgport_env() {
     let mut cmd = rpg();
     cmd.args(["-h", &trust_host(), "-U", &trust_user(), "-c", "SELECT 1"])
@@ -620,8 +636,9 @@ fn e2_pgport_env() {
     );
 }
 
-/// E3: `PGUSER` env var — current_user() returns the expected user.
+/// E3: `PGUSER` env var — `current_user()` returns the expected user.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e3_pguser() {
     let user = trust_user();
     let mut cmd = rpg();
@@ -647,8 +664,9 @@ fn e3_pguser() {
     );
 }
 
-/// E4: `PGAPPNAME` sets application_name visible in pg_stat_activity.
+/// E4: `PGAPPNAME` sets `application_name` visible in `pg_stat_activity`.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e4_pgappname() {
     let mut cmd = rpg();
     apply_trust(&mut cmd);
@@ -668,6 +686,7 @@ fn e4_pgappname() {
 
 /// E5: `PGSSLMODE=require` against a TLS server — ssl=t.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e5_pgsslmode() {
     let mut cmd = rpg();
     cmd.args([
@@ -699,6 +718,7 @@ fn e5_pgsslmode() {
 
 /// F1: Wrong password — stderr contains "authentication failed", not raw "db error".
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn f1_wrong_password_clear_error() {
     let mut cmd = rpg();
     cmd.args([
@@ -734,6 +754,7 @@ fn f1_wrong_password_clear_error() {
 
 /// F2: Connection refused — stderr contains "Connection refused", not raw "db error".
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn f2_connection_refused_clear_error() {
     let mut cmd = rpg();
     cmd.args([
@@ -763,6 +784,7 @@ fn f2_connection_refused_clear_error() {
 
 /// F3: Unknown hostname — stderr contains a DNS error message, not raw "db error".
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn f3_unknown_host_clear_error() {
     let mut cmd = rpg();
     cmd.args([
@@ -798,6 +820,7 @@ fn f3_unknown_host_clear_error() {
 
 /// G1: Trust auth — connects without any password.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn g1_trust_auth() {
     let mut cmd = rpg();
     cmd.args([
@@ -828,6 +851,7 @@ fn g1_trust_auth() {
 
 /// G2: SCRAM-SHA-256 auth — connects with correct password.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn g2_scram_auth() {
     let mut cmd = rpg();
     cmd.args([
@@ -861,6 +885,7 @@ fn g2_scram_auth() {
 
 /// H1: Multiple `-c` flags — both result sets appear in stdout.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn h1_multiple_c_flags() {
     let mut cmd = rpg();
     apply_trust(&mut cmd);
@@ -886,6 +911,7 @@ fn h1_multiple_c_flags() {
 
 /// H2: `-f` file flag — executes SQL from a temp file and returns the result.
 #[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn h2_f_flag() {
     let dir = tempfile::tempdir().expect("h2: failed to create tempdir");
     let sql_path = dir.path().join("query.sql");

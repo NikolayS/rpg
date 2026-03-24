@@ -227,7 +227,7 @@ jobs:
           TEST_PG_SCRAM_USER: postgres
           TEST_PG_SCRAM_PASSWORD: postgres
           TEST_PG_SCRAM_DATABASE: postgres
-        run: cargo test --release --test connection_paths
+        run: cargo test --release --test connection_paths -- --include-ignored
 
   coverage:
     name: Coverage
