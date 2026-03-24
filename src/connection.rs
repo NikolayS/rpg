@@ -367,7 +367,7 @@ impl Default for ConnParams {
 }
 
 /// Return the default host. On Unix, if a well-known socket directory
-/// contains a PostgreSQL socket file (`.s.PGSQL.<port>`), return that
+/// contains a `PostgreSQL` socket file (`.s.PGSQL.<port>`), return that
 /// directory; otherwise `"localhost"`.
 ///
 /// The standard default port is 5432.  This function also scans for sockets
@@ -391,7 +391,7 @@ fn default_host() -> String {
     "localhost".to_owned()
 }
 
-/// Scan `dir` for a PostgreSQL Unix-domain socket file (`.s.PGSQL.<port>`)
+/// Scan `dir` for a `PostgreSQL` Unix-domain socket file (`.s.PGSQL.<port>`)
 /// and return the port number of the first one found, or `None`.
 ///
 /// Lock files (`.s.PGSQL.<port>.lock`) and non-numeric suffixes are ignored.
