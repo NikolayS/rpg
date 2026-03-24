@@ -180,7 +180,25 @@ jobs:
             connection-${{ runner.os }}-cargo-
       - name: Build rpg
         run: cargo build --release
+      - name: Start TLS postgres
+        run: |
+          mkdir -p /tmp/pg-tls
+          openssl req -new -x509 -days 1 -nodes -subj "/CN=localhost" \
+            -keyout /tmp/pg-tls/server.key -out /tmp/pg-tls/server.crt
+          docker run -d --name pg-tls -p 5433:5432 \
+            -e POSTGRES_PASSWORD=testpass \
+            -v /tmp/pg-tls:/tmp/pg-tls:ro \
+            --entrypoint /bin/bash postgres:17 \
+            -c "cp /tmp/pg-tls/server.crt /tmp/pg.crt && cp /tmp/pg-tls/server.key /tmp/pg.key && chown postgres:postgres /tmp/pg.crt /tmp/pg.key && chmod 600 /tmp/pg.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/pg.crt -c ssl_key_file=/tmp/pg.key"
+          for i in $(seq 1 20); do
+            docker exec pg-tls pg_isready -U postgres && break || sleep 1
+          done
+          docker exec pg-tls pg_isready -U postgres || { echo "ERROR: pg-tls container never became ready" >&2; exit 1; }
       - name: Run connection tests
+        env:
+          TEST_PG_TLS_HOST: localhost
+          TEST_PG_TLS_PORT: "5433"
+          TEST_PG_TLS_PASSWORD: testpass
         run: bash tests/compat/test-connections.sh target/release/rpg
 
   coverage:

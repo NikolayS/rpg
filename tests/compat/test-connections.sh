@@ -181,7 +181,7 @@ test_conninfo_string() {
   fi
 }
 
-# (e) Environment variables only — no CLI connection flags
+# (e) Environment variables only - no CLI connection flags
 test_env_vars_only() {
   local rpg_out psql_out
   rpg_out=$(
@@ -211,7 +211,7 @@ test_env_vars_only() {
 # (f) -d flag overrides PGDATABASE env var
 #     psql only accepts dbname as a positional arg; passing extra positional
 #     args emits a warning and is unreliable.  Test the override via env var
-#     instead: set PGDATABASE=wrongdb but pass -d <real-db> — connection
+#     instead: set PGDATABASE=wrongdb but pass -d <real-db> - connection
 #     should succeed, proving -d wins.
 test_flag_overrides_positional() {
   local rpg_out psql_out
@@ -316,6 +316,169 @@ test_unix_socket() {
 }
 
 # ---------------------------------------------------------------------------
+# Section D - SSL/TLS sslmode coverage
+#
+# Requires a TLS-enabled postgres reachable at TEST_PG_TLS_HOST:TEST_PG_TLS_PORT.
+# If TEST_PG_TLS_PORT is unset the entire section is skipped.
+#
+# Two postgres instances are used:
+#   TLS server  : TEST_PG_TLS_HOST / TEST_PG_TLS_PORT (ssl=on, self-signed cert)
+#   Plain server: TEST_PGHOST      / TEST_PGPORT       (ssl=off, existing service)
+# ---------------------------------------------------------------------------
+
+# D1 - sslmode=disable: must connect and report ssl=f in pg_stat_ssl
+test_ssl_disable() {
+  local out exit_code=0
+  out=$(
+    PGSSLMODE=disable \
+    PGPASSWORD="${TEST_PG_TLS_PASSWORD}" \
+      "${RPG}" \
+        -h "${TEST_PG_TLS_HOST}" \
+        -p "${TEST_PG_TLS_PORT}" \
+        -U postgres \
+        -d postgres \
+        -c "select ssl from pg_stat_ssl where pid = pg_backend_pid()" \
+        2>&1
+  ) || exit_code=$?
+  if [[ "${exit_code}" -ne 0 ]]; then
+    echo "FAIL: D1 sslmode=disable (rpg exited ${exit_code})"
+    echo "${out}"
+    (( FAIL++ )) || true
+    return
+  fi
+  if echo "${out}" | grep -q "^[[:space:]]*f"; then
+    pass_test "D1 sslmode=disable (ssl=f confirmed)"
+  else
+    echo "FAIL: D1 sslmode=disable (ssl=f not found in output)"
+    echo "${out}"
+    (( FAIL++ )) || true
+  fi
+}
+
+# D2 - sslmode=prefer: must connect successfully (exit 0).
+# With a self-signed cert, rpg may fall back to plaintext — that is correct
+# prefer semantics. D3 (sslmode=require) is the test that verifies TLS is
+# actually negotiated when the server supports it.
+test_ssl_prefer() {
+  local out exit_code=0
+  out=$(
+    PGSSLMODE=prefer \
+    PGPASSWORD="${TEST_PG_TLS_PASSWORD}" \
+      "${RPG}" \
+        -h "${TEST_PG_TLS_HOST}" \
+        -p "${TEST_PG_TLS_PORT}" \
+        -U postgres \
+        -d postgres \
+        -c "select current_database() as db" \
+        2>&1
+  ) || exit_code=$?
+  if [[ "${exit_code}" -ne 0 ]]; then
+    echo "FAIL: D2 sslmode=prefer (rpg exited ${exit_code})"
+    echo "${out}"
+    (( FAIL++ )) || true
+    return
+  fi
+  pass_test "D2 sslmode=prefer (connected, exit 0)"
+}
+
+# D3 - sslmode=require against TLS server: must connect and report ssl=t.
+# This is the critical regression test - sslmode=require was broken in v0.8.0
+# and fixed in PR #711. See issue #710.
+test_ssl_require_ok() {
+  local out exit_code=0
+  out=$(
+    PGSSLMODE=require \
+    PGPASSWORD="${TEST_PG_TLS_PASSWORD}" \
+      "${RPG}" \
+        -h "${TEST_PG_TLS_HOST}" \
+        -p "${TEST_PG_TLS_PORT}" \
+        -U postgres \
+        -d postgres \
+        -c "select ssl from pg_stat_ssl where pid = pg_backend_pid()" \
+        2>&1
+  ) || exit_code=$?
+  if [[ "${exit_code}" -ne 0 ]]; then
+    echo "FAIL: D3 sslmode=require vs TLS server (rpg exited ${exit_code})"
+    echo "${out}"
+    (( FAIL++ )) || true
+    return
+  fi
+  if echo "${out}" | grep -q "^[[:space:]]*t"; then
+    pass_test "D3 sslmode=require vs TLS server (ssl=t confirmed)"
+  else
+    echo "FAIL: D3 sslmode=require vs TLS server (ssl=t not found in output)"
+    echo "${out}"
+    (( FAIL++ )) || true
+  fi
+}
+
+# D4 - sslmode=require against a plain (no-TLS) server: must exit non-zero
+# and emit a message referencing SSL.
+test_ssl_require_fail() {
+  if [[ -z "${TEST_PGHOST:-}" ]]; then
+    echo "SKIP: D4 sslmode=require vs plain server (TEST_PGHOST not set)"
+    return
+  fi
+  local out exit_code=0
+  out=$(
+    PGSSLMODE=require \
+    PGPASSWORD="${TEST_PGPASSWORD:-}" \
+      "${RPG}" \
+        -h "${TEST_PGHOST:-}" \
+        -p "${TEST_PGPORT:-5432}" \
+        -U "${TEST_PGUSER:-postgres}" \
+        -d "${TEST_PGDATABASE:-postgres}" \
+        -c "select 1" \
+        2>&1
+  ) || exit_code=$?
+  if [[ "${exit_code}" -eq 0 ]]; then
+    echo "FAIL: D4 sslmode=require vs plain server (expected non-zero exit, got 0)"
+    (( FAIL++ )) || true
+    return
+  fi
+  if echo "${out}" | grep -qiE "ssl|tls"; then
+    pass_test "D4 sslmode=require vs plain server (exited ${exit_code}, SSL/TLS error message present)"
+  else
+    echo "FAIL: D4 sslmode=require vs plain server (exited ${exit_code} but no SSL/TLS mention in output)"
+    echo "${out}"
+    (( FAIL++ )) || true
+  fi
+}
+
+# D5 - sslmode=verify-ca: SKIP - rpg currently fails with UnknownIssuer for
+# self-signed certs. See issue #712. Remove this skip once #712 is resolved.
+test_ssl_verify_ca() {
+  echo "SKIP: D5 sslmode=verify-ca (known bug: UnknownIssuer for self-signed certs, see issue #712)"
+}
+
+# D6 - sslmode=verify-full: SKIP - same root cause as D5.
+# See issue #712.
+test_ssl_verify_full() {
+  echo "SKIP: D6 sslmode=verify-full (known bug: UnknownIssuer for self-signed certs, see issue #712)"
+}
+
+# Run all Section D tests, skipping if TEST_PG_TLS_PORT is not configured.
+test_ssl_section() {
+  if [[ -z "${TEST_PG_TLS_PORT:-}" ]]; then
+    echo "SKIP: Section D (TEST_PG_TLS_PORT not set - no TLS postgres available)"
+    return
+  fi
+
+  TEST_PG_TLS_HOST="${TEST_PG_TLS_HOST:-localhost}"
+  TEST_PG_TLS_PASSWORD="${TEST_PG_TLS_PASSWORD:-}"
+
+  echo ""
+  echo "--- Section D: SSL/TLS sslmode tests (TLS server: ${TEST_PG_TLS_HOST}:${TEST_PG_TLS_PORT}) ---"
+
+  test_ssl_disable
+  test_ssl_prefer
+  test_ssl_require_ok
+  test_ssl_require_fail
+  test_ssl_verify_ca
+  test_ssl_verify_full
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -343,6 +506,7 @@ main() {
   test_wrong_password
   test_pgpass_file
   test_unix_socket
+  test_ssl_section
 
   echo ""
   echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
