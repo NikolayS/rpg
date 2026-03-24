@@ -962,11 +962,25 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
     }
 
     // Parse query parameters.
+    //
+    // Per the libpq URI spec, any connection parameter (except password) may
+    // appear in the query string.  In particular `host=` and `port=` in the
+    // query component override the corresponding values extracted from the URI
+    // authority section above, which is the only way to specify a Unix-socket
+    // path in a URI (e.g. `postgres:///mydb?host=/tmp&port=5437`).
+    let mut query_host: Option<String> = None;
+    let mut query_port: Option<u16> = None;
     if let Some(query) = query_part {
         for pair in query.split('&') {
             if let Some((key, val)) = pair.split_once('=') {
                 let val = percent_decode(val);
                 match key {
+                    "host" => {
+                        query_host = Some(val);
+                    }
+                    "port" => {
+                        query_port = val.parse().ok();
+                    }
                     "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
                     "sslrootcert" => params.ssl_root_cert = Some(val),
                     "sslcert" => params.ssl_cert = Some(val),
@@ -982,6 +996,26 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                 }
             }
         }
+    }
+
+    // Apply host/port query overrides after all query params are processed so
+    // that `host=` and `port=` in the query string take precedence over the
+    // authority section.  Update both the legacy single-host fields *and* the
+    // `hosts` Vec so that the rest of the connection logic sees a consistent
+    // state.
+    if query_host.is_some() || query_port.is_some() {
+        if let Some(h) = query_host {
+            params.host = Some(h);
+        }
+        if let Some(p) = query_port {
+            params.port = Some(p);
+        }
+        // Rebuild the hosts list from the (now-updated) single-host fields.
+        // A query-param host/port override is always a single-host override;
+        // multi-host via query params is not supported by this parser.
+        let host = params.host.clone().unwrap_or_default();
+        let port = params.port.unwrap_or(5432);
+        params.hosts = vec![(host, port)];
     }
 
     Ok(params)
@@ -2605,6 +2639,54 @@ mod tests {
         let uri_params = parse_uri("postgresql:///mydb").unwrap();
         assert!(uri_params.host.is_none());
         assert_eq!(uri_params.dbname, Some("mydb".into()));
+    }
+
+    // -- host= / port= query param overrides (C5) ---------------------------
+
+    /// `postgres:///mydb?host=/tmp&port=5437` — canonical Unix-socket URI form.
+    /// The authority is empty so host/port come entirely from query params.
+    #[test]
+    fn test_parse_uri_query_host_and_port() {
+        let uri_params = parse_uri("postgres:///mydb?host=/tmp&port=5437").unwrap();
+        assert_eq!(uri_params.host, Some("/tmp".into()));
+        assert_eq!(uri_params.port, Some(5437));
+        assert_eq!(uri_params.dbname, Some("mydb".into()));
+        // hosts Vec must be consistent with the single-host fields.
+        assert_eq!(uri_params.hosts, vec![("/tmp".to_owned(), 5437)]);
+    }
+
+    /// `host=` in query overrides the authority host.
+    #[test]
+    fn test_parse_uri_query_host_overrides_authority() {
+        let uri_params = parse_uri("postgres://localhost/mydb?host=/var/run/postgresql").unwrap();
+        assert_eq!(uri_params.host, Some("/var/run/postgresql".into()));
+        // No port query param: port comes from the (now-replaced) hosts rebuild,
+        // defaulting to 5432.
+        assert_eq!(uri_params.port, Some(5432));
+        assert_eq!(
+            uri_params.hosts,
+            vec![("/var/run/postgresql".to_owned(), 5432)]
+        );
+    }
+
+    /// `port=` alone in query overrides the authority port.
+    #[test]
+    fn test_parse_uri_query_port_overrides_authority() {
+        let uri_params = parse_uri("postgres://myhost:5432/mydb?port=6543").unwrap();
+        assert_eq!(uri_params.host, Some("myhost".into()));
+        assert_eq!(uri_params.port, Some(6543));
+        assert_eq!(uri_params.hosts, vec![("myhost".to_owned(), 6543)]);
+    }
+
+    /// Query-param host without a port: `host` is set, `port` stays None (the
+    /// caller applies the 5432 default), but `hosts` Vec uses the 5432 default.
+    #[test]
+    fn test_parse_uri_query_host_only_default_port() {
+        let uri_params = parse_uri("postgres:///mydb?host=/tmp").unwrap();
+        assert_eq!(uri_params.host, Some("/tmp".into()));
+        // port field stays None — the resolve layer applies the 5432 default.
+        assert_eq!(uri_params.port, None);
+        assert_eq!(uri_params.hosts, vec![("/tmp".to_owned(), 5432)]);
     }
 
     #[test]
