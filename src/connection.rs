@@ -968,18 +968,18 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
     // query component override the corresponding values extracted from the URI
     // authority section above, which is the only way to specify a Unix-socket
     // path in a URI (e.g. `postgres:///mydb?host=/tmp&port=5437`).
-    let mut query_host: Option<String> = None;
-    let mut query_port: Option<u16> = None;
+    let mut uri_host_override: Option<String> = None;
+    let mut uri_port_override: Option<u16> = None;
     if let Some(query) = query_part {
         for pair in query.split('&') {
             if let Some((key, val)) = pair.split_once('=') {
                 let val = percent_decode(val);
                 match key {
                     "host" => {
-                        query_host = Some(val);
+                        uri_host_override = Some(val);
                     }
                     "port" => {
-                        query_port = val.parse().ok();
+                        uri_port_override = val.parse().ok();
                     }
                     "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
                     "sslrootcert" => params.ssl_root_cert = Some(val),
@@ -1003,11 +1003,11 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
     // authority section.  Update both the legacy single-host fields *and* the
     // `hosts` Vec so that the rest of the connection logic sees a consistent
     // state.
-    if query_host.is_some() || query_port.is_some() {
-        if let Some(h) = query_host {
+    if uri_host_override.is_some() || uri_port_override.is_some() {
+        if let Some(h) = uri_host_override {
             params.host = Some(h);
         }
-        if let Some(p) = query_port {
+        if let Some(p) = uri_port_override {
             params.port = Some(p);
         }
         // Rebuild the hosts list from the (now-updated) single-host fields.
