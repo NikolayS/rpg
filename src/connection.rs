@@ -358,27 +358,20 @@ impl Default for ConnParams {
 }
 
 /// Return the default host. On Unix, if a well-known socket directory
-/// contains an active `PostgreSQL` socket file (`.s.PGSQL.<port>`), return
+/// contains the standard `PostgreSQL` socket file (`.s.PGSQL.5432`), return
 /// that directory; otherwise `"localhost"`.
 ///
-/// Checking for the socket *file* rather than the directory prevents false
-/// positives when the directory exists but no Postgres instance is running.
+/// Checking for `.s.PGSQL.5432` directly (O(1), no directory scan) avoids
+/// false positives from lock files (`.s.PGSQL.5432.lock`) and from sockets
+/// belonging to a non-default port. Port 5432 is the standard default — the
+/// same assumption libpq makes.
 fn default_host() -> String {
     #[cfg(unix)]
     {
         for dir in &["/var/run/postgresql", "/tmp"] {
             let path = PathBuf::from(dir);
-            if path.is_dir() {
-                let has_socket = path.read_dir().ok().is_some_and(|mut entries| {
-                    entries.any(|entry| {
-                        entry.ok().is_some_and(|e| {
-                            e.file_name().to_string_lossy().starts_with(".s.PGSQL.")
-                        })
-                    })
-                });
-                if has_socket {
-                    return (*dir).to_owned();
-                }
+            if path.join(".s.PGSQL.5432").exists() {
+                return (*dir).to_owned();
             }
         }
     }
