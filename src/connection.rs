@@ -979,7 +979,10 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
                         uri_host_override = Some(val);
                     }
                     "port" => {
-                        uri_port_override = val.parse().ok();
+                        uri_port_override = Some(
+                            val.parse::<u16>()
+                                .map_err(|_| err(format!("invalid port in URI query: {val}")))?,
+                        );
                     }
                     "sslmode" => params.sslmode = Some(SslMode::parse(&val)?),
                     "sslrootcert" => params.ssl_root_cert = Some(val),
@@ -1003,19 +1006,23 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
     // authority section.  Update both the legacy single-host fields *and* the
     // `hosts` Vec so that the rest of the connection logic sees a consistent
     // state.
-    if uri_host_override.is_some() || uri_port_override.is_some() {
-        if let Some(h) = uri_host_override {
-            params.host = Some(h);
-        }
+    if let Some(h) = uri_host_override {
+        // host= in query: rebuild to a single-host list (multi-host via query
+        // params is not supported by this parser).
+        params.host = Some(h.clone());
         if let Some(p) = uri_port_override {
             params.port = Some(p);
         }
-        // Rebuild the hosts list from the (now-updated) single-host fields.
-        // A query-param host/port override is always a single-host override;
-        // multi-host via query params is not supported by this parser.
-        let host = params.host.clone().unwrap_or_default();
         let port = params.port.unwrap_or(5432);
-        params.hosts = vec![(host, port)];
+        params.hosts = vec![(h, port)];
+    } else if let Some(p) = uri_port_override {
+        // port= only in query: update every host in the existing list in-place
+        // so that multi-host URIs like postgres://h1,h2/db?port=6543 preserve
+        // all hosts rather than collapsing to one.
+        params.port = Some(p);
+        for (_, port) in &mut params.hosts {
+            *port = p;
+        }
     }
 
     Ok(params)
@@ -2676,6 +2683,37 @@ mod tests {
         assert_eq!(uri_params.host, Some("myhost".into()));
         assert_eq!(uri_params.port, Some(6543));
         assert_eq!(uri_params.hosts, vec![("myhost".to_owned(), 6543)]);
+    }
+
+    /// Invalid `port=` in query string must return an error, not silently ignore it.
+    #[test]
+    fn test_parse_uri_query_invalid_port_errors() {
+        let result = parse_uri("postgres://myhost/mydb?port=abc");
+        assert!(
+            result.is_err(),
+            "expected error for invalid port=abc, got: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("invalid port"),
+            "error message should mention 'invalid port', got: {msg}"
+        );
+    }
+
+    /// `port=` alone in query must update all hosts when multiple hosts are
+    /// present in the authority section, not collapse to a single-host list.
+    #[test]
+    fn test_parse_uri_query_port_only_preserves_multi_host() {
+        let uri_params = parse_uri("postgres://host1,host2,host3/mydb?port=6543").unwrap();
+        assert_eq!(uri_params.port, Some(6543));
+        assert_eq!(
+            uri_params.hosts,
+            vec![
+                ("host1".to_owned(), 6543),
+                ("host2".to_owned(), 6543),
+                ("host3".to_owned(), 6543),
+            ]
+        );
     }
 
     /// Query-param host without a port: `host` is set, `port` stays None (the
