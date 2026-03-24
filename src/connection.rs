@@ -359,7 +359,7 @@ impl Default for ConnParams {
 /// Return the default `(host, port)` pair for a Unix socket connection.
 ///
 /// On Unix, scans well-known socket directories (`/var/run/postgresql`,
-/// `/tmp`) for PostgreSQL Unix-domain socket files (`.s.PGSQL.<port>`).
+/// `/tmp`) for `PostgreSQL` Unix-domain socket files (`.s.PGSQL.<port>`).
 ///
 /// - **Fast path**: checks port 5432 first (O(1)) for libpq compatibility.
 /// - **Slow path**: scans the directory for any `.s.PGSQL.<N>` socket and
