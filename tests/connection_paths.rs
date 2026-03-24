@@ -157,7 +157,12 @@ fn apply_trust(cmd: &mut Command) {
         &trust_port(),
         "-U",
         &trust_user(),
+        "-d",
+        &trust_database(),
     ]);
+    // Always set PGDATABASE so tests that construct their own commands also
+    // inherit the correct database (important in CI where dbname != username).
+    cmd.env("PGDATABASE", trust_database());
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
@@ -576,6 +581,7 @@ fn d4_sslmode_prefer_no_tls_server() {
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
+    cmd.env("PGDATABASE", trust_database());
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
@@ -604,6 +610,7 @@ fn e1_pghost_pgport() {
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
+    cmd.env("PGDATABASE", trust_database());
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
@@ -625,6 +632,7 @@ fn e2_pgport_env() {
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
+    cmd.env("PGDATABASE", trust_database());
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
@@ -653,6 +661,7 @@ fn e3_pguser() {
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
+    cmd.env("PGDATABASE", trust_database());
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
@@ -838,6 +847,7 @@ fn g1_trust_auth() {
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
+    cmd.env("PGDATABASE", trust_database());
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
