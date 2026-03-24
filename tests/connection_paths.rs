@@ -225,8 +225,8 @@ fn a2_tcp_pgpassword() {
 fn a3_tcp_explicit_db() {
     let db = trust_database();
     let mut cmd = rpg();
-    apply_trust(&mut cmd);
-    cmd.args(["-d", &db, "-c", "SELECT current_database()"]);
+    apply_trust(&mut cmd); // apply_trust already sets -d trust_database()
+    cmd.args(["-c", "SELECT current_database()"]);
     let (stdout, stderr, code) = run(cmd);
     assert_eq!(
         code, 0,
