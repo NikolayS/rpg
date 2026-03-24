@@ -334,8 +334,7 @@ impl fmt::Debug for ConnParams {
 
 impl Default for ConnParams {
     fn default() -> Self {
-        let host = default_host();
-        let port = 5432u16;
+        let (host, port) = default_host_port();
         Self {
             hosts: vec![(host.clone(), port)],
             host,
@@ -357,25 +356,69 @@ impl Default for ConnParams {
     }
 }
 
-/// Return the default host. On Unix, if a well-known socket directory
-/// contains the standard `PostgreSQL` socket file (`.s.PGSQL.5432`), return
-/// that directory; otherwise `"localhost"`.
+/// Return the default `(host, port)` pair for a Unix socket connection.
 ///
-/// Checking for `.s.PGSQL.5432` directly (O(1), no directory scan) avoids
-/// false positives from lock files (`.s.PGSQL.5432.lock`) and from sockets
-/// belonging to a non-default port. Port 5432 is the standard default — the
-/// same assumption libpq makes.
-fn default_host() -> String {
+/// On Unix, scans well-known socket directories (`/var/run/postgresql`,
+/// `/tmp`) for `PostgreSQL` Unix-domain socket files (`.s.PGSQL.<port>`).
+///
+/// - **Fast path**: checks port 5432 first (O(1)) for libpq compatibility.
+/// - **Slow path**: scans the directory for any `.s.PGSQL.<N>` socket and
+///   returns the lowest-numbered port for determinism.
+///
+/// Both paths verify the candidate path is actually a socket (not a regular
+/// file or stale `.lock` entry).
+///
+/// Falls back to `("localhost", 5432)` when no socket is found or on
+/// non-Unix platforms.
+fn default_host_port() -> (String, u16) {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::FileTypeExt;
+
         for dir in &["/var/run/postgresql", "/tmp"] {
             let path = PathBuf::from(dir);
-            if path.join(".s.PGSQL.5432").exists() {
-                return (*dir).to_owned();
+
+            // Fast path: the standard port 5432 socket.
+            if path
+                .join(".s.PGSQL.5432")
+                .metadata()
+                .map(|m| m.file_type().is_socket())
+                .unwrap_or(false)
+            {
+                return ((*dir).to_owned(), 5432);
+            }
+
+            // Slow path: scan for any .s.PGSQL.<port> socket, pick lowest
+            // port for determinism (read_dir order is undefined).
+            let mut found_ports: Vec<u16> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if let Some(port_str) = name_str.strip_prefix(".s.PGSQL.") {
+                        // Exclude lock files (.s.PGSQL.<port>.lock).
+                        if !port_str.contains('.') {
+                            if let Ok(port) = port_str.parse::<u16>() {
+                                if entry
+                                    .path()
+                                    .metadata()
+                                    .map(|m| m.file_type().is_socket())
+                                    .unwrap_or(false)
+                                {
+                                    found_ports.push(port);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found_ports.sort_unstable();
+            if let Some(&port) = found_ports.first() {
+                return ((*dir).to_owned(), port);
             }
         }
     }
-    "localhost".to_owned()
+    ("localhost".to_owned(), 5432)
 }
 
 /// Default user: `$USER` (or `$USERNAME` on Windows), falling back to
@@ -475,6 +518,11 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
     let uri_ref = uri_params.as_ref();
     let ci_ref = conninfo_params.as_ref();
 
+    // Compute the socket-based default once so that both resolve_host and
+    // resolve_port use the same scan result (avoids a TOCTOU race where two
+    // independent read_dir() calls could return different sockets).
+    let (dflt_host, dflt_port) = default_host_port();
+
     resolve_host(
         &mut params,
         opts,
@@ -482,6 +530,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
         ci_ref,
         svc_ref,
         is_plain_positional,
+        dflt_host,
     );
     resolve_port(
         &mut params,
@@ -490,6 +539,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
         ci_ref,
         svc_ref,
         is_plain_positional,
+        dflt_port,
     );
     resolve_user(
         &mut params,
@@ -558,6 +608,7 @@ fn resolve_host(
     conninfo: Option<&HashMap<String, String>>,
     svc: Option<&HashMap<String, String>>,
     is_plain: bool,
+    default_host: String,
 ) {
     params.host = opts
         .host
@@ -573,7 +624,7 @@ fn resolve_host(
         .or_else(|| conninfo.and_then(|c| c.get("host").cloned()))
         .or_else(|| svc.and_then(|s| s.get("host").cloned()))
         .or_else(|| env::var("PGHOST").ok())
-        .unwrap_or_else(default_host);
+        .unwrap_or(default_host);
 }
 
 fn resolve_port(
@@ -583,6 +634,7 @@ fn resolve_port(
     conninfo: Option<&HashMap<String, String>>,
     svc: Option<&HashMap<String, String>>,
     is_plain: bool,
+    default_port: u16,
 ) {
     params.port = opts
         .port
@@ -597,7 +649,7 @@ fn resolve_port(
         .or_else(|| conninfo.and_then(|c| c.get("port").and_then(|p| p.parse().ok())))
         .or_else(|| svc.and_then(|s| s.get("port").and_then(|p| p.parse().ok())))
         .or_else(|| env::var("PGPORT").ok().and_then(|p| p.parse().ok()))
-        .unwrap_or(5432);
+        .unwrap_or(default_port);
 }
 
 fn resolve_user(
