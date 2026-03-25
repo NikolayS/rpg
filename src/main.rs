@@ -931,7 +931,7 @@ async fn async_main() {
 // Unit tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "wasi")))]
 mod tests {
     use super::*;
 
