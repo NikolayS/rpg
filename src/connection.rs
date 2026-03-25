@@ -1644,6 +1644,20 @@ fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionE
     Ok(store)
 }
 
+/// Load all PEM certificates from `path` as raw `CertificateDer` bytes.
+///
+/// Used to supply local certificates as intermediates when verifying a chain
+/// that the server did not send in full (issue #712).  Returns an empty vec
+/// if the path is `None` or the file cannot be read.
+fn load_certs_as_intermediates(path: Option<&str>) -> Vec<CertificateDer<'static>> {
+    let Some(p) = path else { return vec![] };
+    let Ok(pem) = std::fs::read(p) else { return vec![] };
+    rustls_pemfile::certs(&mut pem.as_slice())
+        .filter_map(Result::ok)
+        .map(CertificateDer::into_owned)
+        .collect()
+}
+
 /// Load a client certificate and private key from PEM files.
 ///
 /// Returns `(cert_chain, private_key)` suitable for passing to
@@ -1692,9 +1706,14 @@ fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, Connec
         None => webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
     };
 
+    // Load certs from the same bundle as potential intermediates.  PostgreSQL
+    // sends only the leaf cert by default; these extras allow NoCnVerifier to
+    // complete the chain when the server omits intermediate certs (issue #712).
+    let extra = load_certs_as_intermediates(params.ssl_root_cert.as_deref());
+
     // Use a custom verifier that checks the certificate chain against our CA
     // store but does NOT verify the server hostname.
-    let verifier = Arc::new(NoCnVerifier::new(root_store));
+    let verifier = Arc::new(NoCnVerifier::new(root_store, extra));
     let builder = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier);
@@ -1721,15 +1740,20 @@ fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, Connec
 
 /// Build a `ClientConfig` for `sslmode=verify-full`.
 ///
-/// Uses standard rustls hostname verification (the default).  Only differs
-/// from the plain TLS config in that a custom CA file may be used.
+/// Performs full chain + hostname validation.  Uses `FullVerifier` so that
+/// when the server sends only the leaf cert (PostgreSQL's default), the certs
+/// in `sslrootcert` are tried as intermediates before giving up (issue #712).
 fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
     let root_store = match &params.ssl_root_cert {
         Some(path) => load_root_cert_store(path)?,
         None => webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
     };
 
-    let builder = ClientConfig::builder().with_root_certificates(root_store);
+    let extra = load_certs_as_intermediates(params.ssl_root_cert.as_deref());
+    let verifier = Arc::new(FullVerifier::new(root_store, extra));
+    let builder = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier);
 
     match (&params.ssl_cert, &params.ssl_key) {
         (Some(cert), Some(key)) => {
@@ -1822,6 +1846,110 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 // ---------------------------------------------------------------------------
+// Custom certificate verifier: verify-full with chain completion
+// ---------------------------------------------------------------------------
+
+/// A `ServerCertVerifier` that performs full chain + hostname validation but
+/// also retries with extra intermediates from `sslrootcert` when the server
+/// sends only the leaf cert (issue #712).
+///
+/// This implements `sslmode=verify-full` semantics matching psql/OpenSSL.
+#[derive(Debug)]
+struct FullVerifier {
+    roots: rustls::RootCertStore,
+    extra_intermediates: Vec<CertificateDer<'static>>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl FullVerifier {
+    fn new(roots: rustls::RootCertStore, extra_intermediates: Vec<CertificateDer<'static>>) -> Self {
+        Self {
+            roots,
+            extra_intermediates,
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+
+    fn verify_chain(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(self.roots.clone()),
+            Arc::clone(&self.provider),
+        )
+        .build()
+        .map_err(|e| RustlsError::General(format!("cannot build WebPkiServerVerifier: {e}")))?;
+
+        verifier.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+}
+
+impl ServerCertVerifier for FullVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // First attempt: what the server sent.
+        match self.verify_chain(end_entity, intermediates, server_name, ocsp_response, now) {
+            Ok(ok) => return Ok(ok),
+            Err(RustlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+                if !self.extra_intermediates.is_empty() => {}
+            Err(e) => return Err(e),
+        }
+
+        // Second attempt: augment with extras from sslrootcert (issue #712).
+        let mut augmented: Vec<CertificateDer<'_>> =
+            self.extra_intermediates.iter().map(|c| c.as_ref().into()).collect();
+        augmented.extend_from_slice(intermediates);
+
+        self.verify_chain(end_entity, &augmented, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Custom certificate verifier: verify-ca (chain only, no hostname check)
 // ---------------------------------------------------------------------------
 
@@ -1829,17 +1957,69 @@ impl ServerCertVerifier for NoVerifier {
 /// given CA store but does NOT verify the server hostname.
 ///
 /// This implements `sslmode=verify-ca` semantics.
+///
+/// ## Chain completion (issue #712)
+///
+/// rustls requires the full certificate chain to be present in the TLS
+/// handshake.  PostgreSQL by default sends only the leaf certificate.
+/// OpenSSL (used by psql/libpq) can complete the chain from the local trust
+/// store; rustls cannot.
+///
+/// To bridge this gap, `NoCnVerifier` accepts an optional list of
+/// `extra_intermediates` — certificates loaded from the `sslrootcert` bundle.
+/// When the chain cannot be verified with the certs the server sent, it
+/// retries with those extra intermediates prepended.  This allows the common
+/// case where `sslrootcert` contains both the CA root and any intermediate
+/// CA certs.
 #[derive(Debug)]
 struct NoCnVerifier {
     roots: rustls::RootCertStore,
+    /// Certificates from the sslrootcert file, used as fallback intermediates.
+    extra_intermediates: Vec<CertificateDer<'static>>,
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
 impl NoCnVerifier {
-    fn new(roots: rustls::RootCertStore) -> Self {
+    fn new(roots: rustls::RootCertStore, extra_intermediates: Vec<CertificateDer<'static>>) -> Self {
         Self {
             roots,
+            extra_intermediates,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+
+    fn verify_chain(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        // Use a dummy hostname so WebPkiServerVerifier's name check triggers
+        // a known, ignorable error (NotValidForName) rather than a real one.
+        let dummy_name = ServerName::try_from("dummy.invalid")
+            .map_err(|_| RustlsError::General("invalid dummy hostname".into()))?;
+
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(self.roots.clone()),
+            Arc::clone(&self.provider),
+        )
+        .build()
+        .map_err(|e| RustlsError::General(format!("cannot build WebPkiServerVerifier: {e}")))?;
+
+        match verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            &dummy_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(ok) => Ok(ok),
+            // Hostname mismatch on the dummy name is expected — treat as success.
+            Err(RustlsError::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -1853,35 +2033,26 @@ impl ServerCertVerifier for NoCnVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        // Verify the certificate chain against our CA store, but pass a
-        // dummy server name so no hostname check is performed.
-        let dummy_name = ServerName::try_from("dummy.invalid")
-            .map_err(|_| RustlsError::General("invalid dummy hostname".into()))?;
-
-        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
-            Arc::new(self.roots.clone()),
-            Arc::clone(&self.provider),
-        )
-        .build()
-        .map_err(|e| RustlsError::General(format!("cannot build WebPkiServerVerifier: {e}")))?;
-
-        // verify_server_cert on WebPkiServerVerifier checks chain + hostname.
-        // We call it, then ignore InvalidCertificate(NotValidForName) which
-        // is the only error that would arise from the hostname mismatch on
-        // the dummy name.  Any real chain error propagates as-is.
-        match verifier.verify_server_cert(
-            end_entity,
-            intermediates,
-            &dummy_name,
-            ocsp_response,
-            now,
-        ) {
-            Ok(ok) => Ok(ok),
-            Err(RustlsError::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
-                Ok(ServerCertVerified::assertion())
+        // First attempt: use only what the server sent.
+        match self.verify_chain(end_entity, intermediates, ocsp_response, now) {
+            Ok(ok) => return Ok(ok),
+            Err(RustlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+                if !self.extra_intermediates.is_empty() =>
+            {
+                // Chain is incomplete — the server sent only the leaf cert
+                // (PostgreSQL's default behaviour).  Retry with the certs from
+                // the sslrootcert bundle prepended as intermediates.  This
+                // matches what OpenSSL/psql does automatically (issue #712).
             }
-            Err(e) => Err(e),
+            Err(e) => return Err(e),
         }
+
+        // Second attempt: augment the server's intermediates with our extras.
+        let mut augmented: Vec<CertificateDer<'_>> =
+            self.extra_intermediates.iter().map(|c| c.as_ref().into()).collect();
+        augmented.extend_from_slice(intermediates);
+
+        self.verify_chain(end_entity, &augmented, ocsp_response, now)
     }
 
     fn verify_tls12_signature(
@@ -2231,11 +2402,33 @@ async fn connect_one(
             // fall back to plaintext only if the server does not support TLS.
             // This matches psql / libpq semantics: prefer encrypts when
             // possible but does not reject self-signed certificates.
+            //
+            // Timeout handling (issue #723): when connect_timeout is set,
+            // tokio-postgres applies it per attempt.  Without special handling,
+            // sslmode=prefer would try TLS (consuming the full timeout), then
+            // fall back to plain (consuming the full timeout again), making the
+            // total elapsed time ~2× the configured value.
+            //
+            // Fix: if the TLS probe itself times out the host is unreachable,
+            // so we propagate the timeout error immediately without falling
+            // back.  Only non-timeout TLS failures (server rejects SSL,
+            // handshake error, etc.) cause the plain fallback.
             let tls_cfg = make_tls_config_require(params)?;
             match connect_tls_with_config(pg_config, params, tls_cfg).await {
                 Ok((c, info)) => (c, Some(info)),
+                Err(ref e) if is_timeout_error(e) => {
+                    // Timed out during TLS probe — propagate immediately.
+                    // Falling back to plain would just time out again.
+                    return Err(ConnectionError::ConnectionFailed {
+                        host: params.host.clone(),
+                        port: params.port,
+                        reason: format!("connection timed out (PGCONNECT_TIMEOUT={timeout}s)",
+                            timeout = params.connect_timeout.unwrap_or(0)),
+                    });
+                }
                 Err(_) => {
-                    // Fall back to plaintext only if TLS is truly unavailable.
+                    // Non-timeout failure (server does not support TLS, SSL
+                    // handshake refused, etc.) — fall back to plaintext.
                     // No warning is shown — matching psql's default behaviour.
                     (connect_plain(pg_config, params).await?, None)
                 }
@@ -2414,6 +2607,21 @@ async fn connect_tls_with_config(
     });
 
     Ok((client, info))
+}
+
+/// Returns `true` if `e` represents a connection timeout.
+///
+/// Used by `sslmode=prefer` to avoid falling back to plaintext when the host
+/// is simply unreachable — doing so would double the elapsed time relative to
+/// the configured `PGCONNECT_TIMEOUT` (issue #723).
+fn is_timeout_error(e: &ConnectionError) -> bool {
+    match e {
+        ConnectionError::ConnectionFailed { reason, .. } => {
+            let r = reason.to_lowercase();
+            r.contains("timeout") || r.contains("timed out")
+        }
+        _ => false,
+    }
 }
 
 /// Classify an error message string into a `ConnectionError`.
