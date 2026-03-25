@@ -847,8 +847,19 @@ fn resolve_hosts(
         }
     }
 
-    // Fallback: single host from the already-resolved fields.
-    params.hosts = vec![(params.host.clone(), params.port)];
+    // Fallback: single host (or comma-separated list from -h / PGHOST) from
+    // the already-resolved fields.  Split on commas so that
+    // `-h host1,host2` and `PGHOST=host1,host2` produce multiple candidates
+    // matching libpq / psql behaviour.
+    let host_parts: Vec<&str> = params.host.split(',').map(str::trim).collect();
+    if host_parts.len() > 1 {
+        params.hosts = host_parts
+            .iter()
+            .map(|h| ((*h).to_owned(), params.port))
+            .collect();
+    } else {
+        params.hosts = vec![(params.host.clone(), params.port)];
+    }
 }
 
 fn resolve_target_session_attrs(
