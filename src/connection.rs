@@ -857,7 +857,7 @@ fn resolve_hosts(
     // CLI multi-host: `-h host1,host2[,host3] [-p port1[,port2]]`
     // Applies to both named `--host` and positional HOST argument.
     if let Some(o) = opts {
-        let cli_host = o.host.as_deref().or_else(|| o.host_pos.as_deref());
+        let cli_host = o.host.as_deref().or(o.host_pos.as_deref());
         if let Some(h) = cli_host {
             let host_parts: Vec<&str> = h.split(',').map(str::trim).collect();
             if host_parts.len() > 1 {
@@ -867,7 +867,7 @@ fn resolve_hosts(
                 let raw_ports = o
                     .port_str
                     .as_deref()
-                    .or_else(|| o.port_pos.as_deref())
+                    .or(o.port_pos.as_deref())
                     .unwrap_or("");
                 let port_parts: Vec<u16> = raw_ports
                     .split(',')
