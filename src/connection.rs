@@ -807,9 +807,9 @@ fn resolve_options(
 ///
 /// Priority:
 /// 1. Multi-host from URI (already parsed into `uri.hosts`)
-/// 2. Multi-host from conninfo `host=h1,h2 port=5432,5433`
-/// 3. Multi-host from CLI `-h h1,h2 [-p p1,p2]` (opts)
-/// 4. Single host already resolved into `params.host` / `params.port`
+/// 2. Multi-host from conninfo (only when conninfo explicitly has multiple hosts)
+/// 3. Multi-host from CLI -h flag (takes priority over single-host conninfo)
+/// 4. Single host fallback
 fn resolve_hosts(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
@@ -864,15 +864,38 @@ fn resolve_hosts(
                 // Ports: prefer port_str (raw string, may be comma-separated),
                 // fall back to the already-parsed single u16 in opts.port /
                 // opts.port_pos, then to params.port (global default).
+                //
+                // Note: CLI -h takes priority over single-host conninfo — the
+                // multi-host path is entered only when -h supplies multiple
+                // hosts, so any single-host conninfo value is superseded here.
                 let raw_ports = o
                     .port_str
                     .as_deref()
                     .or(o.port_pos.as_deref())
                     .unwrap_or("");
+                // Guard against invalid port values: parse each token and warn
+                // loudly if any is not a valid u16.  Silently dropping an
+                // invalid token would cause the wrong port to be used for the
+                // remaining hosts, which is worse than falling back to the
+                // single-host path.
+                let mut port_parse_ok = true;
                 let port_parts: Vec<u16> = raw_ports
                     .split(',')
-                    .filter_map(|s| s.trim().parse::<u16>().ok())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| {
+                        s.trim().parse::<u16>().unwrap_or_else(|_| {
+                            eprintln!("rpg: invalid port value '{}' in -p", s.trim());
+                            port_parse_ok = false;
+                            0
+                        })
+                    })
                     .collect();
+                if !port_parse_ok {
+                    // At least one port token was invalid.  Fall through to the
+                    // single-host path so the user gets a clear error rather
+                    // than a silent wrong-port connection.
+                    return;
+                }
 
                 let default_port = params.port;
                 let mut last_port = default_port;
@@ -4492,6 +4515,29 @@ host=myhost
             params.hosts,
             vec![("h1".to_owned(), 7777), ("h2".to_owned(), 7778),]
         );
+    }
+
+    /// Invalid port in `-p` must not silently connect to the wrong port.
+    ///
+    /// When `-p 5432,notaport` is supplied, the invalid token is detected and
+    /// the multi-host path is abandoned.  `resolve_params` must not panic and
+    /// must not silently produce a host list with port 0.
+    #[test]
+    #[serial]
+    fn test_resolve_params_cli_multihost_invalid_port_does_not_silently_use_wrong_port() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
+        let opts = CliConnOpts {
+            host: Some("h1,h2".into()),
+            port: Some(5432),
+            port_str: Some("5432,notaport".into()),
+            ..Default::default()
+        };
+        // Should not panic; the invalid port causes the multi-host path to be
+        // abandoned, so port 0 must never appear in the resulting host list.
+        let params = resolve_params(&opts).unwrap();
+        for (_, port) in &params.hosts {
+            assert_ne!(*port, 0, "port 0 must not appear in hosts list");
+        }
     }
 
     /// Single CLI host still works as before (regression guard).
