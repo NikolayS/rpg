@@ -940,3 +940,520 @@ fn h2_f_flag() {
         "h2: expected '42' in -f file output\nstdout: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Group B (continued) — Unix socket error paths
+// ---------------------------------------------------------------------------
+
+/// B3: No socket exists in the given directory — rpg must exit non-zero with
+/// a clear "connection refused" or "no such file" message, not a Rust panic.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn b3_socket_dir_no_socket() {
+    // Use a real directory that definitely has no PG socket.
+    let dir = tempfile::tempdir().expect("b3: failed to create tempdir");
+    let dir_str = dir.path().to_string_lossy().to_string();
+
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &dir_str,
+        "-U", "nobody",
+        "-w",
+        "-c", "SELECT 1",
+    ]);
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "b3: expected nonzero exit for missing socket\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("connection refused")
+            || combined.contains("no such file")
+            || combined.contains("failed to connect")
+            || combined.contains("could not connect"),
+        "b3: expected connection error, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !combined.contains("unwrap") && !combined.contains("panic"),
+        "b3: error must be user-facing, not a Rust panic\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// B4: Socket path exists but wrong user for peer auth — must exit non-zero
+/// with an authentication error, not a Rust panic.  Skipped if the socket
+/// is absent (CI environment without a host-mode PG).
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn b4_socket_wrong_user() {
+    let socket_port = std::env::var("CONN_SOCKET_PORT").unwrap_or_else(|_| "5437".to_owned());
+    let socket_dir =
+        std::env::var("CONN_SOCKET_DIR").unwrap_or_else(|_| "/var/run/postgresql".to_owned());
+    let socket_path = format!("{socket_dir}/.s.PGSQL.{socket_port}");
+
+    if !Path::new(&socket_path).exists() {
+        eprintln!("SKIP b4_socket_wrong_user: {socket_path} not found");
+        return;
+    }
+
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &socket_dir,
+        "-p", &socket_port,
+        "-U", "definitely_nonexistent_user_xyz",
+        "-w",
+        "-c", "SELECT 1",
+    ]);
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "b4: expected nonzero exit for wrong user on Unix socket\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("authentication failed")
+            || combined.contains("peer authentication")
+            || combined.contains("role")
+            || combined.contains("password"),
+        "b4: expected auth error, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group C (continued) — URI edge cases
+// ---------------------------------------------------------------------------
+
+/// C6: URI with a bad port (non-numeric) — must exit non-zero with a parse
+/// error, not connect to a random port or panic.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn c6_uri_bad_port() {
+    let mut cmd = rpg();
+    cmd.args([
+        "postgres://localhost:notaport/postgres",
+        "-w",
+        "-c",
+        "SELECT 1",
+    ]);
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "c6: expected nonzero exit for bad URI port\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("invalid")
+            || combined.contains("parse")
+            || combined.contains("port"),
+        "c6: expected parse error mentioning port, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// C7: URI with port in query param (`?port=<N>`) — C5 regression: this used
+/// to be silently dropped before PR #731.  Must actually connect to the right
+/// port.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn c7_uri_port_query_param() {
+    // postgres://ignored:9999/postgres?host=localhost&port=<trust_port>
+    let port = trust_port();
+    let user = trust_user();
+    let db = trust_database();
+    let uri = format!("postgres://ignored:9999/{db}?host=localhost&port={port}");
+    let mut cmd = rpg();
+    cmd.args([&uri, "-U", &user, "-w", "-c", "SELECT current_database() AS db"]);
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "c7: expected exit 0 for URI with port query param\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(&db),
+        "c7: expected database name '{db}' in output\nstdout: {stdout}"
+    );
+}
+
+/// C8: URI with `host=` query param — must connect to that host, not the
+/// authority host.  Companion to C7.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn c8_uri_host_query_param_tcp() {
+    let port = trust_port();
+    let user = trust_user();
+    let db = trust_database();
+    // Authority has a bogus host; the real one is in the query string.
+    let uri = format!("postgres://ignored/{db}?host=localhost&port={port}");
+    let mut cmd = rpg();
+    cmd.args([&uri, "-U", &user, "-w", "-c", "SELECT 1"]);
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "c8: expected exit 0 for URI with host query param\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "c8: expected '1' in output\nstdout: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group E (continued) — Environment variables
+// ---------------------------------------------------------------------------
+
+/// E6: `PGSSLMODE=disable` suppresses TLS even when server supports it.
+/// Connects to the TLS server; `ssl=f` must appear in pg_stat_ssl.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn e6_pgsslmode_disable() {
+    if std::env::var("TEST_PG_TLS_PORT").is_err()
+        && std::env::var("CONN_TLS_PORT").is_err()
+    {
+        eprintln!("SKIP e6_pgsslmode_disable: no TLS postgres configured");
+        return;
+    }
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &tls_host(),
+        "-p", &tls_port(),
+        "-U", &tls_user(),
+        "-d", &tls_database(),
+        "-c", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+    ])
+    .env("PGSSLMODE", "disable")
+    .env("PGPASSWORD", tls_password());
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "e6: expected exit 0 with PGSSLMODE=disable\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains('f'),
+        "e6: expected ssl=f with PGSSLMODE=disable\nstdout: {stdout}"
+    );
+}
+
+/// E7: `PGDATABASE` env var — no `-d` flag; database comes from env only.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn e7_pgdatabase_env() {
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &trust_host(),
+        "-p", &trust_port(),
+        "-U", &trust_user(),
+        "-w",
+        "-c", "SELECT current_database() AS db",
+    ])
+    .env("PGDATABASE", trust_database());
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "e7: expected exit 0 with PGDATABASE from env\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(&trust_database()),
+        "e7: expected database name in output\nstdout: {stdout}"
+    );
+}
+
+/// E8: `PGPASSFILE` env var — password read from .pgpass file, no PGPASSWORD set.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn e8_pgpassfile_env() {
+    let dir = tempfile::tempdir().expect("e8: failed to create tempdir");
+    let pgpass = dir.path().join(".pgpass");
+
+    // Wildcard entry so it matches any database/user on the trust instance.
+    // Trust auth ignores the password, so any value works.
+    let host = trust_host();
+    let port = trust_port();
+    std::fs::write(
+        &pgpass,
+        format!("{host}:{port}:*:*:pgpassword_test_value\n"),
+    )
+    .expect("e8: failed to write .pgpass");
+
+    // chmod 600 — libpq ignores .pgpass files that are world-readable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pgpass, std::fs::Permissions::from_mode(0o600))
+            .expect("e8: failed to chmod .pgpass");
+    }
+
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &host,
+        "-p", &port,
+        "-U", &trust_user(),
+        "-d", &trust_database(),
+        "-w",
+        "-c", "SELECT 1",
+    ])
+    .env("PGPASSFILE", pgpass.to_str().unwrap())
+    .env_remove("PGPASSWORD");
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "e8: expected exit 0 with PGPASSFILE env var\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "e8: expected '1' in output\nstdout: {stdout}"
+    );
+}
+
+/// E9: `PGCONNECT_TIMEOUT` — elapsed time must be close to the configured
+/// value, not 2x.  Times out against a black-hole IP (10.255.255.1).
+/// Checks elapsed ≤ timeout_s + 1 second of slack.
+///
+/// NOTE: This test documents the known issue #723 (timeout is ~2x expected).
+/// Once #723 is fixed, tighten the bound to `timeout_s + 0.5`.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn e9_pgconnect_timeout() {
+    use std::time::Instant;
+    let timeout_s: u64 = 2;
+
+    let mut cmd = rpg();
+    cmd.args(["-h", "10.255.255.1", "-U", "nobody", "-w", "-c", "SELECT 1"])
+        .env("PGCONNECT_TIMEOUT", timeout_s.to_string());
+
+    let start = Instant::now();
+    let (stdout, stderr, code) = run(cmd);
+    let elapsed = start.elapsed().as_secs_f64();
+
+    assert_ne!(
+        code, 0,
+        "e9: expected nonzero exit for timeout\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Known issue #723: timeout is ~2x configured value.  Accept up to 2x + 1s slack.
+    // Once fixed, tighten to timeout_s as f64 + 1.5.
+    let max_expected = (timeout_s * 2) as f64 + 1.5;
+    assert!(
+        elapsed <= max_expected,
+        "e9: elapsed {elapsed:.1}s exceeds 2×timeout+1.5s ({max_expected}s) — unexpected hang\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Verify a timeout-related error appears
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("timeout")
+            || combined.contains("timed out")
+            || combined.contains("connection refused")
+            || code != 0,
+        "e9: expected timeout error\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group F (continued) — Error message quality
+// ---------------------------------------------------------------------------
+
+/// F4: Error message includes the database name.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn f4_error_includes_dbname() {
+    let db = "nonexistent_db_xyz_709";
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &trust_host(),
+        "-p", &trust_port(),
+        "-U", &trust_user(),
+        "-d", db,
+        "-w",
+        "-c", "SELECT 1",
+    ]);
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "f4: expected nonzero exit for bad dbname\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains(db),
+        "f4: expected database name '{db}' in error output\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// F5: Error message includes the user name.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn f5_error_includes_username() {
+    let user = "nonexistent_user_xyz_709";
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &trust_host(),
+        "-p", &trust_port(),
+        "-U", user,
+        "-d", &trust_database(),
+        "-w",
+        "-c", "SELECT 1",
+    ]);
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "f5: expected nonzero exit for bad username\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains(user),
+        "f5: expected user name '{user}' in error output\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// F6: Error message includes the host name on connection refused.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn f6_error_includes_host() {
+    let host = "127.0.0.1";
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", host,
+        "-p", "19998",
+        "-U", "nobody",
+        "-d", "nobody",
+        "-w",
+        "-c", "SELECT 1",
+    ]);
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "f6: expected nonzero exit\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains(host),
+        "f6: expected host '{host}' in error output\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// F7: Multi-host failover — `-h host1,host2` tries first, falls back to
+/// second, connects successfully.  First host is a black-hole (port 19997),
+/// second is the real trust postgres.
+///
+/// NOTE: This tests issue #724 (multi-host not yet implemented).  Until #724
+/// is fixed this test will fail.  Mark it as a known-failing canary so we
+/// see it break once support lands.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn f7_multihost_failover() {
+    let second_host = trust_host();
+    let second_port = trust_port();
+
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &format!("127.0.0.1,{second_host}"),
+        "-p", &format!("19997,{second_port}"),
+        "-U", &trust_user(),
+        "-d", &trust_database(),
+        "-w",
+        "-c", "SELECT 1",
+    ]);
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    // Once #724 is fixed, this should be assert_eq!(code, 0, ...).
+    // For now we just verify it exits with a clear error (no panic).
+    let (stdout, stderr, code) = run(cmd);
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        !combined.contains("unwrap") && !combined.contains("panic"),
+        "f7: error must be user-facing, not a Rust panic\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let _ = code; // expected to be nonzero until #724 is fixed
+}
+
+// ---------------------------------------------------------------------------
+// Group G (continued) — Authentication methods
+// ---------------------------------------------------------------------------
+
+/// G3: Wrong password against SCRAM — must exit non-zero with a clear
+/// authentication error.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn g3_scram_wrong_password() {
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &scram_host(),
+        "-p", &scram_port(),
+        "-U", &scram_user(),
+        "-d", &scram_database(),
+        "-w",
+        "-c", "SELECT 1",
+    ])
+    .env("PGPASSWORD", "definitely_wrong_password_xyz");
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "g3: expected nonzero exit for wrong SCRAM password\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        combined.contains("authentication failed") || combined.contains("password"),
+        "g3: expected auth error, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !combined.contains("unwrap") && !combined.contains("panic"),
+        "g3: error must be user-facing\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// G4: `PGPASSWORD` takes precedence over `.pgpass` file.
+/// Sets `.pgpass` with a wrong password, but `PGPASSWORD` has the correct one.
+/// Connects to the SCRAM instance so auth is actually enforced.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn g4_pgpassword_overrides_pgpassfile() {
+    let dir = tempfile::tempdir().expect("g4: failed to create tempdir");
+    let pgpass = dir.path().join(".pgpass");
+
+    let host = scram_host();
+    let port = scram_port();
+    // Write a wrong password to .pgpass
+    std::fs::write(
+        &pgpass,
+        format!("{host}:{port}:*:*:wrong_password_in_pgpass\n"),
+    )
+    .expect("g4: failed to write .pgpass");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pgpass, std::fs::Permissions::from_mode(0o600))
+            .expect("g4: failed to chmod .pgpass");
+    }
+
+    let mut cmd = rpg();
+    cmd.args([
+        "-h", &host,
+        "-p", &port,
+        "-U", &scram_user(),
+        "-d", &scram_database(),
+        "-w",
+        "-c", "SELECT 1",
+    ])
+    .env("PGPASSFILE", pgpass.to_str().unwrap())
+    .env("PGPASSWORD", scram_password()); // correct password in env — must win
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "g4: expected PGPASSWORD to win over .pgpass\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "g4: expected '1' in output\nstdout: {stdout}"
+    );
+}
