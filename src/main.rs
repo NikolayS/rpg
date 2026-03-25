@@ -19,6 +19,7 @@ mod dba;
 mod describe;
 mod explain;
 mod highlight;
+mod history_picker;
 mod init;
 mod io;
 mod large_object;
