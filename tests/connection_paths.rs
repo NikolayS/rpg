@@ -1111,7 +1111,7 @@ fn c8_uri_host_query_param_tcp() {
 // ---------------------------------------------------------------------------
 
 /// E6: `PGSSLMODE=disable` suppresses TLS even when server supports it.
-/// Connects to the TLS server; `ssl=f` must appear in pg_stat_ssl.
+/// Connects to the TLS server; `ssl=f` must appear in `pg_stat_ssl`.
 #[test]
 #[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e6_pgsslmode_disable() {
@@ -1229,8 +1229,8 @@ fn e8_pgpassfile_env() {
 }
 
 /// E9: `PGCONNECT_TIMEOUT` — elapsed time must be close to the configured
-/// value, not 2x.  Times out against a black-hole IP (10.255.255.1).
-/// Checks elapsed ≤ timeout_s + 1 second of slack.
+/// value, not `2x`.  Times out against a black-hole IP (10.255.255.1).
+/// Checks elapsed ≤ `timeout_s` + 1 second of slack.
 ///
 /// NOTE: This test documents the known issue #723 (timeout is ~2x expected).
 /// Once #723 is fixed, tighten the bound to `timeout_s + 0.5`.
@@ -1255,6 +1255,7 @@ fn e9_pgconnect_timeout() {
 
     // Known issue #723: timeout is ~2x configured value.  Accept up to 2x + 1s slack.
     // Once fixed, tighten to timeout_s as f64 + 1.5.
+    #[allow(clippy::cast_precision_loss)]
     let max_expected = (timeout_s * 2) as f64 + 1.5;
     assert!(
         elapsed <= max_expected,
