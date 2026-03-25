@@ -87,6 +87,7 @@ pub async fn reconnect(
     let opts = CliConnOpts {
         host: Some(args.host.unwrap_or_else(|| current_params.host.clone())),
         port: Some(port),
+        port_str: None,
         username: Some(args.user.unwrap_or_else(|| current_params.user.clone())),
         dbname: Some(args.dbname.unwrap_or_else(|| current_params.dbname.clone())),
         // All positional fields are None — we feed through the named fields.

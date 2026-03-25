@@ -7,7 +7,8 @@
 //!
 //! ## Multi-host support
 //!
-//! Connection strings may specify multiple hosts:
+//! Multiple hosts may be specified via:
+//! - CLI flags: `rpg -h host1,host2 -p 5432` or `rpg -h host1,host2 -p 5432,5433`
 //! - URI: `postgresql://h1,h2,h3/db` or `postgresql://h1:5432,h2:5433/db`
 //! - conninfo: `host=h1,h2,h3 port=5432,5433`
 //!
@@ -451,6 +452,10 @@ fn is_numeric_addr(host: &str) -> bool {
 pub struct CliConnOpts {
     pub host: Option<String>,
     pub port: Option<u16>,
+    /// Raw port string from CLI, used when `-p` supplies comma-separated ports
+    /// for multi-host connections (`-h host1,host2 -p 5432,5433`).
+    /// Takes precedence over `port` when parsing multi-host lists.
+    pub port_str: Option<String>,
     pub username: Option<String>,
     pub dbname: Option<String>,
     pub dbname_pos: Option<String>,
@@ -593,7 +598,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
         });
 
     // Multi-host list — built after host/port are resolved.
-    resolve_hosts(&mut params, uri_ref, ci_ref);
+    resolve_hosts(&mut params, uri_ref, ci_ref, Some(opts));
 
     // target_session_attrs — URI query param, conninfo key, then env.
     resolve_target_session_attrs(&mut params, uri_ref, ci_ref)?;
@@ -803,11 +808,13 @@ fn resolve_options(
 /// Priority:
 /// 1. Multi-host from URI (already parsed into `uri.hosts`)
 /// 2. Multi-host from conninfo `host=h1,h2 port=5432,5433`
-/// 3. Single host already resolved into `params.host` / `params.port`
+/// 3. Multi-host from CLI `-h h1,h2 [-p p1,p2]` (opts)
+/// 4. Single host already resolved into `params.host` / `params.port`
 fn resolve_hosts(
     params: &mut ConnParams,
     uri: Option<&UriParams>,
     conninfo: Option<&HashMap<String, String>>,
+    opts: Option<&CliConnOpts>,
 ) {
     // URI multi-host takes precedence.
     if let Some(u) = uri {
@@ -841,6 +848,44 @@ fn resolve_hosts(
                     }
                     host_list.push(((*h).to_owned(), last_port));
                 }
+                params.hosts = host_list;
+                return;
+            }
+        }
+    }
+
+    // CLI multi-host: `-h host1,host2[,host3] [-p port1[,port2]]`
+    // Applies to both named `--host` and positional HOST argument.
+    if let Some(o) = opts {
+        let cli_host = o.host.as_deref().or_else(|| o.host_pos.as_deref());
+        if let Some(h) = cli_host {
+            let host_parts: Vec<&str> = h.split(',').map(str::trim).collect();
+            if host_parts.len() > 1 {
+                // Ports: prefer port_str (raw string, may be comma-separated),
+                // fall back to the already-parsed single u16 in opts.port /
+                // opts.port_pos, then to params.port (global default).
+                let raw_ports = o
+                    .port_str
+                    .as_deref()
+                    .or_else(|| o.port_pos.as_deref())
+                    .unwrap_or("");
+                let port_parts: Vec<u16> = raw_ports
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u16>().ok())
+                    .collect();
+
+                let default_port = params.port;
+                let mut last_port = default_port;
+                let mut host_list: Vec<(String, u16)> = Vec::with_capacity(host_parts.len());
+                for (i, host_part) in host_parts.iter().enumerate() {
+                    if let Some(&p) = port_parts.get(i) {
+                        last_port = p;
+                    }
+                    host_list.push(((*host_part).to_owned(), last_port));
+                }
+                // Update params.host/port to reflect first entry (backward-compat).
+                params.host.clone_from(&host_list[0].0);
+                params.port = host_list[0].1;
                 params.hosts = host_list;
                 return;
             }
@@ -4357,6 +4402,113 @@ host=myhost
         };
         let params = resolve_params(&opts).unwrap();
         assert_eq!(params.hosts, vec![("myhost".to_owned(), 9999)]);
+    }
+
+    // -- CLI multi-host parsing (#743) --------------------------------------
+
+    /// CLI `-h h1,h2 -p 5432` — single port applied to all hosts.
+    #[test]
+    #[serial]
+    fn test_resolve_params_cli_multihost_single_port() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
+        let opts = CliConnOpts {
+            host: Some("h1,h2,h3".into()),
+            port: Some(6543),
+            port_str: Some("6543".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![
+                ("h1".to_owned(), 6543),
+                ("h2".to_owned(), 6543),
+                ("h3".to_owned(), 6543),
+            ]
+        );
+        // host/port reflect the first entry.
+        assert_eq!(params.host, "h1");
+        assert_eq!(params.port, 6543);
+    }
+
+    /// CLI `-h h1,h2 -p 5432,5433` — per-host ports.
+    #[test]
+    #[serial]
+    fn test_resolve_params_cli_multihost_per_host_ports() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
+        let opts = CliConnOpts {
+            host: Some("h1,h2,h3".into()),
+            port: Some(5432),
+            port_str: Some("5432,5433,5434".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5433),
+                ("h3".to_owned(), 5434),
+            ]
+        );
+    }
+
+    /// CLI `-h h1,h2 -p 5432,5433` — port reuse for remaining hosts
+    /// when fewer ports than hosts are provided.
+    #[test]
+    #[serial]
+    fn test_resolve_params_cli_multihost_port_reuse() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
+        let opts = CliConnOpts {
+            host: Some("h1,h2,h3".into()),
+            port: Some(5432),
+            port_str: Some("5432,5433".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![
+                ("h1".to_owned(), 5432),
+                ("h2".to_owned(), 5433),
+                ("h3".to_owned(), 5433), // last port reused
+            ]
+        );
+    }
+
+    /// Positional HOST with commas also works (HOST arg).
+    #[test]
+    #[serial]
+    fn test_resolve_params_cli_multihost_positional() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
+        let opts = CliConnOpts {
+            dbname_pos: Some("testdb".into()),
+            host_pos: Some("h1,h2".into()),
+            port_pos: Some("7777,7778".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(
+            params.hosts,
+            vec![("h1".to_owned(), 7777), ("h2".to_owned(), 7778),]
+        );
+    }
+
+    /// Single CLI host still works as before (regression guard).
+    #[test]
+    #[serial]
+    fn test_resolve_params_cli_single_host_regression() {
+        let _guard = EnvGuard::new(&["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]);
+        let opts = CliConnOpts {
+            host: Some("myhost".into()),
+            port: Some(9999),
+            port_str: Some("9999".into()),
+            ..Default::default()
+        };
+        let params = resolve_params(&opts).unwrap();
+        assert_eq!(params.hosts, vec![("myhost".to_owned(), 9999)]);
+        assert_eq!(params.host, "myhost");
+        assert_eq!(params.port, 9999);
     }
 
     // -- SSL error classification -------------------------------------------
