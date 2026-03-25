@@ -955,12 +955,7 @@ fn b3_socket_dir_no_socket() {
     let dir_str = dir.path().to_string_lossy().to_string();
 
     let mut cmd = rpg();
-    cmd.args([
-        "-h", &dir_str,
-        "-U", "nobody",
-        "-w",
-        "-c", "SELECT 1",
-    ]);
+    cmd.args(["-h", &dir_str, "-U", "nobody", "-w", "-c", "SELECT 1"]);
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
         code, 0,
@@ -998,11 +993,15 @@ fn b4_socket_wrong_user() {
 
     let mut cmd = rpg();
     cmd.args([
-        "-h", &socket_dir,
-        "-p", &socket_port,
-        "-U", "definitely_nonexistent_user_xyz",
+        "-h",
+        &socket_dir,
+        "-p",
+        &socket_port,
+        "-U",
+        "definitely_nonexistent_user_xyz",
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
@@ -1042,9 +1041,7 @@ fn c6_uri_bad_port() {
     );
     let combined = format!("{stdout}{stderr}").to_lowercase();
     assert!(
-        combined.contains("invalid")
-            || combined.contains("parse")
-            || combined.contains("port"),
+        combined.contains("invalid") || combined.contains("parse") || combined.contains("port"),
         "c6: expected parse error mentioning port, got:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
@@ -1061,7 +1058,14 @@ fn c7_uri_port_query_param() {
     let db = trust_database();
     let uri = format!("postgres://ignored:9999/{db}?host=localhost&port={port}");
     let mut cmd = rpg();
-    cmd.args([&uri, "-U", &user, "-w", "-c", "SELECT current_database() AS db"]);
+    cmd.args([
+        &uri,
+        "-U",
+        &user,
+        "-w",
+        "-c",
+        "SELECT current_database() AS db",
+    ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
@@ -1111,19 +1115,22 @@ fn c8_uri_host_query_param_tcp() {
 #[test]
 #[ignore = "requires live Postgres — run via connection-tests CI job"]
 fn e6_pgsslmode_disable() {
-    if std::env::var("TEST_PG_TLS_PORT").is_err()
-        && std::env::var("CONN_TLS_PORT").is_err()
-    {
+    if std::env::var("TEST_PG_TLS_PORT").is_err() && std::env::var("CONN_TLS_PORT").is_err() {
         eprintln!("SKIP e6_pgsslmode_disable: no TLS postgres configured");
         return;
     }
     let mut cmd = rpg();
     cmd.args([
-        "-h", &tls_host(),
-        "-p", &tls_port(),
-        "-U", &tls_user(),
-        "-d", &tls_database(),
-        "-c", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        "-h",
+        &tls_host(),
+        "-p",
+        &tls_port(),
+        "-U",
+        &tls_user(),
+        "-d",
+        &tls_database(),
+        "-c",
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
     ])
     .env("PGSSLMODE", "disable")
     .env("PGPASSWORD", tls_password());
@@ -1144,11 +1151,15 @@ fn e6_pgsslmode_disable() {
 fn e7_pgdatabase_env() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", &trust_user(),
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
         "-w",
-        "-c", "SELECT current_database() AS db",
+        "-c",
+        "SELECT current_database() AS db",
     ])
     .env("PGDATABASE", trust_database());
     if let Some(pw) = trust_password() {
@@ -1192,12 +1203,17 @@ fn e8_pgpassfile_env() {
 
     let mut cmd = rpg();
     cmd.args([
-        "-h", &host,
-        "-p", &port,
-        "-U", &trust_user(),
-        "-d", &trust_database(),
+        "-h",
+        &host,
+        "-p",
+        &port,
+        "-U",
+        &trust_user(),
+        "-d",
+        &trust_database(),
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ])
     .env("PGPASSFILE", pgpass.to_str().unwrap())
     .env_remove("PGPASSWORD");
@@ -1267,12 +1283,17 @@ fn f4_error_includes_dbname() {
     let db = "nonexistent_db_xyz_709";
     let mut cmd = rpg();
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", &trust_user(),
-        "-d", db,
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
+        "-d",
+        db,
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
@@ -1296,12 +1317,17 @@ fn f5_error_includes_username() {
     let user = "nonexistent_user_xyz_709";
     let mut cmd = rpg();
     cmd.args([
-        "-h", &trust_host(),
-        "-p", &trust_port(),
-        "-U", user,
-        "-d", &trust_database(),
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        user,
+        "-d",
+        &trust_database(),
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
@@ -1322,12 +1348,7 @@ fn f6_error_includes_host() {
     let host = "127.0.0.1";
     let mut cmd = rpg();
     cmd.args([
-        "-h", host,
-        "-p", "19998",
-        "-U", "nobody",
-        "-d", "nobody",
-        "-w",
-        "-c", "SELECT 1",
+        "-h", host, "-p", "19998", "-U", "nobody", "-d", "nobody", "-w", "-c", "SELECT 1",
     ]);
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
@@ -1356,12 +1377,17 @@ fn f7_multihost_failover() {
 
     let mut cmd = rpg();
     cmd.args([
-        "-h", &format!("127.0.0.1,{second_host}"),
-        "-p", &format!("19997,{second_port}"),
-        "-U", &trust_user(),
-        "-d", &trust_database(),
+        "-h",
+        &format!("127.0.0.1,{second_host}"),
+        "-p",
+        &format!("19997,{second_port}"),
+        "-U",
+        &trust_user(),
+        "-d",
+        &trust_database(),
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ]);
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
@@ -1388,12 +1414,17 @@ fn f7_multihost_failover() {
 fn g3_scram_wrong_password() {
     let mut cmd = rpg();
     cmd.args([
-        "-h", &scram_host(),
-        "-p", &scram_port(),
-        "-U", &scram_user(),
-        "-d", &scram_database(),
+        "-h",
+        &scram_host(),
+        "-p",
+        &scram_port(),
+        "-U",
+        &scram_user(),
+        "-d",
+        &scram_database(),
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ])
     .env("PGPASSWORD", "definitely_wrong_password_xyz");
     let (stdout, stderr, code) = run(cmd);
@@ -1438,12 +1469,17 @@ fn g4_pgpassword_overrides_pgpassfile() {
 
     let mut cmd = rpg();
     cmd.args([
-        "-h", &host,
-        "-p", &port,
-        "-U", &scram_user(),
-        "-d", &scram_database(),
+        "-h",
+        &host,
+        "-p",
+        &port,
+        "-U",
+        &scram_user(),
+        "-d",
+        &scram_database(),
         "-w",
-        "-c", "SELECT 1",
+        "-c",
+        "SELECT 1",
     ])
     .env("PGPASSFILE", pgpass.to_str().unwrap())
     .env("PGPASSWORD", scram_password()); // correct password in env — must win
