@@ -143,7 +143,7 @@ pub fn platform_asset_name() -> String {
 // Version checking
 // ---------------------------------------------------------------------------
 
-const GITHUB_API_URL: &str = "https://api.github.com/repos/NikolayS/project-alpha/releases/latest";
+const GITHUB_API_URL: &str = "https://api.github.com/repos/NikolayS/rpg/releases/latest";
 
 /// Query the GitHub Releases API for the latest published release.
 ///

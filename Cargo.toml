@@ -25,7 +25,7 @@ bytes = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-russh = "0.57"
+russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
