@@ -4353,7 +4353,7 @@ async fn run_readline_loop(
                 if shutdown_flag.load(Ordering::Relaxed) {
                     break;
                 }
-                let mut sl = sl_watcher.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sl = sl_watcher.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 sl.on_resize();
             }
         });
