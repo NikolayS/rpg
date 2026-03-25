@@ -17,6 +17,35 @@
 //! Applies ANSI colors to key elements of `PostgreSQL` EXPLAIN output
 //! to make plans scannable at a glance.
 
+// IMPORTANT: longer/more-specific names must come before shorter prefixes.
+// e.g. "Hash Join" before "Hash", "Bitmap Heap Scan" before "Bitmap Index Scan",
+// "Index Only Scan" before "Index Scan", "Gather Merge" before "Gather",
+// "Parallel Seq Scan" before "Seq Scan".
+// Reordering without care will cause shorter names to match first and break highlighting.
+static NODE_TYPES: [&str; 21] = [
+    "Index Only Scan",
+    "Bitmap Heap Scan",
+    "Bitmap Index Scan",
+    "Parallel Seq Scan",
+    "Subquery Scan",
+    "Gather Merge",
+    "Index Scan",
+    "Seq Scan",
+    "Hash Join",
+    "Merge Join",
+    "Nested Loop",
+    "Aggregate",
+    "Materialize",
+    "Append",
+    "CTE Scan",
+    "Unique",
+    "Gather",
+    "Group",
+    "Limit",
+    "Sort",
+    "Hash",
+];
+
 /// Apply ANSI color highlighting to an EXPLAIN ANALYZE plan string.
 ///
 /// Preserves all text and indentation — only wraps tokens with ANSI codes.
@@ -32,44 +61,21 @@ pub fn highlight_explain(plan: &str, no_color: bool) -> String {
 }
 
 fn highlight_line(line: &str) -> String {
-    // Node type patterns: Seq Scan, Index Scan, Hash Join, etc.
-    // Color: bold cyan (\x1b[1;36m)
-    let node_types = [
-        "Seq Scan",
-        "Index Scan",
-        "Index Only Scan",
-        "Bitmap Heap Scan",
-        "Bitmap Index Scan",
-        "Hash Join",
-        "Merge Join",
-        "Nested Loop",
-        "Hash",
-        "Sort",
-        "Aggregate",
-        "Group",
-        "Limit",
-        "Append",
-        "Subquery Scan",
-        "CTE Scan",
-        "Materialize",
-        "Unique",
-        "Gather",
-        "Gather Merge",
-        "Parallel Seq Scan",
-    ];
-
     let mut result = line.to_owned();
 
-    // Highlight node types
-    for node in &node_types {
-        if result.contains(node) {
+    // Pass 1: node type — check and replace on original line text.
+    // NODE_TYPES is ordered longest/most-specific first to prevent shorter
+    // prefixes (e.g. "Hash") from matching before longer ones ("Hash Join").
+    for node in &NODE_TYPES {
+        if line.contains(node) {
             result = result.replace(node, &format!("\x1b[1;36m{node}\x1b[0m"));
             break; // only first match per line
         }
     }
 
-    // Highlight actual time — color by magnitude
-    if let Some(time_ms) = extract_actual_time(&result) {
+    // Pass 2: actual time — extract magnitude from ORIGINAL line (not result)
+    // to avoid byte-offset corruption from ANSI codes injected in Pass 1.
+    if let Some(time_ms) = extract_actual_time(line) {
         let color = if time_ms >= 100.0 {
             "\x1b[31m" // red — slow
         } else if time_ms >= 10.0 {
@@ -77,24 +83,16 @@ fn highlight_line(line: &str) -> String {
         } else {
             "\x1b[32m" // green — fast
         };
-        // Find and colorize the actual time= segment
-        if let Some(pos) = result.find("actual time=") {
-            let end = result[pos..]
-                .find(')')
-                .map_or(result.len(), |i| pos + i + 1);
-            let segment = result[pos..end].to_owned();
-            result = format!(
-                "{}{}{}{}\x1b[0m{}",
-                &result[..pos],
-                color,
-                segment,
-                "\x1b[0m",
-                &result[end..]
-            );
+        // Locate the segment in the ORIGINAL line, then replace by text value
+        // in result (which may have shifted offsets due to ANSI in Pass 1).
+        if let Some(pos) = line.find("actual time=") {
+            let end = line[pos..].find(')').map_or(line.len(), |i| pos + i + 1);
+            let segment = &line[pos..end];
+            result = result.replace(segment, &format!("{color}{segment}\x1b[0m"));
         }
     }
 
-    // Highlight Filter and Index Cond lines — yellow
+    // Pass 3: Filter / Index Cond / Recheck Cond lines — yellow
     if result.trim_start().starts_with("Filter:")
         || result.trim_start().starts_with("Index Cond:")
         || result.trim_start().starts_with("Recheck Cond:")
@@ -102,7 +100,7 @@ fn highlight_line(line: &str) -> String {
         result = format!("\x1b[33m{result}\x1b[0m");
     }
 
-    // Highlight Planning Time and Execution Time — bold
+    // Pass 4: Planning Time / Execution Time lines — bold
     if result.trim_start().starts_with("Planning Time:")
         || result.trim_start().starts_with("Execution Time:")
     {
@@ -174,5 +172,27 @@ mod tests {
         let line = "Execution Time: 847.234 ms";
         let result = highlight_line(line);
         assert!(result.contains("\x1b[1m"), "Execution Time should be bold");
+    }
+
+    #[test]
+    fn hash_join_not_just_hash() {
+        let line = "  ->  Hash Join  (cost=0.00..100.00 rows=1000 width=8)";
+        let result = highlight_line(line);
+        assert!(result.contains("Hash Join"), "Hash Join text preserved");
+        assert!(result.contains("\x1b[1;36m"), "Hash Join should be highlighted");
+    }
+
+    #[test]
+    fn no_double_reset_on_node_with_time() {
+        // A line with both a node type and actual time must not have double \x1b[0m\x1b[0m
+        // adjacent (which would indicate the old double-reset bug).
+        let line = "  ->  Hash Join  (cost=0.00..100.00 rows=1000 width=8) (actual time=150.000..200.000 rows=1000 loops=1)";
+        let result = highlight_line(line);
+        assert!(
+            !result.contains("\x1b[0m\x1b[0m"),
+            "should not have adjacent double reset codes"
+        );
+        assert!(result.contains("\x1b[31m"), "slow time should be red");
+        assert!(result.contains("\x1b[1;36m"), "node type should be cyan bold");
     }
 }
