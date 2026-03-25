@@ -124,9 +124,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_owned()
     } else {
-        let mut t: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        t.push('…');
-        t
+        s.chars().take(max_chars).collect()
     }
 }
 
@@ -146,6 +144,10 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// Returns `Err` when terminal setup fails (e.g. stdin is not a TTY).
 #[allow(clippy::too_many_lines)]
 pub fn run(entries: Vec<String>) -> io::Result<Option<String>> {
+    if !io::stdout().is_terminal() {
+        return Ok(None);
+    }
+
     if !io::stdin().is_terminal() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
