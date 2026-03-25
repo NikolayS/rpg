@@ -1641,7 +1641,7 @@ pub(super) async fn handle_ai_explain(
          Rules:\n\
          - Output ONLY the labeled lines above, no prose, no markdown, no headers\n\
          - Omit any line where there is nothing significant to report\n\
-         - Maximum 8 lines total\n\
+         - Maximum 6 lines total\n\
          - All significant findings must be included — just on labeled lines\n\n\
          Database: {dbname}\n\n\
          Schema:\n{schema}{wait}",
@@ -1665,7 +1665,7 @@ pub(super) async fn handle_ai_explain(
 
     let options = crate::ai::CompletionOptions {
         model: settings.config.ai.model.clone().unwrap_or_default(),
-        max_tokens: 400,
+        max_tokens: settings.config.ai.max_tokens.min(400),
         temperature: 0.0,
     };
 
@@ -1843,7 +1843,7 @@ pub(super) async fn handle_ai_optimize(
 
     let system_content = format!(
         "You are a PostgreSQL performance optimization expert. \
-         Output a numbered list of concrete optimization actions, highest impact first.\n\
+         Analyse the query, its EXPLAIN ANALYZE plan, and table statistics, then output a numbered list of concrete optimization actions, highest impact first.\n\
          Format each item as: N. <action> -- <one-line rationale with expected impact>\n\
          Rules:\n\
          - CREATE INDEX items must be valid SQL: CREATE INDEX CONCURRENTLY name ON table(col);\n\
@@ -1875,7 +1875,7 @@ pub(super) async fn handle_ai_optimize(
 
     let options = crate::ai::CompletionOptions {
         model: settings.config.ai.model.clone().unwrap_or_default(),
-        max_tokens: 500,
+        max_tokens: settings.config.ai.max_tokens.min(500),
         temperature: 0.0,
     };
 
