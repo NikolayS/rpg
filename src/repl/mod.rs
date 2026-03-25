@@ -4340,9 +4340,8 @@ async fn run_readline_loop(
         use tokio::signal::unix::{signal, SignalKind};
         let sl_watcher = Arc::clone(sl_arc);
         tokio::spawn(async move {
-            let mut sigwinch = match signal(SignalKind::window_change()) {
-                Ok(s) => s,
-                Err(_) => return,
+            let Ok(mut sigwinch) = signal(SignalKind::window_change()) else {
+                return;
             };
             while sigwinch.recv().await.is_some() {
                 let mut sl = sl_watcher.lock().unwrap();
