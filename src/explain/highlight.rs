@@ -135,7 +135,10 @@ mod tests {
     fn seq_scan_highlighted() {
         let line = "  ->  Seq Scan on orders  (cost=0.00..100.00 rows=1000 width=8)";
         let result = highlight_line(line);
-        assert!(result.contains("\x1b[1;36m"), "Seq Scan should be cyan bold");
+        assert!(
+            result.contains("\x1b[1;36m"),
+            "Seq Scan should be cyan bold"
+        );
         assert!(result.contains("Seq Scan"), "node type preserved");
     }
 
