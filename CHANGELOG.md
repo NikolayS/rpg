@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.4] - 2026-03-25
+
+### Added
+
+- **Interactive history picker (`\s`).** Press `\s` to open a fuzzy-searchable TUI list of recent query history. Entries can be selected and inserted into the prompt, or written to a file with `\s filename`. (#701)
+
+### Fixed
+
+- **`sslmode=verify-ca` no longer fails with SAN-bearing certificates.** On rustls 0.23 / webpki 0.103+, servers that present certificates with Subject Alternative Names return `CertificateError::NotValidForNameContext` instead of the legacy `NotValidForName` variant. `NoCnVerifier` now catches both variants, so verify-ca correctly skips hostname validation while still verifying the certificate chain. (#738, closes #712)
+
+### Tests
+
+- Unit test coverage increased from 68% toward 75% (+107 tests, 1809 total). (#702)
+
 ## [0.8.3] - 2026-03-24
 
 ### Fixed
@@ -11,6 +25,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **URI query-string `host=` and `port=` parameters now respected.** Previously, passing `postgres://ignored:9999/db?host=localhost&port=5433` would silently discard the query-string overrides and attempt to connect to `ignored:9999`. The internal URI parser has been replaced with delegation to `tokio_postgres::Config::from_str()`, which handles all standard libpq parameters correctly. (#731)
 - **Default socket detection now finds any `.s.PGSQL.<port>` socket**, not only port 5432. `default_host_port()` scans well-known socket directories for any PostgreSQL socket file and returns the lowest-numbered port found, with port 5432 fast-pathed for the common case. (#728)
 - **Integration tests** for the full connection path matrix (groups A–G from issue #709). (#730)
+
+## [0.8.2] - 2026-03-24
+
+### Fixed
+
+- **`sslmode=prefer` now upgrades to TLS correctly.** Previously, prefer mode used certificate-verification TLS config, which caused a handshake failure when connecting to servers with self-signed or non-public-CA certificates. prefer now uses the same no-verify config as `sslmode=require`, matching psql semantics: prefer encryption, but don't require a trusted certificate. (#726)
+- **`default_host()` now checks for socket file existence**, not just the socket directory. On systems where the socket directory exists but no PostgreSQL instance is running, rpg previously fell through to a misleading TCP connection attempt. (#725)
 
 ## [0.8.1] - 2026-03-24
 
