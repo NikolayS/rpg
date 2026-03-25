@@ -95,7 +95,8 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
             settings.pager_min_lines,
         )
     {
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.clear();
             sl.teardown_scroll_region();
         }
@@ -119,7 +120,8 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
             }
             let _ = std::io::stdout().write_all(text.as_bytes());
         }
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.setup_scroll_region();
             sl.render();
         }

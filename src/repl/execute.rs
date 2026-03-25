@@ -1067,14 +1067,16 @@ pub(super) async fn execute_query_interactive(
         settings.pager_min_lines,
     ) {
         // Clear status bar before handing off to pager (pager takes full screen).
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.clear();
             sl.teardown_scroll_region();
         }
         run_pager_for_text(settings, text, display_bytes);
         // Re-establish scroll region, reposition cursor to bottom of scroll
         // region, and re-render status bar after pager exits.
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.setup_scroll_region_and_restore_cursor();
             sl.render();
         }
@@ -1109,7 +1111,8 @@ pub(super) async fn execute_query_interactive(
     let exec_mode = settings.exec_mode;
     let auto_explain = settings.auto_explain;
     let tx_state = *tx;
-    if let Some(ref mut sl) = settings.statusline {
+    if let Some(ref sl_arc) = settings.statusline {
+        let mut sl = sl_arc.lock().unwrap();
         sl.update(
             tx_state,
             duration_ms,
@@ -1187,14 +1190,16 @@ pub(super) async fn execute_query_extended_interactive(
         settings.pager_min_lines,
     ) {
         // Clear status bar before handing off to pager.
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.clear();
             sl.teardown_scroll_region();
         }
         run_pager_for_text(settings, &text, &captured);
         // Re-establish scroll region, reposition cursor to bottom of scroll
         // region, and re-render after pager exits.
-        if let Some(ref sl) = settings.statusline {
+        if let Some(ref sl_arc) = settings.statusline {
+            let sl = sl_arc.lock().unwrap();
             sl.setup_scroll_region_and_restore_cursor();
             sl.render();
         }
@@ -1229,7 +1234,8 @@ pub(super) async fn execute_query_extended_interactive(
     let exec_mode = settings.exec_mode;
     let auto_explain = settings.auto_explain;
     let tx_state = *tx;
-    if let Some(ref mut sl) = settings.statusline {
+    if let Some(ref sl_arc) = settings.statusline {
+        let mut sl = sl_arc.lock().unwrap();
         sl.update(
             tx_state,
             duration_ms,

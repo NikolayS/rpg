@@ -915,8 +915,8 @@ pub(super) async fn handle_ai_ask(
                             // update_from_sql() only saw `start transaction`
                             // and set InTransaction; correct it here.
                             *tx = TxState::Idle;
-                            if let Some(ref mut sl) = settings.statusline {
-                                sl.set_tx_state(TxState::Idle);
+                            if let Some(ref sl_arc) = settings.statusline {
+                                sl_arc.lock().unwrap().set_tx_state(TxState::Idle);
                             }
                             // Clear the internal-tx flag — the transaction
                             // has been committed or rolled back.
@@ -973,8 +973,8 @@ pub(super) async fn handle_ai_ask(
                                     // update_from_sql() only saw `start
                                     // transaction`; correct it here.
                                     *tx = TxState::Idle;
-                                    if let Some(ref mut sl) = settings.statusline {
-                                        sl.set_tx_state(TxState::Idle);
+                                    if let Some(ref sl_arc) = settings.statusline {
+                                        sl_arc.lock().unwrap().set_tx_state(TxState::Idle);
                                     }
                                     settings.internal_tx = false;
                                     ok
