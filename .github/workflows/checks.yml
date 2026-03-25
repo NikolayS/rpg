@@ -276,7 +276,7 @@ jobs:
           set -Eeuo pipefail
           IFS=$'\n\t'
           cargo llvm-cov \
-            --no-default-features --features ssh,lua,integration \
+            --features lua,integration \
             --lcov \
             --output-path lcov.info
       - name: Upload coverage to Codecov
