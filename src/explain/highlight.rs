@@ -14,7 +14,7 @@
 
 //! Terminal color highlighting for EXPLAIN ANALYZE output.
 //!
-//! Applies ANSI colors to key elements of PostgreSQL EXPLAIN output
+//! Applies ANSI colors to key elements of `PostgreSQL` EXPLAIN output
 //! to make plans scannable at a glance.
 
 /// Apply ANSI color highlighting to an EXPLAIN ANALYZE plan string.
@@ -81,8 +81,7 @@ fn highlight_line(line: &str) -> String {
         if let Some(pos) = result.find("actual time=") {
             let end = result[pos..]
                 .find(')')
-                .map(|i| pos + i + 1)
-                .unwrap_or(result.len());
+                .map_or(result.len(), |i| pos + i + 1);
             let segment = result[pos..end].to_owned();
             result = format!(
                 "{}{}{}{}\x1b[0m{}",
