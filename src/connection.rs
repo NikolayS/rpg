@@ -2027,9 +2027,14 @@ impl NoCnVerifier {
         ) {
             Ok(ok) => Ok(ok),
             // Hostname mismatch on the dummy name is expected — treat as success.
-            Err(RustlsError::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
-                Ok(ServerCertVerified::assertion())
-            }
+            // rustls 0.23 has two variants for name mismatch: the legacy
+            // `NotValidForName` and the richer `NotValidForNameContext` (which
+            // includes the expected name and presented SANs).  webpki 0.103+
+            // always returns the context variant, so we must catch both.
+            Err(RustlsError::InvalidCertificate(
+                rustls::CertificateError::NotValidForName
+                | rustls::CertificateError::NotValidForNameContext { .. },
+            )) => Ok(ServerCertVerified::assertion()),
             Err(e) => Err(e),
         }
     }
