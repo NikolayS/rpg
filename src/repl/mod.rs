@@ -4345,6 +4345,9 @@ async fn run_readline_loop(
     // The `shutdown` flag is set before `run_readline_loop` returns so the
     // task does not call `on_resize()` after `teardown_scroll_region()`.
     let sigwinch_shutdown = Arc::new(AtomicBool::new(false));
+    // SIGWINCH is a Unix-only signal; skip on Windows where the terminal
+    // resize event model differs and tokio::signal::unix is unavailable.
+    #[cfg(unix)]
     if let Some(ref sl_arc) = settings.statusline {
         use tokio::signal::unix::{signal, SignalKind};
         let sl_watcher = Arc::clone(sl_arc);
