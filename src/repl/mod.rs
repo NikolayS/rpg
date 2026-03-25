@@ -1005,6 +1005,10 @@ pub struct ReplSettings {
     /// Persistent status bar rendered at the bottom of the terminal.
     ///
     /// Present only in interactive sessions; `None` in non-interactive paths.
+    ///
+    /// Wrapped in `Arc<Mutex<...>>` so the SIGWINCH signal handler (spawned in
+    /// `run_readline_loop`) can share ownership and call `on_resize()`/`render()`
+    /// from a background tokio task without data races.
     pub statusline: Option<Arc<Mutex<crate::statusline::StatusLine>>>,
     /// Last query duration in milliseconds (for the status bar).
     ///
@@ -4357,6 +4361,7 @@ async fn run_readline_loop(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 sl.on_resize();
+                sl.render();
             }
         });
     }
