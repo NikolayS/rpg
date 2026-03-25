@@ -1186,15 +1186,14 @@ fn e8_pgpassfile_env() {
     let dir = tempfile::tempdir().expect("e8: failed to create tempdir");
     let pgpass = dir.path().join(".pgpass");
 
-    // Wildcard entry so it matches any database/user on the trust instance.
-    // Trust auth ignores the password, so any value works.
+    // Write the correct password (from env or default) to .pgpass.
+    // The point of the test is that PGPASSFILE is read; we need a valid
+    // password here so password-auth servers (SCRAM in CI) also succeed.
     let host = trust_host();
     let port = trust_port();
-    std::fs::write(
-        &pgpass,
-        format!("{host}:{port}:*:*:pgpassword_test_value\n"),
-    )
-    .expect("e8: failed to write .pgpass");
+    let password = trust_password().unwrap_or_default();
+    std::fs::write(&pgpass, format!("{host}:{port}:*:*:{password}\n"))
+        .expect("e8: failed to write .pgpass");
 
     // chmod 600 — libpq ignores .pgpass files that are world-readable
     #[cfg(unix)]
