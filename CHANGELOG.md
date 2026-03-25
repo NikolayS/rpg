@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.3] - 2026-03-24
+
+### Fixed
+
+- **URI query-string `host=` and `port=` parameters now respected.** Previously, passing `postgres://ignored:9999/db?host=localhost&port=5433` would silently discard the query-string overrides and attempt to connect to `ignored:9999`. The internal URI parser has been replaced with delegation to `tokio_postgres::Config::from_str()`, which handles all standard libpq parameters correctly. (#731)
+- **Default socket detection now finds any `.s.PGSQL.<port>` socket**, not only port 5432. `default_host_port()` scans well-known socket directories for any PostgreSQL socket file and returns the lowest-numbered port found, with port 5432 fast-pathed for the common case. (#728)
+- **Integration tests** for the full connection path matrix (groups A–G from issue #709). (#730)
+
 ## [0.8.1] - 2026-03-24
 
 ### Fixed
