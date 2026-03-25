@@ -1743,7 +1743,7 @@ fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, Connec
 /// Build a `ClientConfig` for `sslmode=verify-full`.
 ///
 /// Performs full chain + hostname validation.  Uses `FullVerifier` so that
-/// when the server sends only the leaf cert (PostgreSQL's default), the certs
+/// when the server sends only the leaf cert (`PostgreSQL`'s default), the certs
 /// in `sslrootcert` are tried as intermediates before giving up (issue #712).
 fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
     let root_store = match &params.ssl_root_cert {
@@ -1969,7 +1969,7 @@ impl ServerCertVerifier for FullVerifier {
 /// ## Chain completion (issue #712)
 ///
 /// rustls requires the full certificate chain to be present in the TLS
-/// handshake.  PostgreSQL by default sends only the leaf certificate.
+/// handshake.  `PostgreSQL` by default sends only the leaf certificate.
 /// OpenSSL (used by psql/libpq) can complete the chain from the local trust
 /// store; rustls cannot.
 ///
