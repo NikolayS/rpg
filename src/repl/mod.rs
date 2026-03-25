@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
@@ -4336,15 +4337,23 @@ async fn run_readline_loop(
 
     // Install a SIGWINCH handler so the status bar redraws immediately when
     // the terminal is resized, even while a query is running.
+    //
+    // The `shutdown` flag is set before `run_readline_loop` returns so the
+    // task does not call `on_resize()` after `teardown_scroll_region()`.
+    let sigwinch_shutdown = Arc::new(AtomicBool::new(false));
     if let Some(ref sl_arc) = settings.statusline {
         use tokio::signal::unix::{signal, SignalKind};
         let sl_watcher = Arc::clone(sl_arc);
+        let shutdown_flag = Arc::clone(&sigwinch_shutdown);
         tokio::spawn(async move {
             let Ok(mut sigwinch) = signal(SignalKind::window_change()) else {
                 return;
             };
             while sigwinch.recv().await.is_some() {
-                let mut sl = sl_watcher.lock().unwrap();
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mut sl = sl_watcher.lock().unwrap_or_else(|e| e.into_inner());
                 sl.on_resize();
             }
         });
@@ -4503,6 +4512,10 @@ async fn run_readline_loop(
             settings.cond.depth()
         );
     }
+
+    // Signal the SIGWINCH watcher to stop before we return so it cannot call
+    // `on_resize()` after `teardown_scroll_region()` runs in the caller.
+    sigwinch_shutdown.store(true, Ordering::Relaxed);
 
     0
 }
