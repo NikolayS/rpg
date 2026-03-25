@@ -173,6 +173,43 @@ pub struct PromptContext<'a> {
     pub backend_pid: Option<u32>,
 }
 
+/// Expand backtick-delimited shell commands in a prompt string.
+///
+/// Matches psql behaviour: `` `cmd` `` is replaced with the trimmed stdout of
+/// running `cmd` via `sh -c`.  If the command fails or produces no output,
+/// substitutes an empty string.
+///
+/// This pass should be applied *before* [`expand_prompt`] so that the shell
+/// output can itself contain `%`-sequences (though in practice this is rare).
+pub fn expand_prompt_backticks(prompt: &str) -> String {
+    let mut result = String::new();
+    let mut chars = prompt.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            // Collect until closing backtick.
+            let mut cmd = String::new();
+            for inner in chars.by_ref() {
+                if inner == '`' {
+                    break;
+                }
+                cmd.push(inner);
+            }
+            // Execute the command and capture stdout.
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            result.push_str(output.trim_end_matches('\n').trim_end_matches('\r'));
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Expand a psql-compatible prompt template string.
 ///
 /// Recognises the following format codes (a subset of those documented
@@ -372,6 +409,9 @@ pub fn build_prompt_from_settings(
         line_number: 0,
         backend_pid: None,
     };
+    // Apply backtick command substitution before %-escape expansion,
+    // matching psql behaviour.
+    let template = expand_prompt_backticks(&template);
     expand_prompt(&template, &ctx)
 }
 
@@ -6254,6 +6294,37 @@ mod tests {
         let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
         ctx.connected = false;
         assert_eq!(expand_prompt("%R", &ctx), "!");
+    }
+
+    // -- expand_prompt_backticks -----------------------------------------------
+
+    #[test]
+    fn backtick_echo_hello() {
+        assert_eq!(expand_prompt_backticks("`echo hello`"), "hello");
+    }
+
+    #[test]
+    fn backtick_no_trailing_newline() {
+        let result = expand_prompt_backticks("`echo -n hello`");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn backtick_failing_command_gives_empty() {
+        let result = expand_prompt_backticks("`nonexistent_cmd_xyz_123`");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn no_backticks_unchanged() {
+        assert_eq!(expand_prompt_backticks("user@host> "), "user@host> ");
+    }
+
+    #[test]
+    fn multiple_backticks_expanded() {
+        // Both echo commands should expand.
+        let result = expand_prompt_backticks("`echo a`-`echo b`");
+        assert_eq!(result, "a-b");
     }
 
     // -- build_prompt_from_settings -------------------------------------------
