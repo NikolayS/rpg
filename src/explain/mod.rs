@@ -35,6 +35,7 @@
 // Suppress dead-code warnings until Sprint 2 adds the UI layer.
 #![allow(dead_code)]
 
+pub mod highlight;
 pub mod issues;
 pub mod render;
 pub mod share;
