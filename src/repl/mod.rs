@@ -188,11 +188,19 @@ pub fn expand_prompt_backticks(prompt: &str) -> String {
         if ch == '`' {
             // Collect until closing backtick.
             let mut cmd = String::new();
+            let mut found_close = false;
             for inner in chars.by_ref() {
                 if inner == '`' {
+                    found_close = true;
                     break;
                 }
                 cmd.push(inner);
+            }
+            if !found_close {
+                // No closing backtick — emit literally, do not execute.
+                result.push('`');
+                result.push_str(&cmd);
+                continue;
             }
             // Execute the command and capture stdout.
             let output = std::process::Command::new("sh")
@@ -6325,6 +6333,13 @@ mod tests {
         // Both echo commands should expand.
         let result = expand_prompt_backticks("`echo a`-`echo b`");
         assert_eq!(result, "a-b");
+    }
+
+    #[test]
+    fn backtick_unterminated_passes_through_literally() {
+        // An unterminated backtick should NOT execute anything — pass through literally
+        let result = expand_prompt_backticks("`unclosed");
+        assert_eq!(result, "`unclosed", "unterminated backtick must pass through literally");
     }
 
     // -- build_prompt_from_settings -------------------------------------------
