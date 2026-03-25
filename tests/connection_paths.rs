@@ -1139,9 +1139,12 @@ fn e6_pgsslmode_disable() {
         code, 0,
         "e6: expected exit 0 with PGSSLMODE=disable\nstdout: {stdout}\nstderr: {stderr}"
     );
+    // pg_stat_ssl returns a single row with `ssl | f`; check for the `f`
+    // value in a way that won't match unrelated output (e.g. the word "false"
+    // never appears alone, but "f" does as a Postgres boolean).
     assert!(
-        stdout.contains('f'),
-        "e6: expected ssl=f with PGSSLMODE=disable\nstdout: {stdout}"
+        stdout.contains(" f") || stdout.contains("|f") || stdout.contains("| f"),
+        "e6: expected ssl=f (ssl disabled) in pg_stat_ssl output\nstdout: {stdout}"
     );
 }
 
@@ -1262,14 +1265,15 @@ fn e9_pgconnect_timeout() {
         "e9: elapsed {elapsed:.1}s exceeds 2×timeout+1.5s ({max_expected}s) — unexpected hang\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // Verify a timeout-related error appears
+    // Verify a timeout-related error message appears in output.
+    // (code != 0 is already asserted above — do not include here or the
+    // assert becomes a tautology that never catches missing error messages.)
     let combined = format!("{stdout}{stderr}").to_lowercase();
     assert!(
         combined.contains("timeout")
             || combined.contains("timed out")
-            || combined.contains("connection refused")
-            || code != 0,
-        "e9: expected timeout error\nstdout: {stdout}\nstderr: {stderr}"
+            || combined.contains("connection refused"),
+        "e9: expected timeout/refused error message\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 
@@ -1393,15 +1397,24 @@ fn f7_multihost_failover() {
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
-    // Once #724 is fixed, this should be assert_eq!(code, 0, ...).
-    // For now we just verify it exits with a clear error (no panic).
     let (stdout, stderr, code) = run(cmd);
     let combined = format!("{stdout}{stderr}").to_lowercase();
+
+    // No panic regardless of whether #724 is implemented.
     assert!(
         !combined.contains("unwrap") && !combined.contains("panic"),
         "f7: error must be user-facing, not a Rust panic\nstdout: {stdout}\nstderr: {stderr}"
     );
-    let _ = code; // expected to be nonzero until #724 is fixed
+
+    if code == 0 {
+        // #724 has been implemented — the failover worked.
+        // Tighten the assertion so this test actually validates it.
+        assert!(
+            stdout.contains('1'),
+            "f7: multi-host connected (code=0) but '1' missing from output\nstdout: {stdout}"
+        );
+    }
+    // If code != 0, multi-host is not yet implemented (#724) — no-panic check above is enough.
 }
 
 // ---------------------------------------------------------------------------
