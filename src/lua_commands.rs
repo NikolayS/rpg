@@ -485,6 +485,7 @@ impl LuaRegistry {
     }
 
     #[cfg(not(feature = "lua"))]
+    #[allow(clippy::unused_self)]
     pub fn execute_command(
         &self,
         _name: &str,
