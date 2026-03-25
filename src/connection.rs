@@ -1651,7 +1651,9 @@ fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionE
 /// if the path is `None` or the file cannot be read.
 fn load_certs_as_intermediates(path: Option<&str>) -> Vec<CertificateDer<'static>> {
     let Some(p) = path else { return vec![] };
-    let Ok(pem) = std::fs::read(p) else { return vec![] };
+    let Ok(pem) = std::fs::read(p) else {
+        return vec![];
+    };
     rustls_pemfile::certs(&mut pem.as_slice())
         .filter_map(Result::ok)
         .map(CertificateDer::into_owned)
@@ -1862,7 +1864,10 @@ struct FullVerifier {
 }
 
 impl FullVerifier {
-    fn new(roots: rustls::RootCertStore, extra_intermediates: Vec<CertificateDer<'static>>) -> Self {
+    fn new(
+        roots: rustls::RootCertStore,
+        extra_intermediates: Vec<CertificateDer<'static>>,
+    ) -> Self {
         Self {
             roots,
             extra_intermediates,
@@ -1907,8 +1912,11 @@ impl ServerCertVerifier for FullVerifier {
         }
 
         // Second attempt: augment with extras from sslrootcert (issue #712).
-        let mut augmented: Vec<CertificateDer<'_>> =
-            self.extra_intermediates.iter().map(|c| c.as_ref().into()).collect();
+        let mut augmented: Vec<CertificateDer<'_>> = self
+            .extra_intermediates
+            .iter()
+            .map(|c| c.as_ref().into())
+            .collect();
         augmented.extend_from_slice(intermediates);
 
         self.verify_chain(end_entity, &augmented, server_name, ocsp_response, now)
@@ -1980,7 +1988,10 @@ struct NoCnVerifier {
 }
 
 impl NoCnVerifier {
-    fn new(roots: rustls::RootCertStore, extra_intermediates: Vec<CertificateDer<'static>>) -> Self {
+    fn new(
+        roots: rustls::RootCertStore,
+        extra_intermediates: Vec<CertificateDer<'static>>,
+    ) -> Self {
         Self {
             roots,
             extra_intermediates,
@@ -2048,8 +2059,11 @@ impl ServerCertVerifier for NoCnVerifier {
         }
 
         // Second attempt: augment the server's intermediates with our extras.
-        let mut augmented: Vec<CertificateDer<'_>> =
-            self.extra_intermediates.iter().map(|c| c.as_ref().into()).collect();
+        let mut augmented: Vec<CertificateDer<'_>> = self
+            .extra_intermediates
+            .iter()
+            .map(|c| c.as_ref().into())
+            .collect();
         augmented.extend_from_slice(intermediates);
 
         self.verify_chain(end_entity, &augmented, ocsp_response, now)
@@ -2422,8 +2436,10 @@ async fn connect_one(
                     return Err(ConnectionError::ConnectionFailed {
                         host: params.host.clone(),
                         port: params.port,
-                        reason: format!("connection timed out (PGCONNECT_TIMEOUT={timeout}s)",
-                            timeout = params.connect_timeout.unwrap_or(0)),
+                        reason: format!(
+                            "connection timed out (PGCONNECT_TIMEOUT={timeout}s)",
+                            timeout = params.connect_timeout.unwrap_or(0)
+                        ),
                     });
                 }
                 Err(_) => {
