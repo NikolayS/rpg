@@ -1631,13 +1631,18 @@ pub(super) async fn handle_ai_explain(
 
     let system_content = format!(
         "You are a PostgreSQL performance expert. \
-         Analyse the EXPLAIN ANALYZE plan provided by the user and give \
-         a concise, actionable interpretation:\n\
-         - Identify the most expensive nodes\n\
-         - Flag sequential scans on large tables\n\
-         - Note any high row-estimate errors\n\
-         - Suggest specific indexes or query rewrites when applicable\n\
-         - If wait event data is provided, correlate plan behavior with waits\n\n\
+         Analyse the EXPLAIN ANALYZE plan and output a structured summary using ONLY these labeled lines (omit any line where there is nothing to report):\n\
+         Bottleneck: <most expensive node, cost, actual rows>\n\
+         Est error: <if actual rows diverges from estimated by >5x, state both>\n\
+         Slow nodes: <nodes with actual time >100ms>\n\
+         Filters: <sequential scans or filters that could benefit from an index>\n\
+         Wait: <dominant wait event if wait data provided>\n\
+         Time: planning Xms, execution Xms\n\n\
+         Rules:\n\
+         - Output ONLY the labeled lines above, no prose, no markdown, no headers\n\
+         - Omit any line where there is nothing significant to report\n\
+         - Maximum 6 lines total\n\
+         - All significant findings must be included — just on labeled lines\n\n\
          Database: {dbname}\n\n\
          Schema:\n{schema}{wait}",
         dbname = params.dbname,
@@ -1660,7 +1665,7 @@ pub(super) async fn handle_ai_explain(
 
     let options = crate::ai::CompletionOptions {
         model: settings.config.ai.model.clone().unwrap_or_default(),
-        max_tokens: settings.config.ai.max_tokens,
+        max_tokens: settings.config.ai.max_tokens.min(400),
         temperature: 0.0,
     };
 
@@ -1838,17 +1843,22 @@ pub(super) async fn handle_ai_optimize(
 
     let system_content = format!(
         "You are a PostgreSQL performance optimization expert. \
-         Analyse the query, its EXPLAIN ANALYZE plan, and table statistics, \
-         then provide actionable optimization suggestions.\n\
-         Database: {dbname}\n\n\
-         Schema:\n{schema}\n\n\
+         Analyse the query, its EXPLAIN ANALYZE plan, and table statistics, then output a numbered list of concrete optimization actions, highest impact first.\n\
+         Format each item as: N. <SQL action>; -- <reason, expected gain>\n\
+         Example:\n\
+         1. CREATE INDEX CONCURRENTLY idx ON workload(val); -- seq scan -> index scan, ~10x speedup\n\
+         2. VACUUM workload; -- reclaim dead tuples, reduce scan cost\n\
+         3. ANALYZE workload; -- refresh planner stats\n\
          Rules:\n\
-         - Identify the most expensive operations in the plan\n\
-         - Suggest specific CREATE INDEX statements when beneficial\n\
-         - Suggest query rewrites (join order, CTEs, subquery elimination)\n\
-         - Note any sequential scans on large tables\n\
-         - Estimate the expected improvement for each suggestion\n\
-         - Output suggestions ordered by expected impact (highest first)",
+         - Each item is a single SQL statement followed by an inline comment (-- ...)\n\
+         - Inline comment max 60 chars; no trailing sentences after the SQL line\n\
+         - CREATE INDEX items must be valid SQL: CREATE INDEX CONCURRENTLY name ON table(col);\n\
+         - Maximum 6 items\n\
+         - No prose intro, no section headers, no markdown, no standalone sentences\n\
+         - Forbidden phrases: \"This will\", \"This allows\", \"This enables\", \"This should\", \"significantly\", \"overall\"\n\
+         - Order by expected impact (highest first)\n\n\
+         Database: {dbname}\n\n\
+         Schema:\n{schema}\n",
         dbname = params.dbname,
         schema = schema_ctx,
     );
@@ -1871,7 +1881,7 @@ pub(super) async fn handle_ai_optimize(
 
     let options = crate::ai::CompletionOptions {
         model: settings.config.ai.model.clone().unwrap_or_default(),
-        max_tokens: settings.config.ai.max_tokens,
+        max_tokens: settings.config.ai.max_tokens.min(500),
         temperature: 0.0,
     };
 
@@ -2719,6 +2729,25 @@ mod tests {
             tx,
             TxState::Idle,
             "cancelling a query outside a transaction must leave session in Idle state"
+        );
+    }
+
+    #[test]
+    fn explain_system_prompt_is_structured() {
+        // Verify the explain prompt instructs structured labeled-line output
+        let prompt_fragment = "Bottleneck:";
+        assert!(
+            include_str!("ai_commands.rs").contains(prompt_fragment),
+            "explain system prompt should instruct Bottleneck: label"
+        );
+    }
+
+    #[test]
+    fn optimize_system_prompt_is_numbered_list() {
+        let prompt_fragment = "CREATE INDEX CONCURRENTLY";
+        assert!(
+            include_str!("ai_commands.rs").contains(prompt_fragment),
+            "optimize system prompt should mention CREATE INDEX CONCURRENTLY"
         );
     }
 }
