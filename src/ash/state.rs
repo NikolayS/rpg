@@ -107,7 +107,6 @@ impl AshState {
     /// Human-readable label for the current zoom level.
     pub fn zoom_label(&self) -> &'static str {
         match self.zoom_level {
-            1 => "1s",
             2 => "15s",
             3 => "30s",
             4 => "1min",
@@ -121,7 +120,6 @@ impl AshState {
     /// current zoom level.
     pub fn bucket_secs(&self) -> u64 {
         match self.zoom_level {
-            1 => 1,
             2 => 15,
             3 => 30,
             4 => 60,

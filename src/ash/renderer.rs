@@ -64,7 +64,7 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
         return Vec::new();
     }
 
-    let step = bucket_secs.max(1) as usize;
+    let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
     // How many raw samples per bucket (1 at zoom level 1, more at higher levels).
     // We chunk from the end so the most-recent data always fills the rightmost column.
     let total = snapshots.len();
@@ -94,6 +94,7 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
         .into_iter()
         .map(|chunk| {
             let total_active: u64 = chunk.iter().map(|s| u64::from(s.active_count)).sum();
+            #[allow(clippy::cast_precision_loss)]
             let aas = total_active as f64 / chunk.len() as f64;
 
             // Dominant wait type: sum counts per type across all samples in bucket.
@@ -145,11 +146,15 @@ fn build_timeline_lines(
 
     // For each bucket, compute bar height in rows (bottom-up, 1-indexed from bottom).
     // bar_height[i] = number of filled rows from the bottom for bucket i.
+    #[allow(clippy::cast_precision_loss)]
+    let h_f64 = h as f64;
     let bar_heights: Vec<usize> = buckets
         .iter()
         .map(|b| {
             let frac = b.aas / max_aas;
-            ((frac * h as f64).round() as usize).clamp(0, h)
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let height = (frac * h_f64).round() as usize;
+            height.clamp(0, h)
         })
         .collect();
 
@@ -158,8 +163,9 @@ fn build_timeline_lines(
     // A row is "cpu line" if it is the row where cpu_count falls when scaled.
     let cpu_row_from_bottom: Option<usize> = if cpu_count > 0 {
         let frac = f64::from(cpu_count) / max_aas;
-        let row_from_bottom = ((frac * h as f64).round() as usize).clamp(1, h);
-        Some(row_from_bottom)
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row_from_bottom = (frac * h_f64).round() as usize;
+        Some(row_from_bottom.clamp(1, h))
     } else {
         None
     };
@@ -172,7 +178,7 @@ fn build_timeline_lines(
     for row_from_top in 0..h {
         let row_from_bottom = h - row_from_top; // 1-indexed from bottom
 
-        let is_cpu_line = cpu_row_from_bottom.map_or(false, |r| r == row_from_bottom);
+        let is_cpu_line = cpu_row_from_bottom.is_some_and(|r| r == row_from_bottom);
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(w + 1);
 
@@ -238,6 +244,7 @@ fn compute_summary(snapshots: &[AshSnapshot]) -> (f64, f64, f64, u32) {
     // last bucket itself.  Fall back to snapshot count when timestamps are zero.
     let first_ts = snapshots.first().map_or(0, |s| s.ts);
     let last_ts = snapshots.last().map_or(0, |s| s.ts);
+    #[allow(clippy::cast_precision_loss)]
     let wall = if last_ts > first_ts {
         (last_ts - first_ts + 1) as f64
     } else {
@@ -268,6 +275,118 @@ struct DrillRow {
     is_sub: bool,
 }
 
+/// Sort drill rows descending by `time_secs`.
+fn sort_drill_rows(rows: &mut [DrillRow]) {
+    rows.sort_by(|a, b| {
+        b.time_secs
+            .partial_cmp(&a.time_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Aggregate snapshots by `wait_event_type` into drill rows.
+fn drill_rows_wait_type(snapshots: &[AshSnapshot], wall: f64, total: f64) -> Vec<DrillRow> {
+    let mut type_totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for snap in snapshots {
+        for (k, &v) in &snap.by_type {
+            *type_totals.entry(k.clone()).or_insert(0.0) += f64::from(v);
+        }
+    }
+    let mut rows: Vec<DrillRow> = type_totals
+        .into_iter()
+        .map(|(wt, t)| DrillRow {
+            label: wt.clone(),
+            wait_type: wt,
+            time_secs: t,
+            pct_db: t / total * 100.0,
+            aas: t / wall,
+            is_sub: false,
+        })
+        .collect();
+    sort_drill_rows(&mut rows);
+    rows
+}
+
+/// Aggregate snapshots by `wait_event` (filtered to `selected_type`) into drill rows.
+fn drill_rows_wait_event(
+    snapshots: &[AshSnapshot],
+    selected_type: &str,
+    wall: f64,
+    total: f64,
+) -> Vec<DrillRow> {
+    let prefix = format!("{selected_type}/");
+    let mut type_total = 0.0_f64;
+    let mut event_totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for snap in snapshots {
+        if let Some(&v) = snap.by_type.get(selected_type) {
+            type_total += f64::from(v);
+        }
+        for (k, &v) in &snap.by_event {
+            if k.starts_with(&prefix) {
+                let event_name = k.strip_prefix(&prefix).unwrap_or("").to_owned();
+                *event_totals.entry(event_name).or_insert(0.0) += f64::from(v);
+            }
+        }
+    }
+    let mut rows: Vec<DrillRow> = Vec::with_capacity(event_totals.len() + 1);
+    rows.push(DrillRow {
+        label: selected_type.to_owned(),
+        wait_type: selected_type.to_owned(),
+        time_secs: type_total,
+        pct_db: type_total / total * 100.0,
+        aas: type_total / wall,
+        is_sub: false,
+    });
+    let mut sub_rows: Vec<DrillRow> = event_totals
+        .into_iter()
+        .map(|(ev, t)| DrillRow {
+            label: format!("{selected_type}:{ev}"),
+            wait_type: selected_type.to_owned(),
+            time_secs: t,
+            pct_db: t / total * 100.0,
+            aas: t / wall,
+            is_sub: true,
+        })
+        .collect();
+    sort_drill_rows(&mut sub_rows);
+    rows.extend(sub_rows);
+    rows
+}
+
+/// Aggregate snapshots by `query_id` (filtered to type+event) into drill rows.
+fn drill_rows_query_id(
+    snapshots: &[AshSnapshot],
+    selected_type: &str,
+    selected_event: &str,
+    wall: f64,
+    total: f64,
+) -> Vec<DrillRow> {
+    // Keys are "<wtype>/<wevent>/<query_label>".
+    let prefix = format!("{selected_type}/{selected_event}/");
+    let mut query_totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for snap in snapshots {
+        for (k, &v) in &snap.by_query {
+            if k.starts_with(&prefix) {
+                let label = k.strip_prefix(&prefix).unwrap_or("").to_owned();
+                *query_totals.entry(label).or_insert(0.0) += f64::from(v);
+            }
+        }
+    }
+    let mut rows: Vec<DrillRow> = query_totals
+        .into_iter()
+        .map(|(label, t)| DrillRow {
+            label,
+            wait_type: selected_type.to_owned(),
+            time_secs: t,
+            pct_db: t / total * 100.0,
+            aas: t / wall,
+            is_sub: false,
+        })
+        .collect();
+    sort_drill_rows(&mut rows);
+    rows
+}
+
 /// Collect drill rows for the current level, computing time/pct/aas from the
 /// full snapshot window (not just the last snapshot).
 fn collect_drill_rows(
@@ -279,134 +398,17 @@ fn collect_drill_rows(
     if snapshots.is_empty() {
         return Vec::new();
     }
-
     let wall = wall_secs.max(1.0);
     let total = total_db_time.max(f64::EPSILON);
-
     match level {
-        DrillLevel::WaitType => {
-            // Aggregate by_type across all snapshots in the window.
-            let mut type_totals: std::collections::HashMap<String, f64> =
-                std::collections::HashMap::new();
-            for snap in snapshots {
-                for (k, &v) in &snap.by_type {
-                    *type_totals.entry(k.clone()).or_insert(0.0) += f64::from(v);
-                }
-            }
-
-            let mut rows: Vec<DrillRow> = type_totals
-                .into_iter()
-                .map(|(wt, t)| DrillRow {
-                    label: wt.clone(),
-                    wait_type: wt,
-                    time_secs: t,
-                    pct_db: t / total * 100.0,
-                    aas: t / wall,
-                    is_sub: false,
-                })
-                .collect();
-            rows.sort_by(|a, b| {
-                b.time_secs
-                    .partial_cmp(&a.time_secs)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            rows
-        }
-
+        DrillLevel::WaitType => drill_rows_wait_type(snapshots, wall, total),
         DrillLevel::WaitEvent { selected_type } => {
-            // Top-level row for the type itself, then sub-rows for each event.
-            let prefix = format!("{selected_type}/");
-
-            let mut type_total = 0.0_f64;
-            let mut event_totals: std::collections::HashMap<String, f64> =
-                std::collections::HashMap::new();
-
-            for snap in snapshots {
-                if let Some(&v) = snap.by_type.get(selected_type.as_str()) {
-                    type_total += f64::from(v);
-                }
-                for (k, &v) in &snap.by_event {
-                    if k.starts_with(&prefix) {
-                        let event_name = k.strip_prefix(&prefix).unwrap_or("").to_owned();
-                        *event_totals.entry(event_name).or_insert(0.0) += f64::from(v);
-                    }
-                }
-            }
-
-            let mut rows: Vec<DrillRow> = Vec::with_capacity(event_totals.len() + 1);
-
-            // Parent row.
-            rows.push(DrillRow {
-                label: selected_type.clone(),
-                wait_type: selected_type.clone(),
-                time_secs: type_total,
-                pct_db: type_total / total * 100.0,
-                aas: type_total / wall,
-                is_sub: false,
-            });
-
-            // Sub-event rows.
-            let mut sub_rows: Vec<DrillRow> = event_totals
-                .into_iter()
-                .map(|(ev, t)| {
-                    let label = format!("{selected_type}:{ev}");
-                    DrillRow {
-                        label,
-                        wait_type: selected_type.clone(),
-                        time_secs: t,
-                        pct_db: t / total * 100.0,
-                        aas: t / wall,
-                        is_sub: true,
-                    }
-                })
-                .collect();
-            sub_rows.sort_by(|a, b| {
-                b.time_secs
-                    .partial_cmp(&a.time_secs)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            rows.extend(sub_rows);
-            rows
+            drill_rows_wait_event(snapshots, selected_type, wall, total)
         }
-
         DrillLevel::QueryId {
             selected_type,
             selected_event,
-        } => {
-            // Bug 1 fix: keys are "<wtype>/<wevent>/<query_label>", so prefix
-            // must include both type and event components.
-            let prefix = format!("{selected_type}/{selected_event}/");
-
-            let mut query_totals: std::collections::HashMap<String, f64> =
-                std::collections::HashMap::new();
-            for snap in snapshots {
-                for (k, &v) in &snap.by_query {
-                    if k.starts_with(&prefix) {
-                        let label = k.strip_prefix(&prefix).unwrap_or("").to_owned();
-                        *query_totals.entry(label).or_insert(0.0) += f64::from(v);
-                    }
-                }
-            }
-
-            let mut rows: Vec<DrillRow> = query_totals
-                .into_iter()
-                .map(|(label, t)| DrillRow {
-                    label,
-                    wait_type: selected_type.clone(),
-                    time_secs: t,
-                    pct_db: t / total * 100.0,
-                    aas: t / wall,
-                    is_sub: false,
-                })
-                .collect();
-            rows.sort_by(|a, b| {
-                b.time_secs
-                    .partial_cmp(&a.time_secs)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            rows
-        }
-
+        } => drill_rows_query_id(snapshots, selected_type, selected_event, wall, total),
         DrillLevel::Pid { .. } => Vec::new(),
     }
 }
@@ -429,6 +431,7 @@ fn drill_row_line(row: &DrillRow, is_selected: bool, no_color: bool) -> Line<'st
         "  ".to_owned()
     };
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let bar_len = ((row.pct_db / 5.0).round() as usize).clamp(0, 20);
     let bar: String = "\u{2588}".repeat(bar_len);
 
@@ -438,13 +441,106 @@ fn drill_row_line(row: &DrillRow, is_selected: bool, no_color: bool) -> Line<'st
         Span::styled(format!("{:>8.1}s", row.time_secs), base_style),
         Span::styled(format!("  {:>5.1}%", row.pct_db), base_style),
         Span::styled(format!("  {:>5.2}", row.aas), base_style),
-        Span::styled(format!("  {}", bar), base_style.fg(color)),
+        Span::styled(format!("  {bar}"), base_style.fg(color)),
     ])
 }
 
 // ---------------------------------------------------------------------------
 // Public draw entry point
 // ---------------------------------------------------------------------------
+
+/// Render the timeline band (chunk[1]) inside `draw_frame`.
+fn render_timeline(
+    frame: &mut Frame,
+    snapshots: &[AshSnapshot],
+    state: &AshState,
+    area: ratatui::layout::Rect,
+    no_color: bool,
+) {
+    let cpu_count = snapshots.last().map_or(0, |s| s.cpu_count);
+    let timeline_title = format!(
+        " Timeline  bucket: {}  CPU ref: {cpu_count} ",
+        state.zoom_label(),
+    );
+    let timeline_block = Block::default().borders(Borders::ALL).title(timeline_title);
+    let timeline_inner = timeline_block.inner(area);
+    frame.render_widget(timeline_block, area);
+    let tl_lines = build_timeline_lines(
+        snapshots,
+        state,
+        timeline_inner.height as usize,
+        timeline_inner.width as usize,
+        cpu_count,
+        no_color,
+    );
+    frame.render_widget(Paragraph::new(tl_lines), timeline_inner);
+}
+
+/// Render the drill-down table band (chunk[3]) inside `draw_frame`.
+fn render_drill_table(
+    frame: &mut Frame,
+    snapshots: &[AshSnapshot],
+    state: &AshState,
+    area: ratatui::layout::Rect,
+    wall: f64,
+    db_time: f64,
+    no_color: bool,
+) {
+    let table_block = Block::default().borders(Borders::ALL).title(" Drill-down ");
+    let table_inner = table_block.inner(area);
+    frame.render_widget(table_block, area);
+
+    if matches!(state.level, DrillLevel::Pid { .. }) {
+        frame.render_widget(
+            Paragraph::new("pid-level drill-down: coming soon"),
+            table_inner,
+        );
+        return;
+    }
+
+    let header_chunks =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(table_inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<22}", "STAT NAME"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:>9}", "TIME"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:>8}", "%DB TIME"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:>8}", "AAS"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  BAR", Style::default().add_modifier(Modifier::BOLD)),
+        ])),
+        header_chunks[0],
+    );
+
+    let rows = collect_drill_rows(snapshots, &state.level, wall, db_time);
+    let list_height = header_chunks[1].height as usize;
+    let visible_start = if state.selected_row >= list_height {
+        state.selected_row - list_height + 1
+    } else {
+        0
+    };
+    let lines: Vec<Line<'_>> = rows
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(list_height)
+        .map(|(i, row)| drill_row_line(row, i == state.selected_row, no_color))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), header_chunks[1]);
+}
 
 /// Draw a single frame of the `/ash` TUI.
 ///
@@ -454,20 +550,12 @@ fn drill_row_line(row: &DrillRow, is_selected: bool, no_color: bool) -> Line<'st
 /// * `no_color`  — when true, use terminal default colors.
 pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState, no_color: bool) {
     let area = frame.area();
-
-    // Outer border.
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .title(" /ash \u{2014} Active Session History ");
     let inner = outer_block.inner(area);
     frame.render_widget(outer_block, area);
 
-    // Split inner area into four horizontal bands:
-    //   [0] status bar    Length(2)
-    //   [1] timeline      Min(6)
-    //   [2] summary row   Length(2)
-    //   [3] drill-down    Min(8)
-    //   [4] footer        Length(3)
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(6),
@@ -477,129 +565,35 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     ])
     .split(inner);
 
-    // -----------------------------------------------------------------------
     // [0] Status bar
-    // -----------------------------------------------------------------------
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
     let status_text = format!(
-        "[{mode_label}]  refresh: {}s   zoom: {}   active: {}",
+        "[{mode_label}]  refresh: {}s   zoom: {}   active: {active}",
         state.refresh_secs,
         state.zoom_label(),
-        active,
     );
     frame.render_widget(
         Paragraph::new(status_text).style(Style::default()),
         chunks[0],
     );
 
-    // -----------------------------------------------------------------------
-    // [1] Timeline — scrolling right-to-left stacked bar chart
-    // -----------------------------------------------------------------------
-    let cpu_count = snapshots.last().map_or(0, |s| s.cpu_count);
+    // [1] Timeline
+    render_timeline(frame, snapshots, state, chunks[1], no_color);
 
-    let timeline_title = format!(
-        " Timeline  bucket: {}  CPU ref: {} ",
-        state.zoom_label(),
-        cpu_count,
-    );
-    let timeline_block = Block::default().borders(Borders::ALL).title(timeline_title);
-    let timeline_inner = timeline_block.inner(chunks[1]);
-    frame.render_widget(timeline_block, chunks[1]);
-
-    let chart_height = timeline_inner.height as usize;
-    let chart_width = timeline_inner.width as usize;
-
-    let tl_lines = build_timeline_lines(
-        snapshots,
-        state,
-        chart_height,
-        chart_width,
-        cpu_count,
-        no_color,
-    );
-    frame.render_widget(Paragraph::new(tl_lines), timeline_inner);
-
-    // -----------------------------------------------------------------------
     // [2] Summary row
-    // -----------------------------------------------------------------------
     let (db_time, wall, aas, cpu) = compute_summary(snapshots);
-    let summary_text = format!(
-        "DB TIME: {:.1}s    WALL: {:.1}s    AAS: {:.2}    CPUs: {}",
-        db_time, wall, aas, cpu,
-    );
+    let summary_text =
+        format!("DB TIME: {db_time:.1}s    WALL: {wall:.1}s    AAS: {aas:.2}    CPUs: {cpu}",);
     frame.render_widget(
         Paragraph::new(summary_text).style(Style::default().fg(Color::Cyan)),
         chunks[2],
     );
 
-    // -----------------------------------------------------------------------
     // [3] Drill-down table
-    // -----------------------------------------------------------------------
-    let table_block = Block::default().borders(Borders::ALL).title(" Drill-down ");
-    let table_inner = table_block.inner(chunks[3]);
-    frame.render_widget(table_block, chunks[3]);
+    render_drill_table(frame, snapshots, state, chunks[3], wall, db_time, no_color);
 
-    if matches!(state.level, DrillLevel::Pid { .. }) {
-        frame.render_widget(
-            Paragraph::new("pid-level drill-down: coming soon"),
-            table_inner,
-        );
-    } else {
-        let header_chunks =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(table_inner);
-
-        // Header row: Stat Name | Time | %DB Time | AAS | Bar
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    format!("{:<22}", "STAT NAME"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>9}", "TIME"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>8}", "%DB TIME"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>8}", "AAS"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  BAR", Style::default().add_modifier(Modifier::BOLD)),
-            ])),
-            header_chunks[0],
-        );
-
-        let rows = collect_drill_rows(snapshots, &state.level, wall, db_time);
-        let list_height = header_chunks[1].height as usize;
-
-        let visible_start = if state.selected_row >= list_height {
-            state.selected_row - list_height + 1
-        } else {
-            0
-        };
-
-        let lines: Vec<Line<'_>> = rows
-            .iter()
-            .enumerate()
-            .skip(visible_start)
-            .take(list_height)
-            .map(|(i, row)| {
-                let is_selected = i == state.selected_row;
-                drill_row_line(row, is_selected, no_color)
-            })
-            .collect();
-
-        frame.render_widget(Paragraph::new(lines), header_chunks[1]);
-    }
-
-    // -----------------------------------------------------------------------
     // [4] Footer / key hints
-    // -----------------------------------------------------------------------
     let hint =
         "q:quit  \u{2191}\u{2193}:select  Enter:drill  b:back  r:refresh  \u{2190}\u{2192}:zoom";
     frame.render_widget(
