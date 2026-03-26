@@ -40,6 +40,8 @@ use crate::repl::ReplSettings;
 
 pub use state::AshState;
 
+use state::ViewMode;
+
 // ---------------------------------------------------------------------------
 // TerminalGuard — RAII wrapper (same pattern as history_picker.rs)
 // ---------------------------------------------------------------------------
@@ -87,17 +89,32 @@ pub async fn run_ash(client: &Client, settings: &ReplSettings) -> anyhow::Result
     let mut terminal = Terminal::new(backend)?;
 
     loop {
-        // 1. Take a live snapshot and push to ring buffer (cap 60).
-        if let Ok(snap) = sampler::live_snapshot(client).await {
-            if snapshots.len() == 60 {
-                snapshots.pop_front();
+        // 1. Collect snapshot data for this frame.
+        //
+        //    Live mode: take a fresh snapshot and append to the ring buffer.
+        //    History mode: fetch from pg_ash; on error or if not installed,
+        //    fall back to the live ring buffer so the TUI never goes blank.
+        let snap_slice: Vec<sampler::AshSnapshot> = match &state.mode {
+            ViewMode::History { from, to } => {
+                match sampler::history_snapshots(client, *from, *to).await {
+                    Ok(v) if !v.is_empty() => v,
+                    // Fall back to live ring buffer when history is unavailable.
+                    _ => snapshots.iter().cloned().collect(),
+                }
             }
-            snapshots.push_back(snap);
-        }
-        // On transient errors: ring buffer retains prior data; keep looping.
+            ViewMode::Live => {
+                if let Ok(snap) = sampler::live_snapshot(client).await {
+                    if snapshots.len() == 60 {
+                        snapshots.pop_front();
+                    }
+                    snapshots.push_back(snap);
+                }
+                // On transient errors: ring buffer retains prior data; keep looping.
+                snapshots.iter().cloned().collect()
+            }
+        };
 
         // 2. Draw frame.
-        let snap_slice: Vec<sampler::AshSnapshot> = snapshots.iter().cloned().collect();
         terminal.draw(|f| {
             renderer::draw_frame(f, &snap_slice, &state, no_color);
         })?;
@@ -149,8 +166,11 @@ fn compute_list_len(snapshots: &[sampler::AshSnapshot], state: &AshState) -> usi
                 .filter(|k| k.starts_with(&prefix))
                 .count()
         }
-        DrillLevel::QueryId { selected_event, .. } => {
-            let prefix = format!("{selected_event}/");
+        DrillLevel::QueryId {
+            selected_type,
+            selected_event,
+        } => {
+            let prefix = format!("{selected_type}/{selected_event}/");
             snap.by_query
                 .keys()
                 .filter(|k| k.starts_with(&prefix))

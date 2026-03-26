@@ -75,6 +75,19 @@ pub struct AshState {
     /// Refresh interval cast to u32 for renderer display. Mirrors
     /// `refresh_interval_secs`.
     pub refresh_secs: u32,
+
+    /// Zoom level for bucket aggregation (1–6). Active in both Live and
+    /// History mode. Cycles forward on `→` and backward on `←`.
+    ///
+    /// | Level | bucket_secs |
+    /// |-------|-------------|
+    /// | 1     | 1           |
+    /// | 2     | 15          |
+    /// | 3     | 30          |
+    /// | 4     | 60          |
+    /// | 5     | 300         |
+    /// | 6     | 600         |
+    pub zoom_level: u8,
 }
 
 impl AshState {
@@ -87,7 +100,53 @@ impl AshState {
             pg_ash_installed,
             is_history: false,
             refresh_secs: 1,
+            zoom_level: 1,
         }
+    }
+
+    /// Human-readable label for the current zoom level.
+    pub fn zoom_label(&self) -> &'static str {
+        match self.zoom_level {
+            1 => "1s",
+            2 => "15s",
+            3 => "30s",
+            4 => "1min",
+            5 => "5min",
+            6 => "10min",
+            _ => "1s",
+        }
+    }
+
+    /// Number of raw 1-second samples that make up one display bucket at the
+    /// current zoom level.
+    pub fn bucket_secs(&self) -> u64 {
+        match self.zoom_level {
+            1 => 1,
+            2 => 15,
+            3 => 30,
+            4 => 60,
+            5 => 300,
+            6 => 600,
+            _ => 1,
+        }
+    }
+
+    /// Advance zoom level: 1→2→3→4→5→6→1.
+    pub fn zoom_cycle_forward(&mut self) {
+        self.zoom_level = if self.zoom_level >= 6 {
+            1
+        } else {
+            self.zoom_level + 1
+        };
+    }
+
+    /// Retreat zoom level: 1→6→5→4→3→2→1.
+    pub fn zoom_cycle_back(&mut self) {
+        self.zoom_level = if self.zoom_level <= 1 {
+            6
+        } else {
+            self.zoom_level - 1
+        };
     }
 
     /// Sync the renderer-alias fields from the canonical fields.
@@ -122,10 +181,18 @@ impl AshState {
                 self.go_back();
             }
             KeyCode::Left => {
-                self.zoom_out();
+                self.zoom_cycle_back();
+                // Also shrink the History window when in History mode.
+                if matches!(self.mode, ViewMode::History { .. }) {
+                    self.zoom_in();
+                }
             }
             KeyCode::Right => {
-                self.zoom_in();
+                self.zoom_cycle_forward();
+                // Also expand the History window when in History mode.
+                if matches!(self.mode, ViewMode::History { .. }) {
+                    self.zoom_out();
+                }
             }
             KeyCode::Char('r') => {
                 self.cycle_refresh();

@@ -16,6 +16,18 @@ use tokio_postgres::Client;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Read the number of logical CPUs from `/proc/cpuinfo`.
+///
+/// Falls back to 1 on any I/O error or on platforms without `/proc/cpuinfo`.
+pub fn read_cpu_count() -> u32 {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .map(|s| {
+            let n = s.lines().filter(|l| l.starts_with("processor")).count();
+            u32::try_from(n).unwrap_or(1).max(1)
+        })
+        .unwrap_or(1)
+}
+
 /// A single point-in-time sample of active session counts, aggregated from
 /// `pg_stat_activity` (or `ash.samples` when `pg_ash` is available).
 #[derive(Debug, Default, Clone)]
@@ -24,6 +36,11 @@ pub struct AshSnapshot {
     pub ts: i64,
     /// Total active (non-idle) sessions at sample time.
     pub active_count: u32,
+    /// Number of logical CPUs on the host running rpg.
+    ///
+    /// Populated from `/proc/cpuinfo` once per snapshot; used to draw the CPU
+    /// count reference line in the timeline.
+    pub cpu_count: u32,
     /// Counts grouped by `wait_event_type` (e.g. "Lock", "IO", "CPU*").
     ///
     /// Key: `wait_event_type` string.
@@ -124,6 +141,7 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
 
     let mut snap = AshSnapshot {
         ts,
+        cpu_count: read_cpu_count(),
         ..Default::default()
     };
 
