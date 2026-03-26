@@ -80,7 +80,7 @@ pub async fn run_ash(client: &Client, settings: &ReplSettings) -> anyhow::Result
 
     let pg_ash = sampler::detect_pg_ash(client).await;
     let mut state = AshState::new(pg_ash.installed);
-    let mut snapshots: VecDeque<sampler::AshSnapshot> = VecDeque::with_capacity(60);
+    let mut snapshots: VecDeque<sampler::AshSnapshot> = VecDeque::with_capacity(600);
 
     let no_color = settings.no_highlight;
 
@@ -104,7 +104,7 @@ pub async fn run_ash(client: &Client, settings: &ReplSettings) -> anyhow::Result
             }
             ViewMode::Live => {
                 if let Ok(snap) = sampler::live_snapshot(client).await {
-                    if snapshots.len() == 60 {
+                    if snapshots.len() == 600 {
                         snapshots.pop_front();
                     }
                     snapshots.push_back(snap);

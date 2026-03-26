@@ -3,9 +3,6 @@
 //! Polls `pg_stat_activity` for live data and optionally queries
 //! `ash.samples` when `pg_ash` is installed.
 
-// Structs and functions are not yet fully wired to the TUI entry point;
-// suppress dead-code warnings until integration is complete.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,6 +59,9 @@ pub struct AshSnapshot {
 #[derive(Debug, Clone)]
 pub struct PgAshInfo {
     pub installed: bool,
+    /// Retention window in seconds from `ash.config`.  Reserved for history
+    /// mode (Layer 2); unused in the current live-only implementation.
+    #[allow(dead_code)]
     pub retention_seconds: Option<i64>,
 }
 

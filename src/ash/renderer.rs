@@ -47,11 +47,17 @@ pub fn wait_type_color(wait_event_type: &str, no_color: bool) -> Color {
 // ---------------------------------------------------------------------------
 
 /// One aggregated display bucket, derived from one or more raw snapshots.
+///
+/// Each bucket carries the average AAS per wait type so the timeline can
+/// render a proper stacked bar (one color segment per wait type).
 struct Bucket {
-    /// Average active sessions (total active counts / number of raw samples).
+    /// Total average active sessions across all wait types.
     aas: f64,
-    /// Dominant wait type by sample count across all raw samples in the bucket.
-    wait_type: String,
+    /// AAS broken down by wait type, sorted descending by count so the
+    /// bottom of the bar starts with the busiest type.
+    ///
+    /// Each entry is `(wait_type_name, aas_for_that_type)`.
+    by_type: Vec<(String, f64)>,
 }
 
 /// Aggregate raw snapshots into display buckets according to `bucket_secs`.
@@ -65,13 +71,10 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
     }
 
     let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
-    // How many raw samples per bucket (1 at zoom level 1, more at higher levels).
-    // We chunk from the end so the most-recent data always fills the rightmost column.
     let total = snapshots.len();
-    let num_full = total / step;
     let remainder = total % step;
 
-    // Build chunks: first chunk may be partial (oldest data), then full chunks.
+    // Build chunks from oldest to newest; first chunk may be partial.
     let mut chunks: Vec<&[AshSnapshot]> = Vec::new();
     let mut offset = 0;
     if remainder > 0 {
@@ -82,9 +85,8 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
         chunks.push(&snapshots[offset..offset + step]);
         offset += step;
     }
-    let _ = num_full; // already computed via chunks
 
-    // Trim to max_cols (keep rightmost).
+    // Trim to max_cols (keep rightmost = most recent).
     if chunks.len() > max_cols {
         let drop = chunks.len() - max_cols;
         chunks.drain(..drop);
@@ -93,37 +95,53 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
     chunks
         .into_iter()
         .map(|chunk| {
-            let total_active: u64 = chunk.iter().map(|s| u64::from(s.active_count)).sum();
             #[allow(clippy::cast_precision_loss)]
-            let aas = total_active as f64 / chunk.len() as f64;
+            let n = chunk.len() as f64;
 
-            // Dominant wait type: sum counts per type across all samples in bucket.
-            let mut type_totals: std::collections::HashMap<&str, u64> =
+            // Sum counts per type across all samples in the bucket.
+            let mut type_sums: std::collections::HashMap<&str, f64> =
                 std::collections::HashMap::new();
             for snap in chunk {
                 for (k, &v) in &snap.by_type {
-                    *type_totals.entry(k.as_str()).or_insert(0) += u64::from(v);
+                    *type_sums.entry(k.as_str()).or_insert(0.0) += f64::from(v);
                 }
             }
-            let wt = type_totals
-                .into_iter()
-                .max_by_key(|(_, v)| *v)
-                .map_or("CPU*", |(k, _)| k);
 
-            Bucket {
-                aas,
-                wait_type: wt.to_owned(),
-            }
+            // Convert sums to average-per-sample (= AAS for this type).
+            let mut by_type: Vec<(String, f64)> = type_sums
+                .into_iter()
+                .map(|(k, s)| (k.to_owned(), s / n))
+                .collect();
+            // Sort ascending by aas so bottom-of-bar = busiest type.
+            by_type.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            #[allow(clippy::cast_precision_loss)]
+            let aas: f64 = by_type.iter().map(|(_, v)| v).sum();
+
+            Bucket { aas, by_type }
         })
         .collect()
 }
 
-/// Render the scrolling right-to-left stacked-bar timeline into a vec of
-/// `Line`s (one per row, bottom-aligned).
+/// One colored segment within a stacked timeline bar.
 ///
-/// * `chart_height` — available rows (not counting any header/border lines).
-/// * `chart_width`  — available columns.
-/// * `cpu_count`    — where to draw the `─` reference line.
+/// Coordinates are in row-from-bottom space (1 = bottommost row).
+struct Segment {
+    color: Color,
+    /// Inclusive lower bound in row-from-bottom space.
+    bottom: usize,
+    /// Inclusive upper bound in row-from-bottom space.
+    top: usize,
+}
+
+/// Render the scrolling stacked-bar timeline into a vec of `Line`s.
+///
+/// Each column is a stacked bar: bottom rows belong to the most-active wait
+/// type, then the next, etc.  A horizontal dashed line marks the CPU count.
+///
+/// * `chart_height` — available rows (excluding border).
+/// * `chart_width`  — available columns (excluding border).
+/// * `cpu_count`    — value to draw the `─` CPU reference line at.
 fn build_timeline_lines(
     snapshots: &[AshSnapshot],
     state: &AshState,
@@ -137,83 +155,96 @@ fn build_timeline_lines(
 
     let buckets = aggregate_buckets(snapshots, state.bucket_secs(), w);
 
-    // Find max AAS across all buckets to scale bar height.
+    // Scale: find the maximum AAS across all buckets so bars fill the chart.
     let max_aas = buckets
         .iter()
         .map(|b| b.aas)
         .fold(0.0_f64, f64::max)
         .max(1.0);
 
-    // For each bucket, compute bar height in rows (bottom-up, 1-indexed from bottom).
-    // bar_height[i] = number of filled rows from the bottom for bucket i.
     #[allow(clippy::cast_precision_loss)]
     let h_f64 = h as f64;
-    let bar_heights: Vec<usize> = buckets
+
+    // Pre-compute per-column stacked segment boundaries.
+    //
+    // For each bucket we build a list of Segments in row-from-bottom space
+    // (1-indexed, bottom = row 1).  Rows are integers so adjacent segments
+    // share edges without gaps.
+    let col_segments: Vec<Vec<Segment>> = buckets
         .iter()
-        .map(|b| {
-            let frac = b.aas / max_aas;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let height = (frac * h_f64).round() as usize;
-            height.clamp(0, h)
+        .map(|bucket| {
+            let mut segs: Vec<Segment> = Vec::new();
+            let mut filled_so_far = 0usize;
+
+            // Walk types from bottom (busiest) to top.
+            for (wtype, type_aas) in &bucket.by_type {
+                if *type_aas <= 0.0 {
+                    continue;
+                }
+                let frac = type_aas / max_aas;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let height = ((frac * h_f64).round() as usize).clamp(1, h);
+                let bottom = filled_so_far + 1;
+                let top = (filled_so_far + height).min(h);
+                if bottom > h {
+                    break;
+                }
+                segs.push(Segment {
+                    color: wait_type_color(wtype, no_color),
+                    bottom,
+                    top,
+                });
+                filled_so_far = top;
+                if filled_so_far >= h {
+                    break;
+                }
+            }
+            segs
         })
         .collect();
 
-    // CPU count reference row: which row index from the top corresponds to cpu_count?
-    // Row 0 = top, row h-1 = bottom.
-    // A row is "cpu line" if it is the row where cpu_count falls when scaled.
-    let cpu_row_from_bottom: Option<usize> = if cpu_count > 0 {
+    // CPU reference line: row-from-bottom where cpu_count sits.
+    let cpu_row_from_bottom: Option<usize> = if cpu_count > 0 && max_aas > 0.0 {
         let frac = f64::from(cpu_count) / max_aas;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row_from_bottom = (frac * h_f64).round() as usize;
-        Some(row_from_bottom.clamp(1, h))
+        let r = (frac * h_f64).round() as usize;
+        Some(r.clamp(1, h))
     } else {
         None
     };
 
-    // Number of left-pad columns when fewer buckets than width.
     let pad_cols = w.saturating_sub(buckets.len());
 
-    // Build lines from top (row_from_top = 0) to bottom (row_from_top = h-1).
+    // Render rows top-to-bottom.
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(h);
     for row_from_top in 0..h {
-        let row_from_bottom = h - row_from_top; // 1-indexed from bottom
-
+        let row_from_bottom = h - row_from_top; // 1-indexed
         let is_cpu_line = cpu_row_from_bottom.is_some_and(|r| r == row_from_bottom);
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(w + 1);
 
-        // Left padding (empty space for columns with no data yet).
+        // Left padding.
         if pad_cols > 0 {
-            if is_cpu_line {
-                spans.push(Span::styled(
-                    "\u{2500}".repeat(pad_cols), // ─
-                    Style::default().fg(Color::DarkGray),
-                ));
-            } else {
-                spans.push(Span::raw(" ".repeat(pad_cols)));
-            }
-        }
-
-        for (col_idx, bucket) in buckets.iter().enumerate() {
-            let filled = bar_heights.get(col_idx).copied().unwrap_or(0);
-            let color = wait_type_color(&bucket.wait_type, no_color);
-
-            let ch: String = if row_from_bottom <= filled {
-                // Inside the bar — draw filled block.
-                "\u{2588}".to_owned() // █
-            } else if is_cpu_line {
-                // CPU reference line passes through empty space.
-                "\u{2500}".to_owned() // ─
-            } else {
-                " ".to_owned()
-            };
-
-            let style = if row_from_bottom <= filled {
-                Style::default().fg(color)
-            } else if is_cpu_line {
+            let pad_ch = if is_cpu_line { "\u{2500}" } else { " " };
+            let pad_style = if is_cpu_line {
                 Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
+            };
+            spans.push(Span::styled(pad_ch.repeat(pad_cols), pad_style));
+        }
+
+        // One span per column.
+        for segs in &col_segments {
+            // Find which segment covers this row, if any.
+            let seg = segs.iter().find(|s| row_from_bottom >= s.bottom && row_from_bottom <= s.top);
+
+            let (ch, style) = if let Some(s) = seg {
+                ("\u{2588}".to_owned(), Style::default().fg(s.color)) // █ filled
+            } else if is_cpu_line {
+                ("\u{2500}".to_owned(), Style::default().fg(Color::DarkGray)) // ─
+            } else {
+                (" ".to_owned(), Style::default())
             };
 
             spans.push(Span::styled(ch, style));
@@ -569,8 +600,8 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
     let status_text = format!(
-        "[{mode_label}]  refresh: {}s   zoom: {}   active: {active}",
-        state.refresh_secs,
+        "[{mode_label}]  interval: {}s   bucket: {}   active sessions: {active}",
+        state.refresh_interval_secs,
         state.zoom_label(),
     );
     frame.render_widget(
