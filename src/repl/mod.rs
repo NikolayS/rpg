@@ -6353,6 +6353,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backtick_unterminated_preserves_content_after() {
+        // Regression test for #744: content after an unterminated backtick must NOT
+        // be silently dropped.  `hello `date world` — "world" was being lost because
+        // the inner loop consumed the rest of the string without emitting it.
+        let result = expand_prompt_backticks("hello `date world");
+        assert_eq!(
+            result, "hello `date world",
+            "content after unterminated backtick must not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn backtick_unterminated_with_prefix_and_suffix() {
+        // Variant: prefix text, unterminated backtick command, suffix text — all preserved.
+        let result = expand_prompt_backticks("pre `cmd suffix");
+        assert_eq!(
+            result, "pre `cmd suffix",
+            "prefix and suffix around unterminated backtick must both be preserved"
+        );
+    }
+
     // -- build_prompt_from_settings -------------------------------------------
 
     #[test]
