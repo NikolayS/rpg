@@ -735,11 +735,6 @@ fn render_drill_table(
 /// * `no_color`  — when true, use terminal default colors.
 pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState, no_color: bool) {
     let area = frame.area();
-    let outer_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" /ash \u{2014} Active Session History ");
-    let inner = outer_block.inner(area);
-    frame.render_widget(outer_block, area);
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -747,19 +742,19 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
         Constraint::Min(8),
         Constraint::Length(1),
     ])
-    .split(inner);
+    .split(area);
 
-    // [0] Status bar (single line)
+    // [0] Status bar — title + live metrics on one line
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
     let status_text = format!(
-        "[{mode_label}]  interval: {}s   bucket: {}   window: {}   active: {active}",
+        "/ash  [{mode_label}]  interval: {}s   bucket: {}   window: {}   active: {active}",
         state.refresh_interval_secs,
         state.zoom_label(),
         state.window_label(),
     );
     frame.render_widget(
-        Paragraph::new(status_text).style(Style::default()),
+        Paragraph::new(status_text).style(Style::default().fg(Color::Cyan)),
         chunks[0],
     );
 
