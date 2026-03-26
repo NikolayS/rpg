@@ -304,6 +304,13 @@ fn build_timeline_lines(
         .collect();
 
     // CPU reference line: row-from-bottom where cpu_count sits.
+    // Color: red when current AAS > cpu_count (overloaded), gray otherwise.
+    let current_aas = buckets.last().map_or(0.0, |b| b.aas);
+    let cpu_line_color = if current_aas > f64::from(cpu_count) {
+        Color::Red
+    } else {
+        Color::DarkGray
+    };
     let cpu_row_from_bottom: Option<usize> = if cpu_count > 0 && max_aas > 0.0 {
         let frac = f64::from(cpu_count) / max_aas;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -312,6 +319,21 @@ fn build_timeline_lines(
     } else {
         None
     };
+
+    // Empty state: no buckets at all — return a single centered message line.
+    if buckets.is_empty() {
+        let msg = "No active sessions";
+        let pad = w.saturating_sub(msg.len()) / 2;
+        let empty_line = Line::from(vec![
+            Span::raw(" ".repeat(pad)),
+            Span::styled(msg, Style::default().fg(Color::DarkGray)),
+        ]);
+        let mut empty_lines = vec![Line::raw(""); h / 2];
+        if empty_lines.len() < h {
+            empty_lines.push(empty_line);
+        }
+        return (empty_lines, 0.0);
+    }
 
     let pad_cols = w.saturating_sub(buckets.len());
 
@@ -327,7 +349,7 @@ fn build_timeline_lines(
         if pad_cols > 0 {
             let pad_ch = if is_cpu_line { "\u{2500}" } else { " " };
             let pad_style = if is_cpu_line {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(cpu_line_color)
             } else {
                 Style::default()
             };
@@ -344,7 +366,7 @@ fn build_timeline_lines(
             let (ch, style) = if let Some(s) = seg {
                 ("\u{2588}".to_owned(), Style::default().fg(s.color)) // █ filled
             } else if is_cpu_line {
-                ("\u{2500}".to_owned(), Style::default().fg(Color::DarkGray)) // ─
+                ("\u{2500}".to_owned(), Style::default().fg(cpu_line_color)) // ─
             } else {
                 (" ".to_owned(), Style::default())
             };
@@ -731,9 +753,10 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
     let status_text = format!(
-        "[{mode_label}]  interval: {}s   bucket: {}   active sessions: {active}",
+        "[{mode_label}]  interval: {}s   bucket: {}   window: {}   active: {active}",
         state.refresh_interval_secs,
         state.zoom_label(),
+        state.window_label(),
     );
     frame.render_widget(
         Paragraph::new(status_text).style(Style::default()),
@@ -753,11 +776,9 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     // [2] Drill-down table
     render_drill_table(frame, snapshots, state, chunks[2], wall, db_time, no_color);
 
-    // [4] Footer / key hints
-    let hint =
-        "q:quit  \u{2191}\u{2193}:select  Enter:drill  b:back  r:refresh  \u{2190}\u{2192}:zoom";
+    // [3] Footer — context-sensitive key hints
     frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(state.hint_line()).style(Style::default().fg(Color::DarkGray)),
         chunks[3],
     );
 }

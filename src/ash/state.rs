@@ -123,6 +123,31 @@ impl AshState {
         }
     }
 
+    /// Human-readable label for the time window visible in the timeline.
+    ///
+    /// Based on 600 ring-buffer samples × `bucket_secs` per bucket.
+    pub fn window_label(&self) -> String {
+        let total_secs = 600 * self.bucket_secs();
+        if total_secs < 60 {
+            format!("{total_secs}s")
+        } else if total_secs < 3600 {
+            format!("{}min", total_secs / 60)
+        } else {
+            format!("{}h", total_secs / 3600)
+        }
+    }
+
+    /// Context-sensitive key hint line for the footer.
+    ///
+    /// Shows `b/Esc:back` only when drilled below the top level.
+    pub fn hint_line(&self) -> &'static str {
+        if self.is_at_top_level() {
+            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh"
+        } else {
+            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh"
+        }
+    }
+
     /// Number of raw 1-second samples that make up one display bucket at the
     /// current zoom level.
     pub fn bucket_secs(&self) -> u64 {
@@ -160,14 +185,27 @@ impl AshState {
         self.refresh_secs = u32::try_from(self.refresh_interval_secs).unwrap_or(u32::MAX);
     }
 
+    /// Returns `true` when the current drill level is at the top (no parent to go back to).
+    pub fn is_at_top_level(&self) -> bool {
+        matches!(self.level, DrillLevel::WaitType)
+    }
+
     /// Handle a key event. Returns `true` if the application should exit.
     pub fn handle_key(&mut self, key: KeyEvent, list_len: usize) -> bool {
-        // Exit keys.
+        // q and Ctrl-C always quit.
         if key.code == KeyCode::Char('q')
-            || key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             return true;
+        }
+
+        // Esc: back one drill level, or quit when already at top level.
+        if key.code == KeyCode::Esc {
+            if self.is_at_top_level() {
+                return true;
+            }
+            self.go_back();
+            return false;
         }
 
         match key.code {
