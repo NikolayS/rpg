@@ -66,8 +66,8 @@ pub struct AshState {
     pub refresh_interval_secs: u64,
     /// True when `pg_ash` extension is installed and available.
     ///
-    /// Stored for future use by history mode (pg_ash Layer 2).
-    /// TODO: history mode (pg_ash Layer 2) — not yet implemented; pg_ash_installed
+    /// Stored for future use by history mode (`pg_ash` Layer 2).
+    /// TODO: history mode (`pg_ash` Layer 2) — not yet implemented; `pg_ash_installed`
     /// is detected but currently unused.  See issue #753.
     #[allow(dead_code)]
     pub pg_ash_installed: bool,

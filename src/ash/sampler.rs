@@ -161,9 +161,9 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
 
 /// Return historical snapshots from `pg_ash` if installed.
 ///
-/// # Stub — history mode (pg_ash Layer 2) not yet implemented
+/// # Stub — history mode (`pg_ash` Layer 2) not yet implemented
 ///
-/// TODO: history mode (pg_ash Layer 2) — not yet implemented.
+/// TODO: history mode (`pg_ash` Layer 2) — not yet implemented.
 /// `pg_ash` v1.2 encodes `ash.samples.data` as an opaque `int[]` whose
 /// layout is not yet publicly documented.  Until the encoding is specified
 /// and history mode is fully wired into the event loop, this function always
