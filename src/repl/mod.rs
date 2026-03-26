@@ -179,6 +179,14 @@ pub struct PromptContext<'a> {
 /// running `cmd` via `sh -c`.  If the command fails or produces no output,
 /// substitutes an empty string.
 ///
+/// # Security note
+///
+/// This function executes arbitrary shell commands via `sh -c`. Commands are
+/// sourced exclusively from the user's own `PROMPT1`/`PROMPT2` configuration —
+/// never from query input or remote data. This matches psql's behaviour and is
+/// intentional, but callers must ensure that only prompt strings from user
+/// config are passed here.
+///
 /// This pass should be applied *before* [`expand_prompt`] so that the shell
 /// output can itself contain `%`-sequences (though in practice this is rare).
 pub fn expand_prompt_backticks(prompt: &str) -> String {
