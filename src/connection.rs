@@ -4542,7 +4542,10 @@ host=myhost
             vec![(params.host.clone(), params.port)],
             "hosts must contain the single-host fallback on invalid port"
         );
-        assert_eq!(params.port, 5432, "port must be the resolved single-host port");
+        assert_eq!(
+            params.port, 5432,
+            "port must be the resolved single-host port"
+        );
         assert!(!params.host.is_empty(), "host must not be empty");
     }
 
