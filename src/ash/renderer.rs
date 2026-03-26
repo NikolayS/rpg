@@ -237,7 +237,9 @@ fn build_timeline_lines(
         // One span per column.
         for segs in &col_segments {
             // Find which segment covers this row, if any.
-            let seg = segs.iter().find(|s| row_from_bottom >= s.bottom && row_from_bottom <= s.top);
+            let seg = segs
+                .iter()
+                .find(|s| row_from_bottom >= s.bottom && row_from_bottom <= s.top);
 
             let (ch, style) = if let Some(s) = seg {
                 ("\u{2588}".to_owned(), Style::default().fg(s.color)) // █ filled
