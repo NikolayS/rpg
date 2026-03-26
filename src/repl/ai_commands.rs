@@ -1844,12 +1844,18 @@ pub(super) async fn handle_ai_optimize(
     let system_content = format!(
         "You are a PostgreSQL performance optimization expert. \
          Analyse the query, its EXPLAIN ANALYZE plan, and table statistics, then output a numbered list of concrete optimization actions, highest impact first.\n\
-         Format each item as: N. <action> -- <one-line rationale with expected impact>\n\
+         Format each item as: N. <SQL action>; -- <reason, expected gain>\n\
+         Example:\n\
+         1. CREATE INDEX CONCURRENTLY idx ON workload(val); -- seq scan -> index scan, ~10x speedup\n\
+         2. VACUUM workload; -- reclaim dead tuples, reduce scan cost\n\
+         3. ANALYZE workload; -- refresh planner stats\n\
          Rules:\n\
+         - Each item is a single SQL statement followed by an inline comment (-- ...)\n\
+         - Inline comment max 60 chars; no trailing sentences after the SQL line\n\
          - CREATE INDEX items must be valid SQL: CREATE INDEX CONCURRENTLY name ON table(col);\n\
          - Maximum 6 items\n\
-         - No prose intro, no section headers, no markdown\n\
-         - Include ALL significant findings — just as numbered action items\n\
+         - No prose intro, no section headers, no markdown, no standalone sentences\n\
+         - Forbidden phrases: \"This will\", \"This allows\", \"This enables\", \"This should\", \"significantly\", \"overall\"\n\
          - Order by expected impact (highest first)\n\n\
          Database: {dbname}\n\n\
          Schema:\n{schema}\n",
