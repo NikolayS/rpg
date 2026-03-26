@@ -369,6 +369,18 @@ pub(super) async fn stream_completion(
 /// Returns `Some(MetaResult)` when the caller needs to act on a result (e.g.
 /// reconnect after `/session resume`), or `None` for commands that are fully
 /// handled here.
+
+// Parse /ash --cpu N flag. Accepts --cpu 8 or --cpu=16; returns None otherwise.
+fn parse_ash_cpu_flag(args: &str) -> Option<u32> {
+    let args = args.trim();
+    // --cpu N or --cpu=N
+    if let Some(rest) = args.strip_prefix("--cpu") {
+        let val = rest.trim_start_matches('=').trim();
+        return val.parse::<u32>().ok().filter(|&n| n > 0);
+    }
+    None
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn dispatch_ai_command(
     input: &str,
@@ -486,7 +498,10 @@ pub(super) async fn dispatch_ai_command(
             eprintln!("/ash requires an interactive terminal");
             return None;
         }
-        if let Err(e) = crate::ash::run_ash(client, settings).await {
+        // Parse optional --cpu N flag: /ash --cpu 8
+        let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
+        let cpu_override = parse_ash_cpu_flag(ash_args);
+        if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
             eprintln!("/ash: {e}");
         }
 

@@ -12,14 +12,17 @@ use tokio_postgres::Client;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Query the number of logical CPUs on the **Postgres server** via SQL.
+/// Try to determine the number of logical CPUs on the **Postgres server**.
 ///
-/// Tries `pg_cpu_count()` (requires `pg_proctab` extension) first, then
-/// falls back to parsing `/proc/cpuinfo` via `pg_read_file` (superuser only),
-/// and finally returns `None` if neither is available.  A `None` result hides
+/// Only `pg_proctab` (if installed) exposes this reliably.  All other
+/// approaches require superuser or direct OS access — unavailable on managed
+/// Postgres (RDS, `CloudSQL`, Supabase, etc.).
+///
+/// Returns `None` when the value cannot be determined.  A `None` result hides
 /// the CPU reference line in the TUI rather than showing a misleading value.
+/// Users can supply the count explicitly via `/ash --cpu N`.
 pub async fn query_cpu_count(client: &tokio_postgres::Client) -> Option<u32> {
-    // 1. pg_proctab extension
+    // pg_proctab extension — the only reliable cross-platform source
     if let Ok(row) = client.query_one("select pg_cpu_count()::int", &[]).await {
         let n: i32 = row.get(0);
         if n > 0 {
@@ -27,24 +30,6 @@ pub async fn query_cpu_count(client: &tokio_postgres::Client) -> Option<u32> {
             return Some(n as u32);
         }
     }
-
-    // 2. Parse /proc/cpuinfo on the server (superuser + Linux only)
-    if let Ok(row) = client
-        .query_one(
-            "select count(*) from regexp_matches(
-                pg_read_file('/proc/cpuinfo'), E'processor\\t:', 'g'
-            )",
-            &[],
-        )
-        .await
-    {
-        let n: i64 = row.get(0);
-        if n > 0 {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            return Some(n as u32);
-        }
-    }
-
     None
 }
 

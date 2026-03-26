@@ -73,7 +73,16 @@ impl Drop for TerminalGuard {
 // ---------------------------------------------------------------------------
 
 /// Entry point. Blocks until the user exits with `q`, `Esc`, or `Ctrl-C`.
-pub async fn run_ash(client: &Client, settings: &ReplSettings) -> anyhow::Result<()> {
+/// Entry point for the `/ash` TUI.
+///
+/// `cpu_override` — explicit vCPU count supplied via `/ash --cpu N`.
+/// When `None`, the sampler tries `pg_proctab`; if unavailable the CPU
+/// reference line is hidden rather than showing a misleading value.
+pub async fn run_ash(
+    client: &Client,
+    settings: &ReplSettings,
+    cpu_override: Option<u32>,
+) -> anyhow::Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("/ash requires an interactive terminal");
     }
@@ -103,7 +112,11 @@ pub async fn run_ash(client: &Client, settings: &ReplSettings) -> anyhow::Result
                 }
             }
             ViewMode::Live => {
-                if let Ok(snap) = sampler::live_snapshot(client).await {
+                if let Ok(mut snap) = sampler::live_snapshot(client).await {
+                    // User-supplied --cpu N overrides auto-detected value.
+                    if cpu_override.is_some() {
+                        snap.cpu_count = cpu_override;
+                    }
                     if snapshots.len() == 600 {
                         snapshots.pop_front();
                     }
