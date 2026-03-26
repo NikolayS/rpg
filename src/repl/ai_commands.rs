@@ -363,11 +363,13 @@ pub(super) async fn stream_completion(
 /// - `/fix` — explain and fix the last error
 /// - `/explain [query]` — explain query plan with AI interpretation
 /// - `/optimize [query]` — suggest query optimizations
+///
 /// Dispatch a `/`-prefixed command.
 ///
 /// Returns `Some(MetaResult)` when the caller needs to act on a result (e.g.
 /// reconnect after `/session resume`), or `None` for commands that are fully
 /// handled here.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn dispatch_ai_command(
     input: &str,
     client: &Client,
@@ -472,11 +474,11 @@ pub(super) async fn dispatch_ai_command(
 
     // /ash — active session history (requires pg_ash extension).
     } else if input == "/ash" || input.starts_with("/ash ") {
-        let rest = input.strip_prefix("/ash").map(str::trim).unwrap_or("");
+        let rest = input.strip_prefix("/ash").map_or("", str::trim);
         let caps = settings.db_capabilities.clone();
         let ai_context = crate::dba::execute(
             client,
-            &format!("ash {rest}").trim().to_owned(),
+            format!("ash {rest}").trim(),
             false,
             Some(&caps),
             settings,
