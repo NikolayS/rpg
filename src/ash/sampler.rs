@@ -12,16 +12,40 @@ use tokio_postgres::Client;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Read the number of logical CPUs from `/proc/cpuinfo`.
+/// Query the number of logical CPUs on the **Postgres server** via SQL.
 ///
-/// Falls back to 1 on any I/O error or on platforms without `/proc/cpuinfo`.
-pub fn read_cpu_count() -> u32 {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .map(|s| {
-            let n = s.lines().filter(|l| l.starts_with("processor")).count();
-            u32::try_from(n).unwrap_or(1).max(1)
-        })
-        .unwrap_or(1)
+/// Tries `pg_cpu_count()` (requires `pg_proctab` extension) first, then
+/// falls back to parsing `/proc/cpuinfo` via `pg_read_file` (superuser only),
+/// and finally returns `None` if neither is available.  A `None` result hides
+/// the CPU reference line in the TUI rather than showing a misleading value.
+pub async fn query_cpu_count(client: &tokio_postgres::Client) -> Option<u32> {
+    // 1. pg_proctab extension
+    if let Ok(row) = client.query_one("select pg_cpu_count()::int", &[]).await {
+        let n: i32 = row.get(0);
+        if n > 0 {
+            #[allow(clippy::cast_sign_loss)]
+            return Some(n as u32);
+        }
+    }
+
+    // 2. Parse /proc/cpuinfo on the server (superuser + Linux only)
+    if let Ok(row) = client
+        .query_one(
+            "select count(*) from regexp_matches(
+                pg_read_file('/proc/cpuinfo'), E'processor\\t:', 'g'
+            )",
+            &[],
+        )
+        .await
+    {
+        let n: i64 = row.get(0);
+        if n > 0 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            return Some(n as u32);
+        }
+    }
+
+    None
 }
 
 /// A single point-in-time sample of active session counts, aggregated from
@@ -32,11 +56,12 @@ pub struct AshSnapshot {
     pub ts: i64,
     /// Total active (non-idle) sessions at sample time.
     pub active_count: u32,
-    /// Number of logical CPUs on the host running rpg.
+    /// Number of logical CPUs on the **Postgres server**, if determinable.
     ///
-    /// Populated from `/proc/cpuinfo` once per snapshot; used to draw the CPU
-    /// count reference line in the timeline.
-    pub cpu_count: u32,
+    /// `None` when the server does not expose CPU count (no `pg_proctab`,
+    /// not superuser, or non-Linux).  When `None` the CPU reference line is
+    /// hidden in the TUI rather than showing a misleading client-side value.
+    pub cpu_count: Option<u32>,
     /// Counts grouped by `wait_event_type` (e.g. "Lock", "IO", "CPU*").
     ///
     /// Key: `wait_event_type` string.
@@ -140,7 +165,7 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
 
     let mut snap = AshSnapshot {
         ts,
-        cpu_count: read_cpu_count(),
+        cpu_count: query_cpu_count(client).await,
         ..Default::default()
     };
 

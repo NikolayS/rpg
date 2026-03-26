@@ -233,21 +233,43 @@ fn build_yaxis_lines(max_aas: f64, chart_height: usize) -> Vec<Line<'static>> {
 
 /// Render the scrolling stacked-bar timeline into a vec of `Line`s.
 ///
-/// Each column is a stacked bar: bottom rows belong to the most-active wait
-/// type, then the next, etc.  A horizontal dashed line marks the CPU count.
-///
-/// Returns `(lines, max_aas)` — the lines and the computed scale maximum so
-/// the caller can pass `max_aas` to `build_yaxis_lines`.
-///
-/// * `chart_height` — available rows (excluding border).
-/// * `chart_width`  — available columns (excluding border).
-/// * `cpu_count`    — value to draw the `─` CPU reference line at.
+/// Build the stacked `Segment` list for one bucket column.
+fn bucket_segments(bucket: &Bucket, max_aas: f64, h: usize, no_color: bool) -> Vec<Segment> {
+    #[allow(clippy::cast_precision_loss)]
+    let h_f64 = h as f64;
+    let mut segs: Vec<Segment> = Vec::new();
+    let mut filled_so_far = 0usize;
+    for (wtype, type_aas) in &bucket.by_type {
+        if *type_aas <= 0.0 {
+            continue;
+        }
+        let frac = type_aas / max_aas;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let height = ((frac * h_f64).round() as usize).clamp(1, h);
+        let bottom = filled_so_far + 1;
+        let top = (filled_so_far + height).min(h);
+        if bottom > h {
+            break;
+        }
+        segs.push(Segment {
+            color: wait_type_color(wtype, no_color),
+            bottom,
+            top,
+        });
+        filled_so_far = top;
+        if filled_so_far >= h {
+            break;
+        }
+    }
+    segs
+}
+
 fn build_timeline_lines(
     snapshots: &[AshSnapshot],
     state: &AshState,
     chart_height: usize,
     chart_width: usize,
-    cpu_count: u32,
+    cpu_count: Option<u32>,
     no_color: bool,
 ) -> (Vec<Line<'static>>, f64) {
     let h = chart_height.max(1);
@@ -266,59 +288,30 @@ fn build_timeline_lines(
     let h_f64 = h as f64;
 
     // Pre-compute per-column stacked segment boundaries.
-    //
-    // For each bucket we build a list of Segments in row-from-bottom space
-    // (1-indexed, bottom = row 1).  Rows are integers so adjacent segments
-    // share edges without gaps.
     let col_segments: Vec<Vec<Segment>> = buckets
         .iter()
-        .map(|bucket| {
-            let mut segs: Vec<Segment> = Vec::new();
-            let mut filled_so_far = 0usize;
-
-            // Walk types from bottom (busiest) to top.
-            for (wtype, type_aas) in &bucket.by_type {
-                if *type_aas <= 0.0 {
-                    continue;
-                }
-                let frac = type_aas / max_aas;
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let height = ((frac * h_f64).round() as usize).clamp(1, h);
-                let bottom = filled_so_far + 1;
-                let top = (filled_so_far + height).min(h);
-                if bottom > h {
-                    break;
-                }
-                segs.push(Segment {
-                    color: wait_type_color(wtype, no_color),
-                    bottom,
-                    top,
-                });
-                filled_so_far = top;
-                if filled_so_far >= h {
-                    break;
-                }
-            }
-            segs
-        })
+        .map(|bucket| bucket_segments(bucket, max_aas, h, no_color))
         .collect();
 
-    // CPU reference line: row-from-bottom where cpu_count sits.
+    // CPU reference line — only drawn when cpu_count is known.
     // Color: red when current AAS > cpu_count (overloaded), gray otherwise.
     let current_aas = buckets.last().map_or(0.0, |b| b.aas);
-    let cpu_line_color = if current_aas > f64::from(cpu_count) {
-        Color::Red
-    } else {
-        Color::DarkGray
-    };
-    let cpu_row_from_bottom: Option<usize> = if cpu_count > 0 && max_aas > 0.0 {
-        let frac = f64::from(cpu_count) / max_aas;
+    let cpu_line_color = cpu_count.map_or(Color::DarkGray, |n| {
+        if current_aas > f64::from(n) {
+            Color::Red
+        } else {
+            Color::DarkGray
+        }
+    });
+    let cpu_row_from_bottom: Option<usize> = cpu_count.and_then(|n| {
+        if n == 0 || max_aas <= 0.0 {
+            return None;
+        }
+        let frac = f64::from(n) / max_aas;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let r = (frac * h_f64).round() as usize;
         Some(r.clamp(1, h))
-    } else {
-        None
-    };
+    });
 
     // Empty state: no buckets at all — return a single centered message line.
     if buckets.is_empty() {
@@ -387,9 +380,9 @@ fn build_timeline_lines(
 /// Compute summary metrics over the current snapshot window.
 ///
 /// Returns `(db_time_secs, wall_secs, aas, cpu_count)`.
-fn compute_summary(snapshots: &[AshSnapshot]) -> (f64, f64, f64, u32) {
+fn compute_summary(snapshots: &[AshSnapshot]) -> (f64, f64, f64, Option<u32>) {
     if snapshots.is_empty() {
-        return (0.0, 0.0, 0.0, 0);
+        return (0.0, 0.0, 0.0, None);
     }
 
     // db_time = sum of active_count × 1s per snapshot (each snap = 1 raw second).
@@ -407,7 +400,7 @@ fn compute_summary(snapshots: &[AshSnapshot]) -> (f64, f64, f64, u32) {
     };
 
     let aas = if wall > 0.0 { db_time / wall } else { 0.0 };
-    let cpu_count = snapshots.last().map_or(0, |s| s.cpu_count);
+    let cpu_count = snapshots.last().and_then(|s| s.cpu_count);
 
     (db_time, wall, aas, cpu_count)
 }
@@ -610,7 +603,7 @@ struct SummaryMetrics {
     db_time: f64,
     wall: f64,
     aas: f64,
-    cpu_count: u32,
+    cpu_count: Option<u32>,
 }
 
 fn render_timeline(
@@ -621,15 +614,16 @@ fn render_timeline(
     no_color: bool,
     summary: &SummaryMetrics,
 ) {
-    let cpu_count = snapshots.last().map_or(0, |s| s.cpu_count);
-    let timeline_title = format!(
-        " Timeline  bucket: {}  CPU ref: {cpu_count} ",
-        state.zoom_label(),
-    );
-    // Summary metrics sit in the bottom title of the timeline block — no floating row.
+    let cpu_count = snapshots.last().and_then(|s| s.cpu_count);
+    let cpu_ref_label = cpu_count.map_or(String::new(), |n| format!("  CPU ref: {n}"));
+    let timeline_title = format!(" Timeline  bucket: {}{cpu_ref_label} ", state.zoom_label());
+    // Summary metrics in the bottom title; CPUs shown only when known.
+    let cpus_label = summary
+        .cpu_count
+        .map_or(String::new(), |n| format!("   CPUs: {n}"));
     let bottom_title = format!(
-        " DB TIME: {:.1}s   WALL: {:.1}s   AAS: {:.2}   CPUs: {} ",
-        summary.db_time, summary.wall, summary.aas, summary.cpu_count,
+        " DB TIME: {:.1}s   WALL: {:.1}s   AAS: {:.2}{cpus_label} ",
+        summary.db_time, summary.wall, summary.aas,
     );
     let timeline_block = Block::default()
         .borders(Borders::ALL)
