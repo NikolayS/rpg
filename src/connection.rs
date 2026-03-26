@@ -891,9 +891,10 @@ fn resolve_hosts(
                     })
                     .collect();
                 if !port_parse_ok {
-                    // At least one port token was invalid.  Fall through to the
-                    // single-host path so the user gets a clear error rather
-                    // than a silent wrong-port connection.
+                    // At least one port token was invalid.  Populate hosts from
+                    // the already-resolved single-host fields so the caller
+                    // always gets a valid host list, then return.
+                    params.hosts = vec![(params.host.clone(), params.port)];
                     return;
                 }
 
@@ -4533,11 +4534,16 @@ host=myhost
             ..Default::default()
         };
         // Should not panic; the invalid port causes the multi-host path to be
-        // abandoned, so port 0 must never appear in the resulting host list.
+        // abandoned.  The resulting host list must reflect the single-host
+        // fallback (params.host / params.port), not stale defaults.
         let params = resolve_params(&opts).unwrap();
-        for (_, port) in &params.hosts {
-            assert_ne!(*port, 0, "port 0 must not appear in hosts list");
-        }
+        assert_eq!(
+            params.hosts,
+            vec![(params.host.clone(), params.port)],
+            "hosts must contain the single-host fallback on invalid port"
+        );
+        assert_eq!(params.port, 5432, "port must be the resolved single-host port");
+        assert!(!params.host.is_empty(), "host must not be empty");
     }
 
     /// Single CLI host still works as before (regression guard).
