@@ -1,7 +1,7 @@
 //! Data layer for `/ash`.
 //!
 //! Polls `pg_stat_activity` for live data and optionally queries
-//! `ash.samples` when pg_ash is installed.
+//! `ash.samples` when `pg_ash` is installed.
 
 // Structs and functions are not yet fully wired to the TUI entry point;
 // suppress dead-code warnings until integration is complete.
@@ -17,7 +17,7 @@ use tokio_postgres::Client;
 // ---------------------------------------------------------------------------
 
 /// A single point-in-time sample of active session counts, aggregated from
-/// `pg_stat_activity` (or `ash.samples` when pg_ash is available).
+/// `pg_stat_activity` (or `ash.samples` when `pg_ash` is available).
 #[derive(Debug, Default, Clone)]
 pub struct AshSnapshot {
     /// Unix timestamp (seconds) when the sample was taken.
@@ -26,22 +26,22 @@ pub struct AshSnapshot {
     pub active_count: u32,
     /// Counts grouped by `wait_event_type` (e.g. "Lock", "IO", "CPU*").
     ///
-    /// Key: wait_event_type string.
+    /// Key: `wait_event_type` string.
     pub by_type: HashMap<String, u32>,
     /// Counts grouped by `wait_event_type/wait_event` composite key.
     ///
     /// Key format: `"<wait_event_type>/<wait_event>"`.
-    /// For CPU* rows the wait_event portion is empty: `"CPU*/"`.
+    /// For CPU* rows the `wait_event` portion is empty: `"CPU*/"`.
     pub by_event: HashMap<String, u32>,
     /// Counts grouped by `wait_event_type/wait_event/query_label` composite key.
     ///
     /// Key format: `"<wait_event_type>/<wait_event>/<query_label>"`.
-    /// query_label is the truncated query text (first 80 chars), or the
-    /// decimal representation of query_id when the text is empty.
+    /// `query_label` is the truncated query text (first 80 chars), or the
+    /// decimal representation of `query_id` when the text is empty.
     pub by_query: HashMap<String, u32>,
 }
 
-/// Detection result for the pg_ash extension.
+/// Detection result for the `pg_ash` extension.
 #[derive(Debug, Clone)]
 pub struct PgAshInfo {
     pub installed: bool,
@@ -52,7 +52,7 @@ pub struct PgAshInfo {
 // Public functions
 // ---------------------------------------------------------------------------
 
-/// Detect whether the pg_ash extension is installed and read its config.
+/// Detect whether the `pg_ash` extension is installed and read its config.
 pub async fn detect_pg_ash(client: &Client) -> PgAshInfo {
     let installed: bool = match client
         .query_one(
@@ -62,11 +62,19 @@ pub async fn detect_pg_ash(client: &Client) -> PgAshInfo {
         .await
     {
         Ok(row) => row.get(0),
-        Err(_) => return PgAshInfo { installed: false, retention_seconds: None },
+        Err(_) => {
+            return PgAshInfo {
+                installed: false,
+                retention_seconds: None,
+            }
+        }
     };
 
     if !installed {
-        return PgAshInfo { installed: false, retention_seconds: None };
+        return PgAshInfo {
+            installed: false,
+            retention_seconds: None,
+        };
     }
 
     let retention_seconds = client
@@ -78,7 +86,10 @@ pub async fn detect_pg_ash(client: &Client) -> PgAshInfo {
         .ok()
         .map(|row| row.get::<_, i64>(0));
 
-    PgAshInfo { installed: true, retention_seconds }
+    PgAshInfo {
+        installed: true,
+        retention_seconds,
+    }
 }
 
 /// Take a live snapshot by querying `pg_stat_activity`.
@@ -109,10 +120,12 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
 
-    let mut snap = AshSnapshot { ts, ..Default::default() };
+    let mut snap = AshSnapshot {
+        ts,
+        ..Default::default()
+    };
 
     for row in &rows {
         let wtype: String = row.get(0);
@@ -120,7 +133,7 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
         let query_id: Option<i64> = row.get(2);
         let q: String = row.get(3);
         let cnt: i32 = row.get(4);
-        let count = cnt.max(0) as u32;
+        let count = u32::try_from(cnt.max(0)).unwrap_or(0);
 
         fold_row(&mut snap, &wtype, &wevent, query_id, &q, count);
     }
@@ -128,12 +141,12 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
     Ok(snap)
 }
 
-/// Return historical snapshots from pg_ash if installed.
+/// Return historical snapshots from `pg_ash` if installed.
 ///
-/// TODO: pg_ash v1.2 encodes `ash.samples.data` as an opaque `int[]` whose
+/// TODO: `pg_ash` v1.2 encodes `ash.samples.data` as an opaque `int[]` whose
 /// layout is not yet publicly documented.  Until the encoding is specified,
 /// this function returns an empty vec rather than producing incorrect data.
-/// Track upstream: https://github.com/NikolayS/rpg/issues/753
+/// Track upstream: <https://github.com/NikolayS/rpg/issues/753>
 pub async fn history_snapshots(
     client: &Client,
     from: SystemTime,
@@ -176,9 +189,7 @@ fn fold_row(
     // by_query: "<wtype>/<wevent>/<query_label>"
     // Use truncated query text; fall back to query_id decimal when text is empty.
     let query_label: String = if q.is_empty() {
-        query_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "(unknown)".to_owned())
+        query_id.map_or_else(|| "(unknown)".to_owned(), |id| id.to_string())
     } else {
         q.to_owned()
     };

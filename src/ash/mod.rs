@@ -9,7 +9,7 @@
 //! mod.rs       — public entry point: run_ash()
 //! ```
 //!
-//! # Color scheme (matches pg_ash)
+//! # Color scheme (matches `pg_ash`)
 //!
 //! | wait_event_type          | Color        |
 //! |--------------------------|--------------|
@@ -24,20 +24,188 @@ pub mod renderer;
 pub mod sampler;
 pub mod state;
 
+use std::collections::VecDeque;
+use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio_postgres::Client;
 
 use crate::repl::ReplSettings;
 
 pub use state::AshState;
 
-/// Entry point. Blocks until the user exits with `q` or `Esc`.
-pub async fn run_ash(
-    _client: &Client,
-    _settings: &ReplSettings,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: implemented in state.rs / renderer.rs
-    let _ = Duration::from_secs(1);
-    Err("ash: not yet implemented".into())
+// ---------------------------------------------------------------------------
+// TerminalGuard — RAII wrapper (same pattern as history_picker.rs)
+// ---------------------------------------------------------------------------
+
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(b"\x1b[H\x1b[2J\x1b[H");
+        let _ = stdout.flush();
+        let _ = io::stderr().write_all(b"\x1b[r");
+        let _ = io::stderr().flush();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+/// Entry point. Blocks until the user exits with `q`, `Esc`, or `Ctrl-C`.
+pub async fn run_ash(client: &Client, settings: &ReplSettings) -> anyhow::Result<()> {
+    if !io::stdout().is_terminal() {
+        anyhow::bail!("/ash requires an interactive terminal");
+    }
+
+    let pg_ash = sampler::detect_pg_ash(client).await;
+    let mut state = AshState::new(pg_ash.installed);
+    let mut snapshots: VecDeque<sampler::AshSnapshot> = VecDeque::with_capacity(60);
+
+    let no_color = settings.no_highlight;
+
+    let _guard = TerminalGuard::new()?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    loop {
+        // 1. Take a live snapshot and push to ring buffer (cap 60).
+        if let Ok(snap) = sampler::live_snapshot(client).await {
+            if snapshots.len() == 60 {
+                snapshots.pop_front();
+            }
+            snapshots.push_back(snap);
+        }
+        // On transient errors: ring buffer retains prior data; keep looping.
+
+        // 2. Draw frame.
+        let snap_slice: Vec<sampler::AshSnapshot> = snapshots.iter().cloned().collect();
+        terminal.draw(|f| {
+            renderer::draw_frame(f, &snap_slice, &state, no_color);
+        })?;
+
+        // 3. Poll crossterm events with timeout = refresh_interval_secs.
+        let timeout = Duration::from_secs(state.refresh_interval_secs);
+        if event::poll(timeout)? {
+            if let Event::Key(key) = event::read()? {
+                // 5. Enter: drill into selected row.
+                if key.code == KeyCode::Enter {
+                    // Compute row data from the current snapshot for drill_into.
+                    if let Some(last) = snap_slice.last() {
+                        if let Some((wtype, wevent, qid)) = collect_selected_row_data(last, &state)
+                        {
+                            state.drill_into(&wtype, &wevent, qid);
+                        }
+                    }
+                    continue;
+                }
+
+                // 4. All other keys go through handle_key; true = exit.
+                let list_len = compute_list_len(&snap_slice, &state);
+                if state.handle_key(key, list_len) {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Return the number of rows in the current drill-down level.
+fn compute_list_len(snapshots: &[sampler::AshSnapshot], state: &AshState) -> usize {
+    use state::DrillLevel;
+    let Some(snap) = snapshots.last() else {
+        return 0;
+    };
+    match &state.level {
+        DrillLevel::WaitType => snap.by_type.len(),
+        DrillLevel::WaitEvent { selected_type } => {
+            let prefix = format!("{selected_type}/");
+            snap.by_event
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
+        }
+        DrillLevel::QueryId { selected_event, .. } => {
+            let prefix = format!("{selected_event}/");
+            snap.by_query
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
+        }
+        DrillLevel::Pid { .. } => 0,
+    }
+}
+
+/// Extract (`wait_type`, `wait_event`, `query_id`) for the currently selected row.
+///
+/// Returns None when there are no snapshots or the level is Pid (no-op).
+fn collect_selected_row_data(
+    snap: &sampler::AshSnapshot,
+    state: &AshState,
+) -> Option<(String, String, Option<i64>)> {
+    use state::DrillLevel;
+
+    match &state.level {
+        DrillLevel::WaitType => {
+            // Sort by count descending, then pick state.selected_row.
+            let mut entries: Vec<(&String, &u32)> = snap.by_type.iter().collect();
+            entries.sort_by(|a, b| b.1.cmp(a.1));
+            let (wtype, _) = entries.get(state.selected_row)?;
+            Some(((*wtype).clone(), String::new(), None))
+        }
+        DrillLevel::WaitEvent { selected_type } => {
+            let prefix = format!("{selected_type}/");
+            let mut entries: Vec<(&String, &u32)> = snap
+                .by_event
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .collect();
+            entries.sort_by(|a, b| b.1.cmp(a.1));
+            let (key, _) = entries.get(state.selected_row)?;
+            let wevent = (*key).strip_prefix(&prefix).unwrap_or("").to_owned();
+            Some((selected_type.clone(), wevent, None))
+        }
+        DrillLevel::QueryId {
+            selected_type,
+            selected_event,
+        } => {
+            let prefix = format!("{selected_type}/{selected_event}/");
+            let mut entries: Vec<(&String, &u32)> = snap
+                .by_query
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .collect();
+            entries.sort_by(|a, b| b.1.cmp(a.1));
+            let (key, _) = entries.get(state.selected_row)?;
+            // Try to parse query label as a numeric query_id.
+            let label = (*key).strip_prefix(&prefix).unwrap_or("");
+            let qid: Option<i64> = label.parse().ok();
+            Some((selected_type.clone(), selected_event.clone(), qid))
+        }
+        DrillLevel::Pid { .. } => None,
+    }
 }

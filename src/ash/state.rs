@@ -1,9 +1,9 @@
 //! Drill-down state machine for `/ash`.
 //!
 //! Manages the four drill-down levels:
-//!   1. wait_event_type
-//!   2. wait_event
-//!   3. query_id
+//!   1. `wait_event_type`
+//!   2. `wait_event`
+//!   3. `query_id`
 //!   4. pid
 //!
 //! Also manages zoom/time-range for history mode.
@@ -15,28 +15,28 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Drill-down depth within the ASH view.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DrillLevel {
-    /// Top level: grouped by wait_event_type.
+    /// Top level: grouped by `wait_event_type`.
     #[default]
     WaitType,
-    /// Second level: grouped by wait_event, filtered to one type.
+    /// Second level: grouped by `wait_event`, filtered to one type.
     WaitEvent {
-        /// The wait_event_type that was selected at the previous level.
+        /// The `wait_event_type` that was selected at the previous level.
         selected_type: String,
     },
-    /// Third level: grouped by query_id, filtered to one event.
+    /// Third level: grouped by `query_id`, filtered to one event.
     QueryId {
-        /// The wait_event_type selected two levels up.
+        /// The `wait_event_type` selected two levels up.
         selected_type: String,
-        /// The wait_event that was selected at the previous level.
+        /// The `wait_event` that was selected at the previous level.
         selected_event: String,
     },
     /// Fourth level: individual PIDs.
     Pid {
-        /// The wait_event_type selected three levels up.
+        /// The `wait_event_type` selected three levels up.
         selected_type: String,
-        /// The wait_event selected two levels up.
+        /// The `wait_event` selected two levels up.
         selected_event: String,
-        /// The query_id selected at the previous level (may be None).
+        /// The `query_id` selected at the previous level (may be None).
         selected_query_id: Option<i64>,
     },
 }
@@ -45,10 +45,7 @@ pub enum DrillLevel {
 #[derive(Debug, Clone)]
 pub enum ViewMode {
     Live,
-    History {
-        from: SystemTime,
-        to: SystemTime,
-    },
+    History { from: SystemTime, to: SystemTime },
 }
 
 /// Minimum allowed history window (seconds).
@@ -68,11 +65,11 @@ pub struct AshState {
     /// Refresh interval in seconds. Valid values: 1, 5, 10.
     pub refresh_interval_secs: u64,
     /// True when `pg_ash` extension is installed and available.
+    #[allow(dead_code)]
     pub pg_ash_installed: bool,
 
     // --- renderer-compatible aliases kept in sync with `mode` and
     //     `refresh_interval_secs` to avoid breaking renderer.rs ---
-
     /// True when `mode` is `ViewMode::History`. Mirrors `mode`.
     pub is_history: bool,
     /// Refresh interval cast to u32 for renderer display. Mirrors
@@ -96,7 +93,7 @@ impl AshState {
     /// Sync the renderer-alias fields from the canonical fields.
     fn sync_aliases(&mut self) {
         self.is_history = matches!(self.mode, ViewMode::History { .. });
-        self.refresh_secs = self.refresh_interval_secs as u32;
+        self.refresh_secs = u32::try_from(self.refresh_interval_secs).unwrap_or(u32::MAX);
     }
 
     /// Handle a key event. Returns `true` if the application should exit.
@@ -104,8 +101,7 @@ impl AshState {
         // Exit keys.
         if key.code == KeyCode::Char('q')
             || key.code == KeyCode::Esc
-            || (key.code == KeyCode::Char('c')
-                && key.modifiers.contains(KeyModifiers::CONTROL))
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             return true;
         }
@@ -121,9 +117,7 @@ impl AshState {
                     self.selected_row += 1;
                 }
             }
-            KeyCode::Enter => {
-                // Caller is responsible for calling drill_into with row data.
-            }
+            // Enter: caller is responsible for calling drill_into with row data.
             KeyCode::Char('b') => {
                 self.go_back();
             }
@@ -144,7 +138,7 @@ impl AshState {
 
     /// Advance one drill-down level using the provided row data.
     ///
-    /// The caller supplies the type, event, and optional query_id that apply
+    /// The caller supplies the type, event, and optional `query_id` that apply
     /// to the currently selected row.
     pub fn drill_into(
         &mut self,
@@ -174,8 +168,7 @@ impl AshState {
     /// Retreat one drill-down level; clamps at `WaitType`.
     pub fn go_back(&mut self) {
         self.level = match &self.level {
-            DrillLevel::WaitType => DrillLevel::WaitType,
-            DrillLevel::WaitEvent { .. } => DrillLevel::WaitType,
+            DrillLevel::WaitType | DrillLevel::WaitEvent { .. } => DrillLevel::WaitType,
             DrillLevel::QueryId { selected_type, .. } => DrillLevel::WaitEvent {
                 selected_type: selected_type.clone(),
             },

@@ -479,20 +479,15 @@ pub(super) async fn dispatch_ai_command(
             interpret_dba_output(context, subcommand, settings).await;
         }
 
-    // /ash — active session history (requires pg_ash extension).
+    // /ash — active session history TUI.
     } else if input == "/ash" || input.starts_with("/ash ") {
-        let rest = input.strip_prefix("/ash").map_or("", str::trim);
-        let caps = settings.db_capabilities.clone();
-        let ai_context = crate::dba::execute(
-            client,
-            format!("ash {rest}").trim(),
-            false,
-            Some(&caps),
-            settings,
-        )
-        .await;
-        if let Some(ref context) = ai_context {
-            interpret_dba_output(context, "ash", settings).await;
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            eprintln!("/ash requires an interactive terminal");
+            return None;
+        }
+        if let Err(e) = crate::ash::run_ash(client, settings).await {
+            eprintln!("/ash: {e}");
         }
 
     // /sql — switch to SQL input mode.
@@ -746,6 +741,7 @@ pub(super) async fn dispatch_ai_command(
              Modes: /sql, /text2sql, /t2s, /plan, /yolo, /interactive, /mode\n\
              Queries: /ns, /n, /n+, /nd, /np\n\
              REPL: /profiles, /refresh, /session, /log-file, /explain-share, /commands, /version, /f2-f5"
+
         );
     }
 

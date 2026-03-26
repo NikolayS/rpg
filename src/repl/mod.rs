@@ -1807,6 +1807,7 @@ AI commands:
   /clear            clear AI conversation context
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
+  /ash              show live Active Session History (poll pg_stat_activity; uses pg_ash if installed)
 
 DBA diagnostics:
   /dba               show available diagnostics
