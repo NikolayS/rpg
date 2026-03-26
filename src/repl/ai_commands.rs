@@ -465,8 +465,7 @@ pub(super) async fn dispatch_ai_command(
         let plus = subcommand.ends_with('+');
         let subcommand = subcommand.trim_end_matches('+').trim();
         let caps = settings.db_capabilities.clone();
-        let ai_context =
-            crate::dba::execute(client, subcommand, plus, Some(&caps), settings).await;
+        let ai_context = crate::dba::execute(client, subcommand, plus, Some(&caps), settings).await;
         if let Some(ref context) = ai_context {
             interpret_dba_output(context, subcommand, settings).await;
         }
@@ -475,8 +474,14 @@ pub(super) async fn dispatch_ai_command(
     } else if input == "/ash" || input.starts_with("/ash ") {
         let rest = input.strip_prefix("/ash").map(str::trim).unwrap_or("");
         let caps = settings.db_capabilities.clone();
-        let ai_context =
-            crate::dba::execute(client, &format!("ash {rest}").trim().to_owned(), false, Some(&caps), settings).await;
+        let ai_context = crate::dba::execute(
+            client,
+            &format!("ash {rest}").trim().to_owned(),
+            false,
+            Some(&caps),
+            settings,
+        )
+        .await;
         if let Some(ref context) = ai_context {
             interpret_dba_output(context, "ash", settings).await;
         }
@@ -555,7 +560,11 @@ pub(super) async fn dispatch_ai_command(
             "save" => dispatch_session_save(
                 params,
                 &settings.session_id,
-                if arg.is_empty() { None } else { Some(arg.as_str()) },
+                if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.as_str())
+                },
                 settings.query_count,
             ),
             "delete" | "del" => {
@@ -577,7 +586,11 @@ pub(super) async fn dispatch_ai_command(
 
     // /log-file [path] — start or stop query audit logging.
     } else if let Some(rest) = input.strip_prefix("/log-file").map(str::trim) {
-        let path = if rest.is_empty() { None } else { Some(rest.to_owned()) };
+        let path = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_owned())
+        };
         let parsed = crate::metacmd::ParsedMeta {
             cmd: crate::metacmd::MetaCmd::LogFile(path),
             plus: false,
@@ -709,10 +722,7 @@ pub(super) async fn dispatch_ai_command(
             let mut parts = rest.splitn(2, char::is_whitespace);
             let name = parts.next().unwrap_or("").to_owned();
             let args_str = parts.next().unwrap_or("").trim();
-            let args: Vec<String> = args_str
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect();
+            let args: Vec<String> = args_str.split_whitespace().map(str::to_owned).collect();
             let nq = crate::named::NamedQueries::load();
             match nq.get(&name) {
                 Some(query) => {
@@ -723,7 +733,6 @@ pub(super) async fn dispatch_ai_command(
                 None => eprintln!("/n: unknown query \"{name}\""),
             }
         }
-
     } else {
         eprintln!(
             "Unknown command: {input}\n\

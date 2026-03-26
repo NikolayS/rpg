@@ -3874,7 +3874,11 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
 /// plain text (which is the common case), the function extracts the inner
 /// query from `last_query`, re-executes it as
 /// `EXPLAIN (ANALYZE, FORMAT JSON) <inner_query>`, and uploads the JSON.
-pub(super) async fn dispatch_explain_share(client: &Client, settings: &mut ReplSettings, service: &str) {
+pub(super) async fn dispatch_explain_share(
+    client: &Client,
+    settings: &mut ReplSettings,
+    service: &str,
+) {
     let plan_text = match settings.last_explain_text.as_deref() {
         Some(t) if !t.is_empty() => t.to_owned(),
         _ => {
