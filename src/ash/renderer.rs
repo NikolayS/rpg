@@ -18,27 +18,63 @@ use crate::ash::state::{AshState, DrillLevel};
 // Color scheme — exact 24-bit RGB values matching pg_ash COLOR_SCHEME.md
 // ---------------------------------------------------------------------------
 
+/// Detect whether the terminal supports 24-bit truecolor.
+///
+/// Checks `COLORTERM=truecolor|24bit` (the standard advertisement).  Falls
+/// back to false so 256-color terminals get the indexed palette.
+fn terminal_has_truecolor() -> bool {
+    matches!(
+        std::env::var("COLORTERM")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "truecolor" | "24bit"
+    )
+}
+
 /// Return the color for a given `wait_event_type` string.
 ///
-/// When `no_color` is true (or the `NO_COLOR` environment variable is set),
-/// `Color::Reset` is returned, leaving styling to terminal defaults.
+/// Uses 24-bit RGB when the terminal advertises truecolor (`COLORTERM=truecolor`),
+/// otherwise falls back to the closest xterm-256 index so the chart looks
+/// correct in standard 256-color terminals (e.g. remote SSH without truecolor).
+///
+/// When `no_color` is true (or `NO_COLOR` is set), returns `Color::Reset`.
 pub fn wait_type_color(wait_event_type: &str, no_color: bool) -> Color {
     if no_color || std::env::var_os("NO_COLOR").is_some() {
         return Color::Reset;
     }
-    match wait_event_type {
-        "CPU*" => Color::Rgb(80, 250, 123),       // green
-        "IdleTx" => Color::Rgb(241, 250, 140),    // light yellow
-        "IO" => Color::Rgb(30, 100, 255),         // vivid blue
-        "Lock" => Color::Rgb(255, 85, 85),        // red
-        "LWLock" => Color::Rgb(255, 121, 198),    // pink
-        "IPC" => Color::Rgb(0, 200, 255),         // cyan
-        "Client" => Color::Rgb(255, 220, 100),    // yellow
-        "Timeout" => Color::Rgb(255, 165, 0),     // orange
-        "BufferPin" => Color::Rgb(0, 210, 180),   // teal
-        "Activity" => Color::Rgb(150, 100, 255),  // purple
-        "Extension" => Color::Rgb(190, 150, 255), // light purple
-        _ => Color::Rgb(180, 180, 180),           // gray
+    if terminal_has_truecolor() {
+        // Exact 24-bit RGB matching pg_ash COLOR_SCHEME.md.
+        match wait_event_type {
+            "CPU*" => Color::Rgb(80, 250, 123),
+            "IdleTx" => Color::Rgb(241, 250, 140),
+            "IO" => Color::Rgb(30, 100, 255),
+            "Lock" => Color::Rgb(255, 85, 85),
+            "LWLock" => Color::Rgb(255, 121, 198),
+            "IPC" => Color::Rgb(0, 200, 255),
+            "Client" => Color::Rgb(255, 220, 100),
+            "Timeout" => Color::Rgb(255, 165, 0),
+            "BufferPin" => Color::Rgb(0, 210, 180),
+            "Activity" => Color::Rgb(150, 100, 255),
+            "Extension" => Color::Rgb(190, 150, 255),
+            _ => Color::Rgb(180, 180, 180),
+        }
+    } else {
+        // Nearest xterm-256 indices — visually close, work everywhere.
+        match wait_event_type {
+            "CPU*" => Color::Indexed(84),       // bright green
+            "IdleTx" => Color::Indexed(228),    // light yellow
+            "IO" => Color::Indexed(27),         // vivid blue
+            "Lock" => Color::Indexed(203),      // coral red
+            "LWLock" => Color::Indexed(212),    // pink
+            "IPC" => Color::Indexed(45),        // cyan
+            "Client" => Color::Indexed(221),    // yellow
+            "Timeout" => Color::Indexed(214),   // orange
+            "BufferPin" => Color::Indexed(43),  // teal
+            "Activity" => Color::Indexed(135),  // purple
+            "Extension" => Color::Indexed(183), // light purple
+            _ => Color::Indexed(246),           // gray
+        }
     }
 }
 
@@ -125,16 +161,15 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
                 }
             }
 
-            // Apply the global stable order — types absent in this bucket get 0.
+            // Apply the global stable order — include ALL types, even absent ones
+            // (aas = 0.0).  Zero-height entries reserve their vertical slot so
+            // the position of every type is frame-stable; the renderer skips
+            // zero-aas entries when building segments.
             let by_type: Vec<(String, f64)> = global_order
                 .iter()
-                .filter_map(|&k| {
+                .map(|&k| {
                     let aas = type_sums.get(k).copied().unwrap_or(0.0) / n;
-                    if aas > 0.0 {
-                        Some((k.to_owned(), aas))
-                    } else {
-                        None
-                    }
+                    (k.to_owned(), aas)
                 })
                 .collect();
 
