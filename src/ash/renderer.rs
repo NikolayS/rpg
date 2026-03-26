@@ -92,6 +92,24 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
         chunks.drain(..drop);
     }
 
+    // Compute global type totals across ALL buckets to establish a stable
+    // ordering.  The same order is applied to every bucket so dominant types
+    // always occupy the same vertical position — bars don't jump as load shifts.
+    let mut global_totals: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for snap in snapshots {
+        for (k, &v) in &snap.by_type {
+            *global_totals.entry(k.as_str()).or_insert(0.0) += f64::from(v);
+        }
+    }
+    // Stable order: highest global total first (= bottom of bar), tie-break by name.
+    let mut global_order: Vec<&str> = global_totals.keys().copied().collect();
+    global_order.sort_by(|a, b| {
+        global_totals[b]
+            .partial_cmp(&global_totals[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+
     chunks
         .into_iter()
         .map(|chunk| {
@@ -107,13 +125,18 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
                 }
             }
 
-            // Convert sums to average-per-sample (= AAS for this type).
-            let mut by_type: Vec<(String, f64)> = type_sums
-                .into_iter()
-                .map(|(k, s)| (k.to_owned(), s / n))
+            // Apply the global stable order — types absent in this bucket get 0.
+            let by_type: Vec<(String, f64)> = global_order
+                .iter()
+                .filter_map(|&k| {
+                    let aas = type_sums.get(k).copied().unwrap_or(0.0) / n;
+                    if aas > 0.0 {
+                        Some((k.to_owned(), aas))
+                    } else {
+                        None
+                    }
+                })
                 .collect();
-            // Sort ascending by aas so bottom-of-bar = busiest type.
-            by_type.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             #[allow(clippy::cast_precision_loss)]
             let aas: f64 = by_type.iter().map(|(_, v)| v).sum();
