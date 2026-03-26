@@ -179,7 +179,10 @@ mod tests {
         let line = "  ->  Hash Join  (cost=0.00..100.00 rows=1000 width=8)";
         let result = highlight_line(line);
         assert!(result.contains("Hash Join"), "Hash Join text preserved");
-        assert!(result.contains("\x1b[1;36m"), "Hash Join should be highlighted");
+        assert!(
+            result.contains("\x1b[1;36m"),
+            "Hash Join should be highlighted"
+        );
     }
 
     #[test]
@@ -193,6 +196,9 @@ mod tests {
             "should not have adjacent double reset codes"
         );
         assert!(result.contains("\x1b[31m"), "slow time should be red");
-        assert!(result.contains("\x1b[1;36m"), "node type should be cyan bold");
+        assert!(
+            result.contains("\x1b[1;36m"),
+            "node type should be cyan bold"
+        );
     }
 }
