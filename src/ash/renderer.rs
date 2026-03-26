@@ -147,7 +147,7 @@ fn collect_drill_rows(
             rows.sort_by(|a, b| b.count.cmp(&a.count));
             rows
         }
-        DrillLevel::QueryId { selected_event } => {
+        DrillLevel::QueryId { selected_event, .. } => {
             let prefix = format!("{selected_event}/");
             let mut rows: Vec<DrillRow> = snap
                 .by_query
@@ -165,7 +165,7 @@ fn collect_drill_rows(
             rows.sort_by(|a, b| b.count.cmp(&a.count));
             rows
         }
-        DrillLevel::Pid => Vec::new(),
+        DrillLevel::Pid { .. } => Vec::new(),
     }
 }
 
@@ -283,7 +283,7 @@ pub fn draw_frame(
     let table_inner = table_block.inner(chunks[2]);
     frame.render_widget(table_block, chunks[2]);
 
-    if matches!(state.level, DrillLevel::Pid) {
+    if matches!(state.level, DrillLevel::Pid { .. }) {
         frame.render_widget(
             Paragraph::new("pid-level drill-down: coming soon"),
             table_inner,

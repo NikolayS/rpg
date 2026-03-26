@@ -28,13 +28,16 @@ use std::time::Duration;
 
 use tokio_postgres::Client;
 
-use crate::config::Settings;
+use crate::repl::ReplSettings;
 
 pub use state::AshState;
 
 /// Entry point. Blocks until the user exits with `q` or `Esc`.
-pub async fn run_ash(_client: &Client, _settings: &Settings) -> anyhow::Result<()> {
+pub async fn run_ash(
+    _client: &Client,
+    _settings: &ReplSettings,
+) -> Result<(), Box<dyn std::error::Error>> {
     // TODO: implemented in state.rs / renderer.rs
     let _ = Duration::from_secs(1);
-    anyhow::bail!("/ash: not yet implemented")
+    Err("ash: not yet implemented".into())
 }
