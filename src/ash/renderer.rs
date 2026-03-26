@@ -4,7 +4,7 @@
 //! drill-down table with Time / %DB Time / AAS / Bar columns.
 
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -134,10 +134,52 @@ struct Segment {
     top: usize,
 }
 
+/// Width reserved for the Y-axis label column (e.g. " 9.9 ").
+const YAXIS_WIDTH: u16 = 5;
+
+/// Build Y-axis label lines for the timeline.
+///
+/// Returns `chart_height` lines, each containing a right-aligned AAS value
+/// at the top, midpoint, and bottom; other rows are blank.  The labels are
+/// formatted as right-aligned 4-char strings (e.g. " 9.9", "19.1").
+fn build_yaxis_lines(max_aas: f64, chart_height: usize) -> Vec<Line<'static>> {
+    let h = chart_height.max(1);
+    let label_style = Style::default().fg(Color::DarkGray);
+
+    // Positions (row_from_top, 0-indexed) where we place a label.
+    // top=0, mid=h/2, bottom=h-1.
+    let labeled_rows: [(usize, f64); 3] = [
+        (0, max_aas),
+        (h / 2, max_aas / 2.0),
+        (h.saturating_sub(1), 0.0),
+    ];
+
+    (0..h)
+        .map(|row| {
+            if let Some(&(_, val)) = labeled_rows.iter().find(|(r, _)| *r == row) {
+                // Format: at most 4 chars + trailing space = 5 total.
+                let s = if val == 0.0 {
+                    "   0 ".to_owned()
+                } else if val < 10.0 {
+                    format!("{val:4.1} ")
+                } else {
+                    format!("{val:4.0} ")
+                };
+                Line::from(Span::styled(s, label_style))
+            } else {
+                Line::from(Span::styled("     ", label_style))
+            }
+        })
+        .collect()
+}
+
 /// Render the scrolling stacked-bar timeline into a vec of `Line`s.
 ///
 /// Each column is a stacked bar: bottom rows belong to the most-active wait
 /// type, then the next, etc.  A horizontal dashed line marks the CPU count.
+///
+/// Returns `(lines, max_aas)` — the lines and the computed scale maximum so
+/// the caller can pass `max_aas` to `build_yaxis_lines`.
 ///
 /// * `chart_height` — available rows (excluding border).
 /// * `chart_width`  — available columns (excluding border).
@@ -149,7 +191,7 @@ fn build_timeline_lines(
     chart_width: usize,
     cpu_count: u32,
     no_color: bool,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, f64) {
     let h = chart_height.max(1);
     let w = chart_width.max(1);
 
@@ -255,7 +297,7 @@ fn build_timeline_lines(
         lines.push(Line::from(spans));
     }
 
-    lines
+    (lines, max_aas)
 }
 
 // ---------------------------------------------------------------------------
@@ -498,15 +540,28 @@ fn render_timeline(
     let timeline_block = Block::default().borders(Borders::ALL).title(timeline_title);
     let timeline_inner = timeline_block.inner(area);
     frame.render_widget(timeline_block, area);
-    let tl_lines = build_timeline_lines(
+
+    // Split inner area: narrow Y-axis label column on the left, bars on the right.
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(YAXIS_WIDTH), Constraint::Min(1)])
+        .split(timeline_inner);
+
+    let bar_area = h_chunks[1];
+    let yaxis_area = h_chunks[0];
+
+    let (tl_lines, max_aas) = build_timeline_lines(
         snapshots,
         state,
-        timeline_inner.height as usize,
-        timeline_inner.width as usize,
+        bar_area.height as usize,
+        bar_area.width as usize,
         cpu_count,
         no_color,
     );
-    frame.render_widget(Paragraph::new(tl_lines), timeline_inner);
+    frame.render_widget(Paragraph::new(tl_lines), bar_area);
+
+    let yaxis_lines = build_yaxis_lines(max_aas, yaxis_area.height as usize);
+    frame.render_widget(Paragraph::new(yaxis_lines), yaxis_area);
 }
 
 /// Render the drill-down table band (chunk[3]) inside `draw_frame`.
