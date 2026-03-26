@@ -12,7 +12,7 @@ Single binary, no dependencies, cross-platform.
 
 - **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
-- **DBA diagnostics** — 15+ `\dba` commands for activity, locks, bloat, indexes
+- **DBA diagnostics** — 15+ `/dba` commands for activity, locks, bloat, indexes
 - **Schema-aware completion** — tab completion for tables, columns, keywords
 - **TUI pager** — scrollable pager for large result sets
 - **Syntax highlighting** — SQL keywords, strings, operators; color-coded errors (red), warnings (yellow), notices (cyan)
@@ -79,12 +79,12 @@ select * from orders where status = 'pending';
 | `/compact [focus]` | Compact conversation context (optional focus topic) |
 | `/budget` | Show token usage and remaining budget |
 
-### \text2sql — natural language to SQL
+### /text2sql — natural language to SQL
 
 By default, the generated SQL is shown in a preview box and you confirm before it runs:
 
 ```
-postgres=# \text2sql
+postgres=# /text2sql
 Input mode: text2sql
 postgres=# what is DB size?
 ┌── sql
@@ -97,14 +97,14 @@ Execute? [Y/n/e]
 (1 row)
 ```
 
-### \yolo — fast natural-language mode
+### /yolo — fast natural-language mode
 
-`\yolo` combines text2sql and silent auto-execute in one command: it enables
+`/yolo` combines text2sql and silent auto-execute in one command: it enables
 text2sql input, hides the SQL preview box, and executes immediately without
 confirmation.
 
 ```
-postgres=# \yolo
+postgres=# /yolo
 Execution mode: yolo
 postgres=# what is DB size?
  db_size
@@ -113,12 +113,12 @@ postgres=# what is DB size?
 (1 row)
 ```
 
-Toggle back with `\sql` or `\interactive`. Show/hide the SQL preview box with
+Toggle back with `/sql` or `/interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
-![\\t2s text-to-SQL mode and \\yolo auto-execute mode in action](demos/gif3_t2s.gif)
+![/t2s text-to-SQL mode and /yolo auto-execute mode in action](demos/gif3_t2s.gif)
 
-*`\t2s` shows a SQL preview with confirmation; `\yolo` skips the preview and executes immediately.*
+*`/t2s` shows a SQL preview with confirmation; `/yolo` skips the preview and executes immediately.*
 
 ### /fix — auto-correct errors
 
@@ -169,9 +169,9 @@ postgres=# /optimize
 Upload the last EXPLAIN plan to an external visualizer:
 
 ```
-\explain share depesz     → posts to explain.depesz.com
-\explain share dalibo     → posts to explain.dalibo.com
-\explain share pgmustard  → posts to pgMustard (requires PGMUSTARD_API_KEY)
+/explain-share depesz     → posts to explain.depesz.com
+/explain-share dalibo     → posts to explain.dalibo.com
+/explain-share pgmustard  → posts to pgMustard (requires PGMUSTARD_API_KEY)
 ```
 
 ### EXPLAIN display format
@@ -269,36 +269,36 @@ rpg.register_command({
 })
 ```
 
-Run the command with `\slow_mean`. List all loaded custom commands with `\commands`.
+Run the command with `/slow_mean`. List all loaded custom commands with `/commands`.
 
 More examples are in the [`examples/commands/`](examples/commands/) directory.
 
 ## DBA diagnostics
 
-15+ diagnostic commands accessible via `\dba`:
+15+ diagnostic commands accessible via `/dba`:
 
 ```
-postgres=# \dba
-  \dba activity    pg_stat_activity: grouped by state, duration, wait events
-  \dba locks       Lock tree (blocked/blocking)
-  \dba waits       Wait event breakdown (+ for AI interpretation)
-  \dba bloat       Table bloat estimates
-  \dba vacuum      Vacuum status and dead tuples
-  \dba tablesize   Largest tables
-  \dba connections Connection counts by state
-  \dba indexes     Index health (unused, redundant, invalid, bloated)
-  \dba seq-scans   Tables with high sequential scan ratio
-  \dba cache-hit   Buffer cache hit ratios
-  \dba replication Replication slot status
-  \dba config      Non-default configuration parameters
-  \dba progress    Long-running operation progress (pg_stat_progress_*)
-  \dba io          I/O statistics by backend type (PG 16+)
+postgres=# /dba
+  /dba activity    pg_stat_activity: grouped by state, duration, wait events
+  /dba locks       Lock tree (blocked/blocking)
+  /dba waits       Wait event breakdown (+ for AI interpretation)
+  /dba bloat       Table bloat estimates
+  /dba vacuum      Vacuum status and dead tuples
+  /dba tablesize   Largest tables
+  /dba connections Connection counts by state
+  /dba indexes     Index health (unused, redundant, invalid, bloated)
+  /dba seq-scans   Tables with high sequential scan ratio
+  /dba cache-hit   Buffer cache hit ratios
+  /dba replication Replication slot status
+  /dba config      Non-default configuration parameters
+  /dba progress    Long-running operation progress (pg_stat_progress_*)
+  /dba io          I/O statistics by backend type (PG 16+)
 ```
 
 Index health example:
 
 ```
-postgres=# \dba indexes
+postgres=# /dba indexes
 Index health: 2 issues found.
 
 !  [unused] public.orders
