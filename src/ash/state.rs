@@ -65,6 +65,10 @@ pub struct AshState {
     /// Refresh interval in seconds. Valid values: 1, 5, 10.
     pub refresh_interval_secs: u64,
     /// True when `pg_ash` extension is installed and available.
+    ///
+    /// Stored for future use by history mode (pg_ash Layer 2).
+    /// TODO: history mode (pg_ash Layer 2) — not yet implemented; pg_ash_installed
+    /// is detected but currently unused.  See issue #753.
     #[allow(dead_code)]
     pub pg_ash_installed: bool,
 
@@ -92,6 +96,9 @@ pub struct AshState {
 
 impl AshState {
     pub fn new(pg_ash_installed: bool) -> Self {
+        // TODO: history mode (pg_ash Layer 2) — not yet implemented.
+        // `pg_ash_installed` is detected and stored here for future use, but
+        // `mode` is always `ViewMode::Live` until Layer 2 is implemented.
         Self {
             level: DrillLevel::WaitType,
             mode: ViewMode::Live,

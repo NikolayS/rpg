@@ -161,9 +161,14 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
 
 /// Return historical snapshots from `pg_ash` if installed.
 ///
-/// TODO: `pg_ash` v1.2 encodes `ash.samples.data` as an opaque `int[]` whose
-/// layout is not yet publicly documented.  Until the encoding is specified,
-/// this function returns an empty vec rather than producing incorrect data.
+/// # Stub — history mode (pg_ash Layer 2) not yet implemented
+///
+/// TODO: history mode (pg_ash Layer 2) — not yet implemented.
+/// `pg_ash` v1.2 encodes `ash.samples.data` as an opaque `int[]` whose
+/// layout is not yet publicly documented.  Until the encoding is specified
+/// and history mode is fully wired into the event loop, this function always
+/// returns an empty vec.  The caller in `mod.rs` falls back to the live ring
+/// buffer transparently, so the TUI never goes blank.
 /// Track upstream: <https://github.com/NikolayS/rpg/issues/753>
 pub async fn history_snapshots(
     client: &Client,
@@ -178,7 +183,8 @@ pub async fn history_snapshots(
     // Validate range (suppress unused-variable warnings until encoding is done).
     let _ = (from, to);
 
-    // TODO: decode ash.samples.data int[] encoding once documented.
+    // TODO: history mode (pg_ash Layer 2) — decode ash.samples.data int[] encoding
+    // once the format is documented and history mode is wired into the event loop.
     Ok(vec![])
 }
 
