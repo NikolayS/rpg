@@ -426,6 +426,13 @@ pub(super) async fn dispatch_ai_command(
         }
     } else if input == "/fix" || input.starts_with("/fix ") {
         handle_ai_fix(client, settings, params, tx).await;
+    // /explain-share <service> — upload last EXPLAIN plan to external visualiser.
+    } else if let Some(service) = input.strip_prefix("/explain-share").map(str::trim) {
+        if service.is_empty() {
+            eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
+        } else {
+            dispatch_explain_share(client, settings, service).await;
+        }
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
         handle_ai_explain(client, query_arg, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
@@ -602,14 +609,6 @@ pub(super) async fn dispatch_ai_command(
         };
         dispatch_io(&parsed, client, params, settings, tx).await;
 
-    // /explain-share <service> — upload last EXPLAIN plan to external visualiser.
-    } else if let Some(service) = input.strip_prefix("/explain-share").map(str::trim) {
-        if service.is_empty() {
-            eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
-        } else {
-            dispatch_explain_share(client, settings, service).await;
-        }
-
     // /commands — list custom Lua meta-commands.
     } else if input == "/commands" {
         let cmds = &settings.lua_registry.commands;
@@ -645,7 +644,8 @@ pub(super) async fn dispatch_ai_command(
         apply_fkey_toggle(FKeyAction::AutoExplain, settings);
 
     // /ns <name> <query> — save a named query.
-    } else if let Some(rest) = input.strip_prefix("/ns").map(str::trim) {
+    } else if input == "/ns" || input.starts_with("/ns ") {
+        let rest = input["/ns".len()..].trim();
         let mut parts = rest.splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or("").to_owned();
         let query = parts.next().map_or("", str::trim).to_owned();
@@ -685,7 +685,8 @@ pub(super) async fn dispatch_ai_command(
         }
 
     // /nd <name> — delete a named query.
-    } else if let Some(name) = input.strip_prefix("/nd").map(str::trim) {
+    } else if input == "/nd" || input.starts_with("/nd ") {
+        let name = input["/nd".len()..].trim();
         if name.is_empty() {
             eprintln!("Usage: /nd <name>");
         } else {
@@ -705,7 +706,8 @@ pub(super) async fn dispatch_ai_command(
         }
 
     // /np <name> — print a named query without executing.
-    } else if let Some(name) = input.strip_prefix("/np").map(str::trim) {
+    } else if input == "/np" || input.starts_with("/np ") {
+        let name = input["/np".len()..].trim();
         if name.is_empty() {
             eprintln!("Usage: /np <name>");
         } else {
@@ -717,7 +719,8 @@ pub(super) async fn dispatch_ai_command(
         }
 
     // /n <name> [args...] — execute a named query.
-    } else if let Some(rest) = input.strip_prefix("/n").map(str::trim) {
+    } else if input == "/n" || input.starts_with("/n ") {
+        let rest = input["/n".len()..].trim();
         if rest.is_empty() {
             eprintln!("Usage: /n <name> [args...]");
         } else {
