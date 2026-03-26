@@ -583,19 +583,36 @@ fn drill_row_line(row: &DrillRow, is_selected: bool, no_color: bool) -> Line<'st
 // ---------------------------------------------------------------------------
 
 /// Render the timeline band (chunk[1]) inside `draw_frame`.
+/// Summary metrics passed into the timeline renderer for the bottom title.
+struct SummaryMetrics {
+    db_time: f64,
+    wall: f64,
+    aas: f64,
+    cpu_count: u32,
+}
+
 fn render_timeline(
     frame: &mut Frame,
     snapshots: &[AshSnapshot],
     state: &AshState,
     area: ratatui::layout::Rect,
     no_color: bool,
+    summary: &SummaryMetrics,
 ) {
     let cpu_count = snapshots.last().map_or(0, |s| s.cpu_count);
     let timeline_title = format!(
         " Timeline  bucket: {}  CPU ref: {cpu_count} ",
         state.zoom_label(),
     );
-    let timeline_block = Block::default().borders(Borders::ALL).title(timeline_title);
+    // Summary metrics sit in the bottom title of the timeline block — no floating row.
+    let bottom_title = format!(
+        " DB TIME: {:.1}s   WALL: {:.1}s   AAS: {:.2}   CPUs: {} ",
+        summary.db_time, summary.wall, summary.aas, summary.cpu_count,
+    );
+    let timeline_block = Block::default()
+        .borders(Borders::ALL)
+        .title(timeline_title)
+        .title_bottom(bottom_title);
     let timeline_inner = timeline_block.inner(area);
     frame.render_widget(timeline_block, area);
 
@@ -703,15 +720,14 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     frame.render_widget(outer_block, area);
 
     let chunks = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Min(6),
-        Constraint::Length(2),
         Constraint::Min(8),
-        Constraint::Length(3),
+        Constraint::Length(1),
     ])
     .split(inner);
 
-    // [0] Status bar
+    // [0] Status bar (single line)
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
     let status_text = format!(
@@ -724,26 +740,24 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
         chunks[0],
     );
 
-    // [1] Timeline
-    render_timeline(frame, snapshots, state, chunks[1], no_color);
-
-    // [2] Summary row
+    // [1] Timeline — summary metrics embedded in bottom border title
     let (db_time, wall, aas, cpu) = compute_summary(snapshots);
-    let summary_text =
-        format!("DB TIME: {db_time:.1}s    WALL: {wall:.1}s    AAS: {aas:.2}    CPUs: {cpu}",);
-    frame.render_widget(
-        Paragraph::new(summary_text).style(Style::default().fg(Color::Cyan)),
-        chunks[2],
-    );
+    let summary = SummaryMetrics {
+        db_time,
+        wall,
+        aas,
+        cpu_count: cpu,
+    };
+    render_timeline(frame, snapshots, state, chunks[1], no_color, &summary);
 
-    // [3] Drill-down table
-    render_drill_table(frame, snapshots, state, chunks[3], wall, db_time, no_color);
+    // [2] Drill-down table
+    render_drill_table(frame, snapshots, state, chunks[2], wall, db_time, no_color);
 
     // [4] Footer / key hints
     let hint =
         "q:quit  \u{2191}\u{2193}:select  Enter:drill  b:back  r:refresh  \u{2190}\u{2192}:zoom";
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
-        chunks[4],
+        chunks[3],
     );
 }
