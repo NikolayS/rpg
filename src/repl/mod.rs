@@ -6339,7 +6339,10 @@ mod tests {
     fn backtick_unterminated_passes_through_literally() {
         // An unterminated backtick should NOT execute anything — pass through literally
         let result = expand_prompt_backticks("`unclosed");
-        assert_eq!(result, "`unclosed", "unterminated backtick must pass through literally");
+        assert_eq!(
+            result, "`unclosed",
+            "unterminated backtick must pass through literally"
+        );
     }
 
     // -- build_prompt_from_settings -------------------------------------------
