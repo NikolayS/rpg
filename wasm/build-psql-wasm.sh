@@ -301,7 +301,7 @@ emcc \
   -ledit \
   -lcurses \
   -sWASM=1 \
-  "-sWEBSOCKET_URL=ws://127.0.0.1:9090" \
+  "-sWEBSOCKET_URL=${WS_URL:-ws://127.0.0.1:9090}" \
   -sUSE_PTHREADS=0 \
   "-sEXPORTED_RUNTIME_METHODS=[\"callMain\",\"FS\",\"ENV\"]" \
   -sINVOKE_RUN=0 \
