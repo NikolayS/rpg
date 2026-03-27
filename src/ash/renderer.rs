@@ -202,7 +202,7 @@ const YAXIS_WIDTH: u16 = 5;
 /// formatted as right-aligned 4-char strings (e.g. " 9.9", "19.1").
 fn build_yaxis_lines(max_aas: f64, chart_height: usize) -> Vec<Line<'static>> {
     let h = chart_height.max(1);
-    let label_style = Style::default().fg(Color::DarkGray);
+    let label_style = Style::default().fg(Color::Gray);
 
     // Label positions depend on chart height for appropriate density.
     // h <= 6:  top + bottom only
@@ -579,7 +579,9 @@ fn collect_drill_rows(
 fn drill_row_line(row: &DrillRow, is_selected: bool, no_color: bool) -> Line<'static> {
     let color = wait_type_color(&row.wait_type, no_color);
     let base_style = if is_selected {
-        Style::default().add_modifier(Modifier::REVERSED)
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED)
     } else {
         Style::default()
     };
@@ -683,9 +685,9 @@ fn render_timeline(
     let cpu_count = snapshots.last().and_then(|s| s.cpu_count);
     let cpu_ref_label = cpu_count.map_or(String::new(), |n| format!("  CPU ref: {n}"));
     let timeline_title = format!(
-        " Timeline  bucket: {}  AAS: {:.2}{cpu_ref_label} ",
-        state.zoom_label(),
+        " Timeline  AAS: {:.2}  bucket: {}{cpu_ref_label} ",
         summary.aas,
+        state.zoom_label(),
     );
     let bottom_title = format!(
         " DB TIME: {:.1}s   WALL: {:.1}s ",
