@@ -129,7 +129,14 @@ mod lua_impl {
     // -----------------------------------------------------------------------
 
     fn commands_dir() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|d| d.join("rpg").join("commands"))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            dirs::config_dir().map(|d| d.join("rpg").join("commands"))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
 
     // -----------------------------------------------------------------------
