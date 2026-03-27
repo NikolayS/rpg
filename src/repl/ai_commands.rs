@@ -363,26 +363,62 @@ pub(super) async fn stream_completion(
 /// - `/fix` — explain and fix the last error
 /// - `/explain [query]` — explain query plan with AI interpretation
 /// - `/optimize [query]` — suggest query optimizations
+///
+/// Dispatch a `/`-prefixed command.
+///
+/// Returns `Some(MetaResult)` when the caller needs to act on a result (e.g.
+/// reconnect after `/session resume`), or `None` for commands that are fully
+/// handled here.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn dispatch_ai_command(
     input: &str,
     client: &Client,
     params: &ConnParams,
     settings: &mut ReplSettings,
     tx: &mut TxState,
-) {
-    // Budget gate — skip for /clear, /compact, /budget, and /init (no tokens).
+) -> Option<MetaResult> {
+    // Budget gate — skip for non-AI and budget-diagnostic commands.
     let is_budget_exempt = input == "/clear"
         || input.starts_with("/compact")
         || input.starts_with("/budget")
-        || input == "/init";
+        || input == "/init"
+        || input.starts_with("/dba")
+        || input.starts_with("/sql")
+        || input.starts_with("/text2sql")
+        || input.starts_with("/t2s")
+        || input.starts_with("/mode")
+        || input.starts_with("/plan")
+        || input.starts_with("/yolo")
+        || input.starts_with("/interactive")
+        || input.starts_with("/profiles")
+        || input.starts_with("/refresh")
+        || input.starts_with("/session")
+        || input.starts_with("/log-file")
+        || input.starts_with("/explain-share")
+        || input.starts_with("/commands")
+        || input.starts_with("/version")
+        || input.starts_with("/f2")
+        || input.starts_with("/f3")
+        || input.starts_with("/f4")
+        || input.starts_with("/f5")
+        || input.starts_with("/ns ")
+        || input == "/n+"
+        || input.starts_with("/nd ")
+        || input.starts_with("/np ")
+        || input.starts_with("/n ")
+        || input.starts_with("/ash");
     if !is_budget_exempt && check_token_budget(settings) {
-        return;
+        return None;
     }
+
+    // ------------------------------------------------------------------
+    // AI commands
+    // ------------------------------------------------------------------
 
     if let Some(prompt) = input.strip_prefix("/ask").map(str::trim) {
         if prompt.is_empty() {
             eprintln!("Usage: /ask <natural language description>");
-            return;
+            return None;
         }
         match settings.exec_mode {
             ExecMode::Plan => handle_ai_plan(client, prompt, settings, params).await,
@@ -390,6 +426,13 @@ pub(super) async fn dispatch_ai_command(
         }
     } else if input == "/fix" || input.starts_with("/fix ") {
         handle_ai_fix(client, settings, params, tx).await;
+    // /explain-share <service> — upload last EXPLAIN plan to external visualiser.
+    } else if let Some(service) = input.strip_prefix("/explain-share").map(str::trim) {
+        if service.is_empty() {
+            eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
+        } else {
+            dispatch_explain_share(client, settings, service).await;
+        }
     } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
         handle_ai_explain(client, query_arg, settings, params).await;
     } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
@@ -397,7 +440,7 @@ pub(super) async fn dispatch_ai_command(
     } else if let Some(table_arg) = input.strip_prefix("/describe").map(str::trim) {
         if table_arg.is_empty() {
             eprintln!("Usage: /describe <table_name>");
-            return;
+            return None;
         }
         handle_ai_describe(client, table_arg, settings, params).await;
     } else if input == "/clear" {
@@ -420,13 +463,293 @@ pub(super) async fn dispatch_ai_command(
         handle_ai_budget(settings);
     } else if input == "/init" {
         handle_init(client, settings, params).await;
+
+    // ------------------------------------------------------------------
+    // rpg-specific commands (/ namespace)
+    // ------------------------------------------------------------------
+
+    // /dba [subcommand] — database diagnostics.
+    } else if let Some(rest) = input.strip_prefix("/dba").map(str::trim) {
+        let subcommand = rest;
+        let plus = subcommand.ends_with('+');
+        let subcommand = subcommand.trim_end_matches('+').trim();
+        let caps = settings.db_capabilities.clone();
+        let ai_context = crate::dba::execute(client, subcommand, plus, Some(&caps), settings).await;
+        if let Some(ref context) = ai_context {
+            interpret_dba_output(context, subcommand, settings).await;
+        }
+
+    // /ash — active session history (requires pg_ash extension).
+    } else if input == "/ash" || input.starts_with("/ash ") {
+        let rest = input.strip_prefix("/ash").map_or("", str::trim);
+        let caps = settings.db_capabilities.clone();
+        let ai_context = crate::dba::execute(
+            client,
+            format!("ash {rest}").trim(),
+            false,
+            Some(&caps),
+            settings,
+        )
+        .await;
+        if let Some(ref context) = ai_context {
+            interpret_dba_output(context, "ash", settings).await;
+        }
+
+    // /sql — switch to SQL input mode.
+    } else if input == "/sql" {
+        let result = MetaResult::SetInputMode(InputMode::Sql);
+        let label = apply_mode_change(&result, settings);
+        eprintln!("Input mode: {label}");
+
+    // /text2sql, /t2s — switch to text-to-SQL input mode.
+    } else if input == "/text2sql" || input == "/t2s" {
+        let result = MetaResult::SetInputMode(InputMode::Text2Sql);
+        let label = apply_mode_change(&result, settings);
+        eprintln!("Input mode: {label}");
+
+    // /mode — show current input and execution mode.
+    } else if input == "/mode" {
+        let input_label = match settings.input_mode {
+            InputMode::Sql => "sql",
+            InputMode::Text2Sql => "text2sql",
+        };
+        let exec_label = match settings.exec_mode {
+            ExecMode::Interactive => "interactive",
+            ExecMode::Plan => "plan",
+            ExecMode::Yolo => "yolo",
+        };
+        eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+
+    // /plan — enter plan execution mode.
+    } else if input == "/plan" {
+        let result = MetaResult::SetExecMode(ExecMode::Plan);
+        let label = apply_mode_change(&result, settings);
+        eprintln!("Execution mode: {label}");
+
+    // /yolo — enter YOLO mode (text2sql + auto-execute).
+    } else if input == "/yolo" {
+        let result = MetaResult::SetExecMode(ExecMode::Yolo);
+        let label = apply_mode_change(&result, settings);
+        eprintln!("Execution mode: {label}");
+
+    // /interactive — return to interactive (default) mode.
+    } else if input == "/interactive" {
+        let result = MetaResult::SetExecMode(ExecMode::Interactive);
+        let label = apply_mode_change(&result, settings);
+        eprintln!("Execution mode: {label}");
+
+    // /profiles — list configured connection profiles.
+    } else if input == "/profiles" {
+        print_profiles(&settings.config);
+
+    // /refresh — reload schema cache for tab completion.
+    } else if input == "/refresh" {
+        match &settings.schema_cache {
+            None => {
+                eprintln!("/refresh: no active connection or not in interactive mode");
+            }
+            Some(cache) => match load_schema_cache(client).await {
+                Ok(loaded) => {
+                    *cache.write().unwrap() = loaded;
+                    println!("Schema cache refreshed.");
+                }
+                Err(e) => {
+                    eprintln!("/refresh: failed to reload schema cache: {e}");
+                }
+            },
+        }
+
+    // /session [subcommand] — session persistence.
+    } else if let Some(rest) = input.strip_prefix("/session").map(str::trim) {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let arg = parts.next().map_or("", str::trim).to_owned();
+        match sub {
+            "" | "list" => dispatch_session_list(),
+            "save" => dispatch_session_save(
+                params,
+                &settings.session_id,
+                if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.as_str())
+                },
+                settings.query_count,
+            ),
+            "delete" | "del" => {
+                if arg.is_empty() {
+                    eprintln!("Usage: /session delete <id>");
+                } else {
+                    dispatch_session_delete(&arg);
+                }
+            }
+            "resume" | "connect" => {
+                if arg.is_empty() {
+                    eprintln!("Usage: /session resume <id>");
+                } else if let Some(result) = dispatch_session_resume(&arg).await {
+                    return Some(result);
+                }
+            }
+            _ => eprintln!("/session: unknown subcommand \"{sub}\". Try /session list."),
+        }
+
+    // /log-file [path] — start or stop query audit logging.
+    } else if let Some(rest) = input.strip_prefix("/log-file").map(str::trim) {
+        let path = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_owned())
+        };
+        let parsed = crate::metacmd::ParsedMeta {
+            cmd: crate::metacmd::MetaCmd::LogFile(path),
+            plus: false,
+            system: false,
+            pattern: None,
+            echo_hidden: false,
+        };
+        dispatch_io(&parsed, client, params, settings, tx).await;
+
+    // /commands — list custom Lua meta-commands.
+    } else if input == "/commands" {
+        let cmds = &settings.lua_registry.commands;
+        if cmds.is_empty() {
+            println!(
+                "No custom commands loaded.\n\
+                 Add Lua scripts to ~/.config/rpg/commands/*.lua"
+            );
+        } else {
+            let mut out = String::from("Custom commands:\n");
+            for cmd in cmds {
+                use std::fmt::Write as _;
+                let _ = writeln!(out, "  /{:<20} {}", cmd.name, cmd.description);
+            }
+            maybe_page(settings, &out);
+        }
+
+    // /version — show rpg version and build information.
+    } else if input == "/version" {
+        println!("{}", crate::version_string());
+        if let Some(ref sv) = settings.db_capabilities.server_version {
+            println!("Server: PostgreSQL {sv}");
+        }
+
+    // /f2..f5 — function key toggles.
+    } else if input == "/f2" {
+        apply_fkey_toggle(FKeyAction::Completion, settings);
+    } else if input == "/f3" {
+        apply_fkey_toggle(FKeyAction::SingleLine, settings);
+    } else if input == "/f4" {
+        apply_fkey_toggle(FKeyAction::ViEmacs, settings);
+    } else if input == "/f5" {
+        apply_fkey_toggle(FKeyAction::AutoExplain, settings);
+
+    // /ns <name> <query> — save a named query.
+    } else if input == "/ns" || input.starts_with("/ns ") {
+        let rest = input["/ns".len()..].trim();
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or("").to_owned();
+        let query = parts.next().map_or("", str::trim).to_owned();
+        if name.is_empty() || query.is_empty() {
+            eprintln!("Usage: /ns <name> <query>");
+        } else if crate::named::NamedQueries::is_valid_name(&name) {
+            let mut nq = crate::named::NamedQueries::load();
+            nq.set(&name, &query);
+            match nq.save() {
+                Ok(()) => {
+                    if !settings.quiet {
+                        eprintln!("Saved query \"{name}\".");
+                    }
+                }
+                Err(e) => eprintln!("/ns: {e}"),
+            }
+        } else {
+            eprintln!(
+                "/ns: invalid query name \"{name}\": \
+                 names must contain only alphanumerics and underscores"
+            );
+        }
+
+    // /n+ — list all named queries.
+    } else if input == "/n+" {
+        let nq = crate::named::NamedQueries::load();
+        let queries = nq.list();
+        if queries.is_empty() {
+            println!("No named queries saved.");
+        } else {
+            let mut out = String::new();
+            for (name, query) in queries {
+                use std::fmt::Write as FmtWrite;
+                let _ = writeln!(out, "  {name}: {query}");
+            }
+            maybe_page(settings, &out);
+        }
+
+    // /nd <name> — delete a named query.
+    } else if input == "/nd" || input.starts_with("/nd ") {
+        let name = input["/nd".len()..].trim();
+        if name.is_empty() {
+            eprintln!("Usage: /nd <name>");
+        } else {
+            let mut nq = crate::named::NamedQueries::load();
+            if nq.delete(name) {
+                match nq.save() {
+                    Ok(()) => {
+                        if !settings.quiet {
+                            eprintln!("Deleted query \"{name}\".");
+                        }
+                    }
+                    Err(e) => eprintln!("/nd: {e}"),
+                }
+            } else {
+                eprintln!("/nd: unknown query \"{name}\"");
+            }
+        }
+
+    // /np <name> — print a named query without executing.
+    } else if input == "/np" || input.starts_with("/np ") {
+        let name = input["/np".len()..].trim();
+        if name.is_empty() {
+            eprintln!("Usage: /np <name>");
+        } else {
+            let nq = crate::named::NamedQueries::load();
+            match nq.get(name) {
+                Some(query) => println!("{query}"),
+                None => eprintln!("/np: unknown query \"{name}\""),
+            }
+        }
+
+    // /n <name> [args...] — execute a named query.
+    } else if input == "/n" || input.starts_with("/n ") {
+        let rest = input["/n".len()..].trim();
+        if rest.is_empty() {
+            eprintln!("Usage: /n <name> [args...]");
+        } else {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or("").to_owned();
+            let args_str = parts.next().unwrap_or("").trim();
+            let args: Vec<String> = args_str.split_whitespace().map(str::to_owned).collect();
+            let nq = crate::named::NamedQueries::load();
+            match nq.get(&name) {
+                Some(query) => {
+                    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let sql = crate::named::NamedQueries::substitute(query, &arg_refs);
+                    execute_query(client, &sql, settings, tx).await;
+                }
+                None => eprintln!("/n: unknown query \"{name}\""),
+            }
+        }
     } else {
         eprintln!(
-            "Unknown AI command: {input}\n\
-             Available: /ask, /fix, /explain, /optimize, /describe, \
-             /init, /clear, /compact, /budget"
+            "Unknown command: {input}\n\
+             AI: /ask, /fix, /explain, /optimize, /describe, /init, /clear, /compact, /budget\n\
+             Diagnostics: /dba, /ash\n\
+             Modes: /sql, /text2sql, /t2s, /plan, /yolo, /interactive, /mode\n\
+             Queries: /ns, /n, /n+, /nd, /np\n\
+             REPL: /profiles, /refresh, /session, /log-file, /explain-share, /commands, /version, /f2-f5"
         );
     }
+
+    None
 }
 
 /// Strip markdown code fences from LLM output.

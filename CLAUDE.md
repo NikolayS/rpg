@@ -117,10 +117,24 @@ See `SPEC.md` for the full specification. Key concepts:
 
 - **Modern Postgres terminal** — psql replacement with DBA diagnostics and AI assistant
 - **AI via slash commands** — `/ask`, `/fix`, `/explain`, `/optimize`
-- **`\dba` diagnostics** — built-in DBA commands for bloat, vacuuming, index health, wait events
+- **`/dba` diagnostics** — built-in DBA commands for bloat, vacuuming, index health, wait events
 - **Language:** Rust
 - **Wire protocol:** tokio-postgres
 - **PG support:** 14-18
+
+## Command namespace convention
+
+See `COMMANDS.md` for the full reference.
+
+- `\` = psql-compatible commands only. Any command psql has uses `\`.
+- `/` = rpg-specific extensions. All commands rpg adds use `/`.
+
+**New rpg commands always use `/`. Never add a new `\` command that is not in psql.**
+
+Examples: `/dba`, `/ask`, `/plan`, `/yolo`, `/session`, `/refresh`, `/ns`, `/ash`.
+
+The old `\dba`, `\sql`, `\plan`, etc. are deprecated aliases that still work but
+print a deprecation hint. They will be removed in a future release.
 
 ## PR workflow (mandatory for all agents)
 

@@ -1764,7 +1764,7 @@ Backslash commands:
 Session commands:
   \c [db [user [host [port]]]]  reconnect to database
   \c @profile                   reconnect using a named profile
-  \profiles                     list all configured connection profiles
+  /profiles                     list all configured connection profiles
   \sf[+] <func>   show function source
   \sv[+] <view>   show view definition
   \h [command]    SQL syntax help
@@ -1808,20 +1808,39 @@ AI commands:
   /compact [focus]  compact conversation context (optional focus topic)
   /budget           show token usage and remaining budget
 
+DBA diagnostics:
+  /dba               show available diagnostics
+  /dba activity      pg_stat_activity summary
+  /dba ash           active session history (requires pg_ash)
+  /dba bloat         table bloat estimates
+  /dba cache-hit     buffer cache hit ratios
+  /dba config        non-default configuration
+  /dba connections   connection counts by state
+  /dba indexes       index health (unused, redundant, invalid)
+  /dba io            I/O statistics (PG 16+)
+  /dba locks         lock tree (blocked/blocking)
+  /dba progress      long-running operation progress
+  /dba replication   replication slot status
+  /dba seq-scans     tables with high sequential scan ratio
+  /dba tablesize     largest tables
+  /dba vacuum        vacuum status and dead tuples
+  /dba waits         wait event breakdown
+  /ash               active session history shorthand
+
 Named queries:
-  \ns <name> <query>  save a named query (name: alphanumerics + underscores)
-  \n  <name> [args…]  execute a named query; $1,$2,… replaced by args
-  \n+                 list all named queries with their SQL
-  \nd <name>          delete a named query
-  \np <name>          print a named query without executing
+  /ns <name> <query>  save a named query (name: alphanumerics + underscores)
+  /n  <name> [args…]  execute a named query; $1,$2,… replaced by args
+  /n+                 list all named queries with their SQL
+  /nd <name>          delete a named query
+  /np <name>          print a named query without executing
 
 Input/execution modes:
-  \sql              switch to SQL input mode (default)
-  \text2sql / \t2s  switch to text2sql input mode
-  \plan             enter plan execution mode
-  \yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
-  \interactive      return to interactive mode (default)
-  \mode             show current input and execution mode
+  /sql              switch to SQL input mode (default)
+  /text2sql / /t2s  switch to text2sql input mode
+  /plan             enter plan execution mode
+  /yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
+  /interactive      return to interactive mode (default)
+  /mode             show current input and execution mode
   \set TEXT2SQL_SHOW_SQL on/off   show/hide SQL preview box in text2sql mode
 
 Auto-EXPLAIN:
@@ -1831,9 +1850,9 @@ Auto-EXPLAIN:
   \set EXPLAIN off      disable auto-EXPLAIN
 
 EXPLAIN sharing:
-  \explain share depesz    upload last EXPLAIN plan to explain.depesz.com
-  \explain share dalibo    upload last EXPLAIN plan to explain.dalibo.com
-  \explain share pgmustard upload last EXPLAIN plan to app.pgmustard.com
+  /explain-share depesz    upload last EXPLAIN plan to explain.depesz.com
+  /explain-share dalibo    upload last EXPLAIN plan to explain.dalibo.com
+  /explain-share pgmustard upload last EXPLAIN plan to app.pgmustard.com
                            (requires PGMUSTARD_API_KEY env var or config)
 
 Output format:
@@ -1843,32 +1862,29 @@ Output format:
   \pset explain_format compact  show compact EXPLAIN summary
   --markdown                   start with Markdown output format (CLI flag)
 
-DBA diagnostics:
-  \dba               show available diagnostics
-  \dba activity      pg_stat_activity summary
-  \dba bloat         table bloat estimates
-  \dba cache-hit     buffer cache hit ratios
-  \dba config        non-default configuration
-  \dba connections   connection counts by state
-  \dba indexes       index health (unused, redundant, invalid)
-  \dba io            I/O statistics (PG 16+)
-  \dba locks         lock tree (blocked/blocking)
-  \dba progress      long-running operation progress
-  \dba replication   replication slot status
-  \dba seq-scans     tables with high sequential scan ratio
-  \dba tablesize     largest tables
-  \dba vacuum        vacuum status and dead tuples
-  \dba waits         wait event breakdown
-
-Lua commands:
-  \commands         list custom Lua meta-commands (if any are configured)
+REPL management:
+  /profiles         list configured connection profiles
+  /session list     show recent sessions
+  /session save     save the current session
+  /session delete <id>   delete a session
+  /session resume <id>   reconnect using a saved session
+  /refresh          reload schema cache for tab completion
+  /log-file <path>  start logging queries to path (no arg = stop)
+  /commands         list custom Lua meta-commands (if any are configured)
+  /version          show rpg version and build information
 
 Function keys (interactive mode):
-  F2 / \f2       toggle schema-aware tab completion on/off
-  F3 / \f3       toggle single-line mode on/off
-  F4 / \f4       toggle Vi/Emacs editing mode (next session)
-  F5 / \f5       toggle auto-EXPLAIN on/off
-  Ctrl-T          toggle SQL/text2sql input mode"
+  F2 / /f2       toggle schema-aware tab completion on/off
+  F3 / /f3       toggle single-line mode on/off
+  F4 / /f4       toggle Vi/Emacs editing mode (next session)
+  F5 / /f5       toggle auto-EXPLAIN on/off
+  Ctrl-T          toggle SQL/text2sql input mode
+
+Deprecated (still work, prefer / equivalents above):
+  \dba, \sql, \text2sql, \t2s, \mode, \plan, \yolo, \interactive
+  \profiles, \refresh, \session, \log-file, \explain share
+  \commands, \version, \f2, \f3, \f4, \f5
+  \ns, \n, \n+, \nd, \np"
     )
 }
 
@@ -1880,7 +1896,7 @@ Function keys (interactive mode):
 /// ------------+---------------+------+----------+--------
 ///  production | 10.0.1.5      | 5432 | postgres | mydb
 /// ```
-fn print_profiles(config: &crate::config::Config) {
+pub(super) fn print_profiles(config: &crate::config::Config) {
     if config.connections.is_empty() {
         println!("No connection profiles configured.");
         println!("Add profiles to ~/.config/rpg/config.toml under [connections.<name>].");
@@ -2017,7 +2033,7 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
 ///
 /// Honours `\o` redirection: when `settings.output_target` is set the text
 /// is written to that file instead of stdout / the pager.
-fn maybe_page(settings: &mut ReplSettings, text: &str) {
+pub(super) fn maybe_page(settings: &mut ReplSettings, text: &str) {
     // Honour \o redirect.
     if let Some(ref mut w) = settings.output_target {
         let _ = writeln!(w, "{text}");
@@ -2275,7 +2291,7 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
 ///
 /// Called by the readline loop when an F-key `ConditionalEventHandler` fires.
 /// Also reachable via the `\f2` / `\f3` / `\f4` / `\f5` metacommands.
-fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
+pub(super) fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
     match action {
         FKeyAction::Completion => {
             settings.no_completion = !settings.no_completion;
@@ -2731,7 +2747,7 @@ pub enum MetaResult {
 ///   user returns fully to the default state.
 ///
 /// Returns a short label string used for the confirmation message.
-fn apply_mode_change(result: &MetaResult, settings: &mut ReplSettings) -> &'static str {
+pub(super) fn apply_mode_change(result: &MetaResult, settings: &mut ReplSettings) -> &'static str {
     match result {
         MetaResult::SetInputMode(mode) => {
             settings.input_mode = *mode;
@@ -2769,7 +2785,7 @@ fn apply_mode_change(result: &MetaResult, settings: &mut ReplSettings) -> &'stat
 /// Returns `Some(MetaResult)` if the command was handled, `None` if the
 /// command is not an I/O command (and the caller should continue matching).
 #[allow(clippy::too_many_lines)]
-async fn dispatch_io(
+pub(super) async fn dispatch_io(
     parsed: &crate::metacmd::ParsedMeta,
     client: &Client,
     params: &ConnParams,
@@ -2924,6 +2940,7 @@ async fn dispatch_io(
         MetaCmd::ClosePrepared(ref name) => Some(MetaResult::ClosePrepared(name.clone())),
 
         MetaCmd::LogFile(ref path) => {
+            eprintln!("\\log-file is deprecated; use /log-file instead.");
             if let Some(raw_path) = path.as_deref() {
                 // Expand leading `~` to the home directory.
                 let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
@@ -3283,64 +3300,80 @@ async fn dispatch_meta(
             }
         }
         MetaCmd::ListProfiles => {
+            eprintln!("\\profiles is deprecated; use /profiles instead.");
             print_profiles(&settings.config);
         }
         MetaCmd::Copyright => {
             print_copyright(settings.db_capabilities.server_version.as_deref());
         }
         MetaCmd::Version => {
+            eprintln!("\\version is deprecated; use /version instead.");
             println!("{}", crate::version_string());
             if let Some(ref sv) = settings.db_capabilities.server_version {
                 println!("Server: PostgreSQL {sv}");
             }
         }
         MetaCmd::SqlMode => {
+            eprintln!("\\sql is deprecated; use /sql instead.");
             return MetaResult::SetInputMode(InputMode::Sql);
         }
         MetaCmd::Text2SqlMode => {
+            eprintln!("\\text2sql / \\t2s is deprecated; use /text2sql or /t2s instead.");
             return MetaResult::SetInputMode(InputMode::Text2Sql);
         }
         MetaCmd::ShowMode => {
+            eprintln!("\\mode is deprecated; use /mode instead.");
             return MetaResult::ShowMode;
         }
         MetaCmd::PlanMode => {
+            eprintln!("\\plan is deprecated; use /plan instead.");
             return MetaResult::SetExecMode(ExecMode::Plan);
         }
         MetaCmd::YoloMode => {
+            eprintln!("\\yolo is deprecated; use /yolo instead.");
             return MetaResult::SetExecMode(ExecMode::Yolo);
         }
         MetaCmd::InteractiveMode => {
+            eprintln!("\\interactive is deprecated; use /interactive instead.");
             return MetaResult::SetExecMode(ExecMode::Interactive);
         }
-        MetaCmd::RefreshSchema => match &settings.schema_cache {
-            None => {
-                eprintln!("\\refresh: no active connection or not in interactive mode");
+        MetaCmd::RefreshSchema => {
+            eprintln!("\\refresh is deprecated; use /refresh instead.");
+            match &settings.schema_cache {
+                None => {
+                    eprintln!("\\refresh: no active connection or not in interactive mode");
+                }
+                Some(cache) => match load_schema_cache(client).await {
+                    Ok(loaded) => {
+                        *cache.write().unwrap() = loaded;
+                        println!("Schema cache refreshed.");
+                    }
+                    Err(e) => {
+                        eprintln!("\\refresh: failed to reload schema cache: {e}");
+                    }
+                },
             }
-            Some(cache) => match load_schema_cache(client).await {
-                Ok(loaded) => {
-                    *cache.write().unwrap() = loaded;
-                    println!("Schema cache refreshed.");
-                }
-                Err(e) => {
-                    eprintln!("\\refresh: failed to reload schema cache: {e}");
-                }
-            },
-        },
+        }
         // Function-key toggle metacommands (#321, #324, #325).
         MetaCmd::ToggleCompletion => {
+            eprintln!("\\f2 is deprecated; use /f2 instead.");
             apply_fkey_toggle(FKeyAction::Completion, settings);
         }
         MetaCmd::ToggleSingleLine => {
+            eprintln!("\\f3 is deprecated; use /f3 instead.");
             apply_fkey_toggle(FKeyAction::SingleLine, settings);
         }
         MetaCmd::ToggleViEmacs => {
+            eprintln!("\\f4 is deprecated; use /f4 instead.");
             apply_fkey_toggle(FKeyAction::ViEmacs, settings);
         }
         MetaCmd::ToggleAutoExplain => {
+            eprintln!("\\f5 is deprecated; use /f5 instead.");
             apply_fkey_toggle(FKeyAction::AutoExplain, settings);
         }
         // Custom Lua commands (#659).
         MetaCmd::ListCustomCommands => {
+            eprintln!("\\commands is deprecated; use /commands instead.");
             let cmds = &settings.lua_registry.commands;
             if cmds.is_empty() {
                 println!(
@@ -3351,7 +3384,7 @@ async fn dispatch_meta(
                 let mut out = String::from("Custom commands:\n");
                 for cmd in cmds {
                     use std::fmt::Write as _;
-                    let _ = writeln!(out, "  \\{:<20} {}", cmd.name, cmd.description);
+                    let _ = writeln!(out, "  /{:<20} {}", cmd.name, cmd.description);
                 }
                 maybe_page(settings, &out);
             }
@@ -3518,6 +3551,7 @@ async fn dispatch_meta(
         }
         // Diagnostic commands — delegate to the dba module.
         MetaCmd::Dba => {
+            eprintln!("\\dba is deprecated; use /dba instead.");
             let subcommand = parsed.pattern.as_deref().unwrap_or("");
             let caps = settings.db_capabilities.clone();
             let ai_context =
@@ -3527,8 +3561,9 @@ async fn dispatch_meta(
                 interpret_dba_output(context, subcommand, settings).await;
             }
         }
-        // Named queries (#69).
+        // Named queries (#69). Deprecated in favour of /ns, /n, /n+, /nd, /np.
         MetaCmd::NamedSave(ref name, ref query) => {
+            eprintln!("\\ns is deprecated; use /ns instead.");
             if crate::named::NamedQueries::is_valid_name(name) {
                 let mut nq = crate::named::NamedQueries::load();
                 nq.set(name, query);
@@ -3548,6 +3583,7 @@ async fn dispatch_meta(
             }
         }
         MetaCmd::NamedExec(ref name, ref args) => {
+            eprintln!("\\n is deprecated; use /n instead.");
             let nq = crate::named::NamedQueries::load();
             match nq.get(name) {
                 Some(query) => {
@@ -3559,6 +3595,7 @@ async fn dispatch_meta(
             }
         }
         MetaCmd::NamedList => {
+            eprintln!("\\n+ is deprecated; use /n+ instead.");
             let nq = crate::named::NamedQueries::load();
             let queries = nq.list();
             if queries.is_empty() {
@@ -3573,6 +3610,7 @@ async fn dispatch_meta(
             }
         }
         MetaCmd::NamedDelete(ref name) => {
+            eprintln!("\\nd is deprecated; use /nd instead.");
             let mut nq = crate::named::NamedQueries::load();
             if nq.delete(name) {
                 match nq.save() {
@@ -3588,6 +3626,7 @@ async fn dispatch_meta(
             }
         }
         MetaCmd::NamedPrint(ref name) => {
+            eprintln!("\\np is deprecated; use /np instead.");
             let nq = crate::named::NamedQueries::load();
             match nq.get(name) {
                 Some(query) => println!("{query}"),
@@ -3633,11 +3672,13 @@ async fn dispatch_meta(
             )
             .await;
         }
-        // Session persistence meta-commands (#247).
+        // Session persistence meta-commands (#247). Deprecated in favour of /session.
         MetaCmd::SessionList => {
+            eprintln!("\\session is deprecated; use /session instead.");
             dispatch_session_list();
         }
         MetaCmd::SessionSave(ref name) => {
+            eprintln!("\\session save is deprecated; use /session save instead.");
             dispatch_session_save(
                 params,
                 &settings.session_id,
@@ -3646,15 +3687,18 @@ async fn dispatch_meta(
             );
         }
         MetaCmd::SessionDelete(ref id) => {
+            eprintln!("\\session delete is deprecated; use /session delete instead.");
             dispatch_session_delete(id);
         }
         MetaCmd::SessionResume(ref id) => {
+            eprintln!("\\session resume is deprecated; use /session resume instead.");
             if let Some(result) = dispatch_session_resume(id).await {
                 return result;
             }
         }
-        // Explain share (#655).
+        // Explain share (#655). Deprecated in favour of /explain-share.
         MetaCmd::ExplainShare(ref service) => {
+            eprintln!("\\explain share is deprecated; use /explain-share instead.");
             dispatch_explain_share(client, settings, service).await;
         }
         // Large object commands (#400).
@@ -3731,7 +3775,7 @@ fn read_history_entries() -> Vec<String> {
 /// - `\s filename` — save raw history to a file.
 /// - `\s pattern` — filter history by substring (case-insensitive) and
 ///   display through the pager.
-fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
+pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
     use std::fmt::Write as FmtWrite;
 
     let entries = read_history_entries();
@@ -3830,7 +3874,11 @@ fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
 /// plain text (which is the common case), the function extracts the inner
 /// query from `last_query`, re-executes it as
 /// `EXPLAIN (ANALYZE, FORMAT JSON) <inner_query>`, and uploads the JSON.
-async fn dispatch_explain_share(client: &Client, settings: &mut ReplSettings, service: &str) {
+pub(super) async fn dispatch_explain_share(
+    client: &Client,
+    settings: &mut ReplSettings,
+    service: &str,
+) {
     let plan_text = match settings.last_explain_text.as_deref() {
         Some(t) if !t.is_empty() => t.to_owned(),
         _ => {
@@ -3992,7 +4040,7 @@ fn session_store_auto_save(params: &crate::connection::ConnParams, session_id: &
 }
 
 /// Print a table of recent sessions (used by `\session list`).
-fn dispatch_session_list() {
+pub(super) fn dispatch_session_list() {
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
@@ -4029,7 +4077,7 @@ fn dispatch_session_list() {
 }
 
 /// Save the current session with an optional friendly name.
-fn dispatch_session_save(
+pub(super) fn dispatch_session_save(
     params: &crate::connection::ConnParams,
     session_id: &str,
     name: Option<&str>,
@@ -4066,7 +4114,7 @@ fn dispatch_session_save(
 }
 
 /// Delete a saved session by id.
-fn dispatch_session_delete(id: &str) {
+pub(super) fn dispatch_session_delete(id: &str) {
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
@@ -4085,7 +4133,7 @@ fn dispatch_session_delete(id: &str) {
 ///
 /// Returns `Some(MetaResult::Reconnected(...))` on success, or `None` (error
 /// already printed) on failure.
-async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
+pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
@@ -4248,7 +4296,7 @@ pub async fn run_repl(
 /// The handler stores the pending action in a shared slot; the readline loop
 /// reads and handles it when `Cmd::Interrupt` is returned by the handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FKeyAction {
+pub(super) enum FKeyAction {
     /// F2 — toggle schema-aware completion.
     Completion,
     /// F3 — toggle single-line mode.
@@ -5128,7 +5176,13 @@ async fn handle_line(
     if trimmed.starts_with('/') {
         stmt_buf.clear();
         stmt_buf.push_str(line);
-        dispatch_ai_command(trimmed, client, params, settings, tx).await;
+        if let Some(result) = dispatch_ai_command(trimmed, client, params, settings, tx).await {
+            match result {
+                MetaResult::Reconnected(c, p) => return HandleLineResult::Reconnected(c, p),
+                MetaResult::Quit => return HandleLineResult::Quit,
+                _ => {}
+            }
+        }
         return HandleLineResult::Continue;
     }
 
