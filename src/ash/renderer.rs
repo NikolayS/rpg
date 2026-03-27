@@ -799,7 +799,7 @@ fn render_drill_table(
 /// * `state`     — current drill-down / zoom state.
 /// * `no_color`  — when true, use terminal default colors.
 
-/// Minimum terminal height required to render the `/ash` TUI without garbling.
+// Minimum terminal height required to render the `/ash` TUI without garbling.
 const MIN_HEIGHT: u16 = 18;
 
 pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState, no_color: bool) {
