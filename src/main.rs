@@ -53,6 +53,10 @@ mod ssh_tunnel;
 mod statusline;
 mod update;
 mod vars;
+// WASM browser support: WebSocket connector and wasm-bindgen entry point.
+// Only compiled on wasm32 targets — invisible to native builds.
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 /// Build-time git commit hash injected by `build.rs` (8 hex chars).
 const GIT_HASH: &str = env!("RPG_GIT_HASH");

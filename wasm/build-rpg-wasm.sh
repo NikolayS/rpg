@@ -1,184 +1,112 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-IFS=$'\n\t'
+set -euo pipefail
 
 # =========================================================================
-# build-rpg-wasm.sh — Build rpg as a WASM binary via wasm32-unknown-emscripten
+# build-rpg-wasm.sh — Build rpg as WASM via wasm-pack (wasm32-unknown-unknown)
 #
-# Follows the same approach as build-psql-wasm.sh for the psql WASM port.
-# Produces rpg.js + rpg.wasm in public/rpg/ for use with a WebSocket proxy.
+# This is the wasm-bindgen build path, complementing the Emscripten build
+# (build-rpg-wasm-emscripten.sh).  It targets wasm32-unknown-unknown and
+# uses wasm-pack to produce an ES module + .wasm file for browser use.
 #
-# Heavy tooling (emsdk, Rust wasm32-unknown-emscripten target) is installed
-# on first run and cached in .build/; subsequent runs are fast.
+# The key difference from the Emscripten path:
+#   - No POSIX emulation layer — lighter, smaller output.
+#   - WebSocket transport handled explicitly by src/wasm/connector.rs
+#     via ws_stream_wasm (not Emscripten's socket-to-WS remapping).
+#   - wasm-bindgen exposes run_rpg() directly to JavaScript.
 #
-# Prerequisites (Linux):
-#   apt install build-essential curl nodejs
-#   rustup target add wasm32-unknown-emscripten
+# Prerequisites:
+#   - Rust toolchain with wasm32-unknown-unknown target
+#   - wasm-pack (installed automatically if missing)
+#   - wasm-opt (from binaryen; optional, for size optimisation)
 #
-# Prerequisites (macOS):
-#   brew install node
-#   rustup target add wasm32-unknown-emscripten
+# Environment:
+#   WASM_OUT  — output directory (default: wasm/pkg)
 #
-# Environment variables:
-#   WS_URL — WebSocket proxy URL (default: ws://127.0.0.1:9090)
-#             The proxy bridges WebSocket frames to a TCP Postgres connection.
 # =========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "${SCRIPT_DIR}")"
-BUILD_DIR="${SCRIPT_DIR}/.build"
-EMSDK_DIR="${BUILD_DIR}/emsdk"
-WASM_OUT="${REPO_DIR}/public/rpg"
+WASM_OUT="${WASM_OUT:-${SCRIPT_DIR}/pkg}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-log()  { echo -e "${GREEN}[BUILD]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC}  $1"; }
-err()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-
-mkdir -p "${BUILD_DIR}"
+log()  { echo -e "${GREEN}[build]${NC} $1"; }
+warn() { echo -e "${YELLOW}[warn]${NC}  $1"; }
+err()  { echo -e "${RED}[error]${NC} $1" >&2; exit 1; }
 
 # -------------------------------------------------------------------------
-# Step 0: Install / activate Emscripten SDK
+# Step 0: Ensure wasm-pack is installed
 # -------------------------------------------------------------------------
-EMSDK_VERSION="4.0.23"
-
-if [[ ! -d "${EMSDK_DIR}" ]]; then
-  log "Cloning Emscripten SDK (${EMSDK_VERSION})..."
-  git clone https://github.com/emscripten-core/emsdk.git "${EMSDK_DIR}"
-  cd "${EMSDK_DIR}"
-  ./emsdk install "${EMSDK_VERSION}"
-  ./emsdk activate "${EMSDK_VERSION}"
-  cd "${REPO_DIR}"
+if ! command -v wasm-pack &>/dev/null; then
+  log "Installing wasm-pack..."
+  cargo install wasm-pack
 fi
-
-log "Activating Emscripten SDK..."
-# shellcheck disable=SC1091
-source "${EMSDK_DIR}/emsdk_env.sh"
-emcc --version | head -1
+log "wasm-pack $(wasm-pack --version)"
 
 # -------------------------------------------------------------------------
-# Step 1: Ensure the Rust wasm32-unknown-emscripten target is installed
+# Step 1: Ensure the Rust target is available
 # -------------------------------------------------------------------------
-if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-emscripten; then
-  log "Adding wasm32-unknown-emscripten Rust target..."
-  rustup target add wasm32-unknown-emscripten
+if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+  log "Adding wasm32-unknown-unknown target..."
+  rustup target add wasm32-unknown-unknown
 fi
 
 # -------------------------------------------------------------------------
-# Step 2: Set Emscripten compiler flags for Cargo/cc-rs
+# Step 2: Build with wasm-pack
 #
-# EMCC_CFLAGS / EMMAKEN_CFLAGS tell the cc-rs build helper to use emcc and
-# pass Asyncify + WebSocket flags so any C shims compile correctly.
-# -------------------------------------------------------------------------
-export EMCC_CFLAGS="\
-  -sWASM=1 \
-  -sASYNCIFY \
-  -sASYNCIFY_STACK_SIZE=262144 \
-  -sUSE_PTHREADS=0 \
-"
-export EMMAKEN_CFLAGS="${EMCC_CFLAGS}"
-
-# Tell the Rust linker to use emcc.
-export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER="emcc"
-
-# Emscripten-specific linker flags injected via RUSTFLAGS.
-#
-# -sWEBSOCKET_URL: all TCP sockets in the WASM binary are transparently
-#   proxied to this WebSocket endpoint (same proxy used by psql WASM).
-#   Override at build time: WS_URL=wss://proxy.example.com ./build-rpg-wasm.sh
-#
-# TODO: once the Rust-side WebSocket connector (wasm/ws-proxy.js) is fully
-#   implemented, the WS_URL should be configurable at runtime rather than
-#   baked in at link time.
-WS_URL="${WS_URL:-ws://127.0.0.1:9090}"
-export RUSTFLAGS="\
-  -C link-arg=-sWASM=1 \
-  -C link-arg=-sASYNCIFY \
-  -C link-arg=-sASYNCIFY_STACK_SIZE=262144 \
-  -C link-arg=\"-sWEBSOCKET_URL=${WS_URL}\" \
-  -C link-arg=-sUSE_PTHREADS=0 \
-  -C link-arg=-sALLOW_MEMORY_GROWTH=1 \
-  -C link-arg=\"-sEXPORTED_RUNTIME_METHODS=[\\\"callMain\\\",\\\"FS\\\",\\\"ENV\\\"]\" \
-  -C link-arg=-sINVOKE_RUN=0 \
-  -C link-arg=\"-sENVIRONMENT=web\" \
-  -C link-arg=-sEXIT_RUNTIME=0 \
-  -C link-arg=-sFORCE_FILESYSTEM=1 \
-  -C link-arg=-sMODULARIZE=1 \
-  -C link-arg=\"-sEXPORT_NAME=createRpg\" \
-  -C link-arg=-sSTACK_SIZE=131072 \
-"
-
-# -------------------------------------------------------------------------
-# Step 3: Build rpg for wasm32-unknown-emscripten
+# --target web: produces ES module (no bundler required)
+# --features wasm: enables the wasm feature flag in Cargo.toml
+# --out-dir: where the .js + .wasm artifacts land
 #
 # KNOWN BLOCKER (2026-03-27):
-#   mio v1.x (used by tokio 1.x for its I/O reactor) explicitly removed
-#   wasm32-unknown-emscripten support.  cargo check will fail with:
-#
-#     error: This wasm target is unsupported by mio.
-#            If using Tokio, disable the net feature.
-#
-#   tokio-postgres also uses tokio::net (TCP) internally, so switching to
-#   no-net tokio is not straightforward without a custom async transport.
-#
-#   Potential paths forward:
-#   a) Downgrade to mio 0.6 + tokio 0.2 (old API, significant effort).
-#   b) Patch mio to add emscripten support (upstream contribution needed).
-#   c) Implement a WebSocket-backed tokio::net::TcpStream shim for WASM
-#      and patch tokio-postgres to use it (see wasm/ws-proxy.js for the
-#      proxy-side counterpart that already exists).
-#   d) Target wasm32-unknown-unknown instead, using wasm-bindgen + a
-#      browser-native WebSocket transport (different architecture).
-#
-#   The cfg-gating changes in Cargo.toml / src/ are ready for whichever
-#   path is chosen; they do not affect native builds.
+#   The wasm dependencies (ws_stream_wasm, wasm-bindgen, web-sys,
+#   console_error_panic_hook) are not yet in Cargo.toml — they will be
+#   added when Sprint 1 merges.  Until then this build will fail at the
+#   dependency resolution step.
 # -------------------------------------------------------------------------
-log "Building rpg for wasm32-unknown-emscripten (release)..."
+log "Building rpg for wasm32-unknown-unknown (release)..."
 cd "${REPO_DIR}"
-cargo build \
-  --target wasm32-unknown-emscripten \
+
+wasm-pack build \
+  --target web \
   --release \
+  --features wasm \
+  --out-dir "${WASM_OUT}" \
   2>&1
 
-WASM_BIN="${REPO_DIR}/target/wasm32-unknown-emscripten/release"
-if [[ ! -f "${WASM_BIN}/rpg.js" ]]; then
-  err "Build did not produce rpg.js — check linker output above."
-fi
-log "Build succeeded: $(du -h "${WASM_BIN}/rpg.wasm" | cut -f1) rpg.wasm"
+log "wasm-pack build succeeded"
 
 # -------------------------------------------------------------------------
-# Step 4: Optimize with wasm-opt (if available)
+# Step 3: Optimise with wasm-opt (if available)
 # -------------------------------------------------------------------------
-WASM_OPT="${EMSDK_DIR}/upstream/bin/wasm-opt"
-if [[ -x "${WASM_OPT}" ]]; then
-  log "Running wasm-opt -Oz..."
-  "${WASM_OPT}" -Oz \
+WASM_FILE="${WASM_OUT}/rpg_bg.wasm"
+
+if [[ -f "${WASM_FILE}" ]] && command -v wasm-opt &>/dev/null; then
+  BEFORE=$(du -h "${WASM_FILE}" | cut -f1)
+  log "Running wasm-opt -Oz (before: ${BEFORE})..."
+  wasm-opt -Oz \
     --enable-bulk-memory \
-    --enable-bulk-memory-opt \
     --enable-nontrapping-float-to-int \
-    "${WASM_BIN}/rpg.wasm" \
-    -o "${WASM_BIN}/rpg.wasm"
-  log "After wasm-opt: $(du -h "${WASM_BIN}/rpg.wasm" | cut -f1) rpg.wasm"
-else
-  warn "wasm-opt not found at ${WASM_OPT}, skipping optimisation."
+    "${WASM_FILE}" \
+    -o "${WASM_FILE}"
+  AFTER=$(du -h "${WASM_FILE}" | cut -f1)
+  log "After wasm-opt: ${AFTER}"
+elif [[ -f "${WASM_FILE}" ]]; then
+  warn "wasm-opt not found; skipping optimisation."
 fi
 
 # -------------------------------------------------------------------------
-# Step 5: Copy artifacts to public/rpg/
+# Done
 # -------------------------------------------------------------------------
-log "Copying WASM artifacts to ${WASM_OUT}..."
-mkdir -p "${WASM_OUT}"
-cp "${WASM_BIN}/rpg.js" "${WASM_BIN}/rpg.wasm" "${WASM_OUT}/"
-
 log "Build complete!"
 echo ""
-echo "WASM artifacts:"
-echo "  ${WASM_OUT}/rpg.js   ($(du -h "${WASM_OUT}/rpg.js"   | cut -f1))"
-echo "  ${WASM_OUT}/rpg.wasm ($(du -h "${WASM_OUT}/rpg.wasm" | cut -f1))"
+echo "Artifacts in ${WASM_OUT}:"
+ls -lh "${WASM_OUT}"/*.wasm "${WASM_OUT}"/*.js 2>/dev/null || true
 echo ""
-echo "WebSocket proxy (ws://127.0.0.1:9090) must be running before rpg.js"
-echo "is loaded in the browser.  See wasm/ws-proxy.js for proxy setup docs."
+echo "Usage:"
+echo "  1. Start the ws-proxy:  node wasm/ws-proxy.js --pg-host localhost"
+echo "  2. Serve wasm/pkg/ and load rpg.js in the browser"
+echo "  3. Call: await run_rpg('ws://localhost:9091', 'mydb')"

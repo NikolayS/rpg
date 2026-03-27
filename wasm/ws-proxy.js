@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * ws-proxy.js — WebSocket-to-TCP proxy for rpg WASM
  *
@@ -7,51 +9,32 @@
  * -------------------------------------------------------------------------
  * Overview
  * -------------------------------------------------------------------------
- * Emscripten's network emulation maps POSIX `connect()` syscalls to a
- * WebSocket connection.  When rpg.wasm tries to open a TCP socket to a
- * Postgres host it actually connects to a WebSocket URL baked in at
- * link time (default: ws://127.0.0.1:9090).
+ * When rpg.wasm runs in the browser it cannot open TCP sockets directly.
+ * Instead, the WasmConnector (src/wasm/connector.rs) opens a WebSocket to
+ * this proxy, which then opens a real TCP connection to Postgres and relays
+ * binary frames in both directions.
  *
- * This file documents and provides a reference proxy that:
- *   1. Accepts WebSocket connections from the browser (rpg.wasm).
- *   2. Opens a real TCP connection to the target Postgres host.
- *   3. Relays binary frames in both directions.
- *
- * The same proxy pattern is used by the psql WASM port (see
- * wasm/build-psql-wasm.sh for the Álvaro Herrera / Emscripten approach).
+ * This also works with the Emscripten build path, where POSIX `connect()`
+ * syscalls are transparently mapped to WebSocket connections.
  *
  * -------------------------------------------------------------------------
- * Quick start (Node.js ≥ 18)
+ * Usage
  * -------------------------------------------------------------------------
  *
- *   npm install ws          # or: node --experimental-require-module
- *   node wasm/ws-proxy.js
+ *   node wasm/ws-proxy.js [options]
  *
- * Then open the browser page that loads rpg.js.  rpg.wasm will connect to
- * ws://127.0.0.1:9090 and the proxy will forward traffic to the Postgres
- * instance configured via environment variables.
- *
- * -------------------------------------------------------------------------
- * Environment variables
- * -------------------------------------------------------------------------
- *   PROXY_PORT   — WebSocket listen port   (default: 9090)
- *   PROXY_HOST   — WebSocket listen host   (default: 127.0.0.1)
- *   PG_HOST      — Postgres TCP host       (default: 127.0.0.1)
- *   PG_PORT      — Postgres TCP port       (default: 5432)
+ *   --pg-host <host>      Postgres TCP host    (default: 127.0.0.1, env: PG_HOST)
+ *   --pg-port <port>      Postgres TCP port    (default: 5432,      env: PG_PORT)
+ *   --listen-port <port>  WebSocket listen port(default: 9091,      env: PROXY_PORT)
+ *   --listen-host <host>  WebSocket listen host(default: 127.0.0.1, env: PROXY_HOST)
  *
  * -------------------------------------------------------------------------
- * TODO: Rust-side WebSocket connector
+ * Protocol
  * -------------------------------------------------------------------------
- * The current rpg WASM build relies entirely on Emscripten's transparent
- * socket-to-WebSocket remapping.  A future improvement is to implement a
- * native Rust WebSocket connector so that:
- *   - The WS URL can be set at runtime (not only at link time).
- *   - Multiple simultaneous Postgres connections can be multiplexed.
- *   - The proxy protocol can carry connection metadata (host, port) so a
- *     single proxy can route to multiple Postgres instances.
- *
- * See connection.rs for where the custom AsyncRead/AsyncWrite connector
- * would be plugged in for the wasm32 target.
+ * - Binary WebSocket frames (not text).
+ * - One TCP connection per WebSocket connection.
+ * - Clean close propagation in both directions.
+ * - All diagnostic output goes to stderr.
  */
 
 "use strict";
@@ -59,42 +42,133 @@
 const net = require("net");
 const { WebSocketServer } = require("ws");
 
-const PROXY_PORT = parseInt(process.env.PROXY_PORT ?? "9090", 10);
-const PROXY_HOST = process.env.PROXY_HOST ?? "127.0.0.1";
-const PG_HOST    = process.env.PG_HOST    ?? "127.0.0.1";
-const PG_PORT    = parseInt(process.env.PG_PORT ?? "5432", 10);
+// ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
 
-const wss = new WebSocketServer({ host: PROXY_HOST, port: PROXY_PORT });
-
-console.log(
-  `[ws-proxy] Listening on ws://${PROXY_HOST}:${PROXY_PORT} ` +
-  `→ ${PG_HOST}:${PG_PORT}`
-);
-
-wss.on("connection", (ws) => {
-  console.log(`[ws-proxy] Browser connected; opening TCP ${PG_HOST}:${PG_PORT}`);
-
-  const tcp = net.createConnection({ host: PG_HOST, port: PG_PORT });
-
-  // WebSocket frame (binary) → TCP socket
-  ws.on("message", (data) => {
-    if (!tcp.destroyed) tcp.write(data);
-  });
-
-  // TCP socket → WebSocket frame (binary)
-  tcp.on("data", (data) => {
-    if (ws.readyState === ws.OPEN) ws.send(data);
-  });
-
-  // Tear down both sides on any error or close
-  const cleanup = (label) => () => {
-    console.log(`[ws-proxy] ${label} closed — tearing down pair`);
-    if (!tcp.destroyed) tcp.destroy();
-    if (ws.readyState !== ws.CLOSED) ws.terminate();
+function parseArgs(argv) {
+  const args = {
+    pgHost: process.env.PG_HOST ?? "127.0.0.1",
+    pgPort: parseInt(process.env.PG_PORT ?? "5432", 10),
+    listenPort: parseInt(process.env.PROXY_PORT ?? "9091", 10),
+    listenHost: process.env.PROXY_HOST ?? "127.0.0.1",
   };
 
-  ws.on("close", cleanup("WebSocket"));
-  ws.on("error", cleanup("WebSocket error"));
-  tcp.on("close", cleanup("TCP"));
-  tcp.on("error", cleanup("TCP error"));
+  for (let i = 2; i < argv.length; i++) {
+    switch (argv[i]) {
+      case "--pg-host":
+        args.pgHost = argv[++i];
+        break;
+      case "--pg-port":
+        args.pgPort = parseInt(argv[++i], 10);
+        break;
+      case "--listen-port":
+        args.listenPort = parseInt(argv[++i], 10);
+        break;
+      case "--listen-host":
+        args.listenHost = argv[++i];
+        break;
+      case "--help":
+      case "-h":
+        console.error(
+          "Usage: node ws-proxy.js " +
+            "[--pg-host HOST] [--pg-port PORT] " +
+            "[--listen-port PORT] [--listen-host HOST]"
+        );
+        process.exit(0);
+        break;
+      default:
+        console.error(`Unknown argument: ${argv[i]}`);
+        process.exit(1);
+    }
+  }
+
+  return args;
+}
+
+const config = parseArgs(process.argv);
+
+// ---------------------------------------------------------------------------
+// Connection counter for log context
+// ---------------------------------------------------------------------------
+
+let connId = 0;
+
+// ---------------------------------------------------------------------------
+// WebSocket server
+// ---------------------------------------------------------------------------
+
+const wss = new WebSocketServer({
+  host: config.listenHost,
+  port: config.listenPort,
+});
+
+console.error(
+  `[ws-proxy] listening on ws://${config.listenHost}:${config.listenPort} ` +
+    `-> ${config.pgHost}:${config.pgPort}`
+);
+
+wss.on("connection", (ws, req) => {
+  const id = ++connId;
+  const origin = req.headers.origin ?? req.socket.remoteAddress;
+  console.error(`[ws-proxy] #${id} connected from ${origin}; opening TCP ${config.pgHost}:${config.pgPort}`);
+
+  const tcp = net.createConnection({
+    host: config.pgHost,
+    port: config.pgPort,
+  });
+
+  let closed = false;
+
+  // WebSocket binary frame -> TCP socket
+  ws.on("message", (data) => {
+    if (!tcp.destroyed) {
+      tcp.write(data);
+    }
+  });
+
+  // TCP socket -> WebSocket binary frame
+  tcp.on("data", (data) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(data);
+    }
+  });
+
+  // Clean close propagation both ways.
+  const cleanup = (label) => () => {
+    if (closed) return;
+    closed = true;
+    console.error(`[ws-proxy] #${id} ${label} — tearing down`);
+    if (!tcp.destroyed) tcp.destroy();
+    if (ws.readyState !== ws.CLOSED && ws.readyState !== ws.CLOSING) {
+      ws.terminate();
+    }
+  };
+
+  ws.on("close", cleanup("ws closed"));
+  ws.on("error", (err) => {
+    console.error(`[ws-proxy] #${id} ws error: ${err.message}`);
+    cleanup("ws error")();
+  });
+
+  tcp.on("close", cleanup("tcp closed"));
+  tcp.on("error", (err) => {
+    console.error(`[ws-proxy] #${id} tcp error: ${err.message}`);
+    cleanup("tcp error")();
+  });
+
+  tcp.on("connect", () => {
+    console.error(`[ws-proxy] #${id} tcp connected to ${config.pgHost}:${config.pgPort}`);
+  });
+});
+
+// Graceful shutdown
+process.on("SIGINT", () => {
+  console.error("[ws-proxy] shutting down...");
+  wss.close(() => process.exit(0));
+});
+
+process.on("SIGTERM", () => {
+  console.error("[ws-proxy] shutting down...");
+  wss.close(() => process.exit(0));
 });
