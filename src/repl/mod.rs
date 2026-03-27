@@ -1252,7 +1252,7 @@ impl std::fmt::Debug for ReplSettings {
                 &format!("{} loaded", self.lua_registry.commands.len()),
             )
             .field("initial_input", &self.initial_input)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -3071,37 +3071,49 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
     };
 
     let prompt = format!("Enter new password for user \"{resolved_user}\": ");
-    let pw = match rpassword::prompt_password(&prompt) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("\\password: {e}");
-            return;
-        }
-    };
 
-    let confirm = match rpassword::prompt_password("Enter it again: ") {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("\\password: {e}");
-            return;
-        }
-    };
-
-    if pw != confirm {
-        eprintln!("Passwords didn't match.");
+    // rpassword requires a TTY and is not available on WASM.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = prompt;
+        eprintln!("\\password: not supported in browser");
         return;
     }
 
-    // Escape the username as a SQL identifier (double-quote and double any
-    // internal double-quotes) and the password as a SQL string literal
-    // (single-quote and double any internal single-quotes).
-    let ident_escaped = resolved_user.replace('"', "\"\"");
-    let pw_escaped = pw.replace('\'', "''");
-    let sql = format!("alter user \"{ident_escaped}\" password '{pw_escaped}'");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let pw = match rpassword::prompt_password(&prompt) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("\\password: {e}");
+                return;
+            }
+        };
 
-    match client.simple_query(&sql).await {
-        Ok(_) => {}
-        Err(e) => eprintln!("{e}"),
+        let confirm = match rpassword::prompt_password("Enter it again: ") {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("\\password: {e}");
+                return;
+            }
+        };
+
+        if pw != confirm {
+            eprintln!("Passwords didn't match.");
+            return;
+        }
+
+        // Escape the username as a SQL identifier (double-quote and double any
+        // internal double-quotes) and the password as a SQL string literal
+        // (single-quote and double any internal single-quotes).
+        let ident_escaped = resolved_user.replace('"', "\"\"");
+        let pw_escaped = pw.replace('\'', "''");
+        let sql = format!("alter user \"{ident_escaped}\" password '{pw_escaped}'");
+
+        match client.simple_query(&sql).await {
+            Ok(_) => {}
+            Err(e) => eprintln!("{e}"),
+        }
     }
 }
 
@@ -3438,6 +3450,8 @@ async fn dispatch_meta(
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 let dbname = params.dbname.clone();
                 let cmd_name_owned = cmd_name.to_owned();
+                // block_in_place requires rt-multi-thread (not available on WASM).
+                #[cfg(not(target_arch = "wasm32"))]
                 let result = tokio::task::block_in_place(|| {
                     settings.lua_registry.execute_command(
                         &cmd_name_owned,
@@ -3446,6 +3460,13 @@ async fn dispatch_meta(
                         client,
                     )
                 });
+                #[cfg(target_arch = "wasm32")]
+                let result = settings.lua_registry.execute_command(
+                    &cmd_name_owned,
+                    &arg_refs,
+                    &dbname,
+                    client,
+                );
                 if let Err(e) = result {
                     eprintln!("{e}");
                 }

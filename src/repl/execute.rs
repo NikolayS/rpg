@@ -1443,6 +1443,7 @@ pub(super) fn flush_audit_entry(settings: &mut ReplSettings, entry_text: &str) {
 ///
 /// Prints `-- Schema cache refreshed` on success.  Errors are silently
 /// ignored so that a cache refresh failure never disrupts normal output.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSettings) {
     if let Some(cache) = &settings.schema_cache {
         if let Ok(loaded) = load_schema_cache(client).await {
@@ -1450,6 +1451,12 @@ pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSett
             println!("-- Schema cache refreshed");
         }
     }
+}
+
+/// WASM stub: schema cache refresh is not available.
+#[cfg(target_arch = "wasm32")]
+pub(super) async fn auto_refresh_schema(_client: &Client, _settings: &mut ReplSettings) {
+    // Schema completion is not available on WASM.
 }
 
 /// Activate the appropriate pager for `text`.
