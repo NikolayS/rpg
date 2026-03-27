@@ -62,7 +62,9 @@ pub async fn run_rpg(
     }
     pg_config.user(&user.unwrap_or_else(|| "rpg".to_owned()));
 
-    let connector = WasmConnector::new(&ws_url);
+    // TODO(s1-merge): thread ws_proxy_token from JS through run_rpg() args.
+    // For now, no token is passed (unauthenticated dev mode only).
+    let connector = WasmConnector::new(&ws_url, None);
     let _client = connector
         .connect_spawned(&pg_config)
         .await

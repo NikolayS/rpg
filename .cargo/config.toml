@@ -1,2 +1,22 @@
+# Cross-compilation targets for release builds.
+# See SPEC.md Appendix A.4 for full strategy.
+
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+
+# macOS targets: built natively on macOS runners
+[target.x86_64-apple-darwin]
+
+[target.aarch64-apple-darwin]
+
+# Windows targets: built natively on Windows runners (MSVC toolchain)
+[target.x86_64-pc-windows-msvc]
+
+[target.aarch64-pc-windows-msvc]
+
+# WASM target: getrandom uses JS random source in the browser
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
