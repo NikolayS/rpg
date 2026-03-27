@@ -369,7 +369,6 @@ pub(super) async fn stream_completion(
 /// Returns `Some(MetaResult)` when the caller needs to act on a result (e.g.
 /// reconnect after `/session resume`), or `None` for commands that are fully
 /// handled here.
-
 // Parse /ash --cpu N flag. Accepts --cpu 8 or --cpu=16; returns None otherwise.
 fn parse_ash_cpu_flag(args: &str) -> Option<u32> {
     let args = args.trim();
