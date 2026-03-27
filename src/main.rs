@@ -7,6 +7,7 @@ use clap::Parser;
 
 // Core modules.
 mod ai;
+mod ash;
 mod capabilities;
 mod compat;
 mod complete;
