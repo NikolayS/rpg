@@ -59,7 +59,7 @@ pub trait LineReader {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::*;
+    use super::{LineReader, LineResult, Path};
     use rustyline::error::ReadlineError;
     use rustyline::history::FileHistory;
     use rustyline::{Config, Editor};
@@ -132,7 +132,7 @@ pub use native::NativeLineReader;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use super::*;
+    use super::{LineReader, LineResult, Path};
 
     /// WASM line reader backed by a `tokio::sync::mpsc` channel.
     ///

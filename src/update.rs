@@ -200,6 +200,7 @@ pub async fn check_latest_version(client: &reqwest::Client) -> Result<ReleaseInf
 /// 2. Mark the temp file executable (Unix only).
 /// 3. Rename the temp file over the current exe path.
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn download_and_replace(client: &reqwest::Client, url: &str) -> Result<(), UpdateError> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
