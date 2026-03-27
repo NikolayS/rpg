@@ -18,6 +18,21 @@
  * syscalls are transparently mapped to WebSocket connections.
  *
  * -------------------------------------------------------------------------
+ * Authentication
+ * -------------------------------------------------------------------------
+ * When --token <secret> (or WS_PROXY_TOKEN env var) is set, every incoming
+ * WebSocket connection must send a JSON auth frame as its first message:
+ *
+ *   {"token": "<secret>"}
+ *
+ * If the token does not match, the connection is closed with code 4001
+ * (Unauthorized).  If the first message is not valid JSON, code 4002
+ * (Invalid auth frame) is used.
+ *
+ * When no token is configured the proxy runs unauthenticated — acceptable
+ * for local development only.  A warning is logged to stderr on startup.
+ *
+ * -------------------------------------------------------------------------
  * Usage
  * -------------------------------------------------------------------------
  *
@@ -27,11 +42,14 @@
  *   --pg-port <port>      Postgres TCP port    (default: 5432,      env: PG_PORT)
  *   --listen-port <port>  WebSocket listen port(default: 9091,      env: PROXY_PORT)
  *   --listen-host <host>  WebSocket listen host(default: 127.0.0.1, env: PROXY_HOST)
+ *   --token <secret>      Auth token           (env: WS_PROXY_TOKEN)
  *
  * -------------------------------------------------------------------------
  * Protocol
  * -------------------------------------------------------------------------
- * - Binary WebSocket frames (not text).
+ * - When a token is configured, the first WS message must be a JSON auth
+ *   frame: {"token": "..."}. Subsequent messages are binary Postgres data.
+ * - When no token is configured, all messages are binary Postgres data.
  * - One TCP connection per WebSocket connection.
  * - Clean close propagation in both directions.
  * - All diagnostic output goes to stderr.
@@ -52,6 +70,7 @@ function parseArgs(argv) {
     pgPort: parseInt(process.env.PG_PORT ?? "5432", 10),
     listenPort: parseInt(process.env.PROXY_PORT ?? "9091", 10),
     listenHost: process.env.PROXY_HOST ?? "127.0.0.1",
+    token: process.env.WS_PROXY_TOKEN ?? null,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -68,12 +87,16 @@ function parseArgs(argv) {
       case "--listen-host":
         args.listenHost = argv[++i];
         break;
+      case "--token":
+        args.token = argv[++i];
+        break;
       case "--help":
       case "-h":
         console.error(
           "Usage: node ws-proxy.js " +
             "[--pg-host HOST] [--pg-port PORT] " +
-            "[--listen-port PORT] [--listen-host HOST]"
+            "[--listen-port PORT] [--listen-host HOST] " +
+            "[--token SECRET]"
         );
         process.exit(0);
         break;
@@ -87,6 +110,14 @@ function parseArgs(argv) {
 }
 
 const config = parseArgs(process.argv);
+
+if (!config.token) {
+  console.error(
+    "[ws-proxy] WARNING: no --token or WS_PROXY_TOKEN set — proxy is " +
+      "unauthenticated. This is acceptable for local development only. " +
+      "Set a token for any network-exposed deployment."
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Connection counter for log context
@@ -105,13 +136,54 @@ const wss = new WebSocketServer({
 
 console.error(
   `[ws-proxy] listening on ws://${config.listenHost}:${config.listenPort} ` +
-    `-> ${config.pgHost}:${config.pgPort}`
+    `-> ${config.pgHost}:${config.pgPort}` +
+    (config.token ? " (auth enabled)" : " (no auth)")
 );
 
 wss.on("connection", (ws, req) => {
   const id = ++connId;
   const origin = req.headers.origin ?? req.socket.remoteAddress;
-  console.error(`[ws-proxy] #${id} connected from ${origin}; opening TCP ${config.pgHost}:${config.pgPort}`);
+  console.error(`[ws-proxy] #${id} connected from ${origin}`);
+
+  // -----------------------------------------------------------------------
+  // Authentication gate
+  // -----------------------------------------------------------------------
+  // When a token is configured, the first message must be a JSON auth
+  // frame: {"token": "..."}. Only after successful auth do we open the TCP
+  // connection and start relaying.  When no token is configured, we skip
+  // the auth step and start relaying immediately.
+
+  if (config.token) {
+    ws.once("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.token !== config.token) {
+          console.error(`[ws-proxy] #${id} auth failed — bad token`);
+          ws.close(4001, "Unauthorized");
+          return;
+        }
+      } catch {
+        console.error(`[ws-proxy] #${id} auth failed — invalid JSON`);
+        ws.close(4002, "Invalid auth frame");
+        return;
+      }
+
+      console.error(`[ws-proxy] #${id} auth ok — opening TCP`);
+      startRelay(id, ws);
+    });
+  } else {
+    startRelay(id, ws);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Relay logic (post-auth)
+// ---------------------------------------------------------------------------
+
+function startRelay(id, ws) {
+  console.error(
+    `[ws-proxy] #${id} opening TCP ${config.pgHost}:${config.pgPort}`
+  );
 
   const tcp = net.createConnection({
     host: config.pgHost,
@@ -158,9 +230,11 @@ wss.on("connection", (ws, req) => {
   });
 
   tcp.on("connect", () => {
-    console.error(`[ws-proxy] #${id} tcp connected to ${config.pgHost}:${config.pgPort}`);
+    console.error(
+      `[ws-proxy] #${id} tcp connected to ${config.pgHost}:${config.pgPort}`
+    );
   });
-});
+}
 
 // Graceful shutdown
 process.on("SIGINT", () => {
