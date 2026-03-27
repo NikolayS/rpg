@@ -63,13 +63,13 @@ BENCH_PID=$!
 expect tests/ai/ash-general.exp
 
 # Convert
-agg --theme dracula --font-size 13 docs/ash-demo.cast docs/ash-demo.gif
+agg --theme dracula --font-size 13 demos/slash-ash-general.cast demos/slash-ash-general.gif
 
 # Resize if over 800px wide (Telegram limit for inline playback)
-convert docs/ash-demo.gif -coalesce -resize 800x -layers optimize docs/ash-demo.gif
+convert demos/slash-ash-general.gif -coalesce -resize 800x -layers optimize demos/slash-ash-general.gif
 
 # Commit both cast and gif
-git add docs/ash-demo.gif docs/ash-demo.cast
+git add demos/slash-ash-general.gif demos/slash-ash-general.cast
 git commit -m "docs(ash): update demo GIF"
 ```
 
@@ -79,11 +79,12 @@ Expect script (`tests/ai/ash-general.exp`):
 #!/usr/bin/expect -f
 set timeout 60
 spawn env TERM=xterm-256color COLORTERM=truecolor COLUMNS=120 LINES=35 \
-    asciinema rec docs/ash-demo.cast --overwrite --cols 120 --rows 35
+    asciinema rec demos/slash-ash-general.cast --overwrite --cols 120 --rows 35
 expect -re {[$]\s*$} { sleep 0.5 }
 send "./target/debug/rpg postgresql://postgres@127.0.0.1:15433/ashtest\r"
 expect -re {[#>]\s*$} { sleep 1 }
 send "/ash\r"
+sleep 1
 sleep 20
 send "q"
 sleep 2

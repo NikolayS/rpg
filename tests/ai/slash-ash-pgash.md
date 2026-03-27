@@ -96,13 +96,13 @@ expect tests/ai/slash-ash-pgash.exp
 kill $LIVE_PID 2>/dev/null
 
 # Convert
-agg --theme dracula --font-size 13 docs/ash-pgash-demo.cast docs/ash-pgash-demo.gif
+agg --theme dracula --font-size 13 demos/slash-ash-pgash.cast demos/slash-ash-pgash.gif
 
 # Resize if needed
-convert docs/ash-pgash-demo.gif -coalesce -resize 800x -layers optimize docs/ash-pgash-demo.gif
+convert demos/slash-ash-pgash.gif -coalesce -resize 800x -layers optimize demos/slash-ash-pgash.gif
 
 # Commit
-git add docs/ash-pgash-demo.gif docs/ash-pgash-demo.cast
+git add demos/slash-ash-pgash.gif demos/slash-ash-pgash.cast
 git commit -m "docs(ash): add pg_ash history integration demo GIF"
 ```
 
@@ -112,11 +112,12 @@ Expect script (`tests/ai/slash-ash-pgash.exp`):
 #!/usr/bin/expect -f
 set timeout 60
 spawn env TERM=xterm-256color COLORTERM=truecolor COLUMNS=120 LINES=35 \
-    asciinema rec docs/ash-pgash-demo.cast --overwrite --cols 120 --rows 35
+    asciinema rec demos/slash-ash-pgash.cast --overwrite --cols 120 --rows 35
 expect -re {[$]\s*$} { sleep 0.5 }
 send "./target/debug/rpg postgresql://postgres@127.0.0.1:15433/ashtest\r"
 expect -re {[#>]\s*$} { sleep 1 }
 send "/ash\r"
+sleep 1
 sleep 25
 send "q"
 sleep 2
