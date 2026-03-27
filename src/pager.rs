@@ -339,6 +339,7 @@ pub fn find_matches(lines: &[String], pattern: &str) -> Vec<(usize, usize)> {
 /// searching forward. Wraps around if no match is found after `from_line`.
 ///
 /// Returns `None` when `matches` is empty.
+#[cfg(not(target_arch = "wasm32"))]
 fn first_match_from(matches: &[(usize, usize)], from_line: usize) -> Option<usize> {
     if matches.is_empty() {
         return None;
@@ -355,6 +356,7 @@ fn first_match_from(matches: &[(usize, usize)], from_line: usize) -> Option<usiz
 /// searching backward. Wraps around if no match is found before `before_line`.
 ///
 /// Returns `None` when `matches` is empty.
+#[cfg(not(target_arch = "wasm32"))]
 fn last_match_before(matches: &[(usize, usize)], before_line: usize) -> Option<usize> {
     if matches.is_empty() {
         return None;
@@ -372,6 +374,7 @@ fn last_match_before(matches: &[(usize, usize)], before_line: usize) -> Option<u
 // ---------------------------------------------------------------------------
 
 /// All mutable state for the pager, gathered in one struct.
+#[cfg(not(target_arch = "wasm32"))]
 struct PagerState {
     scroll_y: usize,
     scroll_x: usize,
@@ -396,6 +399,7 @@ struct PagerState {
     status_flash: Option<(String, std::time::Instant)>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PagerState {
     fn new(lines: &[String]) -> Self {
         Self {
@@ -500,6 +504,7 @@ impl PagerState {
 /// and search-match highlighting applied to the `display_str` slice.
 ///
 /// `col_offset` is the byte offset into `raw_line` where `display_str` starts.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_line_from_slice<'a>(
     raw_line: &'a str,
     display_str: &'a str,
@@ -590,6 +595,7 @@ fn build_line_from_slice<'a>(
 
 /// Build a single `Line` for `line` at `line_idx`, applying horizontal scroll
 /// and search-match highlighting.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_line<'a>(
     line: &'a str,
     line_idx: usize,
@@ -628,6 +634,7 @@ fn build_line<'a>(
 
 /// Build a `Line` with a frozen prefix, a `│` separator, and a scrollable
 /// suffix (with `scroll_x` applied to the suffix).
+#[cfg(not(target_arch = "wasm32"))]
 fn build_line_frozen<'a>(
     line: &'a str,
     line_idx: usize,
@@ -702,6 +709,7 @@ fn build_line_frozen<'a>(
 }
 
 /// Draw one frame of the pager into `frame`.
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_frame(
     frame: &mut ratatui::Frame,
     lines: &[String],
@@ -817,6 +825,7 @@ fn draw_frame(
 
 /// Compute the maximum horizontal scroll offset given the current state and
 /// terminal dimensions.
+#[cfg(not(target_arch = "wasm32"))]
 fn max_scroll_x(lines: &[String], state: &PagerState, content_width: usize) -> usize {
     let max_line_width = lines.iter().map(String::len).max().unwrap_or(0);
     let scrollable_width = if let Some(frozen_end) = state.frozen_split_byte() {
@@ -840,6 +849,7 @@ fn max_scroll_x(lines: &[String], state: &PagerState, content_width: usize) -> u
 
 /// Handle a key event while in search-input mode.
 /// Returns `true` if the pager should quit.
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_search_key(key: event::KeyEvent, state: &mut PagerState, lines: &[String]) -> bool {
     match key.code {
         KeyCode::Esc => {
@@ -868,6 +878,7 @@ fn handle_search_key(key: event::KeyEvent, state: &mut PagerState, lines: &[Stri
 
 /// Handle a key event while in normal navigation mode.
 /// Returns `true` if the pager should quit.
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_nav_key(
     key: event::KeyEvent,
     state: &mut PagerState,
@@ -943,6 +954,7 @@ fn handle_nav_key(
     false
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_pager_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     lines: &[String],
