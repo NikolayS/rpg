@@ -22,6 +22,7 @@ mod explain;
 mod highlight;
 #[cfg(not(target_arch = "wasm32"))]
 mod history_picker;
+#[allow(dead_code, unused_imports)]
 mod input;
 mod init;
 mod io;
@@ -563,9 +564,12 @@ async fn async_main() {
     // Install the default rustls CryptoProvider before any TLS operations.
     // Required because multiple dependencies (tokio-postgres-rustls, reqwest)
     // pull in different crypto backends, preventing auto-selection.
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .ok();
+    }
 
     let mut cli = Cli::parse();
 
@@ -632,15 +636,24 @@ async fn async_main() {
                 update::record_update_check();
 
                 if cli.update {
-                    println!("Downloading update from {}", info.download_url);
-                    match update::download_and_replace(&http, &info.download_url).await {
-                        Ok(()) => {
-                            println!("rpg updated to {} — please restart.", info.version);
+                    // Self-update requires filesystem access (not available on WASM).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        println!("Downloading update from {}", info.download_url);
+                        match update::download_and_replace(&http, &info.download_url).await {
+                            Ok(()) => {
+                                println!("rpg updated to {} — please restart.", info.version);
+                            }
+                            Err(e) => {
+                                eprintln!("rpg: update failed: {e}");
+                                std::process::exit(2);
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("rpg: update failed: {e}");
-                            std::process::exit(2);
-                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        eprintln!("rpg: self-update not supported in browser");
+                        std::process::exit(2);
                     }
                 }
             }
