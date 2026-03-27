@@ -14,14 +14,20 @@
 
 //! Terminal color highlighting for EXPLAIN ANALYZE output.
 //!
-//! Applies ANSI colors to key elements of `PostgreSQL` EXPLAIN output
+//! Applies ANSI colors to key elements of Postgres EXPLAIN output
 //! to make plans scannable at a glance.
+//!
+//! All byte offsets are computed against the **original** line text, then
+//! applied in a single left-to-right reconstruction pass. This avoids the
+//! class of panics where ANSI sequences injected in an earlier pass shift
+//! byte offsets used by a later pass (see #745).
 
 // IMPORTANT: longer/more-specific names must come before shorter prefixes.
 // e.g. "Hash Join" before "Hash", "Bitmap Heap Scan" before "Bitmap Index Scan",
 // "Index Only Scan" before "Index Scan", "Gather Merge" before "Gather",
 // "Parallel Seq Scan" before "Seq Scan".
-// Reordering without care will cause shorter names to match first and break highlighting.
+// The `break` after the first match means ordering determines which pattern
+// wins when one is a substring of another.
 static NODE_TYPES: [&str; 21] = [
     "Index Only Scan",
     "Bitmap Heap Scan",
@@ -46,6 +52,14 @@ static NODE_TYPES: [&str; 21] = [
     "Hash",
 ];
 
+/// A colored span: byte range `[start, end)` in the original line plus an
+/// ANSI color prefix. The reset `\x1b[0m` is appended automatically.
+struct Span {
+    start: usize,
+    end: usize,
+    color: &'static str,
+}
+
 /// Apply ANSI color highlighting to an EXPLAIN ANALYZE plan string.
 ///
 /// Preserves all text and indentation — only wraps tokens with ANSI codes.
@@ -61,20 +75,36 @@ pub fn highlight_explain(plan: &str, no_color: bool) -> String {
 }
 
 fn highlight_line(line: &str) -> String {
-    let mut result = line.to_owned();
+    // Whole-line wraps: these are exclusive — if one matches, wrap the entire
+    // line and return early. Check on the raw line (no ANSI yet).
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("Filter:")
+        || trimmed.starts_with("Index Cond:")
+        || trimmed.starts_with("Recheck Cond:")
+    {
+        return format!("\x1b[33m{line}\x1b[0m");
+    }
+    if trimmed.starts_with("Planning Time:") || trimmed.starts_with("Execution Time:") {
+        return format!("\x1b[1m{line}\x1b[0m");
+    }
 
-    // Pass 1: node type — check and replace on original line text.
-    // NODE_TYPES is ordered longest/most-specific first to prevent shorter
-    // prefixes (e.g. "Hash") from matching before longer ones ("Hash Join").
+    // Collect non-overlapping spans from the ORIGINAL line. All byte offsets
+    // reference `line` — we never compute offsets against a mutated string.
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Span 1: node type — bold cyan. First longest match wins.
     for node in &NODE_TYPES {
-        if line.contains(node) {
-            result = result.replace(node, &format!("\x1b[1;36m{node}\x1b[0m"));
-            break; // only first match per line
+        if let Some(start) = line.find(node) {
+            spans.push(Span {
+                start,
+                end: start + node.len(),
+                color: "\x1b[1;36m",
+            });
+            break;
         }
     }
 
-    // Pass 2: actual time — extract magnitude from ORIGINAL line (not result)
-    // to avoid byte-offset corruption from ANSI codes injected in Pass 1.
+    // Span 2: actual time segment — colored by magnitude.
     if let Some(time_ms) = extract_actual_time(line) {
         let color = if time_ms >= 100.0 {
             "\x1b[31m" // red — slow
@@ -83,31 +113,40 @@ fn highlight_line(line: &str) -> String {
         } else {
             "\x1b[32m" // green — fast
         };
-        // Locate the segment in the ORIGINAL line, then replace by text value
-        // in result (which may have shifted offsets due to ANSI in Pass 1).
         if let Some(pos) = line.find("actual time=") {
             let end = line[pos..].find(')').map_or(line.len(), |i| pos + i + 1);
-            let segment = &line[pos..end];
-            result = result.replace(segment, &format!("{color}{segment}\x1b[0m"));
+            spans.push(Span {
+                start: pos,
+                end,
+                color,
+            });
         }
     }
 
-    // Pass 3: Filter / Index Cond / Recheck Cond lines — yellow
-    if result.trim_start().starts_with("Filter:")
-        || result.trim_start().starts_with("Index Cond:")
-        || result.trim_start().starts_with("Recheck Cond:")
-    {
-        result = format!("\x1b[33m{result}\x1b[0m");
+    if spans.is_empty() {
+        return line.to_owned();
     }
 
-    // Pass 4: Planning Time / Execution Time lines — bold
-    if result.trim_start().starts_with("Planning Time:")
-        || result.trim_start().starts_with("Execution Time:")
-    {
-        result = format!("\x1b[1m{result}\x1b[0m");
-    }
+    // Sort spans by start offset so we can apply them left-to-right.
+    spans.sort_by_key(|s| s.start);
 
-    result
+    // Single-pass reconstruction: copy uncolored text between spans verbatim,
+    // wrap each span with its ANSI color + reset.
+    let mut out = String::with_capacity(line.len() + spans.len() * 12);
+    let mut cursor = 0;
+    for span in &spans {
+        // Copy text before this span.
+        out.push_str(&line[cursor..span.start]);
+        // Emit colored span.
+        out.push_str(span.color);
+        out.push_str(&line[span.start..span.end]);
+        out.push_str("\x1b[0m");
+        cursor = span.end;
+    }
+    // Copy any remaining text after the last span.
+    out.push_str(&line[cursor..]);
+
+    out
 }
 
 /// Extract the higher actual time value (ms) from a plan line.
@@ -187,8 +226,8 @@ mod tests {
 
     #[test]
     fn no_double_reset_on_node_with_time() {
-        // A line with both a node type and actual time must not have double \x1b[0m\x1b[0m
-        // adjacent (which would indicate the old double-reset bug).
+        // A line with both a node type and actual time must not have
+        // adjacent double reset codes.
         let line = "  ->  Hash Join  (cost=0.00..100.00 rows=1000 width=8) (actual time=150.000..200.000 rows=1000 loops=1)";
         let result = highlight_line(line);
         assert!(
@@ -200,5 +239,60 @@ mod tests {
             result.contains("\x1b[1;36m"),
             "node type should be cyan bold"
         );
+    }
+
+    /// Regression test for #745: a line with both a node type AND `actual
+    /// time=` would panic with "byte index N is not a char boundary" in the
+    /// old multi-pass-mutate implementation because ANSI codes injected in
+    /// pass 1 shifted the byte offsets used by pass 2.
+    #[test]
+    fn node_type_and_actual_time_no_panic() {
+        let line = "->  Seq Scan on workload  (cost=0.00..1693.00 rows=100000 width=12) (actual time=0.012..8.234 rows=100000 loops=1)";
+        let result = highlight_line(line);
+
+        // Must not panic (the old code panicked here).
+        // Verify both highlights are present and correctly placed.
+        assert!(
+            result.contains("\x1b[1;36mSeq Scan\x1b[0m"),
+            "node type should be wrapped in cyan bold"
+        );
+        assert!(
+            result.contains("\x1b[32mactual time=0.012..8.234 rows=100000 loops=1)\x1b[0m"),
+            "actual time segment should be wrapped in green"
+        );
+
+        // Original text (minus ANSI codes) must be preserved.
+        let stripped = strip_ansi(&result);
+        assert_eq!(stripped, line, "stripped output must equal original line");
+    }
+
+    /// Verify that Parallel Seq Scan is matched as itself, not as Seq Scan.
+    #[test]
+    fn parallel_seq_scan_not_plain_seq_scan() {
+        let line = "  ->  Parallel Seq Scan on big_table  (cost=0.00..4321.00 rows=50000 width=16) (actual time=0.023..45.678 rows=50000 loops=2)";
+        let result = highlight_line(line);
+        assert!(
+            result.contains("\x1b[1;36mParallel Seq Scan\x1b[0m"),
+            "should highlight full 'Parallel Seq Scan', not just 'Seq Scan'"
+        );
+    }
+
+    /// Strip ANSI escape sequences from a string for comparison.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Skip until 'm' (end of CSI sequence).
+                for inner in chars.by_ref() {
+                    if inner == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 }
