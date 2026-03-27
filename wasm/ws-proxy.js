@@ -51,6 +51,9 @@
  *   frame: {"token": "..."}. Subsequent messages are binary Postgres data.
  * - When no token is configured, all messages are binary Postgres data.
  * - One TCP connection per WebSocket connection.
+ * - Backpressure: TCP reads are paused when the WS send buffer exceeds a
+ *   high-water mark, and resumed on drain.  Similarly, WS reads are paused
+ *   when the TCP write buffer is full, and resumed on drain.
  * - Clean close propagation in both directions.
  * - All diagnostic output goes to stderr.
  */
@@ -177,6 +180,16 @@ wss.on("connection", (ws, req) => {
 });
 
 // ---------------------------------------------------------------------------
+// Backpressure tuning
+// ---------------------------------------------------------------------------
+
+// When the WebSocket bufferedAmount exceeds this threshold, pause TCP reads
+// until the WS drains.  64 KiB is a conservative default that prevents
+// unbounded memory growth under load while keeping latency low for normal
+// interactive use.
+const WS_HIGH_WATER_MARK = 64 * 1024;
+
+// ---------------------------------------------------------------------------
 // Relay logic (post-auth)
 // ---------------------------------------------------------------------------
 
@@ -192,17 +205,41 @@ function startRelay(id, ws) {
 
   let closed = false;
 
-  // WebSocket binary frame -> TCP socket
+  // WS -> TCP with backpressure.
+  // If the TCP write buffer is full, pause incoming WS reads until TCP
+  // drains.  This prevents unbounded buffering when the WS client sends
+  // data faster than the Postgres TCP socket can consume it.
   ws.on("message", (data) => {
-    if (!tcp.destroyed) {
-      tcp.write(data);
+    if (tcp.destroyed) return;
+    const canWrite = tcp.write(data);
+    if (!canWrite) {
+      ws._socket.pause();
+      tcp.once("drain", () => {
+        if (ws.readyState === ws.OPEN) {
+          ws._socket.resume();
+        }
+      });
     }
   });
 
-  // TCP socket -> WebSocket binary frame
+  // TCP -> WS with backpressure.
+  // If the WS send buffer exceeds the high-water mark, pause TCP reads
+  // until the WS drains.  This prevents unbounded memory growth when
+  // Postgres sends data faster than the WS client can consume it.
   tcp.on("data", (data) => {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(data);
+    if (ws.readyState !== ws.OPEN) return;
+    ws.send(data, { binary: true }, (err) => {
+      if (err) {
+        console.error(`[ws-proxy] #${id} WS send error: ${err.message}`);
+      }
+    });
+    if (ws.bufferedAmount > WS_HIGH_WATER_MARK) {
+      tcp.pause();
+      ws.once("drain", () => {
+        if (!tcp.destroyed) {
+          tcp.resume();
+        }
+      });
     }
   });
 
