@@ -76,13 +76,15 @@ pub struct CompletionResult {
 // LlmProvider trait
 // ---------------------------------------------------------------------------
 
-/// Trait for LLM providers.
+// On native targets the provider and its futures must be Send so they can
+// cross tokio task boundaries.  On WASM (single-threaded), reqwest futures
+// contain `Rc`/`RefCell` which are `!Send`, so we relax the bounds.
+#[cfg(not(target_arch = "wasm32"))]
+/// Trait for LLM providers (native — requires `Send`).
 ///
 /// Uses `Pin<Box<dyn Future>>` to avoid the `async_trait` crate dependency.
 pub trait LlmProvider: Send + Sync + std::fmt::Debug {
     /// Human-readable name of this provider.
-    ///
-    /// Used for logging and diagnostics.
     #[allow(dead_code)]
     fn name(&self) -> &'static str;
 
@@ -111,6 +113,44 @@ pub trait LlmProvider: Send + Sync + std::fmt::Debug {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + Send + '_>,
     > {
+        let messages = messages.to_vec();
+        let options = options.clone();
+        Box::pin(async move {
+            let result = self.complete(&messages, &options).await?;
+            on_token(&result.content);
+            Ok(result)
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Trait for LLM providers (WASM — relaxed `Send` bounds).
+///
+/// Uses `Pin<Box<dyn Future>>` to avoid the `async_trait` crate dependency.
+pub trait LlmProvider: std::fmt::Debug {
+    /// Human-readable name of this provider.
+    #[allow(dead_code)]
+    fn name(&self) -> &'static str;
+
+    /// Default model for this provider.
+    fn default_model(&self) -> &'static str;
+
+    /// Send a completion request and return the result.
+    fn complete(
+        &self,
+        messages: &[Message],
+        options: &CompletionOptions,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>>;
+
+    /// Send a streaming completion request, invoking `on_token` for each
+    /// text chunk as it arrives.
+    fn complete_streaming(
+        &self,
+        messages: &[Message],
+        options: &CompletionOptions,
+        on_token: Box<dyn Fn(&str)>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>>
+    {
         let messages = messages.to_vec();
         let options = options.clone();
         Box::pin(async move {
