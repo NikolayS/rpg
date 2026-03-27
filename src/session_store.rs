@@ -62,11 +62,20 @@ impl SessionStore {
     /// Open (or create) the session store at an explicit path.
     ///
     /// Used by unit tests to open a temp-file store.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_at(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create data directory: {e}"))?;
         }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// WASM stub: no filesystem, just track the path.
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_at(path: &Path) -> Result<Self, String> {
         Ok(Self {
             path: path.to_path_buf(),
         })
@@ -79,6 +88,7 @@ impl SessionStore {
     /// Load all records from the JSON file.
     ///
     /// Returns an empty `Vec` if the file does not yet exist.
+    #[cfg(not(target_arch = "wasm32"))]
     fn load(&self) -> Result<Vec<SessionRecord>, String> {
         match std::fs::read_to_string(&self.path) {
             Ok(text) => serde_json::from_str::<Vec<SessionRecord>>(&text)
@@ -88,10 +98,17 @@ impl SessionStore {
         }
     }
 
+    /// WASM stub: no filesystem, always empty.
+    #[cfg(target_arch = "wasm32")]
+    fn load(&self) -> Result<Vec<SessionRecord>, String> {
+        Ok(Vec::new())
+    }
+
     /// Persist `records` to the JSON file atomically.
     ///
     /// Writes to `<path>.tmp` then renames into place so a crash during
     /// the write never leaves a corrupt primary file.
+    #[cfg(not(target_arch = "wasm32"))]
     fn save(&self, records: &[SessionRecord]) -> Result<(), String> {
         let json = serde_json::to_string_pretty(records)
             .map_err(|e| format!("cannot serialise sessions: {e}"))?;
@@ -110,6 +127,12 @@ impl SessionStore {
         std::fs::rename(&tmp, &self.path)
             .map_err(|e| format!("cannot rename sessions tmp file: {e}"))?;
 
+        Ok(())
+    }
+
+    /// WASM stub: no filesystem, silently succeed.
+    #[cfg(target_arch = "wasm32")]
+    fn save(&self, _records: &[SessionRecord]) -> Result<(), String> {
         Ok(())
     }
 
@@ -197,11 +220,18 @@ impl SessionStore {
 ///
 /// Uses `dirs::data_dir()` which respects `$XDG_DATA_HOME` on Linux and
 /// returns the appropriate platform path on macOS and Windows.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn store_path() -> Option<PathBuf> {
     let mut p = dirs::data_dir()?;
     p.push("rpg");
     p.push("sessions.json");
     Some(p)
+}
+
+/// WASM stub: no filesystem, no store path.
+#[cfg(target_arch = "wasm32")]
+pub fn store_path() -> Option<PathBuf> {
+    None
 }
 
 // ---------------------------------------------------------------------------

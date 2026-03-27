@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::Command;
 
 use tokio_postgres::Client;
@@ -176,6 +177,7 @@ pub fn write_buffer(buf: &str, path: &str) -> Result<(), String> {
 /// # Errors
 /// Returns `Err(message)` if the editor cannot be launched or the temporary
 /// file cannot be read back.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<String, String> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -219,7 +221,14 @@ pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<St
     Ok(result)
 }
 
+/// WASM stub: editor invocation is not supported in a browser context.
+#[cfg(target_arch = "wasm32")]
+pub fn edit(_content: &str, _file: Option<&str>, _line: Option<usize>) -> Result<String, String> {
+    Err("\\e: editor not available in browser".to_owned())
+}
+
 /// Return a path for a temporary file.
+#[cfg(not(target_arch = "wasm32"))]
 fn temp_file_path() -> String {
     let pid = std::process::id();
     let dir = std::env::temp_dir();
@@ -240,6 +249,7 @@ fn temp_file_path() -> String {
 ///
 /// Returns the exit code of the child process, or 1 if it could not be
 /// launched.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn shell_command(cmd: Option<&str>) -> i32 {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
 
@@ -256,6 +266,13 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
             1
         }
     }
+}
+
+/// WASM stub: shell command spawning is not supported in a browser context.
+#[cfg(target_arch = "wasm32")]
+pub fn shell_command(_cmd: Option<&str>) -> i32 {
+    eprintln!("\\!: shell commands not available in browser");
+    1
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +292,15 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     let target: std::path::PathBuf = match dir {
         Some(d) => Path::new(d).to_path_buf(),
         None => {
-            dirs::home_dir().ok_or_else(|| "\\cd: could not determine home directory".to_owned())?
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                dirs::home_dir()
+                    .ok_or_else(|| "\\cd: could not determine home directory".to_owned())?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err("\\cd: not supported in browser".to_owned());
+            }
         }
     };
 

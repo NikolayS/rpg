@@ -276,11 +276,18 @@ async fn with_ctrl_c_cancel<F, T>(fut: F) -> Result<T, String>
 where
     F: std::future::Future<Output = Result<T, String>>,
 {
-    tokio::select! {
-        biased;
-        _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
-        result = fut => result,
+    // tokio::signal is not available on WASM; run the future without
+    // Ctrl-C cancellation support in that environment.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
+            result = fut => result,
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    fut.await
 }
 
 /// Stream a completion to the terminal, rendering markdown when enabled.
@@ -521,72 +528,86 @@ pub(super) enum AskChoice {
 /// Ctrl+C and Ctrl+D (EOF) always return `No` regardless of the default,
 /// so the user can safely abort without the query being executed.
 pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
-    use crossterm::event::{read, Event, KeyCode, KeyModifiers};
-    use crossterm::terminal;
-    use std::io::{IsTerminal, Write};
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+        use crossterm::terminal;
+        use std::io::{IsTerminal, Write};
 
-    eprint!("{prompt}");
-    let _ = io::stderr().flush();
+        eprint!("{prompt}");
+        let _ = io::stderr().flush();
 
-    // Non-TTY guard: if stdin is not a terminal (CI, piped input, scripts),
-    // skip the raw-mode loop entirely and return the default answer.
-    if !io::stdin().is_terminal() {
-        return if default_yes {
+        // Non-TTY guard: if stdin is not a terminal (CI, piped input, scripts),
+        // skip the raw-mode loop entirely and return the default answer.
+        if !io::stdin().is_terminal() {
+            return if default_yes {
+                AskChoice::Yes
+            } else {
+                AskChoice::No
+            };
+        }
+
+        // Enable raw mode so we can read single key events and detect Ctrl+C.
+        // Outside readline, the terminal is in cooked mode; we temporarily switch
+        // to raw, read one meaningful key, then restore.
+        let raw_enabled = terminal::enable_raw_mode().is_ok();
+
+        let choice = loop {
+            if let Ok(Event::Key(key)) = read() {
+                match (key.code, key.modifiers) {
+                    // Ctrl+C / Ctrl+D / Escape — abort without executing.
+                    (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break AskChoice::No;
+                    }
+                    // Enter — use the default.
+                    (KeyCode::Enter, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break if default_yes {
+                            AskChoice::Yes
+                        } else {
+                            AskChoice::No
+                        };
+                    }
+                    (KeyCode::Char('y' | 'Y'), _) => {
+                        let _ = write!(io::stderr(), "y\r\n");
+                        break AskChoice::Yes;
+                    }
+                    (KeyCode::Char('n' | 'N'), _) => {
+                        let _ = write!(io::stderr(), "n\r\n");
+                        break AskChoice::No;
+                    }
+                    (KeyCode::Char('e' | 'E'), _) => {
+                        let _ = write!(io::stderr(), "e\r\n");
+                        break AskChoice::Edit;
+                    }
+                    // Any other key: ignore and keep waiting.
+                    _ => {}
+                }
+            } else {
+                // EOF or error — abort.
+                let _ = write!(io::stderr(), "\r\n");
+                break AskChoice::No;
+            }
+        };
+
+        if raw_enabled {
+            let _ = terminal::disable_raw_mode();
+        }
+
+        choice
+    }
+
+    // On WASM there is no raw-mode terminal; return the default.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = prompt;
+        if default_yes {
             AskChoice::Yes
         } else {
             AskChoice::No
-        };
-    }
-
-    // Enable raw mode so we can read single key events and detect Ctrl+C.
-    // Outside readline, the terminal is in cooked mode; we temporarily switch
-    // to raw, read one meaningful key, then restore.
-    let raw_enabled = terminal::enable_raw_mode().is_ok();
-
-    let choice = loop {
-        if let Ok(Event::Key(key)) = read() {
-            match (key.code, key.modifiers) {
-                // Ctrl+C / Ctrl+D / Escape — abort without executing.
-                (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-                    let _ = write!(io::stderr(), "\r\n");
-                    break AskChoice::No;
-                }
-                // Enter — use the default.
-                (KeyCode::Enter, _) => {
-                    let _ = write!(io::stderr(), "\r\n");
-                    break if default_yes {
-                        AskChoice::Yes
-                    } else {
-                        AskChoice::No
-                    };
-                }
-                (KeyCode::Char('y' | 'Y'), _) => {
-                    let _ = write!(io::stderr(), "y\r\n");
-                    break AskChoice::Yes;
-                }
-                (KeyCode::Char('n' | 'N'), _) => {
-                    let _ = write!(io::stderr(), "n\r\n");
-                    break AskChoice::No;
-                }
-                (KeyCode::Char('e' | 'E'), _) => {
-                    let _ = write!(io::stderr(), "e\r\n");
-                    break AskChoice::Edit;
-                }
-                // Any other key: ignore and keep waiting.
-                _ => {}
-            }
-        } else {
-            // EOF or error — abort.
-            let _ = write!(io::stderr(), "\r\n");
-            break AskChoice::No;
         }
-    };
-
-    if raw_enabled {
-        let _ = terminal::disable_raw_mode();
     }
-
-    choice
 }
 
 /// Wrap a SQL query in a `start transaction read only` / `commit` block.
@@ -1159,10 +1180,13 @@ pub(super) async fn handle_ai_plan(
 
     // Offer to save the plan.
     if ask_yn_prompt("Save this plan? [Y/n] ", true) {
+        #[cfg(not(target_arch = "wasm32"))]
         let plans_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("rpg")
             .join("plans");
+        #[cfg(target_arch = "wasm32")]
+        let plans_dir = std::path::PathBuf::from(".").join("rpg").join("plans");
         if let Err(e) = std::fs::create_dir_all(&plans_dir) {
             eprintln!("Cannot create plans directory: {e}");
             return;

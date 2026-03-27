@@ -77,8 +77,13 @@ pub async fn share_explain_plan(
 /// `redirect::Policy::none()` lets us capture the `Location` header directly
 /// instead of following the redirect (which would return HTML).
 async fn upload_depesz(plan_text: &str) -> Result<String, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    #[cfg(target_arch = "wasm32")]
+    let client = reqwest::Client::builder()
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
@@ -167,8 +172,13 @@ fn extract_depesz_url(body: &str) -> Option<String> {
 /// instead of following the redirect automatically (which would give us
 /// the rendered HTML page with status 200, making URL extraction fail).
 async fn upload_dalibo(plan_text: &str) -> Result<String, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    #[cfg(target_arch = "wasm32")]
+    let client = reqwest::Client::builder()
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
