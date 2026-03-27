@@ -33,15 +33,22 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+#[cfg(not(target_arch = "wasm32"))]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[cfg(not(target_arch = "wasm32"))]
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+#[cfg(not(target_arch = "wasm32"))]
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_postgres::config::SslMode as TokioSslMode;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect};
 use tokio_postgres::Client;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_rustls::client::TlsStream;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_rustls::TlsConnector;
 
 // ---------------------------------------------------------------------------
@@ -132,6 +139,7 @@ impl TlsInfo {
 /// Convert a rustls `ProtocolVersion` to the psql display string.
 ///
 /// rustls uses `TLSv1_2` / `TLSv1_3`; psql shows `TLSv1.2` / `TLSv1.3`.
+#[cfg(not(target_arch = "wasm32"))]
 fn protocol_version_str(v: rustls::ProtocolVersion) -> String {
     match v.as_str() {
         Some(s) => s.replace('_', "."),
@@ -143,6 +151,7 @@ fn protocol_version_str(v: rustls::ProtocolVersion) -> String {
 ///
 /// rustls names TLS 1.3 suites as `TLS13_AES_256_GCM_SHA384`; IANA (and psql)
 /// use `TLS_AES_256_GCM_SHA384`.  TLS 1.2 suites already start with `TLS_`.
+#[cfg(not(target_arch = "wasm32"))]
 fn cipher_suite_str(cs: rustls::CipherSuite) -> String {
     match cs.as_str() {
         Some(s) => {
@@ -1348,6 +1357,7 @@ const SERVICE_VALID_KEYS: &[&str] = &[
 ///
 /// The first path that exists is returned.  Returns `None` if no file is
 /// found or if the home directory cannot be determined.
+#[cfg(not(target_arch = "wasm32"))]
 fn service_file_path() -> Option<PathBuf> {
     // 1. Explicit env override.
     if let Ok(p) = env::var("PGSERVICEFILE") {
@@ -1376,6 +1386,12 @@ fn service_file_path() -> Option<PathBuf> {
         return Some(sys);
     }
 
+    None
+}
+
+/// WASM stub: no filesystem access, so no service file is available.
+#[cfg(target_arch = "wasm32")]
+fn service_file_path() -> Option<PathBuf> {
     None
 }
 
@@ -1436,6 +1452,7 @@ pub fn parse_service_file(contents: &str) -> HashMap<String, HashMap<String, Str
 /// does not exist in the file (matching psql behaviour — no error is raised
 /// for a missing service file, only for a service file that exists but does
 /// not contain the requested service).
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_service(name: &str) -> Result<HashMap<String, String>, ConnectionError> {
     let Some(path) = service_file_path() else {
         return Ok(HashMap::new());
@@ -1458,11 +1475,18 @@ fn resolve_service(name: &str) -> Result<HashMap<String, String>, ConnectionErro
     }
 }
 
+/// WASM stub: service files are not available in browser.
+#[cfg(target_arch = "wasm32")]
+fn resolve_service(_name: &str) -> Result<HashMap<String, String>, ConnectionError> {
+    Ok(HashMap::new())
+}
+
 // ---------------------------------------------------------------------------
 // .pgpass support
 // ---------------------------------------------------------------------------
 
 /// Look up a password in the `.pgpass` file.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn pgpass_lookup(params: &ConnParams) -> Result<Option<String>, ConnectionError> {
     let path = pgpass_path();
     let Some(path) = path else {
@@ -1504,7 +1528,14 @@ pub fn pgpass_lookup(params: &ConnParams) -> Result<Option<String>, ConnectionEr
     ))
 }
 
+/// WASM stub: no filesystem, so no .pgpass file.
+#[cfg(target_arch = "wasm32")]
+pub fn pgpass_lookup(_params: &ConnParams) -> Result<Option<String>, ConnectionError> {
+    Ok(None)
+}
+
 /// Return the path to the pgpass file.
+#[cfg(not(target_arch = "wasm32"))]
 fn pgpass_path() -> Option<PathBuf> {
     if let Ok(p) = env::var("PGPASSFILE") {
         return Some(PathBuf::from(p));
@@ -1649,13 +1680,14 @@ pub fn resolve_password(
 }
 
 // ---------------------------------------------------------------------------
-// TLS configuration
+// TLS configuration (native-only)
 // ---------------------------------------------------------------------------
 
 /// Build a default `rustls` `ClientConfig` using Mozilla/webpki root certs.
 ///
 /// This is used for `sslmode=prefer`, `sslmode=require`, and as the basis
 /// for `sslmode=verify-ca` / `sslmode=verify-full` when no custom CA is set.
+#[cfg(not(target_arch = "wasm32"))]
 fn make_tls_config_default() -> ClientConfig {
     let root_store: rustls::RootCertStore =
         webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
@@ -1669,6 +1701,7 @@ fn make_tls_config_default() -> ClientConfig {
 ///
 /// Encrypts the connection but performs no certificate or hostname verification.
 /// Supports optional client certificates (mutual TLS).
+#[cfg(not(target_arch = "wasm32"))]
 fn make_tls_config_require(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
     let verifier = Arc::new(NoVerifier::new());
     let builder = ClientConfig::builder()
@@ -1696,6 +1729,7 @@ fn make_tls_config_require(params: &ConnParams) -> Result<ClientConfig, Connecti
 }
 
 /// Load PEM certificates from `path` into a `RootCertStore`.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionError> {
     let pem = std::fs::read(path)
         .map_err(|e| ConnectionError::SslRootCertError(format!("cannot read {path}: {e}")))?;
@@ -1726,6 +1760,7 @@ fn load_root_cert_store(path: &str) -> Result<rustls::RootCertStore, ConnectionE
 /// Used to supply local certificates as intermediates when verifying a chain
 /// that the server did not send in full (issue #712).  Returns an empty vec
 /// if the path is `None` or the file cannot be read.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_certs_as_intermediates(path: Option<&str>) -> Vec<CertificateDer<'static>> {
     let Some(p) = path else { return vec![] };
     let Ok(pem) = std::fs::read(p) else {
@@ -1741,6 +1776,7 @@ fn load_certs_as_intermediates(path: Option<&str>) -> Vec<CertificateDer<'static
 ///
 /// Returns `(cert_chain, private_key)` suitable for passing to
 /// `ClientConfig::with_client_auth_cert()`.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_client_cert_and_key(
     cert_path: &str,
     key_path: &str,
@@ -1779,6 +1815,7 @@ fn load_client_cert_and_key(
 ///
 /// The certificate chain is verified against the CA bundle but the server
 /// hostname is NOT checked — matching psql `sslmode=verify-ca` semantics.
+#[cfg(not(target_arch = "wasm32"))]
 fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
     let root_store = match &params.ssl_root_cert {
         Some(path) => load_root_cert_store(path)?,
@@ -1822,6 +1859,7 @@ fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, Connec
 /// Performs full chain + hostname validation.  Uses `FullVerifier` so that
 /// when the server sends only the leaf cert (`PostgreSQL`'s default), the certs
 /// in `sslrootcert` are tried as intermediates before giving up (issue #712).
+#[cfg(not(target_arch = "wasm32"))]
 fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, ConnectionError> {
     let root_store = match &params.ssl_root_cert {
         Some(path) => load_root_cert_store(path)?,
@@ -1855,7 +1893,7 @@ fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, Conn
 }
 
 // ---------------------------------------------------------------------------
-// Custom certificate verifier: require (no verification at all)
+// Custom certificate verifier: require (no verification at all) — native only
 // ---------------------------------------------------------------------------
 
 /// A `ServerCertVerifier` that accepts any server certificate without
@@ -1863,11 +1901,13 @@ fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, Conn
 ///
 /// This implements `sslmode=require` semantics: the connection is encrypted
 /// but the server identity is not verified.  psql behaves identically.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct NoVerifier {
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NoVerifier {
     fn new() -> Self {
         Self {
@@ -1876,6 +1916,7 @@ impl NoVerifier {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ServerCertVerifier for NoVerifier {
     fn verify_server_cert(
         &self,
@@ -1925,7 +1966,7 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 // ---------------------------------------------------------------------------
-// Custom certificate verifier: verify-full with chain completion
+// Custom certificate verifier: verify-full with chain completion — native only
 // ---------------------------------------------------------------------------
 
 /// A `ServerCertVerifier` that performs full chain + hostname validation but
@@ -1933,6 +1974,7 @@ impl ServerCertVerifier for NoVerifier {
 /// sends only the leaf cert (issue #712).
 ///
 /// This implements `sslmode=verify-full` semantics matching psql/OpenSSL.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct FullVerifier {
     roots: rustls::RootCertStore,
@@ -1940,6 +1982,7 @@ struct FullVerifier {
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FullVerifier {
     fn new(
         roots: rustls::RootCertStore,
@@ -1971,6 +2014,7 @@ impl FullVerifier {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ServerCertVerifier for FullVerifier {
     fn verify_server_cert(
         &self,
@@ -2035,7 +2079,7 @@ impl ServerCertVerifier for FullVerifier {
 }
 
 // ---------------------------------------------------------------------------
-// Custom certificate verifier: verify-ca (chain only, no hostname check)
+// Custom certificate verifier: verify-ca (chain only, no hostname check) — native only
 // ---------------------------------------------------------------------------
 
 /// A `ServerCertVerifier` that validates the certificate chain against a
@@ -2056,6 +2100,7 @@ impl ServerCertVerifier for FullVerifier {
 /// retries with those extra intermediates prepended.  This allows the common
 /// case where `sslrootcert` contains both the CA root and any intermediate
 /// CA certs.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct NoCnVerifier {
     roots: rustls::RootCertStore,
@@ -2064,6 +2109,7 @@ struct NoCnVerifier {
     provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NoCnVerifier {
     fn new(
         roots: rustls::RootCertStore,
@@ -2117,6 +2163,7 @@ impl NoCnVerifier {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ServerCertVerifier for NoCnVerifier {
     fn verify_server_cert(
         &self,
@@ -2187,21 +2234,24 @@ impl ServerCertVerifier for NoCnVerifier {
 }
 
 // ---------------------------------------------------------------------------
-// Capturing TLS connector
+// Capturing TLS connector — native only
 // ---------------------------------------------------------------------------
 
 /// Shared slot written by [`CapturingTlsStream`] when the TLS handshake
 /// completes.  The [`connect`] function reads from this after
 /// `pg_config.connect()` resolves.
+#[cfg(not(target_arch = "wasm32"))]
 type TlsInfoSlot = Arc<Mutex<Option<TlsInfo>>>;
 
 /// A [`MakeTlsConnect`] that wraps `tokio-rustls` and captures the negotiated
 /// TLS protocol version and cipher suite into a shared [`TlsInfoSlot`].
+#[cfg(not(target_arch = "wasm32"))]
 struct CapturingMakeConnect {
     connector: TlsConnector,
     slot: TlsInfoSlot,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CapturingMakeConnect {
     fn new(config: ClientConfig, slot: TlsInfoSlot) -> Self {
         Self {
@@ -2211,6 +2261,7 @@ impl CapturingMakeConnect {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> MakeTlsConnect<S> for CapturingMakeConnect
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2231,6 +2282,7 @@ where
 }
 
 /// The [`TlsConnect`] returned by [`CapturingMakeConnect`].
+#[cfg(not(target_arch = "wasm32"))]
 struct CapturingConnect<S> {
     server_name: ServerName<'static>,
     connector: TlsConnector,
@@ -2238,6 +2290,7 @@ struct CapturingConnect<S> {
     _marker: std::marker::PhantomData<S>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> TlsConnect<S> for CapturingConnect<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2276,8 +2329,10 @@ where
 
 /// Thin wrapper around `tokio_rustls::client::TlsStream` that implements
 /// the `tokio_postgres::tls::TlsStream` trait.
+#[cfg(not(target_arch = "wasm32"))]
 struct CapturingTlsStream<S>(Pin<Box<TlsStream<S>>>);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> tokio_postgres::tls::TlsStream for CapturingTlsStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -2314,6 +2369,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> AsyncRead for CapturingTlsStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -2327,6 +2383,7 @@ where
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> AsyncWrite for CapturingTlsStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -2444,6 +2501,8 @@ pub async fn connect(
             // host/port already updated above.
 
             // Resolve hostname → IP for \conninfo display.
+            // std::net::ToSocketAddrs is not available on WASM targets.
+            #[cfg(not(target_arch = "wasm32"))]
             if !params.host.starts_with('/') && !is_numeric_addr(&params.host) {
                 let addr_str = format!("{}:{}", params.host, params.port);
                 if let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str())
@@ -2475,6 +2534,7 @@ pub async fn connect(
 ///
 /// Returns the connected `Client` together with the captured [`TlsInfo`] when
 /// TLS was used, or `None` for a plain connection.
+#[cfg(not(target_arch = "wasm32"))]
 async fn connect_one(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
@@ -2558,6 +2618,16 @@ async fn connect_one(
         }
     };
     Ok(result)
+}
+
+/// WASM variant: TLS is not available; only plain connections are supported.
+/// The browser's WebSocket proxy layer handles encryption transparently.
+#[cfg(target_arch = "wasm32")]
+async fn connect_one(
+    pg_config: &tokio_postgres::Config,
+    params: &ConnParams,
+) -> Result<(Client, Option<TlsInfo>), ConnectionError> {
+    Ok((connect_plain(pg_config, params).await?, None))
 }
 
 /// Verify that a newly-established `client` satisfies `tsa`.
@@ -2667,6 +2737,7 @@ async fn connect_plain(
 }
 
 /// Connect with TLS using the default (webpki) root certificate store.
+#[cfg(not(target_arch = "wasm32"))]
 async fn connect_tls_default(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
@@ -2678,6 +2749,7 @@ async fn connect_tls_default(
 ///
 /// Returns the connected `Client` together with the [`TlsInfo`] captured from
 /// the negotiated TLS session (protocol version and cipher suite).
+#[cfg(not(target_arch = "wasm32"))]
 async fn connect_tls_with_config(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
@@ -2712,6 +2784,7 @@ async fn connect_tls_with_config(
 /// Used by `sslmode=prefer` to avoid falling back to plaintext when the host
 /// is simply unreachable — doing so would double the elapsed time relative to
 /// the configured `PGCONNECT_TIMEOUT` (issue #723).
+#[cfg(not(target_arch = "wasm32"))]
 fn is_timeout_error(e: &ConnectionError) -> bool {
     match e {
         ConnectionError::ConnectionFailed { reason, .. } => {

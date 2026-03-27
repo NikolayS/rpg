@@ -13,15 +13,20 @@ use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::error::ReadlineError;
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::history::FileHistory;
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::{
     Cmd, ConditionalEventHandler, Event, EventContext, EventHandler, KeyCode, KeyEvent, Modifiers,
     RepeatCount,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::{Config, EditMode, Editor};
 use tokio_postgres::Client;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::complete::{
     load_schema_cache, DropdownEventHandler, DropdownKey, RpgHelper, SchemaCache,
 };
@@ -1018,6 +1023,7 @@ pub struct ReplSettings {
     /// `None` in non-interactive paths (e.g. `-c`, `-f`, piped stdin).
     /// Set to `Some(...)` by the readline loop so that `\refresh` can
     /// update the same `Arc` that the completion helper holds.
+    #[cfg(not(target_arch = "wasm32"))]
     pub schema_cache: Option<Arc<RwLock<SchemaCache>>>,
 
     // -- Query audit log (FR-23) -------------------------------------------
@@ -1202,10 +1208,6 @@ impl std::fmt::Debug for ReplSettings {
             .field("query_count", &self.query_count)
             .field("is_superuser", &self.is_superuser)
             .field(
-                "schema_cache",
-                &self.schema_cache.as_ref().map(|_| "<cache>"),
-            )
-            .field(
                 "audit_log_file",
                 &self.audit_log_file.as_ref().map(|_| "<writer>"),
             )
@@ -1299,6 +1301,7 @@ impl Default for ReplSettings {
             session_id: crate::session_store::new_session_id(),
             query_count: 0,
             is_superuser: false,
+            #[cfg(not(target_arch = "wasm32"))]
             schema_cache: None,
             audit_log_file: None,
             audit_log_path: None,
@@ -3341,6 +3344,7 @@ async fn dispatch_meta(
         }
         MetaCmd::RefreshSchema => {
             eprintln!("\\refresh is deprecated; use /refresh instead.");
+            #[cfg(not(target_arch = "wasm32"))]
             match &settings.schema_cache {
                 None => {
                     eprintln!("\\refresh: no active connection or not in interactive mode");
@@ -3354,6 +3358,10 @@ async fn dispatch_meta(
                         eprintln!("\\refresh: failed to reload schema cache: {e}");
                     }
                 },
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                eprintln!("\\refresh: schema completion not available on this platform");
             }
         }
         // Function-key toggle metacommands (#321, #324, #325).
@@ -3785,12 +3793,18 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
     match arg {
         // ---- Interactive TUI picker (no argument) ------------------------
         None => {
+            #[cfg(not(target_arch = "wasm32"))]
             match crate::history_picker::run(entries) {
                 Ok(Some(query)) => {
                     settings.initial_input = Some(query);
                 }
                 Ok(None) => {} // user cancelled
                 Err(e) => eprintln!("\\s: {e}"),
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = entries;
+                eprintln!("\\s: interactive history picker not available on this platform");
             }
         }
 
@@ -4275,10 +4289,20 @@ pub async fn run_repl(
         settings.statusline = Some(Arc::new(Mutex::new(sl)));
     }
 
-    let exit_code = if use_readline {
-        run_readline_loop(&mut client, &mut params, &mut settings, &mut tx).await
-    } else {
-        run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
+    let exit_code = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if use_readline {
+                run_readline_loop(&mut client, &mut params, &mut settings, &mut tx).await
+            } else {
+                run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = use_readline;
+            run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
+        }
     };
 
     // Tear down the status bar on exit.
@@ -4317,12 +4341,14 @@ pub(super) enum FKeyAction {
 /// returns `Cmd::Interrupt` so the readline loop gets control back without
 /// adding a blank line to history.  The loop checks the slot, clears it,
 /// and performs the toggle.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct FKeyHandler {
     action: FKeyAction,
     pending: Arc<Mutex<Option<FKeyAction>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ConditionalEventHandler for FKeyHandler {
     fn handle(
         &self,
@@ -4339,6 +4365,7 @@ impl ConditionalEventHandler for FKeyHandler {
 }
 
 /// Run with rustyline readline support.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_lines)]
 async fn run_readline_loop(
     client: &mut Client,

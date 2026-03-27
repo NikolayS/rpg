@@ -27,13 +27,16 @@
 //! for 1 second after copying.
 
 use std::io::{self, IsTerminal, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::{Command, Stdio};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
@@ -50,6 +53,7 @@ use ratatui::{
 /// Encode `data` as standard base64 (RFC 4648, with `=` padding).
 ///
 /// Used for OSC 52 clipboard copy sequences.
+#[cfg(not(target_arch = "wasm32"))]
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -91,6 +95,7 @@ fn base64_encode(data: &[u8]) -> String {
 ///
 /// This is best-effort: errors are intentionally ignored so that a missing
 /// or non-compliant terminal does not crash the pager.
+#[cfg(not(target_arch = "wasm32"))]
 fn osc52_copy(text: &str) {
     let encoded = base64_encode(text.as_bytes());
     let mut stdout = io::stdout();
@@ -105,8 +110,10 @@ fn osc52_copy(text: &str) {
 /// RAII guard that enables raw mode and enters the alternate screen on
 /// construction, then restores the terminal unconditionally on drop —
 /// even if the caller panics.
+#[cfg(not(target_arch = "wasm32"))]
 struct TerminalGuard;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TerminalGuard {
     /// Enter raw mode and the alternate screen.
     ///
@@ -120,6 +127,7 @@ impl TerminalGuard {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         // Best-effort restoration — errors are intentionally ignored so that
@@ -164,6 +172,7 @@ impl Drop for TerminalGuard {
 /// Returns `Err` with kind `Unsupported` when stdin is not a terminal —
 /// callers should fall back to plain `print!` without logging an error in
 /// that case.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_pager(content: &str) -> io::Result<()> {
     // crossterm's event reader (mio/kqueue) requires a real TTY file
     // descriptor that was inherited as stdin (fd 0).  When stdin is a pipe
@@ -198,6 +207,13 @@ pub fn run_pager(content: &str) -> io::Result<()> {
     run_pager_loop(&mut terminal, &lines, &mut state)
 }
 
+/// WASM stub: print content directly to stdout (no interactive pager).
+#[cfg(target_arch = "wasm32")]
+pub fn run_pager(content: &str) -> io::Result<()> {
+    print!("{content}");
+    Ok(())
+}
+
 /// Pipe `content` to an external pager command.
 ///
 /// Spawns `cmd` as a child process via `sh -c`, writes all of `content` to
@@ -212,6 +228,7 @@ pub fn run_pager(content: &str) -> io::Result<()> {
 /// Returns an `Err` with `ErrorKind::NotFound` when the shell exits with
 /// code 127 (command not found).  Returns other `Err` variants when the
 /// child process cannot be spawned.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_pager_external(cmd: &str, content: &str) -> io::Result<()> {
     let mut child = Command::new("sh")
         .args(["-c", cmd])
@@ -246,6 +263,13 @@ pub fn run_pager_external(cmd: &str, content: &str) -> io::Result<()> {
     let _ = stderr.write_all(b"\x1b[?1049l\x1b[?25h\x1b[r\x1b[m");
     let _ = stderr.flush();
 
+    Ok(())
+}
+
+/// WASM stub: external pager not available.
+#[cfg(target_arch = "wasm32")]
+pub fn run_pager_external(_cmd: &str, content: &str) -> io::Result<()> {
+    print!("{content}");
     Ok(())
 }
 
