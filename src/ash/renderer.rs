@@ -670,7 +670,6 @@ struct SummaryMetrics {
     db_time: f64,
     wall: f64,
     aas: f64,
-    cpu_count: Option<u32>,
 }
 
 fn render_timeline(
@@ -799,6 +798,7 @@ fn render_drill_table(
 /// * `snapshots` — ring buffer of raw snapshots, most recent last.
 /// * `state`     — current drill-down / zoom state.
 /// * `no_color`  — when true, use terminal default colors.
+
 /// Minimum terminal height required to render the `/ash` TUI without garbling.
 const MIN_HEIGHT: u16 = 18;
 
@@ -836,13 +836,8 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     );
 
     // [1] Timeline — summary metrics embedded in bottom border title
-    let (db_time, wall, aas, cpu) = compute_summary(snapshots);
-    let summary = SummaryMetrics {
-        db_time,
-        wall,
-        aas,
-        cpu_count: cpu,
-    };
+    let (db_time, wall, aas, _cpu) = compute_summary(snapshots);
+    let summary = SummaryMetrics { db_time, wall, aas };
     render_timeline(frame, snapshots, state, chunks[1], no_color, &summary);
 
     // [2] Drill-down table
