@@ -369,6 +369,17 @@ pub(super) async fn stream_completion(
 /// Returns `Some(MetaResult)` when the caller needs to act on a result (e.g.
 /// reconnect after `/session resume`), or `None` for commands that are fully
 /// handled here.
+// Parse /ash --cpu N flag. Accepts --cpu 8 or --cpu=16; returns None otherwise.
+fn parse_ash_cpu_flag(args: &str) -> Option<u32> {
+    let args = args.trim();
+    // --cpu N or --cpu=N
+    if let Some(rest) = args.strip_prefix("--cpu") {
+        let val = rest.trim_start_matches('=').trim();
+        return val.parse::<u32>().ok().filter(|&n| n > 0);
+    }
+    None
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn dispatch_ai_command(
     input: &str,
@@ -479,20 +490,18 @@ pub(super) async fn dispatch_ai_command(
             interpret_dba_output(context, subcommand, settings).await;
         }
 
-    // /ash — active session history (requires pg_ash extension).
+    // /ash — active session history TUI.
     } else if input == "/ash" || input.starts_with("/ash ") {
-        let rest = input.strip_prefix("/ash").map_or("", str::trim);
-        let caps = settings.db_capabilities.clone();
-        let ai_context = crate::dba::execute(
-            client,
-            format!("ash {rest}").trim(),
-            false,
-            Some(&caps),
-            settings,
-        )
-        .await;
-        if let Some(ref context) = ai_context {
-            interpret_dba_output(context, "ash", settings).await;
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            eprintln!("/ash requires an interactive terminal");
+            return None;
+        }
+        // Parse optional --cpu N flag: /ash --cpu 8
+        let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
+        let cpu_override = parse_ash_cpu_flag(ash_args);
+        if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
+            eprintln!("/ash: {e}");
         }
 
     // /sql — switch to SQL input mode.
@@ -746,6 +755,7 @@ pub(super) async fn dispatch_ai_command(
              Modes: /sql, /text2sql, /t2s, /plan, /yolo, /interactive, /mode\n\
              Queries: /ns, /n, /n+, /nd, /np\n\
              REPL: /profiles, /refresh, /session, /log-file, /explain-share, /commands, /version, /f2-f5"
+
         );
     }
 
