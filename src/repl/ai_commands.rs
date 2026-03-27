@@ -1597,7 +1597,9 @@ pub(super) async fn handle_ai_explain(
     }
 
     let plan_text = plan_lines.join("\n");
-    println!("{plan_text}");
+    let display_plan =
+        crate::explain::highlight::highlight_explain(&plan_text, settings.no_highlight);
+    println!("{display_plan}");
 
     // AI interpretation — skip gracefully when AI is not configured.
     let Ok(provider) = get_ai_provider(settings) else {
@@ -1774,7 +1776,9 @@ pub(super) async fn handle_ai_optimize(
     }
 
     let plan_text = plan_lines.join("\n");
-    println!("{plan_text}");
+    let display_plan =
+        crate::explain::highlight::highlight_explain(&plan_text, settings.no_highlight);
+    println!("{display_plan}");
 
     // Gather table statistics for referenced tables.
     let table_names = extract_table_names(&target_query);
