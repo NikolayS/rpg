@@ -70,19 +70,13 @@ impl WasmConnector {
     pub async fn connect(
         &self,
         pg_config: &Config,
-    ) -> Result<
-        (
-            Client,
-            Connection<WsStreamIo, NoTlsStream>,
-        ),
-        Box<dyn std::error::Error>,
-    > {
+    ) -> Result<(Client, Connection<WsStreamIo, NoTlsStream>), Box<dyn std::error::Error>> {
         let (_ws_meta, mut ws_stream) = WsMeta::connect(&self.ws_url, None).await?;
 
         // Send auth frame before Postgres negotiation when a token is configured.
         if let Some(ref tok) = self.token {
-            use ws_stream_wasm::WsMessage;
             use futures::SinkExt;
+            use ws_stream_wasm::WsMessage;
             let auth_frame = format!(r#"{{"token":"{}"}}"#, tok);
             ws_stream.send(WsMessage::Text(auth_frame)).await?;
         }
