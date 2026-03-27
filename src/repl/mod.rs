@@ -1270,6 +1270,26 @@ impl Default for ReplSettings {
 }
 
 // ---------------------------------------------------------------------------
+// Tilde expansion (platform-aware)
+// ---------------------------------------------------------------------------
+
+/// Expand a leading `~` or `~/...` in a path string to the user's home
+/// directory.  Returns the path unchanged when the home directory cannot
+/// be determined (e.g. on WASM).
+fn expand_tilde(raw: &str) -> PathBuf {
+    if raw.starts_with("~/") || raw == "~" {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(home) = dirs::home_dir() {
+            let suffix = raw.strip_prefix("~/").unwrap_or("");
+            return home.join(suffix);
+        }
+        PathBuf::from(raw)
+    } else {
+        PathBuf::from(raw)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // History file path resolution
 // ---------------------------------------------------------------------------
 
@@ -1282,7 +1302,14 @@ pub fn history_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("PSQL_HISTORY") {
         return Some(PathBuf::from(val));
     }
-    dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,6 +1327,7 @@ pub fn startup_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("PSQLRC") {
         return Some(PathBuf::from(val));
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(home) = dirs::home_dir() {
         let rpgrc = home.join(".rpgrc");
         if rpgrc.exists() {
@@ -1970,9 +1998,7 @@ fn maybe_page(settings: &mut ReplSettings, text: &str) {
         let _ = writeln!(w, "{text}");
         return;
     }
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = crate::term::terminal_size().1 as usize;
     if settings.pager_enabled
         && crate::pager::needs_paging_with_min(
             text,
@@ -2275,61 +2301,71 @@ fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings) {
 fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) {
     use std::io::Write;
 
-    if io::stdin().is_terminal() {
+    // Determine whether to use interactive (raw-mode) or piped input.
+    #[cfg(not(target_arch = "wasm32"))]
+    let interactive = io::stdin().is_terminal();
+    #[cfg(target_arch = "wasm32")]
+    let interactive = false;
+
+    if interactive {
         // Interactive path: use crossterm raw mode so Ctrl+C is detectable.
         // Read the input character-by-character, building a line.
-        use crossterm::event::{read, Event, KeyCode, KeyModifiers};
-        use crossterm::terminal;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+            use crossterm::terminal;
 
-        if !prompt_text.is_empty() {
-            eprint!("{prompt_text}");
-            let _ = io::stderr().flush();
-        }
+            if !prompt_text.is_empty() {
+                eprint!("{prompt_text}");
+                let _ = io::stderr().flush();
+            }
 
-        let raw_enabled = terminal::enable_raw_mode().is_ok();
-        let mut input = String::new();
-        let interrupted = loop {
-            match read() {
-                Ok(Event::Key(key)) => match (key.code, key.modifiers) {
-                    // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
-                    (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-                        let _ = write!(io::stderr(), "\r\n");
-                        break true;
-                    }
-                    // Enter — end of input.
-                    (KeyCode::Enter, _) => {
-                        let _ = write!(io::stderr(), "\r\n");
-                        break false;
-                    }
-                    // Backspace — delete last character.
-                    (KeyCode::Backspace, _) => {
-                        if input.pop().is_some() {
-                            // Erase the character on screen.
-                            let _ = write!(io::stderr(), "\x08 \x08");
+            let raw_enabled = terminal::enable_raw_mode().is_ok();
+            let mut input = String::new();
+            let interrupted = loop {
+                match read() {
+                    Ok(Event::Key(key)) => match (key.code, key.modifiers) {
+                        // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
+                        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL)
+                        | (KeyCode::Esc, _) => {
+                            let _ = write!(io::stderr(), "\r\n");
+                            break true;
+                        }
+                        // Enter — end of input.
+                        (KeyCode::Enter, _) => {
+                            let _ = write!(io::stderr(), "\r\n");
+                            break false;
+                        }
+                        // Backspace — delete last character.
+                        (KeyCode::Backspace, _) => {
+                            if input.pop().is_some() {
+                                // Erase the character on screen.
+                                let _ = write!(io::stderr(), "\x08 \x08");
+                                let _ = io::stderr().flush();
+                            }
+                        }
+                        // Printable character — echo and accumulate.
+                        (KeyCode::Char(ch), _) => {
+                            input.push(ch);
+                            let _ = write!(io::stderr(), "{ch}");
                             let _ = io::stderr().flush();
                         }
-                    }
-                    // Printable character — echo and accumulate.
-                    (KeyCode::Char(ch), _) => {
-                        input.push(ch);
-                        let _ = write!(io::stderr(), "{ch}");
-                        let _ = io::stderr().flush();
-                    }
-                    _ => {}
-                },
-                Ok(_) => {}
-                Err(_) => break false,
+                        _ => {}
+                    },
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+            };
+            if raw_enabled {
+                let _ = terminal::disable_raw_mode();
             }
-        };
-        if raw_enabled {
-            let _ = terminal::disable_raw_mode();
-        }
 
-        if interrupted {
-            settings.vars.set(var_name, "");
-            settings.prompt_interrupted = true;
-        } else {
-            settings.vars.set(var_name, &input);
+            if interrupted {
+                settings.vars.set(var_name, "");
+                settings.prompt_interrupted = true;
+            } else {
+                settings.vars.set(var_name, &input);
+            }
         }
     } else {
         // Non-interactive (piped) path: use read_line as before; Ctrl+C is
@@ -2873,16 +2909,7 @@ async fn dispatch_io(
         MetaCmd::LogFile(ref path) => {
             if let Some(raw_path) = path.as_deref() {
                 // Expand leading `~` to the home directory.
-                let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
-                    if let Some(home) = dirs::home_dir() {
-                        let suffix = raw_path.strip_prefix("~/").unwrap_or("");
-                        home.join(suffix)
-                    } else {
-                        std::path::PathBuf::from(raw_path)
-                    }
-                } else {
-                    std::path::PathBuf::from(raw_path)
-                };
+                let expanded = expand_tilde(raw_path);
 
                 // Create parent directories if needed.
                 if let Some(parent) = expanded.parent() {
@@ -3711,15 +3738,7 @@ fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
         // ---- Save to file ------------------------------------------------
         Some(path) if arg_is_filepath(path) => {
             // Expand leading `~`.
-            let resolved = if let Some(rest) = path.strip_prefix("~/") {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(rest)
-                } else {
-                    std::path::PathBuf::from(path)
-                }
-            } else {
-                std::path::PathBuf::from(path)
-            };
+            let resolved = expand_tilde(path);
 
             match std::fs::write(&resolved, entries.join("\n") + "\n") {
                 Ok(()) => {
@@ -4126,16 +4145,7 @@ pub async fn run_repl(
     // Open audit log file from config if one is configured.
     if settings.audit_log_file.is_none() {
         if let Some(ref raw_path) = settings.config.logging.audit_file.clone() {
-            let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
-                if let Some(home) = dirs::home_dir() {
-                    let suffix = raw_path.strip_prefix("~/").unwrap_or("");
-                    home.join(suffix)
-                } else {
-                    std::path::PathBuf::from(raw_path)
-                }
-            } else {
-                std::path::PathBuf::from(raw_path)
-            };
+            let expanded = expand_tilde(raw_path);
             if let Some(parent) = expanded.parent() {
                 if !parent.as_os_str().is_empty() {
                     let _ = std::fs::create_dir_all(parent);

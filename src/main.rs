@@ -9,6 +9,7 @@ use clap::Parser;
 mod ai;
 mod capabilities;
 mod compat;
+#[cfg(not(target_arch = "wasm32"))]
 mod complete;
 mod conditional;
 mod config;
@@ -19,7 +20,9 @@ mod dba;
 mod describe;
 mod explain;
 mod highlight;
+#[cfg(not(target_arch = "wasm32"))]
 mod history_picker;
+mod input;
 mod init;
 mod io;
 mod large_object;
@@ -42,6 +45,7 @@ mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 mod ssh_tunnel;
 mod statusline;
+mod term;
 mod update;
 mod vars;
 // WASM browser support: WebSocket connector and wasm-bindgen entry point.

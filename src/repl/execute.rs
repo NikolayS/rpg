@@ -1057,9 +1057,7 @@ pub(super) async fn execute_query_interactive(
     let _ = &display; // suppress unused warning
 
     // Determine terminal height; fall back to 24 if unavailable.
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = crate::term::terminal_size().1 as usize;
 
     if crate::pager::needs_paging_with_min(
         text,
@@ -1180,9 +1178,7 @@ pub(super) async fn execute_query_extended_interactive(
 
     let text = String::from_utf8_lossy(&captured);
 
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = crate::term::terminal_size().1 as usize;
 
     if crate::pager::needs_paging_with_min(
         &text,

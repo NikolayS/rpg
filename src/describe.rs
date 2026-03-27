@@ -85,9 +85,7 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
         let _ = writeln!(w, "{text}");
         return;
     }
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = crate::term::terminal_size().1 as usize;
     if settings.pager_enabled
         && crate::pager::needs_paging_with_min(
             text,

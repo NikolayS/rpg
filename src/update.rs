@@ -265,7 +265,14 @@ pub async fn download_and_replace(client: &reqwest::Client, url: &str) -> Result
 
 /// Return the path used to cache the last-update-check timestamp.
 fn update_check_stamp_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("rpg").join("last_update_check"))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        dirs::config_dir().map(|d| d.join("rpg").join("last_update_check"))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
 }
 
 /// Core logic for [`should_check_update`], testable with an arbitrary path.

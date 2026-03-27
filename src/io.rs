@@ -292,7 +292,15 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     let target: std::path::PathBuf = match dir {
         Some(d) => Path::new(d).to_path_buf(),
         None => {
-            dirs::home_dir().ok_or_else(|| "\\cd: could not determine home directory".to_owned())?
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                dirs::home_dir()
+                    .ok_or_else(|| "\\cd: could not determine home directory".to_owned())?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err("\\cd: not supported in browser".to_owned());
+            }
         }
     };
 
