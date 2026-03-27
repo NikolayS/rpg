@@ -799,10 +799,12 @@ fn render_drill_table(
 /// * `snapshots` — ring buffer of raw snapshots, most recent last.
 /// * `state`     — current drill-down / zoom state.
 /// * `no_color`  — when true, use terminal default colors.
+/// Minimum terminal height required to render the `/ash` TUI without garbling.
+const MIN_HEIGHT: u16 = 18;
+
 pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState, no_color: bool) {
     let area = frame.area();
 
-    const MIN_HEIGHT: u16 = 18;
     if area.height < MIN_HEIGHT {
         frame.render_widget(
             Paragraph::new("terminal too small (need \u{2265}18 rows)")
