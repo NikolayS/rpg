@@ -204,13 +204,27 @@ fn build_yaxis_lines(max_aas: f64, chart_height: usize) -> Vec<Line<'static>> {
     let h = chart_height.max(1);
     let label_style = Style::default().fg(Color::DarkGray);
 
-    // Positions (row_from_top, 0-indexed) where we place a label.
-    // top=0, mid=h/2, bottom=h-1.
-    let labeled_rows: [(usize, f64); 3] = [
-        (0, max_aas),
-        (h / 2, max_aas / 2.0),
-        (h.saturating_sub(1), 0.0),
-    ];
+    // Label positions depend on chart height for appropriate density.
+    // h <= 6:  top + bottom only
+    // h <= 14: top + mid + bottom
+    // h >  14: top + 1/4 + mid + 3/4 + bottom
+    let labeled_rows: Vec<(usize, f64)> = if h <= 6 {
+        vec![(0, max_aas), (h.saturating_sub(1), 0.0)]
+    } else if h <= 14 {
+        vec![
+            (0, max_aas),
+            (h / 2, max_aas / 2.0),
+            (h.saturating_sub(1), 0.0),
+        ]
+    } else {
+        vec![
+            (0, max_aas),
+            (h / 4, max_aas * 3.0 / 4.0),
+            (h / 2, max_aas / 2.0),
+            (h * 3 / 4, max_aas / 4.0),
+            (h.saturating_sub(1), 0.0),
+        ]
+    };
 
     (0..h)
         .map(|row| {
@@ -597,6 +611,59 @@ fn drill_row_line(row: &DrillRow, is_selected: bool, no_color: bool) -> Line<'st
 // Public draw entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Legend overlay
+// ---------------------------------------------------------------------------
+
+/// Ordered list of all wait event types for the color legend.
+const LEGEND_TYPES: &[&str] = &[
+    "CPU*",
+    "IO",
+    "Lock",
+    "LWLock",
+    "IPC",
+    "IdleTx",
+    "Client",
+    "Timeout",
+    "BufferPin",
+    "Activity",
+    "Extension",
+    "Other",
+];
+
+/// Width of the legend overlay in columns.
+const LEGEND_WIDTH: u16 = 14;
+
+/// Render a color legend as a floating overlay in the top-right corner of `area`.
+///
+/// Each line shows a colored block character followed by the wait type name.
+/// Only rendered when the area is tall enough to fit all entries.
+fn render_legend(frame: &mut Frame, area: ratatui::layout::Rect, no_color: bool) {
+    #[allow(clippy::cast_possible_truncation)]
+    let legend_height = LEGEND_TYPES.len() as u16;
+    if area.height < legend_height || area.width < LEGEND_WIDTH + 4 {
+        return;
+    }
+    let legend_x = area.x + area.width.saturating_sub(LEGEND_WIDTH);
+    let legend_rect = ratatui::layout::Rect {
+        x: legend_x,
+        y: area.y,
+        width: LEGEND_WIDTH,
+        height: legend_height,
+    };
+    let lines: Vec<Line<'static>> = LEGEND_TYPES
+        .iter()
+        .map(|&wtype| {
+            let color = wait_type_color(wtype, no_color);
+            Line::from(vec![
+                Span::styled("\u{2588} ", Style::default().fg(color)),
+                Span::raw(wtype.to_owned()),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), legend_rect);
+}
+
 /// Render the timeline band (chunk[1]) inside `draw_frame`.
 /// Summary metrics passed into the timeline renderer for the bottom title.
 struct SummaryMetrics {
@@ -616,14 +683,14 @@ fn render_timeline(
 ) {
     let cpu_count = snapshots.last().and_then(|s| s.cpu_count);
     let cpu_ref_label = cpu_count.map_or(String::new(), |n| format!("  CPU ref: {n}"));
-    let timeline_title = format!(" Timeline  bucket: {}{cpu_ref_label} ", state.zoom_label());
-    // Summary metrics in the bottom title; CPUs shown only when known.
-    let cpus_label = summary
-        .cpu_count
-        .map_or(String::new(), |n| format!("   CPUs: {n}"));
+    let timeline_title = format!(
+        " Timeline  bucket: {}  AAS: {:.2}{cpu_ref_label} ",
+        state.zoom_label(),
+        summary.aas,
+    );
     let bottom_title = format!(
-        " DB TIME: {:.1}s   WALL: {:.1}s   AAS: {:.2}{cpus_label} ",
-        summary.db_time, summary.wall, summary.aas,
+        " DB TIME: {:.1}s   WALL: {:.1}s ",
+        summary.db_time, summary.wall,
     );
     let timeline_block = Block::default()
         .borders(Borders::ALL)
@@ -653,6 +720,11 @@ fn render_timeline(
 
     let yaxis_lines = build_yaxis_lines(max_aas, yaxis_area.height as usize);
     frame.render_widget(Paragraph::new(yaxis_lines), yaxis_area);
+
+    // Legend overlay — rendered top-right inside bar_area when `l` is toggled.
+    if state.show_legend {
+        render_legend(frame, bar_area, no_color);
+    }
 }
 
 /// Render the drill-down table band (chunk[3]) inside `draw_frame`.
@@ -730,6 +802,16 @@ fn render_drill_table(
 pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState, no_color: bool) {
     let area = frame.area();
 
+    const MIN_HEIGHT: u16 = 18;
+    if area.height < MIN_HEIGHT {
+        frame.render_widget(
+            Paragraph::new("terminal too small (need \u{2265}18 rows)")
+                .style(Style::default().fg(Color::Red)),
+            area,
+        );
+        return;
+    }
+
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(6),
@@ -742,9 +824,8 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
     let status_text = format!(
-        "/ash  [{mode_label}]  interval: {}s   bucket: {}   window: {}   active: {active}",
+        "/ash  [{mode_label}]  interval: {}s   window: {}   active: {active}",
         state.refresh_interval_secs,
-        state.zoom_label(),
         state.window_label(),
     );
     frame.render_widget(

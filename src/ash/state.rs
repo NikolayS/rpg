@@ -92,6 +92,9 @@ pub struct AshState {
     /// | 5     | 300         |
     /// | 6     | 600         |
     pub zoom_level: u8,
+
+    /// When true, render the color legend overlay (`l` key toggles).
+    pub show_legend: bool,
 }
 
 impl AshState {
@@ -108,6 +111,7 @@ impl AshState {
             is_history: false,
             refresh_secs: 1,
             zoom_level: 1,
+            show_legend: false,
         }
     }
 
@@ -142,9 +146,9 @@ impl AshState {
     /// Shows `b/Esc:back` only when drilled below the top level.
     pub fn hint_line(&self) -> &'static str {
         if self.is_at_top_level() {
-            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh"
+            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh  l:legend"
         } else {
-            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh"
+            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh  l:legend"
         }
     }
 
@@ -239,6 +243,9 @@ impl AshState {
             }
             KeyCode::Char('r') => {
                 self.cycle_refresh();
+            }
+            KeyCode::Char('l') => {
+                self.show_legend = !self.show_legend;
             }
             _ => {}
         }
