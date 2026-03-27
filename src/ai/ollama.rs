@@ -253,7 +253,9 @@ impl LlmProvider for OllamaProvider {
 }
 
 // ---------------------------------------------------------------------------
-// WASM LlmProvider impl — relaxed Send bounds, no streaming
+// WASM LlmProvider impl — relaxed Send bounds, streaming falls back to
+// non-streaming (SSE parsing requires native I/O primitives not available
+// in the browser).
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
@@ -276,6 +278,26 @@ impl LlmProvider for OllamaProvider {
         let messages = messages.to_vec();
         let options = options.clone();
         Box::pin(self.complete_inner(messages, options))
+    }
+
+    /// Streaming fallback for WASM: calls the non-streaming endpoint and
+    /// delivers the full response as a single token.  SSE-based streaming
+    /// is not available in the browser environment.
+    fn complete_streaming(
+        &self,
+        messages: &[Message],
+        options: &CompletionOptions,
+        on_token: Box<dyn Fn(&str)>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>,
+    > {
+        let messages = messages.to_vec();
+        let options = options.clone();
+        Box::pin(async move {
+            let result = self.complete_inner(messages, options).await?;
+            on_token(&result.content);
+            Ok(result)
+        })
     }
 }
 

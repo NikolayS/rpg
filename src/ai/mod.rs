@@ -144,6 +144,11 @@ pub trait LlmProvider: std::fmt::Debug {
 
     /// Send a streaming completion request, invoking `on_token` for each
     /// text chunk as it arrives.
+    ///
+    /// In WASM, true SSE streaming is not available.  The default
+    /// implementation calls the non-streaming [`Self::complete`] endpoint
+    /// and delivers the full response as a single `on_token` callback.
+    /// If the non-streaming endpoint also fails, returns a clear error.
     fn complete_streaming(
         &self,
         messages: &[Message],
@@ -154,7 +159,12 @@ pub trait LlmProvider: std::fmt::Debug {
         let messages = messages.to_vec();
         let options = options.clone();
         Box::pin(async move {
-            let result = self.complete(&messages, &options).await?;
+            let result = self.complete(&messages, &options).await.map_err(|e| {
+                format!(
+                    "AI streaming not available in browser; non-streaming \
+                     fallback also failed: {e}"
+                )
+            })?;
             on_token(&result.content);
             Ok(result)
         })
