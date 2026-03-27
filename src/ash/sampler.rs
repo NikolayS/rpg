@@ -68,8 +68,8 @@ pub struct AshSnapshot {
 #[derive(Debug, Clone)]
 pub struct PgAshInfo {
     pub installed: bool,
-    /// Retention window in seconds from `ash.config`.  Used by history mode
-    /// to determine how far back to query `ash.sample`.
+    /// Retention window in seconds from `ash.config`.  Reserved for future use
+    /// to cap history queries to the configured retention window; not yet wired.
     #[allow(dead_code)]
     pub retention_seconds: Option<i64>,
 }
@@ -179,34 +179,35 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
 /// - the query fails (transient error, permission issue, etc.)
 /// - no historical data exists for the requested window
 pub async fn query_ash_history(client: &Client, window_secs: u64) -> Vec<AshSnapshot> {
-    let interval = format!("{window_secs} seconds");
-    query_ash_history_interval(client, &interval)
+    query_ash_history_inner(client, window_secs)
         .await
         .unwrap_or_default()
 }
 
-/// Shared implementation for history queries.
+/// Inner implementation — uses a parameterized query to avoid SQL injection.
 ///
-/// Uses `ash.wait_timeline(interval, '1 second')` which returns
+/// Uses `ash.wait_timeline($1::interval, '1 second')` which returns
 /// `(bucket_start timestamptz, wait_event text, samples bigint)`
 /// already decoded from the opaque `int[]` encoding.
-async fn query_ash_history_interval(
+async fn query_ash_history_inner(
     client: &Client,
-    interval: &str,
+    window_secs: u64,
 ) -> anyhow::Result<Vec<AshSnapshot>> {
     // ash.wait_timeline returns (bucket_start, wait_event, samples).
     // wait_event format: "Type:Event" or just "Type" when type == event
     // (e.g. "CPU*", "IO:DataFileRead", "Lock:relation").
-    let sql = format!(
-        "select \
+    //
+    // Pass the interval as a parameterized $1 (not format!() interpolation) so
+    // there is no SQL injection vector, even though window_secs is u64 today.
+    let interval = format!("{window_secs} seconds");
+    let sql = "select \
             extract(epoch from bucket_start)::int8 as ts, \
             wait_event, \
-            samples::int4 as cnt \
-        from ash.wait_timeline('{interval}'::interval, '1 second'::interval) \
-        order by bucket_start, wait_event"
-    );
+            samples::int8 as cnt \
+        from ash.wait_timeline($1::interval, '1 second'::interval) \
+        order by bucket_start, wait_event";
 
-    let Ok(rows) = client.query(&sql, &[]).await else {
+    let Ok(rows) = client.query(sql, &[&interval]).await else {
         return Ok(vec![]);
     };
 
@@ -222,8 +223,8 @@ async fn query_ash_history_interval(
     for row in &rows {
         let ts: i64 = row.get(0);
         let wait_event: String = row.get(1);
-        let cnt: i32 = row.get(2);
-        let count = u32::try_from(cnt.max(0)).unwrap_or(0);
+        let cnt: i64 = row.get(2);
+        let count = u32::try_from(cnt.max(0)).unwrap_or(u32::MAX);
 
         if ts != current_ts {
             if current_ts != i64::MIN {
@@ -231,6 +232,8 @@ async fn query_ash_history_interval(
             }
             snap = AshSnapshot {
                 ts,
+                // cpu_count is unknown for history rows; the CPU reference line
+                // populates once the first live snapshot arrives.
                 ..Default::default()
             };
             current_ts = ts;

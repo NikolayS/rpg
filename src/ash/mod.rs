@@ -124,6 +124,8 @@ pub async fn run_ash(
                     .unwrap_or_default()
                     .as_secs()
                     .max(1);
+                // TODO: cache history result for ~1s to avoid a DB round-trip
+                // on every frame when the user holds arrow keys to adjust zoom.
                 let v = sampler::query_ash_history(client, window).await;
                 if v.is_empty() {
                     // Fall back to live ring buffer when history is unavailable.

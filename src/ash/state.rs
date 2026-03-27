@@ -64,12 +64,12 @@ pub struct AshState {
     pub selected_row: usize,
     /// Refresh interval in seconds. Valid values: 1, 5, 10.
     pub refresh_interval_secs: u64,
-    /// True when `pg_ash` extension is installed and available.
+    /// Whether `pg_ash` is installed on the server.
     ///
-    /// When true, historical data from `ash.sample` is used to pre-populate
-    /// the ring buffer on startup, and history mode can query wider windows.
-    /// Whether `pg_ash` is installed on the server.  Used by the event loop to
-    /// decide whether to pre-populate the ring buffer from history.
+    /// When true, historical data from `ash.samples` is used to pre-populate
+    /// the ring buffer on startup and history mode can query wider windows.
+    /// Stored for future use (e.g. status-bar indicator); branching currently
+    /// uses `PgAshInfo.installed` directly in the event loop.
     #[allow(dead_code)]
     pub pg_ash_installed: bool,
 
