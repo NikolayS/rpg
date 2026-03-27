@@ -25,37 +25,50 @@ path = "src/main.rs"
 bytes = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-crossterm = "0.29"
-dirs = "6"
 futures = "0.3"
-libc = "0.2"
-ratatui = "0.30"
-rustyline = "15"
-ring = { version = "0.17", default-features = false }
-rustls = "0.23"
-rustls-pemfile = "2"
 thiserror = "2"
 # On WASM we use a single-threaded runtime without signal/process support.
 # The rt-multi-thread, signal, and process features are added for native
 # targets via the platform-specific section below.
 tokio = { version = "1", features = ["rt", "macros", "time", "io-util"] }
 tokio-postgres = "0.7"
+unicode-width = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# Native-only dependencies: TLS, SSH tunneling, terminal UI, password
+# prompts, multi-threaded Tokio, signal handling, process management,
+# and filesystem-dependent crates are not available in WASM/browser.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ring = { version = "0.17", default-features = false }
+rustls = "0.23"
+rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false }
 x509-certificate = { version = "0.23", default-features = false }
-unicode-width = "0.2"
 webpki-roots = "0.26"
-
-# Native-only dependencies: SSH tunneling, password prompts, multi-threaded
-# Tokio runtime, signal handling, and process management are not available
-# (or meaningful) in a WASM/browser context.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
 rpassword = "7"
+crossterm = "0.29"
+ratatui = "0.30"
+rustyline = "15"
+libc = "0.2"
+dirs = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "process"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# WASM-only dependencies: browser WebSocket transport, JS interop, and
+# panic diagnostics.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["WebSocket", "CloseEvent", "MessageEvent"] }
+js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
+tokio-postgres = { version = "0.7", default-features = false }
 
 [[bench]]
 name = "non_ai_paths"
