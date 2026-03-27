@@ -34,7 +34,6 @@ thiserror = "2"
 # The rt-multi-thread, signal, and process features are added for native
 # targets via the platform-specific section below.
 tokio = { version = "1", features = ["rt", "macros", "time", "io-util"] }
-tokio-postgres = "0.7"
 unicode-width = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
@@ -56,17 +55,20 @@ rustyline = "15"
 libc = "0.2"
 dirs = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "process"] }
+tokio-postgres = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # WASM-only dependencies: browser WebSocket transport, JS interop, and
 # panic diagnostics.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
+async_io_stream = { version = "0.3", features = ["tokio_io"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["WebSocket", "CloseEvent", "MessageEvent"] }
 js-sys = "0.3"
-getrandom = { version = "0.2", features = ["js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"
 tokio-postgres = { version = "0.7", default-features = false }
 
