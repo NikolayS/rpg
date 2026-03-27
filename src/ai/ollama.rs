@@ -272,9 +272,8 @@ impl LlmProvider for OllamaProvider {
         &self,
         messages: &[Message],
         options: &CompletionOptions,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>>
+    {
         let messages = messages.to_vec();
         let options = options.clone();
         Box::pin(self.complete_inner(messages, options))
@@ -288,9 +287,8 @@ impl LlmProvider for OllamaProvider {
         messages: &[Message],
         options: &CompletionOptions,
         on_token: Box<dyn Fn(&str)>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CompletionResult, String>> + '_>>
+    {
         let messages = messages.to_vec();
         let options = options.clone();
         Box::pin(async move {

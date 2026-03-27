@@ -1527,9 +1527,7 @@ pub(super) async fn handle_ai_plan(
             .join("rpg")
             .join("plans");
         #[cfg(target_arch = "wasm32")]
-        let plans_dir = std::path::PathBuf::from(".")
-            .join("rpg")
-            .join("plans");
+        let plans_dir = std::path::PathBuf::from(".").join("rpg").join("plans");
         if let Err(e) = std::fs::create_dir_all(&plans_dir) {
             eprintln!("Cannot create plans directory: {e}");
             return;

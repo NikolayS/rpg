@@ -23,9 +23,9 @@ mod explain;
 mod highlight;
 #[cfg(not(target_arch = "wasm32"))]
 mod history_picker;
+mod init;
 #[allow(dead_code, unused_imports)]
 mod input;
-mod init;
 mod io;
 mod large_object;
 mod logging;
