@@ -2326,8 +2326,7 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
                 match read() {
                     Ok(Event::Key(key)) => match (key.code, key.modifiers) {
                         // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
-                        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL)
-                        | (KeyCode::Esc, _) => {
+                        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
                             let _ = write!(io::stderr(), "\r\n");
                             break true;
                         }

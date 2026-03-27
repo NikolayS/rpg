@@ -63,7 +63,10 @@ pub async fn run_rpg(
     pg_config.user(&user.unwrap_or_else(|| "rpg".to_owned()));
 
     let connector = WasmConnector::new(&ws_url);
-    let _client = connector.connect_spawned(&pg_config).await.map_err(to_js_err)?;
+    let _client = connector
+        .connect_spawned(&pg_config)
+        .await
+        .map_err(to_js_err)?;
 
     web_sys::console::log_1(&"rpg: connected to postgres".into());
 

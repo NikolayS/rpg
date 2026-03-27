@@ -11,10 +11,10 @@
 //! driven via `wasm_bindgen_futures::spawn_local`, which runs on the
 //! single-threaded WASM executor.
 
+use async_io_stream::IoStream;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{Client, Config, Connection, NoTls};
 use wasm_bindgen::JsValue;
-use async_io_stream::IoStream;
 use ws_stream_wasm::{WsMeta, WsStreamIo};
 
 /// WebSocket-backed connector for `tokio-postgres` in WASM.
