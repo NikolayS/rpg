@@ -1210,12 +1210,20 @@ fn parse_uri(uri: &str) -> Result<UriParams, ConnectionError> {
         Some(SslMode::parse(s)?)
     } else {
         // Map the tokio-postgres SslMode back to rpg's SslMode.
-        Some(match pg_cfg.get_ssl_mode() {
-            TokioSslMode::Disable => SslMode::Disable,
-            TokioSslMode::Require => SslMode::Require,
-            // tokio-postgres SslMode is #[non_exhaustive]; Prefer and unknown variants map to Prefer.
-            _ => SslMode::Prefer,
-        })
+        // tokio_postgres::config::SslMode is not available on WASM (no TLS).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Some(match pg_cfg.get_ssl_mode() {
+                TokioSslMode::Disable => SslMode::Disable,
+                TokioSslMode::Require => SslMode::Require,
+                // tokio-postgres SslMode is #[non_exhaustive]; Prefer and unknown variants map to Prefer.
+                _ => SslMode::Prefer,
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Some(SslMode::Disable)
+        }
     };
 
     params.application_name = pg_cfg.get_application_name().map(str::to_owned);
@@ -2624,10 +2632,18 @@ async fn connect_one(
 /// The browser's WebSocket proxy layer handles encryption transparently.
 #[cfg(target_arch = "wasm32")]
 async fn connect_one(
-    pg_config: &tokio_postgres::Config,
+    _pg_config: &tokio_postgres::Config,
     params: &ConnParams,
 ) -> Result<(Client, Option<TlsInfo>), ConnectionError> {
-    Ok((connect_plain(pg_config, params).await?, None))
+    // On WASM, direct TCP connections are not available.  The browser must
+    // use the WasmConnector (WebSocket proxy) instead.  This code path
+    // should not be reached in normal WASM operation — if it is, it means
+    // the caller has not been wired up to the WasmConnector yet.
+    Err(ConnectionError::ConnectionFailed {
+        host: params.host.clone(),
+        port: params.port,
+        reason: "direct TCP connections are not supported in WASM; use WebSocket proxy".into(),
+    })
 }
 
 /// Verify that a newly-established `client` satisfies `tsa`.
@@ -2718,6 +2734,7 @@ where
 }
 
 /// Connect without TLS.
+#[cfg(not(target_arch = "wasm32"))]
 async fn connect_plain(
     pg_config: &tokio_postgres::Config,
     params: &ConnParams,
