@@ -139,7 +139,7 @@ Anyone fluent in psql — human or AI agent — should be immediately productive
 #### FR-2: REPL
 - Interactive readline with history (persistent across sessions)
 - Multi-line input with continuation prompts
-- Customizable prompts (`\set PROMPT1`, `\set PROMPT2`)
+- Customizable prompts (`\set PROMPT1`, `\set PROMPT2`; backtick-enclosed strings in prompt templates are executed as shell commands — psql-compatible behavior)
 - Command history search (Ctrl-R)
 - Ctrl-C cancels current query (sends CancelRequest)
 - Ctrl-D exits
@@ -1398,7 +1398,7 @@ rpg/
 - [ ] `\cd [dir]` — change working directory
 - [ ] `\encoding [enc]` — show/set client encoding
 - [ ] `\password [user]` — interactively change password
-- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3) with format codes:
+- [ ] Customizable prompts (PROMPT1, PROMPT2, PROMPT3) with format codes (note: backtick-enclosed strings in prompt templates are executed as shell commands, psql-compatible behavior):
   - [ ] `%M` (full host), `%m` (short host), `%>` (port), `%n` (user), `%/` (database), `%~` (database, `~` for default)
   - [ ] `%#` (`#` if superuser, `>` otherwise), `%p` (backend PID), `%R` (ready/single-line/disconnected)
   - [ ] `%l` (line number), `%w` (whitespace padding), `%x` (transaction status)

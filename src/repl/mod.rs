@@ -173,6 +173,59 @@ pub struct PromptContext<'a> {
     pub backend_pid: Option<u32>,
 }
 
+/// Expand backtick-delimited shell commands in a prompt string.
+///
+/// Matches psql behaviour: `` `cmd` `` is replaced with the trimmed stdout of
+/// running `cmd` via `sh -c`.  If the command fails or produces no output,
+/// substitutes an empty string.
+///
+/// # Security note
+///
+/// This function executes arbitrary shell commands via `sh -c`. Commands are
+/// sourced exclusively from the user's own `PROMPT1`/`PROMPT2` configuration —
+/// never from query input or remote data. This matches psql's behaviour and is
+/// intentional, but callers must ensure that only prompt strings from user
+/// config are passed here.
+///
+/// This pass should be applied *before* [`expand_prompt`] so that the shell
+/// output can itself contain `%`-sequences (though in practice this is rare).
+pub fn expand_prompt_backticks(prompt: &str) -> String {
+    let mut result = String::new();
+    let mut chars = prompt.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            // Collect until closing backtick.
+            let mut cmd = String::new();
+            let mut found_close = false;
+            for inner in chars.by_ref() {
+                if inner == '`' {
+                    found_close = true;
+                    break;
+                }
+                cmd.push(inner);
+            }
+            if !found_close {
+                // No closing backtick — emit literally, do not execute.
+                result.push('`');
+                result.push_str(&cmd);
+                continue;
+            }
+            // Execute the command and capture stdout.
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            result.push_str(output.trim_end_matches('\n').trim_end_matches('\r'));
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Expand a psql-compatible prompt template string.
 ///
 /// Recognises the following format codes (a subset of those documented
@@ -372,6 +425,9 @@ pub fn build_prompt_from_settings(
         line_number: 0,
         backend_pid: None,
     };
+    // Apply backtick command substitution before %-escape expansion,
+    // matching psql behaviour.
+    let template = expand_prompt_backticks(&template);
     expand_prompt(&template, &ctx)
 }
 
@@ -6254,6 +6310,69 @@ mod tests {
         let mut ctx = make_ctx("mydb", "alice", TxState::Idle, false);
         ctx.connected = false;
         assert_eq!(expand_prompt("%R", &ctx), "!");
+    }
+
+    // -- expand_prompt_backticks -----------------------------------------------
+
+    #[test]
+    fn backtick_echo_hello() {
+        assert_eq!(expand_prompt_backticks("`echo hello`"), "hello");
+    }
+
+    #[test]
+    fn backtick_no_trailing_newline() {
+        let result = expand_prompt_backticks("`echo -n hello`");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn backtick_failing_command_gives_empty() {
+        let result = expand_prompt_backticks("`nonexistent_cmd_xyz_123`");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn no_backticks_unchanged() {
+        assert_eq!(expand_prompt_backticks("user@host> "), "user@host> ");
+    }
+
+    #[test]
+    fn multiple_backticks_expanded() {
+        // Both echo commands should expand.
+        let result = expand_prompt_backticks("`echo a`-`echo b`");
+        assert_eq!(result, "a-b");
+    }
+
+    #[test]
+    fn backtick_unterminated_passes_through_literally() {
+        // An unterminated backtick should NOT execute anything — pass through literally
+        let result = expand_prompt_backticks("`unclosed");
+        assert_eq!(
+            result, "`unclosed",
+            "unterminated backtick must pass through literally"
+        );
+    }
+
+    #[test]
+    fn backtick_unterminated_preserves_content_after() {
+        // Regression test for #744: content after an unterminated backtick must NOT
+        // be silently dropped.  `hello `date world` — "world" was being lost because
+        // the inner loop consumed the rest of the string without emitting it.
+        let result = expand_prompt_backticks("hello `date world");
+        assert_eq!(
+            result, "hello `date world",
+            "content after unterminated backtick must not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn backtick_unterminated_with_prefix_and_suffix() {
+        // Variant: prefix text, unterminated backtick command, suffix text — all preserved.
+        let result = expand_prompt_backticks("pre `cmd suffix");
+        assert_eq!(
+            result, "pre `cmd suffix",
+            "prefix and suffix around unterminated backtick must both be preserved"
+        );
     }
 
     // -- build_prompt_from_settings -------------------------------------------
