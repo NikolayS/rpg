@@ -10,6 +10,7 @@ repository = "https://github.com/NikolayS/project-alpha"
 [features]
 integration = []
 lua = ["dep:mlua"]
+wasm = []
 
 [profile.release]
 strip = true
@@ -25,7 +26,6 @@ bytes = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -34,19 +34,29 @@ dirs = "6"
 futures = "0.3"
 libc = "0.2"
 ratatui = "0.30"
-rpassword = "7"
 rustyline = "15"
 ring = { version = "0.17", default-features = false }
 rustls = "0.23"
 rustls-pemfile = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "process", "io-util"] }
+# On WASM we use a single-threaded runtime without signal/process support.
+# The rt-multi-thread, signal, and process features are added for native
+# targets via the platform-specific section below.
+tokio = { version = "1", features = ["rt", "macros", "time", "io-util"] }
 tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26", default-features = false }
 anyhow = "1"
 x509-certificate = { version = "0.23", default-features = false }
 unicode-width = "0.2"
 webpki-roots = "0.26"
+
+# Native-only dependencies: SSH tunneling, password prompts, multi-threaded
+# Tokio runtime, signal handling, and process management are not available
+# (or meaningful) in a WASM/browser context.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
+rpassword = "7"
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "process"] }
 
 [[bench]]
 name = "non_ai_paths"

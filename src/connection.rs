@@ -1624,6 +1624,8 @@ pub fn resolve_password(
     // Interactive prompt (-W or server requested).
     if force_prompt || (server_requested_auth && !no_password) {
         let prompt = format!("Password for user {}: ", params.user);
+        // Interactive password prompts require a TTY — not available in WASM.
+        #[cfg(not(target_arch = "wasm32"))]
         match rpassword::prompt_password(&prompt) {
             Ok(pw) => {
                 params.password = Some(pw);
@@ -1635,6 +1637,12 @@ pub fn resolve_password(
                 });
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        return Err(ConnectionError::AuthenticationFailed {
+            user: params.user.clone(),
+            reason: "interactive password prompts not supported in browser (use connection string)"
+                .to_owned(),
+        });
     }
 
     Ok(())

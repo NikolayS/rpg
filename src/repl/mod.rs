@@ -4537,6 +4537,9 @@ async fn run_readline_loop(
                 // A oneshot channel lets us tear down the task once the line
                 // has been handled without a spurious cancel on the next query.
                 let (cancel_done_tx, cancel_done_rx) = tokio::sync::oneshot::channel::<()>();
+                // tokio::signal is not available on WASM; skip the Ctrl-C
+                // cancel-guard task on that target.
+                #[cfg(not(target_arch = "wasm32"))]
                 tokio::spawn(async move {
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
@@ -4552,6 +4555,8 @@ async fn run_readline_loop(
                         }
                     }
                 });
+                #[cfg(target_arch = "wasm32")]
+                drop(cancel_done_rx);
 
                 let result =
                     handle_line(&line, &mut buf, &mut stmt_buf, client, params, settings, tx).await;

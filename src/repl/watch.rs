@@ -132,6 +132,7 @@ pub(super) async fn watch_query(
     settings: &mut ReplSettings,
 ) {
     use std::time::Duration;
+    #[cfg(not(target_arch = "wasm32"))]
     use tokio::signal;
     use tokio::time::sleep;
 
@@ -146,9 +147,15 @@ pub(super) async fn watch_query(
         execute_query(client, sql, settings, &mut dummy_tx).await;
 
         // Sleep for the interval, but exit cleanly on Ctrl-C.
+        // On WASM signal::ctrl_c() is unavailable; use a never-resolving
+        // future so only the sleep arm can fire.
+        #[cfg(not(target_arch = "wasm32"))]
+        let ctrl_c = signal::ctrl_c();
+        #[cfg(target_arch = "wasm32")]
+        let ctrl_c = std::future::pending::<std::io::Result<()>>();
         tokio::select! {
             () = sleep(Duration::from_secs_f64(interval_secs)) => {},
-            _ = signal::ctrl_c() => {
+            _ = ctrl_c => {
                 break;
             },
         }

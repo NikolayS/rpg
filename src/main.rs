@@ -47,6 +47,8 @@ mod safety;
 mod session;
 mod session_store;
 mod setup;
+// SSH tunneling uses russh which is not available for WASM targets.
+#[cfg(not(target_arch = "wasm32"))]
 mod ssh_tunnel;
 mod statusline;
 mod update;
@@ -376,9 +378,13 @@ impl Cli {
             force_password: self.password,
             no_password: self.no_password,
             sslmode: self.sslmode.clone(),
+            // SSH tunneling is not available on WASM targets.
+            #[cfg(not(target_arch = "wasm32"))]
             ssh_tunnel: self.ssh_tunnel.as_deref().and_then(|s| {
                 ssh_tunnel::SshTunnelSpec::parse(s).map(config::SshTunnelConfig::from)
             }),
+            #[cfg(target_arch = "wasm32")]
+            ssh_tunnel: None,
         }
     }
 }
@@ -585,6 +591,14 @@ fn build_settings(
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // WASM (single-threaded): use current_thread runtime — no OS threads.
+    // Native: use multi-thread runtime for signal handling and concurrency.
+    #[cfg(target_arch = "wasm32")]
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    #[cfg(not(target_arch = "wasm32"))]
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -790,6 +804,8 @@ async fn async_main() {
     // If an SSH tunnel is configured, establish it now and redirect the
     // Postgres host/port to the local tunnel endpoint.  The `_tunnel` handle
     // must stay alive for the entire process (dropping it kills the tunnel).
+    // SSH tunneling is not available on WASM targets (no russh dependency).
+    #[cfg(not(target_arch = "wasm32"))]
     let _tunnel: Option<ssh_tunnel::SshTunnel> = if let Some(ref tcfg) = opts.ssh_tunnel {
         let target_host = opts.host.clone().unwrap_or_else(|| "localhost".to_owned());
         let target_port = opts.port.unwrap_or(5432);
@@ -814,6 +830,10 @@ async fn async_main() {
     } else {
         None
     };
+    // On WASM the tunnel handle is a unit placeholder so the borrow checker
+    // sees the variable used regardless of cfg.
+    #[cfg(target_arch = "wasm32")]
+    let _tunnel: Option<()> = None;
 
     // Resolve parameters once; pass into connect() so both display and the
     // actual driver use the exact same values (avoids double-resolve drift).
