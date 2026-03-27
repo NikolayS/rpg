@@ -94,7 +94,9 @@ pub async fn run_ash(
     // Pre-populate ring buffer from pg_ash history when available.
     // Fills the left side of the timeline; live data scrolls in on the right.
     if pg_ash.installed {
-        let history = sampler::query_ash_history(client, 600).await;
+        // Pre-populate using the current zoom window (bucket_secs × 600 samples).
+        let history_window = state.bucket_secs() * 600;
+        let history = sampler::query_ash_history(client, history_window).await;
         for snap in history {
             if snapshots.len() == 600 {
                 snapshots.pop_front();
@@ -117,10 +119,17 @@ pub async fn run_ash(
         //    fall back to the live ring buffer so the TUI never goes blank.
         let snap_slice: Vec<sampler::AshSnapshot> = match &state.mode {
             ViewMode::History { from, to } => {
-                match sampler::history_snapshots(client, *from, *to).await {
-                    Ok(v) if !v.is_empty() => v,
+                let window = to
+                    .duration_since(*from)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .max(1);
+                let v = sampler::query_ash_history(client, window).await;
+                if v.is_empty() {
                     // Fall back to live ring buffer when history is unavailable.
-                    _ => snapshots.iter().cloned().collect(),
+                    snapshots.iter().cloned().collect()
+                } else {
+                    v
                 }
             }
             ViewMode::Live => {

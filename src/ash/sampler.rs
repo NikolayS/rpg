@@ -168,34 +168,6 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
     Ok(snap)
 }
 
-/// Return historical snapshots from `pg_ash` for an explicit time range.
-///
-/// Uses `ash.wait_timeline()` to fetch time-bucketed wait event data, then
-/// converts each bucket into an `AshSnapshot`.  Falls back to an empty vec
-/// when `pg_ash` is not installed or the query fails.
-pub async fn history_snapshots(
-    client: &Client,
-    from: SystemTime,
-    to: SystemTime,
-) -> anyhow::Result<Vec<AshSnapshot>> {
-    let info = detect_pg_ash(client).await;
-    if !info.installed {
-        return Ok(vec![]);
-    }
-
-    let from_epoch = from
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    let to_epoch = to
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-
-    let window_secs = to_epoch.saturating_sub(from_epoch).max(1);
-    let interval = format!("{window_secs} seconds");
-
-    query_ash_history_interval(client, &interval).await
-}
-
 /// Pre-populate the ring buffer with historical snapshots from `pg_ash`.
 ///
 /// Queries `ash.wait_timeline()` with 1-second buckets for the requested
@@ -548,5 +520,81 @@ mod tests {
         assert_eq!(ring[0].ts, 5);
         // Newest should be ts=604.
         assert_eq!(ring[599].ts, 604);
+    }
+
+    // --- integration tests (require live pg_ash) ---
+
+    /// Verifies `query_ash_history` does not panic and returns valid snapshots
+    /// when `pg_ash` is installed.
+    ///
+    /// Run with: `cargo test --include-ignored test_pg_ash_history_live`
+    ///
+    /// Setup: install `pg_ash` and run pgbench for a few minutes first so there
+    /// is history data to query.
+    #[tokio::test]
+    #[ignore = "requires pg_ash installed on postgresql://postgres@127.0.0.1:15433/ashtest"]
+    async fn test_pg_ash_history_live() {
+        let (client, conn) = tokio_postgres::connect(
+            "host=127.0.0.1 port=15433 user=postgres dbname=ashtest",
+            tokio_postgres::NoTls,
+        )
+        .await
+        .expect("connect to test database");
+        tokio::spawn(async move {
+            conn.await.ok();
+        });
+
+        // Skip gracefully if pg_ash is not installed.
+        let ext_rows = client
+            .query("select 1 from pg_extension where extname = 'pg_ash'", &[])
+            .await
+            .unwrap_or_default();
+        if ext_rows.is_empty() {
+            eprintln!("pg_ash not installed — skipping live history test");
+            return;
+        }
+
+        let history = query_ash_history(&client, 60).await;
+        eprintln!(
+            "test_pg_ash_history_live: {} snapshots returned",
+            history.len()
+        );
+
+        // All snapshots must have consistent counts.
+        for snap in &history {
+            let type_total: u32 = snap.by_type.values().sum();
+            assert_eq!(
+                type_total, snap.active_count,
+                "by_type sum must equal active_count"
+            );
+        }
+    }
+
+    /// Verifies `query_ash_history` returns an empty vec gracefully when
+    /// `pg_ash` is not installed (no crash, no error propagation).
+    ///
+    /// Run with: `cargo test --include-ignored test_pg_ash_history_graceful_degradation`
+    #[tokio::test]
+    #[ignore = "requires connection to postgresql://postgres@127.0.0.1:15433/ashtest"]
+    async fn test_pg_ash_history_graceful_degradation() {
+        let (client, conn) = tokio_postgres::connect(
+            "host=127.0.0.1 port=15433 user=postgres dbname=ashtest",
+            tokio_postgres::NoTls,
+        )
+        .await
+        .expect("connect to test database");
+        tokio::spawn(async move {
+            conn.await.ok();
+        });
+
+        // Drop pg_ash if installed so we can test degradation.
+        let _ = client.execute("drop extension if exists pg_ash", &[]).await;
+
+        // Must return empty vec, not panic or propagate error.
+        let history = query_ash_history(&client, 60).await;
+        assert!(
+            history.is_empty(),
+            "expected empty vec when pg_ash not installed"
+        );
     }
 }
