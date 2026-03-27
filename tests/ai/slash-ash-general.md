@@ -1,4 +1,4 @@
-# AI test: ash-general
+# AI test: slash-ash-general
 
 Tests the `/ash` Active Session History TUI — basic functionality, visual correctness,
 and demo recording.
