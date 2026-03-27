@@ -91,6 +91,18 @@ pub async fn run_ash(
     let mut state = AshState::new(pg_ash.installed);
     let mut snapshots: VecDeque<sampler::AshSnapshot> = VecDeque::with_capacity(600);
 
+    // Pre-populate ring buffer from pg_ash history when available.
+    // Fills the left side of the timeline; live data scrolls in on the right.
+    if pg_ash.installed {
+        let history = sampler::query_ash_history(client, 600).await;
+        for snap in history {
+            if snapshots.len() == 600 {
+                snapshots.pop_front();
+            }
+            snapshots.push_back(snap);
+        }
+    }
+
     let no_color = settings.no_highlight;
 
     let _guard = TerminalGuard::new()?;

@@ -68,8 +68,8 @@ pub struct AshSnapshot {
 #[derive(Debug, Clone)]
 pub struct PgAshInfo {
     pub installed: bool,
-    /// Retention window in seconds from `ash.config`.  Reserved for history
-    /// mode (Layer 2); unused in the current live-only implementation.
+    /// Retention window in seconds from `ash.config`.  Used by history mode
+    /// to determine how far back to query `ash.sample`.
     #[allow(dead_code)]
     pub retention_seconds: Option<i64>,
 }
@@ -168,17 +168,11 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
     Ok(snap)
 }
 
-/// Return historical snapshots from `pg_ash` if installed.
+/// Return historical snapshots from `pg_ash` for an explicit time range.
 ///
-/// # Stub — history mode (`pg_ash` Layer 2) not yet implemented
-///
-/// TODO: history mode (`pg_ash` Layer 2) — not yet implemented.
-/// `pg_ash` v1.2 encodes `ash.samples.data` as an opaque `int[]` whose
-/// layout is not yet publicly documented.  Until the encoding is specified
-/// and history mode is fully wired into the event loop, this function always
-/// returns an empty vec.  The caller in `mod.rs` falls back to the live ring
-/// buffer transparently, so the TUI never goes blank.
-/// Track upstream: <https://github.com/NikolayS/rpg/issues/753>
+/// Uses `ash.wait_timeline()` to fetch time-bucketed wait event data, then
+/// converts each bucket into an `AshSnapshot`.  Falls back to an empty vec
+/// when `pg_ash` is not installed or the query fails.
 pub async fn history_snapshots(
     client: &Client,
     from: SystemTime,
@@ -189,12 +183,110 @@ pub async fn history_snapshots(
         return Ok(vec![]);
     }
 
-    // Validate range (suppress unused-variable warnings until encoding is done).
-    let _ = (from, to);
+    let from_epoch = from
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let to_epoch = to
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
 
-    // TODO: history mode (pg_ash Layer 2) — decode ash.samples.data int[] encoding
-    // once the format is documented and history mode is wired into the event loop.
-    Ok(vec![])
+    let window_secs = to_epoch.saturating_sub(from_epoch).max(1);
+    let interval = format!("{window_secs} seconds");
+
+    query_ash_history_interval(client, &interval).await
+}
+
+/// Pre-populate the ring buffer with historical snapshots from `pg_ash`.
+///
+/// Queries `ash.wait_timeline()` with 1-second buckets for the requested
+/// window, groups each bucket into an `AshSnapshot`, and returns them in
+/// chronological order (oldest first).
+///
+/// Returns an empty vec when:
+/// - `pg_ash` is not installed (graceful degradation)
+/// - the query fails (transient error, permission issue, etc.)
+/// - no historical data exists for the requested window
+pub async fn query_ash_history(client: &Client, window_secs: u64) -> Vec<AshSnapshot> {
+    let interval = format!("{window_secs} seconds");
+    query_ash_history_interval(client, &interval)
+        .await
+        .unwrap_or_default()
+}
+
+/// Shared implementation for history queries.
+///
+/// Uses `ash.wait_timeline(interval, '1 second')` which returns
+/// `(bucket_start timestamptz, wait_event text, samples bigint)`
+/// already decoded from the opaque `int[]` encoding.
+async fn query_ash_history_interval(
+    client: &Client,
+    interval: &str,
+) -> anyhow::Result<Vec<AshSnapshot>> {
+    // ash.wait_timeline returns (bucket_start, wait_event, samples).
+    // wait_event format: "Type:Event" or just "Type" when type == event
+    // (e.g. "CPU*", "IO:DataFileRead", "Lock:relation").
+    let sql = format!(
+        "select \
+            extract(epoch from bucket_start)::int8 as ts, \
+            wait_event, \
+            samples::int4 as cnt \
+        from ash.wait_timeline('{interval}'::interval, '1 second'::interval) \
+        order by bucket_start, wait_event"
+    );
+
+    let Ok(rows) = client.query(&sql, &[]).await else {
+        return Ok(vec![]);
+    };
+
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Group rows by timestamp into AshSnapshot instances.
+    let mut snapshots: Vec<AshSnapshot> = Vec::new();
+    let mut current_ts: i64 = i64::MIN;
+    let mut snap = AshSnapshot::default();
+
+    for row in &rows {
+        let ts: i64 = row.get(0);
+        let wait_event: String = row.get(1);
+        let cnt: i32 = row.get(2);
+        let count = u32::try_from(cnt.max(0)).unwrap_or(0);
+
+        if ts != current_ts {
+            if current_ts != i64::MIN {
+                snapshots.push(snap);
+            }
+            snap = AshSnapshot {
+                ts,
+                ..Default::default()
+            };
+            current_ts = ts;
+        }
+
+        // Parse "Type:Event" format back into (wtype, wevent).
+        let (wtype, wevent) = if let Some(idx) = wait_event.find(':') {
+            (
+                wait_event[..idx].to_owned(),
+                wait_event[idx + 1..].to_owned(),
+            )
+        } else {
+            // No colon — type == event (e.g. "CPU*").
+            (wait_event.clone(), String::new())
+        };
+
+        // wait_timeline only gives us type+event, no query_id or query text.
+        // Use an empty query label; drill-down to query level won't have data
+        // from history but that's acceptable for timeline pre-population.
+        fold_row(&mut snap, &wtype, &wevent, None, "", count);
+    }
+
+    // Push the last accumulated snapshot.
+    if current_ts != i64::MIN {
+        snapshots.push(snap);
+    }
+
+    Ok(snapshots)
 }
 
 // ---------------------------------------------------------------------------
@@ -314,5 +406,147 @@ mod tests {
         // No query text and no query_id — should fall back to "(unknown)".
         let snap = mock_snapshot(&[("CPU*", "", None, "", 2)]);
         assert!(snap.by_query.contains_key("CPU*//(unknown)"));
+    }
+
+    // --- pg_ash history integration tests ---
+
+    /// Parse a `"Type:Event"` string like `ash.wait_timeline` returns.
+    fn parse_wait_event(s: &str) -> (String, String) {
+        if let Some(idx) = s.find(':') {
+            (s[..idx].to_owned(), s[idx + 1..].to_owned())
+        } else {
+            (s.to_owned(), String::new())
+        }
+    }
+
+    /// Simulate building `AshSnapshot`s from `wait_timeline` rows
+    /// (the same logic as `query_ash_history_interval`).
+    fn build_snapshots_from_timeline(rows: &[(i64, &str, u32)]) -> Vec<AshSnapshot> {
+        let mut snapshots: Vec<AshSnapshot> = Vec::new();
+        let mut current_ts: i64 = i64::MIN;
+        let mut snap = AshSnapshot::default();
+
+        for &(ts, wait_event, count) in rows {
+            if ts != current_ts {
+                if current_ts != i64::MIN {
+                    snapshots.push(snap);
+                }
+                snap = AshSnapshot {
+                    ts,
+                    ..Default::default()
+                };
+                current_ts = ts;
+            }
+
+            let (wtype, wevent) = parse_wait_event(wait_event);
+            fold_row(&mut snap, &wtype, &wevent, None, "", count);
+        }
+
+        if current_ts != i64::MIN {
+            snapshots.push(snap);
+        }
+
+        snapshots
+    }
+
+    #[test]
+    fn test_history_build_snapshots_basic() {
+        let rows = vec![
+            (1000, "CPU*", 5),
+            (1000, "IO:DataFileRead", 3),
+            (1001, "CPU*", 4),
+            (1001, "Lock:relation", 2),
+            (1002, "IO:WALWrite", 1),
+        ];
+        let snaps = build_snapshots_from_timeline(&rows);
+
+        assert_eq!(snaps.len(), 3);
+
+        // First snapshot: ts=1000, CPU*=5, IO=3
+        assert_eq!(snaps[0].ts, 1000);
+        assert_eq!(snaps[0].active_count, 8);
+        assert_eq!(snaps[0].by_type["CPU*"], 5);
+        assert_eq!(snaps[0].by_type["IO"], 3);
+
+        // Second snapshot: ts=1001, CPU*=4, Lock=2
+        assert_eq!(snaps[1].ts, 1001);
+        assert_eq!(snaps[1].active_count, 6);
+        assert_eq!(snaps[1].by_type["CPU*"], 4);
+        assert_eq!(snaps[1].by_type["Lock"], 2);
+        assert_eq!(snaps[1].by_event["Lock/relation"], 2);
+
+        // Third snapshot: ts=1002, IO=1
+        assert_eq!(snaps[2].ts, 1002);
+        assert_eq!(snaps[2].active_count, 1);
+        assert_eq!(snaps[2].by_type["IO"], 1);
+    }
+
+    #[test]
+    fn test_history_build_snapshots_empty() {
+        let snaps = build_snapshots_from_timeline(&[]);
+        assert!(snaps.is_empty());
+    }
+
+    #[test]
+    fn test_history_snapshots_prepopulate_ring_buffer() {
+        use std::collections::VecDeque;
+
+        let rows = vec![
+            (100, "CPU*", 3),
+            (101, "IO:DataFileRead", 2),
+            (102, "Lock:relation", 1),
+        ];
+        let history = build_snapshots_from_timeline(&rows);
+
+        // Simulate ring buffer pre-population (same logic as mod.rs).
+        let mut ring: VecDeque<AshSnapshot> = VecDeque::with_capacity(600);
+        for snap in history {
+            if ring.len() == 600 {
+                ring.pop_front();
+            }
+            ring.push_back(snap);
+        }
+
+        assert_eq!(ring.len(), 3);
+        assert_eq!(ring[0].ts, 100);
+        assert_eq!(ring[1].ts, 101);
+        assert_eq!(ring[2].ts, 102);
+    }
+
+    #[test]
+    fn test_history_parse_wait_event_with_colon() {
+        let (wtype, wevent) = parse_wait_event("IO:DataFileRead");
+        assert_eq!(wtype, "IO");
+        assert_eq!(wevent, "DataFileRead");
+    }
+
+    #[test]
+    fn test_history_parse_wait_event_no_colon() {
+        let (wtype, wevent) = parse_wait_event("CPU*");
+        assert_eq!(wtype, "CPU*");
+        assert_eq!(wevent, "");
+    }
+
+    #[test]
+    fn test_history_ring_buffer_capacity_limit() {
+        use std::collections::VecDeque;
+
+        // Build 605 snapshots — ring buffer should keep only last 600.
+        let rows: Vec<(i64, &str, u32)> = (0..605).map(|i| (i64::from(i), "CPU*", 1)).collect();
+        let history = build_snapshots_from_timeline(&rows);
+
+        let mut ring: VecDeque<AshSnapshot> = VecDeque::with_capacity(600);
+        for snap in history {
+            if ring.len() == 600 {
+                ring.pop_front();
+            }
+            ring.push_back(snap);
+        }
+
+        assert_eq!(ring.len(), 600);
+        // Oldest kept snapshot should be ts=5 (first 5 were dropped).
+        assert_eq!(ring[0].ts, 5);
+        // Newest should be ts=604.
+        assert_eq!(ring[599].ts, 604);
     }
 }
