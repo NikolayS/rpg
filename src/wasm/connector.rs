@@ -11,6 +11,7 @@
 //! driven via `wasm_bindgen_futures::spawn_local`, which runs on the
 //! single-threaded WASM executor.
 
+use async_io_stream::IoStream;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{Client, Config, Connection, NoTls};
 use wasm_bindgen::JsValue;
@@ -70,7 +71,13 @@ impl WasmConnector {
     pub async fn connect(
         &self,
         pg_config: &Config,
-    ) -> Result<(Client, Connection<WsStreamIo, NoTlsStream>), Box<dyn std::error::Error>> {
+    ) -> Result<
+        (
+            Client,
+            Connection<IoStream<WsStreamIo, Vec<u8>>, NoTlsStream>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         let (_ws_meta, mut ws_stream) = WsMeta::connect(&self.ws_url, None).await?;
 
         // Send auth frame before Postgres negotiation when a token is configured.
@@ -107,7 +114,7 @@ impl WasmConnector {
 /// Uses `wasm_bindgen_futures::spawn_local` because `WsIo` is `!Send` and
 /// cannot be used with `tokio::spawn`.  Errors are logged to the browser
 /// console via `web_sys::console::error_1`.
-pub fn spawn_connection(connection: Connection<WsStreamIo, NoTlsStream>) {
+pub fn spawn_connection(connection: Connection<IoStream<WsStreamIo, Vec<u8>>, NoTlsStream>) {
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(e) = connection.await {
             web_sys::console::error_1(&format!("pg connection error: {e}").into());
