@@ -276,11 +276,18 @@ async fn with_ctrl_c_cancel<F, T>(fut: F) -> Result<T, String>
 where
     F: std::future::Future<Output = Result<T, String>>,
 {
-    tokio::select! {
-        biased;
-        _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
-        result = fut => result,
+    // tokio::signal is not available on WASM; run the future without
+    // Ctrl-C cancellation support in that environment.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
+            result = fut => result,
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    fut.await
 }
 
 /// Stream a completion to the terminal, rendering markdown when enabled.
