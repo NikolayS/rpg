@@ -233,53 +233,19 @@ async fn query_ash_history_inner(
         return Ok(vec![]);
     }
 
-    // Group rows by timestamp into AshSnapshot instances.
-    let mut snapshots: Vec<AshSnapshot> = Vec::new();
-    let mut current_ts: i64 = i64::MIN;
-    let mut snap = AshSnapshot::default();
+    // Convert DB rows to (ts, wait_event, count) tuples and group into snapshots.
+    let tuples: Vec<(i64, String, u32)> = rows
+        .iter()
+        .map(|row| {
+            let ts: i64 = row.get(0);
+            let wait_event: String = row.get(1);
+            let cnt: i64 = row.get(2);
+            let count = u32::try_from(cnt.max(0)).unwrap_or(u32::MAX);
+            (ts, wait_event, count)
+        })
+        .collect();
 
-    for row in &rows {
-        let ts: i64 = row.get(0);
-        let wait_event: String = row.get(1);
-        let cnt: i64 = row.get(2);
-        let count = u32::try_from(cnt.max(0)).unwrap_or(u32::MAX);
-
-        if ts != current_ts {
-            if current_ts != i64::MIN {
-                snapshots.push(snap);
-            }
-            snap = AshSnapshot {
-                ts,
-                // cpu_count is unknown for history rows; the CPU reference line
-                // populates once the first live snapshot arrives.
-                ..Default::default()
-            };
-            current_ts = ts;
-        }
-
-        // Parse "Type:Event" format back into (wtype, wevent).
-        let (wtype, wevent) = if let Some(idx) = wait_event.find(':') {
-            (
-                wait_event[..idx].to_owned(),
-                wait_event[idx + 1..].to_owned(),
-            )
-        } else {
-            // No colon — type == event (e.g. "CPU*").
-            (wait_event.clone(), String::new())
-        };
-
-        // wait_timeline only gives us type+event, no query_id or query text.
-        // Use an empty query label; drill-down to query level won't have data
-        // from history but that's acceptable for timeline pre-population.
-        fold_row(&mut snap, &wtype, &wevent, None, "", count);
-    }
-
-    // Push the last accumulated snapshot.
-    if current_ts != i64::MIN {
-        snapshots.push(snap);
-    }
-
-    Ok(snapshots)
+    Ok(group_timeline_rows(&tuples))
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +279,58 @@ fn fold_row(
     };
     let query_key = format!("{event_key}/{query_label}");
     *snap.by_query.entry(query_key).or_insert(0) += count;
+}
+
+/// Split a `"Type:Event"` string (as returned by `ash.wait_timeline`) into
+/// `(wtype, wevent)`.  When there is no colon, `wevent` is the empty string
+/// (e.g. `"CPU*"` → `("CPU*", "")`).
+fn split_wait_event(s: &str) -> (String, String) {
+    if let Some(idx) = s.find(':') {
+        (s[..idx].to_owned(), s[idx + 1..].to_owned())
+    } else {
+        (s.to_owned(), String::new())
+    }
+}
+
+/// Group `(ts, wait_event, count)` tuples — as produced by `ash.wait_timeline`
+/// — into a chronologically-ordered `Vec<AshSnapshot>`.
+///
+/// Rows must be sorted by `ts` (ascending).  Consecutive rows with the same
+/// `ts` are merged into a single snapshot via `fold_row`.
+///
+/// Exposed as `pub(crate)` so unit tests can drive it directly without
+/// duplicating the grouping logic.
+pub(crate) fn group_timeline_rows(rows: &[(i64, impl AsRef<str>, u32)]) -> Vec<AshSnapshot> {
+    let mut snapshots: Vec<AshSnapshot> = Vec::new();
+    let mut current_ts: i64 = i64::MIN;
+    let mut snap = AshSnapshot::default();
+
+    for (ts, wait_event, count) in rows {
+        let ts = *ts;
+        let count = *count;
+        if ts != current_ts {
+            if current_ts != i64::MIN {
+                snapshots.push(snap);
+            }
+            snap = AshSnapshot {
+                ts,
+                // cpu_count is unknown for history rows; the CPU reference line
+                // populates once the first live snapshot arrives.
+                ..Default::default()
+            };
+            current_ts = ts;
+        }
+
+        let (wtype, wevent) = split_wait_event(wait_event.as_ref());
+        // wait_timeline provides no query_id or query text; use empty labels.
+        fold_row(&mut snap, &wtype, &wevent, None, "", count);
+    }
+
+    if current_ts != i64::MIN {
+        snapshots.push(snap);
+    }
+
+    snapshots
 }
 
 // ---------------------------------------------------------------------------
@@ -403,45 +421,6 @@ mod tests {
 
     // --- pg_ash history integration tests ---
 
-    /// Parse a `"Type:Event"` string like `ash.wait_timeline` returns.
-    fn parse_wait_event(s: &str) -> (String, String) {
-        if let Some(idx) = s.find(':') {
-            (s[..idx].to_owned(), s[idx + 1..].to_owned())
-        } else {
-            (s.to_owned(), String::new())
-        }
-    }
-
-    /// Simulate building `AshSnapshot`s from `wait_timeline` rows
-    /// (the same logic as `query_ash_history_interval`).
-    fn build_snapshots_from_timeline(rows: &[(i64, &str, u32)]) -> Vec<AshSnapshot> {
-        let mut snapshots: Vec<AshSnapshot> = Vec::new();
-        let mut current_ts: i64 = i64::MIN;
-        let mut snap = AshSnapshot::default();
-
-        for &(ts, wait_event, count) in rows {
-            if ts != current_ts {
-                if current_ts != i64::MIN {
-                    snapshots.push(snap);
-                }
-                snap = AshSnapshot {
-                    ts,
-                    ..Default::default()
-                };
-                current_ts = ts;
-            }
-
-            let (wtype, wevent) = parse_wait_event(wait_event);
-            fold_row(&mut snap, &wtype, &wevent, None, "", count);
-        }
-
-        if current_ts != i64::MIN {
-            snapshots.push(snap);
-        }
-
-        snapshots
-    }
-
     #[test]
     fn test_history_build_snapshots_basic() {
         let rows = vec![
@@ -451,7 +430,7 @@ mod tests {
             (1001, "Lock:relation", 2),
             (1002, "IO:WALWrite", 1),
         ];
-        let snaps = build_snapshots_from_timeline(&rows);
+        let snaps = group_timeline_rows(&rows);
 
         assert_eq!(snaps.len(), 3);
 
@@ -476,7 +455,7 @@ mod tests {
 
     #[test]
     fn test_history_build_snapshots_empty() {
-        let snaps = build_snapshots_from_timeline(&[]);
+        let snaps = group_timeline_rows(&[] as &[(i64, &str, u32)]);
         assert!(snaps.is_empty());
     }
 
@@ -489,7 +468,7 @@ mod tests {
             (101, "IO:DataFileRead", 2),
             (102, "Lock:relation", 1),
         ];
-        let history = build_snapshots_from_timeline(&rows);
+        let history = group_timeline_rows(&rows);
 
         // Simulate ring buffer pre-population (same logic as mod.rs).
         let mut ring: VecDeque<AshSnapshot> = VecDeque::with_capacity(600);
@@ -507,15 +486,15 @@ mod tests {
     }
 
     #[test]
-    fn test_history_parse_wait_event_with_colon() {
-        let (wtype, wevent) = parse_wait_event("IO:DataFileRead");
+    fn test_history_split_wait_event_with_colon() {
+        let (wtype, wevent) = split_wait_event("IO:DataFileRead");
         assert_eq!(wtype, "IO");
         assert_eq!(wevent, "DataFileRead");
     }
 
     #[test]
-    fn test_history_parse_wait_event_no_colon() {
-        let (wtype, wevent) = parse_wait_event("CPU*");
+    fn test_history_split_wait_event_no_colon() {
+        let (wtype, wevent) = split_wait_event("CPU*");
         assert_eq!(wtype, "CPU*");
         assert_eq!(wevent, "");
     }
@@ -526,7 +505,7 @@ mod tests {
 
         // Build 605 snapshots — ring buffer should keep only last 600.
         let rows: Vec<(i64, &str, u32)> = (0..605).map(|i| (i64::from(i), "CPU*", 1)).collect();
-        let history = build_snapshots_from_timeline(&rows);
+        let history = group_timeline_rows(&rows);
 
         let mut ring: VecDeque<AshSnapshot> = VecDeque::with_capacity(600);
         for snap in history {
