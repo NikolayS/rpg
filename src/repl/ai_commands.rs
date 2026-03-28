@@ -499,7 +499,6 @@ pub(super) async fn dispatch_ai_command(
             return None;
         }
         crate::rpg::run_game();
-
     } else if input == "/ash" || input.starts_with("/ash ") {
         use std::io::IsTerminal;
         if !std::io::stdout().is_terminal() {
