@@ -40,7 +40,7 @@ expect -re {\$\s}
 wait 1
 
 # --- Connect to demo DB (psql-style flags) ---
-human_type "./target/debug/rpg -U postgres -h localhost -p 15433 demo"
+human_type "./target/debug/rpg -U postgres -h demo -p 15433 demo"
 send "\r"
 
 # Wait for rpg prompt (demo=#)
