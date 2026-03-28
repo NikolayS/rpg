@@ -1,6 +1,5 @@
 #![allow(clippy::all, dead_code, unused_imports)]
 /// Turn-based combat engine.
-
 use crate::rpg::entities::{Enemy, ItemKind, Player};
 use crate::rpg::renderer::{print_info, print_warn};
 
@@ -42,7 +41,10 @@ pub fn run_combat(player: &mut Player, enemy: &mut Enemy) -> CombatResult {
     let mut vacuum_full_stun = 0i32; // stun after using VACUUM FULL scroll
 
     println!();
-    print_warn(&format!("⚔  Combat begins: {} (HP: {})", enemy.name, enemy.hp));
+    print_warn(&format!(
+        "⚔  Combat begins: {} (HP: {})",
+        enemy.name, enemy.hp
+    ));
     println!("   {}", enemy.flavor);
     println!("   Commands: attack (a), use <item>, flee (f)");
     println!();
@@ -70,7 +72,9 @@ pub fn run_combat(player: &mut Player, enemy: &mut Enemy) -> CombatResult {
             print_warn("   You are stunned and cannot act this turn.");
         } else if vacuum_full_stun > 0 {
             vacuum_full_stun -= 1;
-            print_warn(&format!("   Stunned by VACUUM FULL side effects ({vacuum_full_stun} turns remaining)."));
+            print_warn(&format!(
+                "   Stunned by VACUUM FULL side effects ({vacuum_full_stun} turns remaining)."
+            ));
         } else if cmd == "a" || cmd == "attack" || cmd.is_empty() {
             let dmg = rng.gen_range(player.attack_min, player.attack_max);
             enemy.hp -= dmg;
@@ -112,12 +116,17 @@ pub fn run_combat(player: &mut Player, enemy: &mut Enemy) -> CombatResult {
             if enemy.kind == crate::rpg::entities::EnemyKind::NplusOneHydra {
                 enemy.hp += 5;
                 enemy.max_hp += 5;
-                print_warn("   The N+1 Hydra grows another head. Someone is calling findById() in a loop.");
+                print_warn(
+                    "   The N+1 Hydra grows another head. Someone is calling findById() in a loop.",
+                );
             }
 
             let dmg = rng.gen_range(enemy.attack_min, enemy.attack_max);
             player.hp -= dmg;
-            print_warn(&format!("   {} attacks you for {} damage.", enemy.name, dmg));
+            print_warn(&format!(
+                "   {} attacks you for {} damage.",
+                enemy.name, dmg
+            ));
 
             if enemy.stuns_player {
                 let roll = rng.gen_f32();
@@ -164,7 +173,10 @@ fn use_item_combat(
             let dmg = rng.gen_range(40, 60);
             enemy.hp -= dmg;
             *vacuum_stun = 2;
-            print_warn(&format!("   VACUUM FULL: {} damage! But you're locked for 2 turns.", dmg));
+            print_warn(&format!(
+                "   VACUUM FULL: {} damage! But you're locked for 2 turns.",
+                dmg
+            ));
             player.take_item(ItemKind::VacuumFullScroll);
         }
         ItemKind::ExplainAnalyzeLens => {
@@ -178,7 +190,10 @@ fn use_item_combat(
             let dmg = rng.gen_range(15, 25);
             enemy.hp -= dmg;
             enemy.stunned_turns = 1;
-            print_info(&format!("   pg_cancel_backend: {} damage, enemy stunned next turn.", dmg));
+            print_info(&format!(
+                "   pg_cancel_backend: {} damage, enemy stunned next turn.",
+                dmg
+            ));
             player.take_item(ItemKind::PgCancelCrossbow);
         }
         ItemKind::ReindexHammer => {
@@ -210,33 +225,51 @@ fn use_item_combat(
 
 fn find_item_kind(player: &Player, name: &str) -> Option<ItemKind> {
     let name_lower = name.to_lowercase();
-    player.inventory.iter().find(|i| {
-        i.name.to_lowercase().contains(&name_lower)
-    }).map(|i| i.kind.clone())
+    player
+        .inventory
+        .iter()
+        .find(|i| i.name.to_lowercase().contains(&name_lower))
+        .map(|i| i.kind.clone())
 }
 
 fn victory_flavor(enemy: &Enemy) {
     let msg = match enemy.kind {
-        crate::rpg::entities::EnemyKind::SeqScanOgre =>
-            "   The Seq Scan Ogre collapses. It never knew what an index was.",
-        crate::rpg::entities::EnemyKind::LwlockLich =>
-            "   The LWLock:LockManager Lich dissolves. Its 847,291 daily summons finally end.",
-        crate::rpg::entities::EnemyKind::NplusOneHydra =>
-            "   The N+1 Hydra falls. Someone finally used a JOIN.",
-        crate::rpg::entities::EnemyKind::AutvacuumBoss =>
-            "   The rotting elephant stills. A rumble echoes through the cluster.",
+        crate::rpg::entities::EnemyKind::SeqScanOgre => {
+            "   The Seq Scan Ogre collapses. It never knew what an index was."
+        }
+        crate::rpg::entities::EnemyKind::LwlockLich => {
+            "   The LWLock:LockManager Lich dissolves. Its 847,291 daily summons finally end."
+        }
+        crate::rpg::entities::EnemyKind::NplusOneHydra => {
+            "   The N+1 Hydra falls. Someone finally used a JOIN."
+        }
+        crate::rpg::entities::EnemyKind::AutvacuumBoss => {
+            "   The rotting elephant stills. A rumble echoes through the cluster."
+        }
         _ => "   The enemy falls.",
     };
     print_info(msg);
 }
 
 fn print_hp_bar(player: &Player, enemy: &Enemy) {
-    use crossterm::style::{Color, SetForegroundColor, ResetColor};
+    use crossterm::style::{Color, ResetColor, SetForegroundColor};
 
     let p_pct = player.hp_pct();
-    let p_color = if p_pct > 0.5 { Color::Green } else if p_pct > 0.25 { Color::Yellow } else { Color::Red };
+    let p_color = if p_pct > 0.5 {
+        Color::Green
+    } else if p_pct > 0.25 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
     let e_pct = enemy.hp as f32 / enemy.max_hp as f32;
-    let e_color = if e_pct > 0.5 { Color::Green } else if e_pct > 0.25 { Color::Yellow } else { Color::Red };
+    let e_color = if e_pct > 0.5 {
+        Color::Green
+    } else if e_pct > 0.25 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
 
     let mut out = std::io::stdout();
     print!("   You: ");
