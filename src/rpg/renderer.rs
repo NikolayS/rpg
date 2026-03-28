@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_imports)]
 /// Terminal output helpers using crossterm.
 
 use crossterm::style::{Attribute, Color, SetAttribute, SetForegroundColor, ResetColor};

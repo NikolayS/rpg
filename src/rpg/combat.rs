@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_imports)]
 /// Turn-based combat engine.
 
 use crate::rpg::entities::{Enemy, ItemKind, Player};
