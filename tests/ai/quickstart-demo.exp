@@ -27,9 +27,10 @@ regexp {RPG_ANTHROPIC_KEY=(.+)} $keyline -> rpg_key
 spawn env TERM=xterm-256color COLORTERM=truecolor COLUMNS=120 LINES=35 \
     RPG_ANTHROPIC_KEY=$rpg_key \
     asciinema rec /tmp/rpg-761-pgash/demos/quickstart-demo.cast \
-    --overwrite --cols 120 --rows 35
+    --overwrite --cols 120 --rows 35 \
+    --command {env PS1="$ " bash --norc --noprofile}
 
-# Wait for shell prompt
+# Wait for shell prompt (just "$ ")
 expect -re {\$\s}
 
 # cd into repo
@@ -59,7 +60,8 @@ expect -re {demo[=#>\|]} { wait 1 }
 # --- Intentional typo ---
 human_type "select * from orderss limit 1;"
 send "\r"
-expect -re {demo[=#>\|]} { wait 1 }
+# Wait for error + AI hint to fully render before typing /fix
+expect -re {[Hh]int.*fix} { wait 2 }
 
 # --- /fix — AI corrects "orderss" -> "orders", accept and execute ---
 human_type "/fix"
