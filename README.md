@@ -12,7 +12,7 @@ Single binary, no dependencies, cross-platform.
 
 ## Features
 
-- **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
+- **psql-compatible** — `\`-commands are standard psql meta-commands (`\d`, `\dt`, `\copy`, `\watch`, ...); `/`-commands are rpg extensions — both AI and non-AI. Same muscle memory, clearly distinct additions.
 - **Active Session History** — `/ash` live wait event timeline with drill-down
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
 - **DBA diagnostics** — 15+ `/dba` commands for activity, locks, bloat, indexes
@@ -52,6 +52,19 @@ rpg "postgresql://user@localhost/mydb"
 # Non-interactive
 rpg -d postgres -c "select version()"
 ```
+
+On connect, rpg prints its version (with commit count and hash if built past a release tag), the full server version, AI status, and a reminder to type `\?` for help.
+
+## Command convention
+
+rpg uses two command namespaces:
+
+| Prefix | Type | Examples |
+|--------|------|---------|
+| `\` | psql meta-commands — standard, unchanged | `\d`, `\dt`, `\l`, `\copy`, `\watch`, `\timing` |
+| `/` | rpg extensions — AI and non-AI | `/fix`, `/explain`, `/ash`, `/dba`, `/ask` |
+
+Anything that works in psql works here unchanged. Everything rpg adds uses `/`. Type `\?` to see the full list.
 
 ## AI assistant
 

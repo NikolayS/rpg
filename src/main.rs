@@ -44,11 +44,30 @@ mod statusline;
 mod update;
 mod vars;
 
-/// Build-time git commit hash injected by `build.rs`.
+/// Build-time git commit hash injected by `build.rs` (8 hex chars).
 const GIT_HASH: &str = env!("RPG_GIT_HASH");
 
 /// Build-time date (UTC, `YYYY-MM-DD`) injected by `build.rs`.
 const BUILD_DATE: &str = env!("RPG_BUILD_DATE");
+
+/// Number of commits since the last version tag, injected by `build.rs`.
+/// Zero when this commit is exactly the tagged release.
+const COMMITS_SINCE_TAG: u32 = {
+    match option_env!("RPG_COMMITS_SINCE_TAG") {
+        Some(s) => {
+            // const-compatible decimal parse
+            let bytes = s.as_bytes();
+            let mut n: u32 = 0;
+            let mut i = 0;
+            while i < bytes.len() {
+                n = n * 10 + (bytes[i] - b'0') as u32;
+                i += 1;
+            }
+            n
+        }
+        None => 0,
+    }
+};
 
 /// One-line version string: `rpg 0.2.0 (abc1234, built 2026-03-13)`.
 ///
@@ -57,13 +76,28 @@ const BUILD_DATE: &str = env!("RPG_BUILD_DATE");
 pub fn version_string() -> &'static str {
     // Leak is fine: called at most a handful of times, lives for the
     // process lifetime.
+    //
+    // Examples:
+    //   "rpg 0.9.0 (588b8d0a, built 2026-03-28)"          ← exact tag
+    //   "rpg 0.9.0+3-abc12345 (abc12345, built 2026-03-28)" ← 3 commits past tag
     Box::leak(
-        format!(
-            "rpg {} ({}, built {})",
-            env!("CARGO_PKG_VERSION"),
-            GIT_HASH,
-            BUILD_DATE,
-        )
+        if COMMITS_SINCE_TAG == 0 {
+            format!(
+                "rpg {} ({}, built {})",
+                env!("CARGO_PKG_VERSION"),
+                GIT_HASH,
+                BUILD_DATE,
+            )
+        } else {
+            format!(
+                "rpg {}+{}-{} ({}, built {})",
+                env!("CARGO_PKG_VERSION"),
+                COMMITS_SINCE_TAG,
+                GIT_HASH,
+                GIT_HASH,
+                BUILD_DATE,
+            )
+        }
         .into_boxed_str(),
     )
 }
@@ -812,16 +846,46 @@ async fn async_main() {
             };
 
             if !cli.quiet && is_interactive {
-                // Version banner — matches psql's style of showing version on
-                // connect. Only shown for interactive sessions, not -c/-f/pipe.
+                // Connect banner — shown for interactive sessions only.
                 let server_ver = settings
                     .db_capabilities
                     .server_version
                     .as_deref()
                     .unwrap_or("unknown");
-                println!("{} (server PostgreSQL {})", version_string(), server_ver,);
-                println!("Type \"help\" for help.");
-                println!("{}", connection::connection_info(&resolved));
+
+                // rpg version line
+                println!("{}", version_string());
+                // Server version (full, including distro build info when present)
+                println!("Server: PostgreSQL {server_ver}");
+
+                // LLM status
+                let ai_status = {
+                    let ai = &settings.config.ai;
+                    match (ai.provider.as_deref(), ai.api_key_env.as_deref()) {
+                        (Some(provider), Some(env_var)) => {
+                            let key_set = std::env::var(env_var)
+                                .map(|v| !v.is_empty())
+                                .unwrap_or(false);
+                            if key_set {
+                                format!("AI: {provider} (via ${env_var})")
+                            } else {
+                                format!(
+                                    "AI: {provider} configured but ${env_var} is not set — /fix /explain /optimize unavailable"
+                                )
+                            }
+                        }
+                        _ => {
+                            "AI: not configured — set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run: rpg --help-ai"
+                                .to_owned()
+                        }
+                    }
+                };
+                println!("{ai_status}");
+
+                // Command convention hint
+                println!(
+                    r#"Type \? for help. \-commands are psql-compatible; /-commands are rpg extensions (AI and non-AI)."#
+                );
             }
 
             if let capabilities::PgAshStatus::Available { ref version } =

@@ -6,7 +6,7 @@ fn main() {
     // Falls back to "unknown" gracefully when git is unavailable
     // (e.g., CI builds from tarballs or environments without git).
     let hash = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short=8", "HEAD"])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -14,6 +14,25 @@ fn main() {
         .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
 
     println!("cargo:rustc-env=RPG_GIT_HASH={hash}");
+
+    // Embed commit count since the last tag (for "v0.9.0+3-abc12345" style).
+    // `git describe --tags --long` output: "v0.9.0-3-gabc12345"
+    // We extract just the count; 0 means this commit IS the tag.
+    let commits_since_tag = Command::new("git")
+        .args(["describe", "--tags", "--long", "--match", "v*"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            // format: "v0.9.0-<count>-g<hash>"
+            let parts: Vec<&str> = s.trim().rsplitn(3, '-').collect();
+            // rsplitn gives: [hash, count, tag]
+            parts.get(1).and_then(|c| c.parse::<u32>().ok())
+        })
+        .unwrap_or(0);
+
+    println!("cargo:rustc-env=RPG_COMMITS_SINCE_TAG={commits_since_tag}");
 
     // Embed the build date (UTC, YYYY-MM-DD format).
     // Uses the SOURCE_DATE_EPOCH env var for reproducible builds when set;
