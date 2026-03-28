@@ -30,14 +30,14 @@ Single binary, no dependencies, cross-platform.
 Build the latest stable release from source (requires Rust 1.85+):
 
 ```bash
-git clone --branch v0.7.0 --depth 1 https://github.com/NikolayS/rpg.git
+git clone --branch v0.9.0 --depth 1 https://github.com/NikolayS/rpg.git
 cd rpg
 cargo build --release
 sudo cp ./target/release/rpg /usr/local/bin/
 ```
 
 > **Note:** `main` is under active development and may be unstable. Pin to a
-> release tag (e.g. `v0.7.0`) for a known-good build. Release notes:
+> release tag (e.g. `v0.9.0`) for a known-good build. Release notes:
 > [github.com/NikolayS/rpg/releases](https://github.com/NikolayS/rpg/releases)
 
 ## Connect
@@ -120,7 +120,7 @@ Toggle back with `/sql` or `/interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
 <details>
-<summary>See demo</summary>
+<summary>▶ Click to expand demo</summary>
 
 ![/t2s text-to-SQL mode and /yolo auto-execute mode in action](demos/gif3_t2s.gif)
 
@@ -151,7 +151,7 @@ Execute? [Y/n/e]
 ```
 
 <details>
-<summary>See demo</summary>
+<summary>▶ Click to expand demo</summary>
 
 ![/fix auto-corrects a typo in the table name and re-runs the query](demos/gif2_typo.gif)
 
@@ -174,7 +174,7 @@ postgres=# /optimize
 ```
 
 <details>
-<summary>See demo</summary>
+<summary>▶ Click to expand demo</summary>
 
 ![/explain and /optimize workflow: slow query, AI analysis, index creation, re-run](demos/gif1_optimize.gif)
 
@@ -248,15 +248,6 @@ Or set `PAGER=pspg` in your environment before launching rpg.
 pspg adds horizontal scrolling (Right arrow), line numbers (Alt+n),
 and a vertical column cursor (Alt+v) — useful for wide result sets.
 
-<details>
-<summary>See demo</summary>
-
-![pspg external pager with theme menu](demos/pspg_screenshot.jpg)
-
-*pspg with the theme selector menu — 20+ built-in themes, horizontal scrolling, column cursor.*
-
-</details>
-
 ### \s — command history
 
 Browse, search, and save your query history:
@@ -315,7 +306,7 @@ postgres=# /ash
 - **X-axis timestamps** — `HH:MM:SS` at zoom 1–2, `HH:MM` at coarser levels; anchors shift as time passes
 
 <details>
-<summary>See X-axis labels demo</summary>
+<summary>▶ Click to expand — X-axis labels</summary>
 
 ![/ash X-axis timestamp labels shifting in real time](demos/slash-ash-xaxis.gif)
 
@@ -326,7 +317,7 @@ installed, the timeline pre-populates with historical data on startup —
 bars appear immediately rather than building from scratch.
 
 <details>
-<summary>See demo — with pg_ash history pre-population</summary>
+<summary>▶ Click to expand — pg_ash history pre-population</summary>
 
 ![/ash with pg_ash history pre-population — bars from the past visible on launch](demos/slash-ash-pgash.gif)
 
