@@ -209,16 +209,24 @@ async fn query_ash_history_inner(
     //
     // Pass the interval as a parameterized $1 (not format!() interpolation) so
     // there is no SQL injection vector, even though window_secs is u64 today.
-    let interval = format!("{window_secs} seconds");
-    let sql = "select \
+    // Build the interval literal directly from a u64 (no user input — safe).
+    // tokio-postgres cannot serialize a Rust String as a Postgres interval
+    // parameter without an explicit type annotation that requires a server
+    // round-trip; embedding the literal is simpler and avoids the issue.
+    let sql = format!(
+        "select \
             extract(epoch from bucket_start)::int8 as ts, \
             wait_event, \
             samples::int8 as cnt \
-        from ash.wait_timeline($1::interval, '1 second'::interval) \
-        order by bucket_start, wait_event";
+        from ash.wait_timeline('{window_secs} seconds'::interval, '1 second'::interval) \
+        order by bucket_start, wait_event"
+    );
 
-    let Ok(rows) = client.query(sql, &[&interval]).await else {
-        return Ok(vec![]);
+    let rows = match client.query(sql.as_str(), &[]).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(anyhow::anyhow!("ash.wait_timeline query failed: {e}"));
+        }
     };
 
     if rows.is_empty() {
