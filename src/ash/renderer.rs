@@ -678,34 +678,59 @@ struct SummaryMetrics {
 // X-axis timestamp helpers
 // ---------------------------------------------------------------------------
 
-/// Width of one timestamp label on the X axis (e.g. "12:34" = 5 chars).
-const XAXIS_LABEL_WIDTH: usize = 5;
+/// Width of one timestamp label on the X axis.
+/// At fine zoom (bucket ≤ 15 s) we show `HH:MM:SS` (8 chars);
+/// at coarser zoom we show `HH:MM` (5 chars).
+const XAXIS_LABEL_WIDTH_SHORT: usize = 5; // "HH:MM"
+const XAXIS_LABEL_WIDTH_LONG: usize = 8; // "HH:MM:SS"
+
+/// Pick the label width based on bucket granularity.
+fn xaxis_label_width(bucket_secs: u64) -> usize {
+    if bucket_secs <= 15 {
+        XAXIS_LABEL_WIDTH_LONG
+    } else {
+        XAXIS_LABEL_WIDTH_SHORT
+    }
+}
 
 /// Format a Unix epoch seconds value as a short timestamp for the X axis.
 ///
-/// Returns `"HH:MM"` (5 chars, UTC).  Pure integer arithmetic — no extra deps.
-fn fmt_xaxis_ts(ts: i64) -> String {
-    // Pure arithmetic — no chrono dep needed; format as HH:MM in UTC.
-    // For a TUI the exact TZ matters less than consistency.
+/// Returns `"HH:MM:SS"` (8 chars) when `bucket_secs ≤ 15` so that labels
+/// visibly shift every second at zoom 1.  Returns `"HH:MM"` (5 chars) at
+/// coarser zoom levels where per-second resolution is unnecessary.
+/// Pure integer arithmetic — no extra deps.
+fn fmt_xaxis_ts(ts: i64, bucket_secs: u64) -> String {
+    let long = bucket_secs <= 15;
+    let width = if long {
+        XAXIS_LABEL_WIDTH_LONG
+    } else {
+        XAXIS_LABEL_WIDTH_SHORT
+    };
     if ts <= 0 {
-        return " ".repeat(XAXIS_LABEL_WIDTH);
+        return " ".repeat(width);
     }
     let secs_in_day = 86400i64;
     let sod = ((ts % secs_in_day) + secs_in_day) % secs_in_day; // seconds since midnight UTC
     let h = sod / 3600;
     let m = (sod % 3600) / 60;
-    format!("{h:02}:{m:02}")
+    let s = sod % 60;
+    if long {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{h:02}:{m:02}")
+    }
 }
 
 /// Build a 1-row X-axis `Line` for the bar area.
 ///
-/// Places `"HH:MM"` anchors at left (oldest visible bucket), right (newest),
-/// and — when the area is wide enough (≥ 20 cols) — a mid-point anchor.
-/// The label for the right anchor is always the timestamp of the newest
-/// snapshot so the user can see "now" immediately.
+/// Places timestamp anchors at left (oldest visible bucket), right (newest),
+/// and — when the area is wide enough — a mid-point anchor.
+/// Format: `HH:MM:SS` at zoom 1–2 (bucket ≤ 15 s) so labels visibly shift
+/// every second; `HH:MM` at coarser zoom levels.
 fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -> Line<'static> {
     let w = width.max(1);
     let bucket = state.bucket_secs();
+    let label_w = xaxis_label_width(bucket);
     let step = usize::try_from(bucket.max(1)).unwrap_or(usize::MAX);
     let n_buckets = (snapshots.len() / step).max(usize::from(!snapshots.is_empty()));
     let visible = n_buckets.min(w);
@@ -720,17 +745,18 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
     // Left edge: the snapshot at index (total - visible*step).
     let left_idx = snapshots.len().saturating_sub(visible * step);
     let left_ts = snapshots.get(left_idx).map_or(0, |s| s.ts);
-    let mid_ts = if w >= 20 {
+    let min_w_for_mid = label_w * 3 + 4; // need room for left + mid + right with gaps
+    let mid_ts = if w >= min_w_for_mid {
         let mid_idx = left_idx + (snapshots.len() - left_idx) / 2;
         snapshots.get(mid_idx).map_or(0, |s| s.ts)
     } else {
         0
     };
 
-    let left_label = fmt_xaxis_ts(left_ts);
-    let right_label = fmt_xaxis_ts(right_ts);
-    let mid_label = if w >= 20 {
-        fmt_xaxis_ts(mid_ts)
+    let left_label = fmt_xaxis_ts(left_ts, bucket);
+    let right_label = fmt_xaxis_ts(right_ts, bucket);
+    let mid_label = if w >= min_w_for_mid {
+        fmt_xaxis_ts(mid_ts, bucket)
     } else {
         String::new()
     };
@@ -745,7 +771,7 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
         }
     }
     // Place right label flush-right.
-    let right_start = w.saturating_sub(XAXIS_LABEL_WIDTH);
+    let right_start = w.saturating_sub(label_w);
     for (i, c) in right_label.chars().enumerate() {
         let col = right_start + i;
         if col < w {
@@ -753,10 +779,10 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
         }
     }
     // Place mid label only if it won't overlap left/right.
-    if w >= 20 && !mid_label.is_empty() {
-        let mid_col = w / 2 - XAXIS_LABEL_WIDTH / 2;
-        let overlap_left = mid_col < XAXIS_LABEL_WIDTH + 1;
-        let overlap_right = mid_col + XAXIS_LABEL_WIDTH + 1 >= right_start;
+    if w >= min_w_for_mid && !mid_label.is_empty() {
+        let mid_col = w / 2 - label_w / 2;
+        let overlap_left = mid_col < label_w + 1;
+        let overlap_right = mid_col + label_w + 1 >= right_start;
         if !overlap_left && !overlap_right {
             for (i, c) in mid_label.chars().enumerate() {
                 let col = mid_col + i;
