@@ -13,15 +13,20 @@ Single binary, no dependencies, cross-platform.
 ## Features
 
 - **psql-compatible** — `\`-commands are standard psql meta-commands (`\d`, `\dt`, `\copy`, `\watch`, ...); `/`-commands are rpg extensions — both AI and non-AI. Same muscle memory, clearly distinct additions.
-- **Active Session History** — `/ash` live wait event timeline with drill-down
-- **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
-- **DBA diagnostics** — 15+ `/dba` commands for activity, locks, bloat, indexes
-- **Schema-aware completion** — tab completion for tables, columns, keywords
+- **Active Session History** — `/ash` live wait event timeline with drill-down; pg_ash history integration
+- **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`, `/text2sql`, `/yolo`
+- **DBA diagnostics** — 15+ `/dba` commands: activity, locks, bloat, indexes, vacuum, replication, config
+- **Schema-aware completion** — tab completion for tables, columns, functions, keywords
+- **Lua plugin system** — extend rpg with custom `/`-commands written in Lua
 - **TUI pager** — scrollable pager for large result sets
-- **Syntax highlighting** — SQL keywords, strings, operators; color-coded errors (red), warnings (yellow), notices (cyan)
+- **Syntax highlighting** — SQL keywords, strings, operators; EXPLAIN plans; color-coded errors/warnings
+- **Markdown output** — `\pset format markdown` for docs-ready table output
 - **Named queries** — save and recall frequent queries
 - **Session persistence** — history and settings preserved across sessions
+- **Multi-host failover** — `-h host1,host2` tries each in order, first success wins
+- **SSH tunnel** — connect through bastion hosts without manual port-forwarding
 - **Config profiles** — per-project `.rpg.toml`
+- **Shell backtick substitution** — dynamic prompts via `PROMPT1='[`git branch --show-current`] %/ # '`
 - **Status bar** — connection info, transaction state, timing
 - **Cross-platform** — single static binary: Linux, macOS, Windows (x86_64 + aarch64)
 
