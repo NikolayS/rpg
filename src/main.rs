@@ -884,7 +884,7 @@ async fn async_main() {
 
                 // Command convention hint
                 println!(
-                    r#"Type \? for help. \-commands are psql-compatible; /-commands are rpg extensions (AI and non-AI)."#
+                    "Type \\? for help. \\-commands are psql-compatible; /-commands are rpg extensions (AI and non-AI)."
                 );
             }
 
