@@ -8,9 +8,12 @@
 A psql-compatible terminal written in Rust with built-in DBA diagnostics and AI assistant.
 Single binary, no dependencies, cross-platform.
 
+![/ash Active Session History — live wait event timeline with drill-down](demos/slash-ash-general.gif)
+
 ## Features
 
 - **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
+- **Active Session History** — `/ash` live wait event timeline with drill-down
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
 - **DBA diagnostics** — 15+ `/dba` commands for activity, locks, bloat, indexes
 - **Schema-aware completion** — tab completion for tables, columns, keywords
@@ -272,6 +275,30 @@ rpg.register_command({
 Run the command with `/slow_mean`. List all loaded custom commands with `/commands`.
 
 More examples are in the [`examples/commands/`](examples/commands/) directory.
+
+## Active Session History
+
+`/ash` opens a live wait event timeline — a scrolling stacked-bar chart of
+active sessions grouped by wait event type, with drill-down to individual
+events and queries.
+
+```
+postgres=# /ash
+```
+
+- **Timeline** — stacked bars scroll right-to-left, one bar per second (or
+  wider buckets at higher zoom levels)
+- **Drill-down** — `↑↓` to select a wait type, `Enter` to expand to events,
+  `Enter` again to see queries
+- **Zoom** — `←→` to change the time bucket (1s → 15s → 30s → 60s → 5min → 10min)
+- **Legend** — `l` to toggle the color legend overlay
+- **X-axis timestamps** — HH:MM anchors show the time range of visible bars
+
+When the [`pg_ash`](https://github.com/NikolayS/pg_ash) extension is
+installed, the timeline pre-populates with historical data on startup —
+bars appear immediately rather than building from scratch.
+
+![/ash with pg_ash history pre-population — bars from the past visible on launch](demos/slash-ash-pgash.gif)
 
 ## DBA diagnostics
 
