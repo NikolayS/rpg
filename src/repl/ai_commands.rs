@@ -417,7 +417,8 @@ pub(super) async fn dispatch_ai_command(
         || input.starts_with("/nd ")
         || input.starts_with("/np ")
         || input.starts_with("/n ")
-        || input.starts_with("/ash");
+        || input.starts_with("/ash")
+        || input == "/rpg";
     if !is_budget_exempt && check_token_budget(settings) {
         return None;
     }
@@ -491,6 +492,14 @@ pub(super) async fn dispatch_ai_command(
         }
 
     // /ash — active session history TUI.
+    } else if input == "/rpg" {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            eprintln!("/rpg requires an interactive terminal");
+            return None;
+        }
+        crate::rpg::run_game();
+
     } else if input == "/ash" || input.starts_with("/ash ") {
         use std::io::IsTerminal;
         if !std::io::stdout().is_terminal() {

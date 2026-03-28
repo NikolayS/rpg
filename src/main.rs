@@ -34,6 +34,7 @@ mod pager;
 mod pattern;
 mod query;
 mod repl;
+mod rpg;
 mod report;
 mod safety;
 mod session;
