@@ -65,6 +65,7 @@ pub fn print_warn(msg: &str) {
     crossterm::execute!(out, ResetColor).ok();
 }
 
+#[allow(dead_code)]
 pub fn print_error(msg: &str) {
     let mut out = io::stdout();
     crossterm::execute!(out, SetForegroundColor(Color::Red)).ok();

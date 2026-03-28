@@ -135,6 +135,7 @@ impl RpgGame {
         true
     }
 
+    #[allow(dead_code)]
     fn current(&self) -> &Room {
         &self.rooms[self.current_room]
     }

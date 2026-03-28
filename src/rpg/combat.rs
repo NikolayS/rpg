@@ -1,6 +1,6 @@
 /// Turn-based combat engine.
 
-use crate::rpg::entities::{Enemy, Item, ItemKind, Player};
+use crate::rpg::entities::{Enemy, ItemKind, Player};
 use crate::rpg::renderer::{print_info, print_warn};
 
 pub enum CombatResult {
@@ -231,7 +231,6 @@ fn victory_flavor(enemy: &Enemy) {
 
 fn print_hp_bar(player: &Player, enemy: &Enemy) {
     use crossterm::style::{Color, SetForegroundColor, ResetColor};
-    use std::io::Write;
 
     let p_pct = player.hp_pct();
     let p_color = if p_pct > 0.5 { Color::Green } else if p_pct > 0.25 { Color::Yellow } else { Color::Red };
