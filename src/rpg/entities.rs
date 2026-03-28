@@ -198,7 +198,8 @@ impl Enemy {
                 max_hp: 50,
                 attack_min: 8,
                 attack_max: 15,
-                flavor: "Every turn it grows another head. Someone is calling findById() in a loop.",
+                flavor:
+                    "Every turn it grows another head. Someone is calling findById() in a loop.",
                 stunned_turns: 0,
                 stuns_player: false,
             },
@@ -242,7 +243,8 @@ impl Enemy {
                 max_hp: 90,
                 attack_min: 20,
                 attack_max: 35,
-                flavor: "age: 2,147,483,000. It counts every transaction. Soon it resets everything.",
+                flavor:
+                    "age: 2,147,483,000. It counts every transaction. Soon it resets everything.",
                 stunned_turns: 0,
                 stuns_player: false,
             },
@@ -264,7 +266,8 @@ impl Enemy {
                 max_hp: 200,
                 attack_min: 25,
                 attack_max: 40,
-                flavor: "A colossal rotting elephant, half-buried in dead tuples. Its eyes are hollow.",
+                flavor:
+                    "A colossal rotting elephant, half-buried in dead tuples. Its eyes are hollow.",
                 stunned_turns: 0,
                 stuns_player: false,
             },

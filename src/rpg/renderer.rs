@@ -1,13 +1,17 @@
 #![allow(clippy::all, dead_code, unused_imports)]
 /// Terminal output helpers using crossterm.
-
-use crossterm::style::{Attribute, Color, SetAttribute, SetForegroundColor, ResetColor};
+use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use std::io::{self, Write};
 
 pub fn print_room_name(name: &str) {
     let mut out = io::stdout();
     println!();
-    crossterm::execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).ok();
+    crossterm::execute!(
+        out,
+        SetForegroundColor(Color::White),
+        SetAttribute(Attribute::Bold)
+    )
+    .ok();
     println!("  {}", name);
     crossterm::execute!(out, ResetColor, SetAttribute(Attribute::Reset)).ok();
 }
@@ -109,7 +113,12 @@ pub fn print_help() {
 pub fn print_banner() {
     let mut out = io::stdout();
     println!();
-    crossterm::execute!(out, SetForegroundColor(Color::Magenta), SetAttribute(Attribute::Bold)).ok();
+    crossterm::execute!(
+        out,
+        SetForegroundColor(Color::Magenta),
+        SetAttribute(Attribute::Bold)
+    )
+    .ok();
     println!("  ╔══════════════════════════════════════════════════╗");
     println!("  ║        THE HAUNTED CLUSTER                       ║");
     println!("  ║        A PostgreSQL Text Adventure               ║");
@@ -128,7 +137,12 @@ pub fn print_banner() {
 pub fn print_victory() {
     let mut out = io::stdout();
     println!();
-    crossterm::execute!(out, SetForegroundColor(Color::Green), SetAttribute(Attribute::Bold)).ok();
+    crossterm::execute!(
+        out,
+        SetForegroundColor(Color::Green),
+        SetAttribute(Attribute::Bold)
+    )
+    .ok();
     println!("  ╔══════════════════════════════════════════════════╗");
     println!("  ║                  VICTORY                         ║");
     println!("  ╚══════════════════════════════════════════════════╝");

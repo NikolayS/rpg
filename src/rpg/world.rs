@@ -1,6 +1,5 @@
 #![allow(clippy::all, dead_code, unused_imports)]
 /// Room definitions and world map for "The Haunted Cluster".
-
 use crate::rpg::entities::{EnemyKind, Item, ItemKind};
 
 #[derive(Debug, Clone)]

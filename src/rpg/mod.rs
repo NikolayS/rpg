@@ -4,7 +4,6 @@
 /// Entirely isolated in src/rpg/. To remove: delete this directory and
 /// the `mod rpg;` line in main.rs and the one dispatch arm in
 /// src/repl/ai_commands.rs.
-
 mod combat;
 mod entities;
 mod renderer;
@@ -98,8 +97,8 @@ impl RpgGame {
             "inventory" | "i" | "inv" => print_inventory(&self.player.inventory),
             "north" | "n" => self.go("north"),
             "south" | "s" => self.go("south"),
-            "east"  | "e" => self.go("east"),
-            "west"  | "w" => self.go("west"),
+            "east" | "e" => self.go("east"),
+            "west" | "w" => self.go("west"),
             _ if cmd.starts_with("take ") => {
                 let name = cmd.trim_start_matches("take ").trim();
                 self.take_item(name);
@@ -130,7 +129,10 @@ impl RpgGame {
                 self.examine(name);
             }
             _ => {
-                print_warn(&format!("  Unknown command: '{}'. Type 'help' for help.", cmd));
+                print_warn(&format!(
+                    "  Unknown command: '{}'. Type 'help' for help.",
+                    cmd
+                ));
             }
         }
         true
@@ -173,14 +175,16 @@ impl RpgGame {
 
     fn go(&mut self, direction: &str) {
         let exits = self.rooms[self.current_room].exits.clone();
-        let target = exits.iter().find(|e| e.direction == direction || e.short == direction);
+        let target = exits
+            .iter()
+            .find(|e| e.direction == direction || e.short == direction);
         match target {
             None => print_warn("  You can't go that way."),
             Some(exit) => {
                 let to = exit.to_room;
                 // Zone 2/3 locked until player has key
                 let from_zone = self.rooms[self.current_room].zone;
-                let to_zone   = self.rooms[to].zone;
+                let to_zone = self.rooms[to].zone;
                 if to_zone > from_zone && !self.player.has_item(ItemKind::ConnectionStringKey) {
                     print_warn("  The passage is locked. You need a Connection String Key.");
                     return;
@@ -201,7 +205,9 @@ impl RpgGame {
     fn take_item(&mut self, name: &str) {
         let items = &mut self.room_items[self.current_room];
         let name_lower = name.to_lowercase();
-        let pos = items.iter().position(|i| i.name.to_lowercase().contains(&name_lower));
+        let pos = items
+            .iter()
+            .position(|i| i.name.to_lowercase().contains(&name_lower));
         match pos {
             None => print_warn("  No such item here."),
             Some(p) => {
@@ -214,7 +220,11 @@ impl RpgGame {
 
     fn drop_item(&mut self, name: &str) {
         let name_lower = name.to_lowercase();
-        let pos = self.player.inventory.iter().position(|i| i.name.to_lowercase().contains(&name_lower));
+        let pos = self
+            .player
+            .inventory
+            .iter()
+            .position(|i| i.name.to_lowercase().contains(&name_lower));
         match pos {
             None => print_warn("  You don't have that item."),
             Some(p) => {
@@ -228,7 +238,9 @@ impl RpgGame {
     fn fight(&mut self, name: &str) {
         let name_lower = name.to_lowercase();
         let enemies = &mut self.room_enemies[self.current_room];
-        let pos = enemies.iter().position(|e| e.name.to_lowercase().contains(&name_lower));
+        let pos = enemies
+            .iter()
+            .position(|e| e.name.to_lowercase().contains(&name_lower));
         match pos {
             None => {
                 if name.is_empty() || name == "enemy" {
@@ -261,7 +273,10 @@ impl RpgGame {
                         self.player.hp = self.player.max_hp / 2;
                         let room_idx = self.current_room;
                         self.current_room = checkpoint;
-                        print_warn(&format!("  You respawn at the checkpoint with {} HP.", self.player.hp));
+                        print_warn(&format!(
+                            "  You respawn at the checkpoint with {} HP.",
+                            self.player.hp
+                        ));
                         // Put enemy back in original room
                         self.room_enemies[room_idx].push(enemy);
                         self.look();
@@ -277,7 +292,11 @@ impl RpgGame {
 
     fn use_item(&mut self, name: &str) {
         let name_lower = name.to_lowercase();
-        let pos = self.player.inventory.iter().position(|i| i.name.to_lowercase().contains(&name_lower));
+        let pos = self
+            .player
+            .inventory
+            .iter()
+            .position(|i| i.name.to_lowercase().contains(&name_lower));
         match pos {
             None => print_warn("  You don't have that item."),
             Some(p) => {
@@ -285,7 +304,10 @@ impl RpgGame {
                 match item.kind {
                     ItemKind::WalSegment => {
                         self.player.hp = (self.player.hp + 20).min(self.player.max_hp);
-                        print_info(&format!("  You restore 20 HP. Current HP: {}/{}", self.player.hp, self.player.max_hp));
+                        print_info(&format!(
+                            "  You restore 20 HP. Current HP: {}/{}",
+                            self.player.hp, self.player.max_hp
+                        ));
                         self.player.inventory.remove(p);
                     }
                     ItemKind::DiscardAllScroll => {
@@ -302,7 +324,11 @@ impl RpgGame {
                                 let enemies = &self.room_enemies[i];
                                 if !enemies.is_empty() {
                                     let names: Vec<&str> = enemies.iter().map(|e| e.name).collect();
-                                    print_info(&format!("    {} — {}", room.name, names.join(", ")));
+                                    print_info(&format!(
+                                        "    {} — {}",
+                                        room.name,
+                                        names.join(", ")
+                                    ));
                                 }
                             }
                         }
@@ -322,17 +348,28 @@ impl RpgGame {
             return;
         }
         // Check items in room
-        if let Some(item) = self.room_items[self.current_room].iter().find(|i| i.name.to_lowercase().contains(&name_lower)) {
+        if let Some(item) = self.room_items[self.current_room]
+            .iter()
+            .find(|i| i.name.to_lowercase().contains(&name_lower))
+        {
             print_info(&format!("  {}: {}", item.name, item.desc));
             return;
         }
         // Check inventory
-        if let Some(item) = self.player.inventory.iter().find(|i| i.name.to_lowercase().contains(&name_lower)) {
+        if let Some(item) = self
+            .player
+            .inventory
+            .iter()
+            .find(|i| i.name.to_lowercase().contains(&name_lower))
+        {
             print_info(&format!("  {}: {}", item.name, item.desc));
             return;
         }
         // Check enemies
-        if let Some(enemy) = self.room_enemies[self.current_room].iter().find(|e| e.name.to_lowercase().contains(&name_lower)) {
+        if let Some(enemy) = self.room_enemies[self.current_room]
+            .iter()
+            .find(|e| e.name.to_lowercase().contains(&name_lower))
+        {
             print_warn(&format!("  {}: {}", enemy.name, enemy.flavor));
             return;
         }
@@ -407,16 +444,16 @@ fn find_checkpoint(rooms: &[Room], hint: usize) -> usize {
 fn enemy_loot(kind: &entities::EnemyKind) -> Option<Item> {
     use entities::EnemyKind::*;
     match kind {
-        ZombieConnection    => None,
+        ZombieConnection => None,
         PoolExhaustionWraith => Some(Item::new(ItemKind::WalSegment)),
-        SeqScanOgre         => Some(Item::new(ItemKind::ReindexHammer)),
-        NplusOneHydra       => Some(Item::new(ItemKind::ExplainAnalyzeLens)),
-        LwlockLich          => Some(Item::new(ItemKind::VacuumFullScroll)),
-        DeadlockSpecter     => Some(Item::new(ItemKind::DiscardAllScroll)),
-        BloatElemental      => Some(Item::new(ItemKind::WalSegment)),
-        XidWraparoundDemon  => Some(Item::new(ItemKind::AutovacuumAmulet)),
+        SeqScanOgre => Some(Item::new(ItemKind::ReindexHammer)),
+        NplusOneHydra => Some(Item::new(ItemKind::ExplainAnalyzeLens)),
+        LwlockLich => Some(Item::new(ItemKind::VacuumFullScroll)),
+        DeadlockSpecter => Some(Item::new(ItemKind::DiscardAllScroll)),
+        BloatElemental => Some(Item::new(ItemKind::WalSegment)),
+        XidWraparoundDemon => Some(Item::new(ItemKind::AutovacuumAmulet)),
         CheckpointThrashHarpy => Some(Item::new(ItemKind::WalSegment)),
-        AutvacuumBoss       => None,
+        AutvacuumBoss => None,
     }
 }
 
