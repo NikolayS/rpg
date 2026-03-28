@@ -312,7 +312,14 @@ postgres=# /ash
   `Enter` again to see queries
 - **Zoom** — `←→` to change the time bucket (1s → 15s → 30s → 60s → 5min → 10min)
 - **Legend** — `l` to toggle the color legend overlay
-- **X-axis timestamps** — HH:MM anchors show the time range of visible bars
+- **X-axis timestamps** — `HH:MM:SS` at zoom 1–2, `HH:MM` at coarser levels; anchors shift as time passes
+
+<details>
+<summary>See X-axis labels demo</summary>
+
+![/ash X-axis timestamp labels shifting in real time](demos/slash-ash-xaxis.gif)
+
+</details>
 
 When the [`pg_ash`](https://github.com/NikolayS/pg_ash) extension is
 installed, the timeline pre-populates with historical data on startup —

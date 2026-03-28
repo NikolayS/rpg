@@ -70,6 +70,7 @@ expect -re {demo[=#>\|]} { wait 1 }
 
 # --- /ash (sees pgbench on ashtest server-wide) ---
 human_type "/ash"
+after 1400
 send "\r"
 # Let bars accumulate
 wait 7
