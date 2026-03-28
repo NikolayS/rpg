@@ -34,6 +34,7 @@ mod pager;
 mod pattern;
 mod query;
 mod repl;
+#[allow(clippy::all, dead_code, unused_imports, clippy::pedantic, clippy::nursery)]
 mod rpg;
 mod report;
 mod safety;
