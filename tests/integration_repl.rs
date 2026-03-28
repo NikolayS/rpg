@@ -872,7 +872,10 @@ async fn ash_pg_extension_absent_in_test_db() {
 
 /// `ash.wait_timeline` graceful fallback: querying it when `pg_ash` is absent
 /// must produce an error (not a panic/hang), confirming the sampler's
-/// `Ok(rows) = ... else { return Ok(vec![]) }` guard would fire correctly.
+/// error branch fires correctly.
+///
+/// Uses the same literal-interval SQL as `query_ash_history_inner` in
+/// `sampler.rs` (`format!("{window_secs} seconds")` — no parameters).
 #[tokio::test]
 async fn ash_wait_timeline_missing_returns_error() {
     let _ = connect_or_skip!();
@@ -884,19 +887,20 @@ async fn ash_wait_timeline_missing_returns_error() {
         .simple_query("drop extension if exists pg_ash cascade")
         .await;
 
-    // The same parameterized query the sampler runs — must fail gracefully.
+    // The exact SQL the sampler runs (literal interval, no parameters).
     let result = client
         .query(
             "select extract(epoch from bucket_start)::int8, wait_event, samples::int8 \
-             from ash.wait_timeline($1::interval, '1 second'::interval) \
+             from ash.wait_timeline('60 seconds'::interval, '1 second'::interval) \
              order by bucket_start, wait_event",
-            &[&"60 seconds"],
+            &[],
         )
         .await;
 
     assert!(
         result.is_err(),
-        "querying ash.wait_timeline when pg_ash is absent must return an error"
+        "querying ash.wait_timeline when pg_ash is absent must return an error \
+         (relation/function does not exist)"
     );
 }
 
