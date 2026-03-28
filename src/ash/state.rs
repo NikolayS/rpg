@@ -64,11 +64,12 @@ pub struct AshState {
     pub selected_row: usize,
     /// Refresh interval in seconds. Valid values: 1, 5, 10.
     pub refresh_interval_secs: u64,
-    /// True when `pg_ash` extension is installed and available.
+    /// Whether `pg_ash` is installed on the server.
     ///
-    /// Stored for future use by history mode (`pg_ash` Layer 2).
-    /// TODO: history mode (`pg_ash` Layer 2) — not yet implemented; `pg_ash_installed`
-    /// is detected but currently unused.  See issue #753.
+    /// When true, historical data from `ash.samples` is used to pre-populate
+    /// the ring buffer on startup and history mode can query wider windows.
+    /// Stored for future use (e.g. status-bar indicator); branching currently
+    /// uses `PgAshInfo.installed` directly in the event loop.
     #[allow(dead_code)]
     pub pg_ash_installed: bool,
 
@@ -99,9 +100,6 @@ pub struct AshState {
 
 impl AshState {
     pub fn new(pg_ash_installed: bool) -> Self {
-        // TODO: history mode (pg_ash Layer 2) — not yet implemented.
-        // `pg_ash_installed` is detected and stored here for future use, but
-        // `mode` is always `ViewMode::Live` until Layer 2 is implemented.
         Self {
             level: DrillLevel::WaitType,
             mode: ViewMode::Live,

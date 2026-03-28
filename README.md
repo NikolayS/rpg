@@ -1,5 +1,7 @@
 # rpg — modern Postgres terminal written in Rust
 
+![/ash Active Session History — live wait event timeline with drill-down](demos/slash-ash-general.gif)
+
 [![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/NikolayS/rpg/branch/main/graph/badge.svg)](https://codecov.io/gh/NikolayS/rpg)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -11,6 +13,7 @@ Single binary, no dependencies, cross-platform.
 ## Features
 
 - **psql-compatible** — drop-in replacement (`\d`, `\dt`, `\copy`, `\watch`, ...)
+- **Active Session History** — `/ash` live wait event timeline with drill-down
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`
 - **DBA diagnostics** — 15+ `/dba` commands for activity, locks, bloat, indexes
 - **Schema-aware completion** — tab completion for tables, columns, keywords
@@ -116,9 +119,14 @@ postgres=# what is DB size?
 Toggle back with `/sql` or `/interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
+<details>
+<summary>See demo</summary>
+
 ![/t2s text-to-SQL mode and /yolo auto-execute mode in action](demos/gif3_t2s.gif)
 
 *`/t2s` shows a SQL preview with confirmation; `/yolo` skips the preview and executes immediately.*
+
+</details>
 
 ### /fix — auto-correct errors
 
@@ -142,9 +150,14 @@ Execute? [Y/n/e]
 (1 row)
 ```
 
+<details>
+<summary>See demo</summary>
+
 ![/fix auto-corrects a typo in the table name and re-runs the query](demos/gif2_typo.gif)
 
 *`/fix` detects a misspelled table name, suggests the corrected query, and executes it after confirmation.*
+
+</details>
 
 ### /optimize — index and performance suggestions
 
@@ -160,9 +173,14 @@ postgres=# /optimize
    ANALYZE public.t1;
 ```
 
+<details>
+<summary>See demo</summary>
+
 ![/explain and /optimize workflow: slow query, AI analysis, index creation, re-run](demos/gif1_optimize.gif)
 
 *`/explain` interprets the query plan; `/optimize` suggests an index. After creating it, the same query runs dramatically faster.*
+
+</details>
 
 ### Share EXPLAIN plans
 
@@ -230,9 +248,14 @@ Or set `PAGER=pspg` in your environment before launching rpg.
 pspg adds horizontal scrolling (Right arrow), line numbers (Alt+n),
 and a vertical column cursor (Alt+v) — useful for wide result sets.
 
-![pspg external pager with theme menu](demos/pspg_screenshot.png)
+<details>
+<summary>See demo</summary>
+
+![pspg external pager with theme menu](demos/pspg_screenshot.jpg)
 
 *pspg with the theme selector menu — 20+ built-in themes, horizontal scrolling, column cursor.*
+
+</details>
 
 ### \s — command history
 
@@ -272,6 +295,42 @@ rpg.register_command({
 Run the command with `/slow_mean`. List all loaded custom commands with `/commands`.
 
 More examples are in the [`examples/commands/`](examples/commands/) directory.
+
+## Active Session History
+
+`/ash` opens a live wait event timeline — a scrolling stacked-bar chart of
+active sessions grouped by wait event type, with drill-down to individual
+events and queries.
+
+```
+postgres=# /ash
+```
+
+- **Timeline** — stacked bars scroll right-to-left, one bar per second (or
+  wider buckets at higher zoom levels)
+- **Drill-down** — `↑↓` to select a wait type, `Enter` to expand to events,
+  `Enter` again to see queries
+- **Zoom** — `←→` to change the time bucket (1s → 15s → 30s → 60s → 5min → 10min)
+- **Legend** — `l` to toggle the color legend overlay
+- **X-axis timestamps** — `HH:MM:SS` at zoom 1–2, `HH:MM` at coarser levels; anchors shift as time passes
+
+<details>
+<summary>See X-axis labels demo</summary>
+
+![/ash X-axis timestamp labels shifting in real time](demos/slash-ash-xaxis.gif)
+
+</details>
+
+When the [`pg_ash`](https://github.com/NikolayS/pg_ash) extension is
+installed, the timeline pre-populates with historical data on startup —
+bars appear immediately rather than building from scratch.
+
+<details>
+<summary>See demo — with pg_ash history pre-population</summary>
+
+![/ash with pg_ash history pre-population — bars from the past visible on launch](demos/slash-ash-pgash.gif)
+
+</details>
 
 ## DBA diagnostics
 

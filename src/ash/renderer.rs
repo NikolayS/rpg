@@ -674,6 +674,129 @@ struct SummaryMetrics {
     aas: f64,
 }
 
+// ---------------------------------------------------------------------------
+// X-axis timestamp helpers
+// ---------------------------------------------------------------------------
+
+/// Width of one timestamp label on the X axis.
+/// At fine zoom (bucket ≤ 15 s) we show `HH:MM:SS` (8 chars);
+/// at coarser zoom we show `HH:MM` (5 chars).
+const XAXIS_LABEL_WIDTH_SHORT: usize = 5; // "HH:MM"
+const XAXIS_LABEL_WIDTH_LONG: usize = 8; // "HH:MM:SS"
+
+/// Pick the label width based on bucket granularity.
+fn xaxis_label_width(bucket_secs: u64) -> usize {
+    if bucket_secs <= 15 {
+        XAXIS_LABEL_WIDTH_LONG
+    } else {
+        XAXIS_LABEL_WIDTH_SHORT
+    }
+}
+
+/// Format a Unix epoch seconds value as a short timestamp for the X axis.
+///
+/// Returns `"HH:MM:SS"` (8 chars) when `bucket_secs ≤ 15` so that labels
+/// visibly shift every second at zoom 1.  Returns `"HH:MM"` (5 chars) at
+/// coarser zoom levels where per-second resolution is unnecessary.
+/// Pure integer arithmetic — no extra deps.
+fn fmt_xaxis_ts(ts: i64, bucket_secs: u64) -> String {
+    let long = bucket_secs <= 15;
+    let width = if long {
+        XAXIS_LABEL_WIDTH_LONG
+    } else {
+        XAXIS_LABEL_WIDTH_SHORT
+    };
+    if ts <= 0 {
+        return " ".repeat(width);
+    }
+    let secs_in_day = 86400i64;
+    let sod = ((ts % secs_in_day) + secs_in_day) % secs_in_day; // seconds since midnight UTC
+    let h = sod / 3600;
+    let m = (sod % 3600) / 60;
+    let s = sod % 60;
+    if long {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{h:02}:{m:02}")
+    }
+}
+
+/// Build a 1-row X-axis `Line` for the bar area.
+///
+/// Places timestamp anchors at left (oldest visible bucket), right (newest),
+/// and — when the area is wide enough — a mid-point anchor.
+/// Format: `HH:MM:SS` at zoom 1–2 (bucket ≤ 15 s) so labels visibly shift
+/// every second; `HH:MM` at coarser zoom levels.
+fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -> Line<'static> {
+    let w = width.max(1);
+    let bucket = state.bucket_secs();
+    let label_w = xaxis_label_width(bucket);
+    let step = usize::try_from(bucket.max(1)).unwrap_or(usize::MAX);
+    let n_buckets = (snapshots.len() / step).max(usize::from(!snapshots.is_empty()));
+    let visible = n_buckets.min(w);
+
+    if visible == 0 || snapshots.is_empty() {
+        return Line::raw(" ".repeat(w));
+    }
+
+    // Timestamps for the leftmost and rightmost *visible* buckets.
+    // Rightmost bucket = last `step` snapshots; leftmost = first visible bucket.
+    let right_ts = snapshots.last().map_or(0, |s| s.ts);
+    // Left edge: the snapshot at index (total - visible*step).
+    let left_idx = snapshots.len().saturating_sub(visible * step);
+    let left_ts = snapshots.get(left_idx).map_or(0, |s| s.ts);
+    let min_w_for_mid = label_w * 3 + 4; // need room for left + mid + right with gaps
+    let mid_ts = if w >= min_w_for_mid {
+        let mid_idx = left_idx + (snapshots.len() - left_idx) / 2;
+        snapshots.get(mid_idx).map_or(0, |s| s.ts)
+    } else {
+        0
+    };
+
+    let left_label = fmt_xaxis_ts(left_ts, bucket);
+    let right_label = fmt_xaxis_ts(right_ts, bucket);
+    let mid_label = if w >= min_w_for_mid {
+        fmt_xaxis_ts(mid_ts, bucket)
+    } else {
+        String::new()
+    };
+
+    // Build a flat char buffer, then turn it into a styled Line.
+    let mut buf: Vec<char> = vec![' '; w];
+
+    // Place left label at col 0.
+    for (i, c) in left_label.chars().enumerate() {
+        if i < w {
+            buf[i] = c;
+        }
+    }
+    // Place right label flush-right.
+    let right_start = w.saturating_sub(label_w);
+    for (i, c) in right_label.chars().enumerate() {
+        let col = right_start + i;
+        if col < w {
+            buf[col] = c;
+        }
+    }
+    // Place mid label only if it won't overlap left/right.
+    if w >= min_w_for_mid && !mid_label.is_empty() {
+        let mid_col = w / 2 - label_w / 2;
+        let overlap_left = mid_col < label_w + 1;
+        let overlap_right = mid_col + label_w + 1 >= right_start;
+        if !overlap_left && !overlap_right {
+            for (i, c) in mid_label.chars().enumerate() {
+                let col = mid_col + i;
+                if col < w {
+                    buf[col] = c;
+                }
+            }
+        }
+    }
+
+    let s: String = buf.into_iter().collect();
+    Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)))
+}
+
 fn render_timeline(
     frame: &mut Frame,
     snapshots: &[AshSnapshot],
@@ -700,14 +823,23 @@ fn render_timeline(
     let timeline_inner = timeline_block.inner(area);
     frame.render_widget(timeline_block, area);
 
-    // Split inner area: narrow Y-axis label column on the left, bars on the right.
+    // Split inner area: narrow Y-axis label column on the left, rest on the right.
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(YAXIS_WIDTH), Constraint::Min(1)])
         .split(timeline_inner);
 
-    let bar_area = h_chunks[1];
+    let right_area = h_chunks[1];
     let yaxis_area = h_chunks[0];
+
+    // Split right area vertically: bars above, 1-row X-axis below.
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(right_area);
+
+    let bar_area = v_chunks[0];
+    let xaxis_area = v_chunks[1];
 
     let (tl_lines, max_aas) = build_timeline_lines(
         snapshots,
@@ -718,6 +850,9 @@ fn render_timeline(
         no_color,
     );
     frame.render_widget(Paragraph::new(tl_lines), bar_area);
+
+    let xaxis_line = build_xaxis_line(snapshots, state, xaxis_area.width as usize);
+    frame.render_widget(Paragraph::new(xaxis_line), xaxis_area);
 
     let yaxis_lines = build_yaxis_lines(max_aas, yaxis_area.height as usize);
     frame.render_widget(Paragraph::new(yaxis_lines), yaxis_area);

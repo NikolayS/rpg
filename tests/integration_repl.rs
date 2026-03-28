@@ -824,3 +824,123 @@ async fn ask_yolo_ddl_rejected_by_readonly_tx() {
         "test_ask_yolo_ddl_guard must not exist after failed yolo read-only tx"
     );
 }
+
+// ---------------------------------------------------------------------------
+// pg_ash sampler integration tests (#761)
+// ---------------------------------------------------------------------------
+
+/// `detect_pg_ash`-equivalent: the test DB must NOT have `pg_ash` installed in CI.
+///
+/// Verifies the SQL detection logic directly — the same query used by
+/// `detect_pg_ash()` must return false/no-rows when the extension is absent.
+#[tokio::test]
+async fn ash_pg_extension_absent_in_test_db() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Ensure absent (no-op if already gone).
+    let _ = client
+        .simple_query("drop extension if exists pg_ash cascade")
+        .await;
+
+    // Same query as detect_pg_ash(): check for ash.wait_timeline in pg_proc,
+    // not pg_extension (pg_ash may be installed via SQL without CREATE EXTENSION).
+    let rows = client
+        .simple_query(
+            "select exists(\
+               select 1 from pg_proc p \
+               join pg_namespace n on p.pronamespace = n.oid \
+               where n.nspname = 'ash' and p.proname = 'wait_timeline'\
+             ) as installed",
+        )
+        .await
+        .expect("pg_proc wait_timeline existence check failed");
+
+    let mut installed = false;
+    for msg in rows {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+            installed = row.get("installed").unwrap_or("f").starts_with('t');
+        }
+    }
+
+    assert!(
+        !installed,
+        "ash.wait_timeline must NOT exist in the CI test database"
+    );
+}
+
+/// `ash.wait_timeline` graceful fallback: querying it when `pg_ash` is absent
+/// must produce an error (not a panic/hang), confirming the sampler's
+/// error branch fires correctly.
+///
+/// Uses the same literal-interval SQL as `query_ash_history_inner` in
+/// `sampler.rs` (`format!("{window_secs} seconds")` — no parameters).
+#[tokio::test]
+async fn ash_wait_timeline_missing_returns_error() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // Ensure pg_ash is absent.
+    let _ = client
+        .simple_query("drop extension if exists pg_ash cascade")
+        .await;
+
+    // The exact SQL the sampler runs (literal interval, no parameters).
+    let result = client
+        .query(
+            "select extract(epoch from bucket_start)::int8, wait_event, samples::int8 \
+             from ash.wait_timeline('60 seconds'::interval, '1 second'::interval) \
+             order by bucket_start, wait_event",
+            &[],
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "querying ash.wait_timeline when pg_ash is absent must return an error \
+         (relation/function does not exist)"
+    );
+}
+
+/// Live snapshot query shape: verifies the SQL behind `live_snapshot()` works
+/// against the test DB and returns well-formed rows.
+#[tokio::test]
+async fn ash_live_snapshot_query_shape() {
+    let _ = connect_or_skip!();
+
+    let client = raw_client().await.expect("raw client connect failed");
+
+    // The same SQL as live_snapshot() in sampler.rs.
+    let rows = client
+        .query(
+            "select \
+                case \
+                    when state in ('idle in transaction', 'idle in transaction (aborted)') then 'IdleTx' \
+                    when wait_event_type is null then 'CPU*' \
+                    else wait_event_type \
+                end as wtype, \
+                coalesce(wait_event, '') as wevent, \
+                query_id, \
+                left(query, 80) as q, \
+                count(*)::int as cnt \
+             from pg_stat_activity \
+             where pid <> pg_backend_pid() \
+               and state <> 'idle' \
+             group by 1, 2, 3, 4 \
+             order by cnt desc",
+            &[],
+        )
+        .await
+        .expect("live_snapshot SQL must execute against test DB");
+
+    // Validate row shape: all wtype values must be non-empty strings.
+    for row in &rows {
+        let wtype: String = row.get(0);
+        assert!(!wtype.is_empty(), "wtype must not be empty");
+
+        let cnt: i32 = row.get(4);
+        assert!(cnt >= 0, "cnt must be non-negative, got {cnt}");
+    }
+}

@@ -1,0 +1,104 @@
+#!/usr/bin/expect -f
+
+# Reliable sleep: busy-wait so asciinema timing is accurate
+proc wait {secs} {
+    set end [expr {[clock seconds] + $secs}]
+    while {[clock seconds] < $end} {
+        expect -timeout 1 -re {XXXXWILLNEVERMATCH} {}
+    }
+}
+
+# Human-like typing: one char at a time, 60-140ms per keystroke
+proc human_type {text} {
+    foreach char [split $text ""] {
+        send -- $char
+        after [expr {60 + int(rand() * 80)}]
+    }
+}
+
+set timeout 120
+
+# Load Anthropic key
+set keyfile [open /tmp/rpg-env r]
+set keyline [gets $keyfile]
+close $keyfile
+regexp {RPG_ANTHROPIC_KEY=(.+)} $keyline -> rpg_key
+
+spawn env TERM=xterm-256color COLORTERM=truecolor COLUMNS=120 LINES=35 \
+    RPG_ANTHROPIC_KEY=$rpg_key \
+    asciinema rec /tmp/rpg-761-pgash/demos/quickstart-demo.cast \
+    --overwrite --cols 120 --rows 35 \
+    --command {env PS1="$ " bash --norc --noprofile}
+
+# Wait for shell prompt (just "$ ")
+expect -re {\$\s}
+
+# cd into repo
+send "cd /tmp/rpg-761-pgash\r"
+expect -re {\$\s}
+
+# Brief pause before starting
+wait 1
+
+# --- Connect to demo DB (psql-style flags) ---
+human_type "./target/debug/rpg -U postgres -h demo -p 15433 demo"
+send "\r"
+
+# Wait for rpg prompt (demo=#)
+expect -re {demo[=#>\|]} { wait 1 }
+
+# --- /version ---
+human_type "/version"
+send "\r"
+expect -re {demo[=#>\|]} { wait 1 }
+
+# --- \d (list tables: customers, orders, products) ---
+human_type "\\d"
+send "\r"
+expect -re {demo[=#>\|]} { wait 1 }
+
+# --- Intentional typo ---
+human_type "select * from orderss limit 1;"
+send "\r"
+# Wait for error + AI hint to fully render before typing /fix
+expect -re {[Hh]int.*fix} { wait 2 }
+
+# --- /fix — AI corrects "orderss" -> "orders", accept and execute ---
+human_type "/fix"
+send "\r"
+expect -re {Execute\?} { wait 2 }
+send "y"
+expect -re {demo[=#>\|]} { wait 1 }
+
+# --- /ash (sees pgbench on ashtest server-wide) ---
+human_type "/ash"
+after 1400
+send "\r"
+# Let bars accumulate
+wait 7
+
+# Drill down level 1: arrow down to select top wait type, Enter
+send "\033\[B"
+wait 1
+send "\r"
+wait 4
+
+# Drill down level 2: arrow down to select a wait event, Enter to see queries
+send "\033\[B"
+wait 1
+send "\r"
+wait 4
+
+# Back out and exit
+send "\033"
+wait 1
+send "q"
+expect -re {demo[=#>\|]} { wait 1 }
+
+# Quit rpg
+send "\\q\r"
+wait 1
+
+# End recording
+send "\x04"
+wait 1
