@@ -125,20 +125,6 @@ impl AshState {
         }
     }
 
-    /// Human-readable label for the time window visible in the timeline.
-    ///
-    /// Based on 600 ring-buffer samples × `bucket_secs` per bucket.
-    pub fn window_label(&self) -> String {
-        let total_secs = 600 * self.bucket_secs();
-        if total_secs < 60 {
-            format!("{total_secs}s")
-        } else if total_secs < 3600 {
-            format!("{}min", total_secs / 60)
-        } else {
-            format!("{}h", total_secs / 3600)
-        }
-    }
-
     /// Context-sensitive key hint line for the footer.
     ///
     /// Shows `b/Esc:back` only when drilled below the top level.
@@ -164,21 +150,39 @@ impl AshState {
     }
 
     /// Advance zoom level: 1→2→3→4→5→6→1.
+    ///
+    /// Also updates `refresh_interval_secs` to match the new bucket size so
+    /// live sampling rate stays consistent with the display granularity.
     pub fn zoom_cycle_forward(&mut self) {
         self.zoom_level = if self.zoom_level >= 6 {
             1
         } else {
             self.zoom_level + 1
         };
+        self.sync_refresh_to_zoom();
     }
 
     /// Retreat zoom level: 1→6→5→4→3→2→1.
+    ///
+    /// Also updates `refresh_interval_secs` to match the new bucket size so
+    /// live sampling rate stays consistent with the display granularity.
     pub fn zoom_cycle_back(&mut self) {
         self.zoom_level = if self.zoom_level <= 1 {
             6
         } else {
             self.zoom_level - 1
         };
+        self.sync_refresh_to_zoom();
+    }
+
+    /// Set `refresh_interval_secs` to match `bucket_secs` so the live
+    /// sampling interval equals the display bucket granularity.
+    ///
+    /// Capped at 60s — polling less than once per minute would make the TUI
+    /// feel unresponsive even at coarse zoom levels.
+    fn sync_refresh_to_zoom(&mut self) {
+        self.refresh_interval_secs = self.bucket_secs().min(60);
+        self.sync_aliases();
     }
 
     /// Sync the renderer-alias fields from the canonical fields.
@@ -622,5 +626,42 @@ mod tests {
         let mut s = AshState::new(false);
         s.zoom_out(); // should not panic
         assert!(matches!(s.mode, ViewMode::Live));
+    }
+
+    /// Zooming via `←`/`→` must keep `refresh_interval_secs` in sync with
+    /// `bucket_secs`, capped at 60s.
+    #[test]
+    fn zoom_cycle_syncs_refresh_to_bucket() {
+        let mut s = AshState::new(false);
+        // Start: zoom_level=1, bucket_secs=1, refresh=1
+        assert_eq!(s.refresh_interval_secs, 1);
+
+        s.zoom_cycle_forward(); // level 2 → bucket_secs=15
+        assert_eq!(s.bucket_secs(), 15);
+        assert_eq!(s.refresh_interval_secs, 15);
+
+        s.zoom_cycle_forward(); // level 3 → bucket_secs=30
+        assert_eq!(s.bucket_secs(), 30);
+        assert_eq!(s.refresh_interval_secs, 30);
+
+        s.zoom_cycle_forward(); // level 4 → bucket_secs=60
+        assert_eq!(s.bucket_secs(), 60);
+        assert_eq!(s.refresh_interval_secs, 60);
+
+        s.zoom_cycle_forward(); // level 5 → bucket_secs=300, capped at 60
+        assert_eq!(s.bucket_secs(), 300);
+        assert_eq!(s.refresh_interval_secs, 60, "refresh capped at 60s");
+
+        s.zoom_cycle_back(); // back to level 4 → bucket_secs=60
+        assert_eq!(s.refresh_interval_secs, 60);
+
+        s.zoom_cycle_back(); // back to level 3 → bucket_secs=30
+        assert_eq!(s.refresh_interval_secs, 30);
+
+        s.zoom_cycle_back(); // back to level 2 → bucket_secs=15
+        assert_eq!(s.refresh_interval_secs, 15);
+
+        s.zoom_cycle_back(); // back to level 1 → bucket_secs=1
+        assert_eq!(s.refresh_interval_secs, 1);
     }
 }
