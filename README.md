@@ -1,6 +1,6 @@
 # rpg — modern Postgres terminal written in Rust
 
-![/ash Active Session History — live wait event timeline with drill-down](demos/slash-ash-general.gif)
+![rpg quickstart — connect, query, AI fix, active session history](demos/quickstart-demo.gif)
 
 [![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/NikolayS/rpg/branch/main/graph/badge.svg)](https://codecov.io/gh/NikolayS/rpg)
@@ -305,6 +305,8 @@ Run the command with `/slow_mean`. List all loaded custom commands with `/comman
 More examples are in the [`examples/commands/`](examples/commands/) directory.
 
 ## Active Session History
+
+![/ash Active Session History — live wait event timeline with drill-down](demos/slash-ash-general.gif)
 
 `/ash` opens a live wait event timeline — a scrolling stacked-bar chart of
 active sessions grouped by wait event type, with drill-down to individual
