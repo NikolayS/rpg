@@ -826,10 +826,19 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     // [0] Status bar — title + live metrics on one line
     let active = snapshots.last().map_or(0, |s| s.active_count);
     let mode_label = if state.is_history { "History" } else { "Live" };
+    // Show actual data span (samples × bucket_secs), not ring-buffer capacity.
+    // Capacity label is misleading when the ring buffer isn't full yet.
+    let actual_secs = snapshots.len() as u64 * state.bucket_secs();
+    let actual_window = if actual_secs < 60 {
+        format!("{actual_secs}s")
+    } else if actual_secs < 3600 {
+        format!("{}min", actual_secs / 60)
+    } else {
+        format!("{}h", actual_secs / 3600)
+    };
     let status_text = format!(
         "/ash  [{mode_label}]  interval: {}s   window: {}   active: {active}",
-        state.refresh_interval_secs,
-        state.window_label(),
+        state.refresh_interval_secs, actual_window,
     );
     frame.render_widget(
         Paragraph::new(status_text).style(Style::default().fg(Color::Cyan)),
