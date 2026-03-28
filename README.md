@@ -119,9 +119,14 @@ postgres=# what is DB size?
 Toggle back with `/sql` or `/interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
+<details>
+<summary>See demo</summary>
+
 ![/t2s text-to-SQL mode and /yolo auto-execute mode in action](demos/gif3_t2s.gif)
 
 *`/t2s` shows a SQL preview with confirmation; `/yolo` skips the preview and executes immediately.*
+
+</details>
 
 ### /fix — auto-correct errors
 
@@ -145,9 +150,14 @@ Execute? [Y/n/e]
 (1 row)
 ```
 
+<details>
+<summary>See demo</summary>
+
 ![/fix auto-corrects a typo in the table name and re-runs the query](demos/gif2_typo.gif)
 
 *`/fix` detects a misspelled table name, suggests the corrected query, and executes it after confirmation.*
+
+</details>
 
 ### /optimize — index and performance suggestions
 
@@ -163,9 +173,14 @@ postgres=# /optimize
    ANALYZE public.t1;
 ```
 
+<details>
+<summary>See demo</summary>
+
 ![/explain and /optimize workflow: slow query, AI analysis, index creation, re-run](demos/gif1_optimize.gif)
 
 *`/explain` interprets the query plan; `/optimize` suggests an index. After creating it, the same query runs dramatically faster.*
+
+</details>
 
 ### Share EXPLAIN plans
 
@@ -233,9 +248,14 @@ Or set `PAGER=pspg` in your environment before launching rpg.
 pspg adds horizontal scrolling (Right arrow), line numbers (Alt+n),
 and a vertical column cursor (Alt+v) — useful for wide result sets.
 
+<details>
+<summary>See demo</summary>
+
 ![pspg external pager with theme menu](demos/pspg_screenshot.jpg)
 
 *pspg with the theme selector menu — 20+ built-in themes, horizontal scrolling, column cursor.*
+
+</details>
 
 ### \s — command history
 
@@ -298,7 +318,12 @@ When the [`pg_ash`](https://github.com/NikolayS/pg_ash) extension is
 installed, the timeline pre-populates with historical data on startup —
 bars appear immediately rather than building from scratch.
 
+<details>
+<summary>See demo — with pg_ash history pre-population</summary>
+
 ![/ash with pg_ash history pre-population — bars from the past visible on launch](demos/slash-ash-pgash.gif)
+
+</details>
 
 ## DBA diagnostics
 
