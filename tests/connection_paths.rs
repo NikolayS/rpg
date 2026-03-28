@@ -1506,3 +1506,120 @@ fn g4_pgpassword_overrides_pgpassfile() {
         "g4: expected '1' in output\nstdout: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Group I — Multi-host failover (#743)
+// ---------------------------------------------------------------------------
+
+/// I1: First host is unreachable, second host succeeds — connection established.
+///
+/// Tests that `-h bad-host,goodhost -p badport,goodport` tries the first host,
+/// fails, then connects via the second.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn i1_multihost_first_fails_second_succeeds() {
+    // Use the trust postgres instance as the "good" second host.
+    let good_host = trust_host();
+    let good_port = trust_port();
+
+    let mut cmd = rpg();
+    cmd.args([
+        "-h",
+        &format!("bad-host-xyz-nonexistent,{good_host}"),
+        "-p",
+        &format!("19997,{good_port}"),
+        "-U",
+        &trust_user(),
+        "-d",
+        &trust_database(),
+        "-w",
+        "-c",
+        "SELECT 1",
+    ]);
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "i1: expected success via second host\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "i1: expected '1' in output\nstdout: {stdout}"
+    );
+    // No panic in either case.
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        !combined.contains("unwrap") && !combined.contains("panic"),
+        "i1: output must not contain internal Rust errors\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// I2: All hosts fail — error message must mention the attempted hosts.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn i2_multihost_all_fail() {
+    let mut cmd = rpg();
+    cmd.args([
+        "-h",
+        "bad-host-one,bad-host-two",
+        "-p",
+        "19990,19991",
+        "-U",
+        "postgres",
+        "-d",
+        "postgres",
+        "-w",
+        "-c",
+        "SELECT 1",
+    ]);
+    let (stdout, stderr, code) = run(cmd);
+    assert_ne!(
+        code, 0,
+        "i2: expected non-zero exit when all hosts fail\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    // Error should reference at least one of the hosts or give a clear message.
+    assert!(
+        combined.contains("bad-host") || combined.contains("could not connect"),
+        "i2: error should mention failed host(s)\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // No Rust panics.
+    assert!(
+        !combined.contains("unwrap") && !combined.contains("panic"),
+        "i2: error must be user-facing\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// I3: Single host via `-h` still works as a regression guard.
+#[test]
+#[ignore = "requires live Postgres — run via connection-tests CI job"]
+fn i3_single_host_regression() {
+    let mut cmd = rpg();
+    cmd.args([
+        "-h",
+        &trust_host(),
+        "-p",
+        &trust_port(),
+        "-U",
+        &trust_user(),
+        "-d",
+        &trust_database(),
+        "-w",
+        "-c",
+        "SELECT 1",
+    ]);
+    if let Some(pw) = trust_password() {
+        cmd.env("PGPASSWORD", pw);
+    }
+    let (stdout, stderr, code) = run(cmd);
+    assert_eq!(
+        code, 0,
+        "i3: single-host connection must still work\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains('1'),
+        "i3: expected '1' in output\nstdout: {stdout}"
+    );
+}

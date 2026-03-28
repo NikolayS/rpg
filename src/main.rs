@@ -119,8 +119,11 @@ struct Cli {
     host: Option<String>,
 
     /// Database server port number.
-    #[arg(short = 'p', long)]
-    port: Option<u16>,
+    ///
+    /// Accepts a single port or a comma-separated list matching the hosts in
+    /// `-h` (`-p 5432,5433`).  A single port is applied to all hosts.
+    #[arg(short = 'p', long, value_name = "PORT")]
+    port: Option<String>,
 
     /// Database user name.
     #[arg(short = 'U', long)]
@@ -309,9 +312,19 @@ struct Cli {
 impl Cli {
     /// Convert CLI flags into connection-layer options.
     fn conn_opts(&self) -> connection::CliConnOpts {
+        // `-p` now accepts a string to support comma-separated ports for
+        // multi-host connections.  Parse a single u16 for backward-compat
+        // callers that use `opts.port`; keep the raw string in `port_str`
+        // so `resolve_hosts` can expand per-host ports.
+        let port_u16: Option<u16> = self
+            .port
+            .as_deref()
+            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.trim().parse().ok());
         connection::CliConnOpts {
             host: self.host.clone(),
-            port: self.port,
+            port: port_u16,
+            port_str: self.port.clone(),
             username: self.username.clone(),
             dbname: self.dbname.clone(),
             dbname_pos: self.dbname_pos.clone(),
@@ -678,7 +691,7 @@ async fn async_main() {
                 cli.host.clone_from(&profile.host);
             }
             if cli.port.is_none() {
-                cli.port = profile.port;
+                cli.port = profile.port.map(|p| p.to_string());
             }
             if cli.dbname.is_none() {
                 cli.dbname.clone_from(&profile.dbname);
@@ -713,11 +726,7 @@ async fn async_main() {
         cli.host.clone_from(&cfg.connection.host);
     }
     if cli.port.is_none() && cli.port_pos.is_none() {
-        cli.port = cfg
-            .connection
-            .port
-            .as_deref()
-            .and_then(|p| p.parse::<u16>().ok());
+        cli.port = cfg.connection.port.clone();
     }
     if cli.username.is_none() && cli.user_pos.is_none() {
         cli.username.clone_from(&cfg.connection.user);
