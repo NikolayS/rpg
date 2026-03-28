@@ -825,7 +825,6 @@ async fn ask_yolo_ddl_rejected_by_readonly_tx() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // pg_ash sampler integration tests (#761)
 // ---------------------------------------------------------------------------
@@ -858,10 +857,7 @@ async fn ash_pg_extension_absent_in_test_db() {
     let mut installed = false;
     for msg in rows {
         if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
-            installed = row
-                .get("installed")
-                .unwrap_or("f")
-                .starts_with('t');
+            installed = row.get("installed").unwrap_or("f").starts_with('t');
         }
     }
 
