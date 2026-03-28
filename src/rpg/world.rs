@@ -18,6 +18,7 @@ pub struct Puzzle {
 
 #[derive(Debug, Clone)]
 pub struct Room {
+    #[allow(dead_code)]
     pub id: usize,
     pub name: &'static str,
     pub description: &'static str,
