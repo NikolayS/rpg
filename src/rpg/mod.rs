@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_imports)]
 /// /rpg — The Haunted Cluster: a PostgreSQL text adventure.
 ///
 /// Entirely isolated in src/rpg/. To remove: delete this directory and

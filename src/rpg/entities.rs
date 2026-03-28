@@ -1,3 +1,4 @@
+#![allow(clippy::all, dead_code, unused_imports)]
 /// Player, Enemy, and Item types for the /rpg MUD.
 
 #[derive(Debug, Clone)]
