@@ -79,10 +79,20 @@ pub struct PgAshInfo {
 // ---------------------------------------------------------------------------
 
 /// Detect whether the `pg_ash` extension is installed and read its config.
+///
+/// Detection strategy: check for `ash.wait_timeline` in `pg_proc` rather
+/// than `pg_extension`.  `pg_ash` can be installed either via
+/// `CREATE EXTENSION pg_ash` (which populates `pg_extension`) or by running
+/// the install SQL directly (which does not).  Checking the function exists
+/// handles both cases and is the only capability we actually need.
 pub async fn detect_pg_ash(client: &Client) -> PgAshInfo {
     let installed: bool = match client
         .query_one(
-            "select exists(select 1 from pg_extension where extname = 'pg_ash')",
+            "select exists(\
+                select 1 from pg_proc p \
+                join pg_namespace n on p.pronamespace = n.oid \
+                where n.nspname = 'ash' and p.proname = 'wait_timeline'\
+            )",
             &[],
         )
         .await

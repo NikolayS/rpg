@@ -844,15 +844,18 @@ async fn ash_pg_extension_absent_in_test_db() {
         .simple_query("drop extension if exists pg_ash cascade")
         .await;
 
-    // Same query as detect_pg_ash().
+    // Same query as detect_pg_ash(): check for ash.wait_timeline in pg_proc,
+    // not pg_extension (pg_ash may be installed via SQL without CREATE EXTENSION).
     let rows = client
         .simple_query(
             "select exists(\
-               select 1 from pg_extension where extname = 'pg_ash'\
+               select 1 from pg_proc p \
+               join pg_namespace n on p.pronamespace = n.oid \
+               where n.nspname = 'ash' and p.proname = 'wait_timeline'\
              ) as installed",
         )
         .await
-        .expect("pg_extension existence check failed");
+        .expect("pg_proc wait_timeline existence check failed");
 
     let mut installed = false;
     for msg in rows {
@@ -863,7 +866,7 @@ async fn ash_pg_extension_absent_in_test_db() {
 
     assert!(
         !installed,
-        "pg_ash must NOT be installed in the CI test database"
+        "ash.wait_timeline must NOT exist in the CI test database"
     );
 }
 
