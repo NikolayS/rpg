@@ -1,5 +1,7 @@
 # rpg — modern Postgres terminal written in Rust
 
+![/ash Active Session History — live wait event timeline with drill-down](demos/slash-ash-general.gif)
+
 [![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/NikolayS/rpg/branch/main/graph/badge.svg)](https://codecov.io/gh/NikolayS/rpg)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -7,8 +9,6 @@
 
 A psql-compatible terminal written in Rust with built-in DBA diagnostics and AI assistant.
 Single binary, no dependencies, cross-platform.
-
-![/ash Active Session History — live wait event timeline with drill-down](demos/slash-ash-general.gif)
 
 ## Features
 
