@@ -32,59 +32,65 @@ spawn env TERM=xterm-256color COLORTERM=truecolor COLUMNS=120 LINES=35 \
 # Wait for shell prompt
 expect -re {\$\s}
 
-# cd into repo so ./target/debug/rpg works
+# cd into repo
 send "cd /tmp/rpg-761-pgash\r"
 expect -re {\$\s}
 
 # Brief pause before starting
 wait 1
 
-# --- Connect to clean demo DB ---
-human_type "./target/debug/rpg postgresql://postgres@127.0.0.1:15433/demodb"
+# --- Connect to demo DB (psql-style flags) ---
+human_type "./target/debug/rpg -U postgres -h localhost -p 15433 demo"
 send "\r"
 
-# Wait for rpg prompt (demodb=#)
-expect -re {demodb[=#>\|]} { wait 1 }
+# Wait for rpg prompt (demo=#)
+expect -re {demo[=#>\|]} { wait 1 }
 
 # --- /version ---
 human_type "/version"
 send "\r"
-expect -re {demodb[=#>\|]} { wait 1 }
+expect -re {demo[=#>\|]} { wait 1 }
 
 # --- \d (list tables: customers, orders, products) ---
 human_type "\\d"
 send "\r"
-expect -re {demodb[=#>\|]} { wait 1 }
+expect -re {demo[=#>\|]} { wait 1 }
 
 # --- Intentional typo ---
 human_type "select * from orderss limit 1;"
 send "\r"
-expect -re {demodb[=#>\|]} { wait 1 }
+expect -re {demo[=#>\|]} { wait 1 }
 
-# --- /fix — AI corrects "orderss" -> "orders", we accept and it runs ---
+# --- /fix — AI corrects "orderss" -> "orders", accept and execute ---
 human_type "/fix"
 send "\r"
-# Wait for AI response + Execute? prompt (may take 2-3s)
 expect -re {Execute\?} { wait 2 }
-# Accept — run the corrected query
 send "y"
-expect -re {demodb[=#>\|]} { wait 1 }
+expect -re {demo[=#>\|]} { wait 1 }
 
-# --- /ash (samples pg_stat_activity server-wide, sees pgbench on ashtest) ---
+# --- /ash (sees pgbench on ashtest server-wide) ---
 human_type "/ash"
 send "\r"
-# Let bars accumulate (pgbench running in background on ashtest)
-wait 9
+# Let bars accumulate
+wait 7
 
-# Drill down: arrow down to select top wait type, Enter to expand
+# Drill down level 1: arrow down to select top wait type, Enter
 send "\033\[B"
 wait 1
 send "\r"
 wait 4
 
-# Exit /ash
+# Drill down level 2: arrow down to select a wait event, Enter to see queries
+send "\033\[B"
+wait 1
+send "\r"
+wait 4
+
+# Back out and exit
+send "\033"
+wait 1
 send "q"
-expect -re {demodb[=#>\|]} { wait 1 }
+expect -re {demo[=#>\|]} { wait 1 }
 
 # Quit rpg
 send "\\q\r"
