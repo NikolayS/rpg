@@ -144,10 +144,10 @@ pub enum LiveSnapshotResult {
 /// connection).  The result set is folded in Rust into three views
 /// (`by_type`, `by_event`, `by_query`) without additional round-trips.
 ///
-/// Observer-effect protection: `SET LOCAL statement_timeout = '500ms'` is
-/// applied before the query (matching the same guard used by pg_ash's
-/// per-second cron job).  If the query times out the tick is skipped and
-/// [`LiveSnapshotResult::Missed`] is returned instead of blocking the TUI.
+/// Observer-effect protection: `SET statement_timeout = '500ms'` is applied
+/// before the query (matching the same guard used by pg_ash's per-second cron
+/// job) and reset to 0 afterwards.  If the query times out the tick is skipped
+/// and [`LiveSnapshotResult::Missed`] is returned instead of blocking the TUI.
 pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult> {
     let sql = "
         select
@@ -167,16 +167,22 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult
         order by cnt desc
     ";
 
-    // Apply a short statement_timeout for observer-effect protection.
-    // SET LOCAL is transaction-scoped; we issue it as a plain statement before
-    // the query so it applies for this execution only and resets automatically.
+    // Observer-effect protection: apply a short statement_timeout so a slow
+    // pg_stat_activity scan fails fast rather than blocking the TUI.
+    //
+    // SET LOCAL requires an active transaction block (it's a no-op outside
+    // one). Use SET + reset instead: set for this query, restore default after.
+    // This is a session-level change but is immediately restored, so it does
+    // not leak across queries in the connection pool.
     client
-        .execute("set local statement_timeout = '500ms'", &[])
+        .execute("set statement_timeout = '500ms'", &[])
         .await?;
 
     let rows = match client.query(sql, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
+            // Restore statement_timeout before returning — best-effort.
+            let _ = client.execute("set statement_timeout = 0", &[]).await;
             // statement_timeout fires as SQLSTATE 57014 (query_canceled).
             // Return Missed so the TUI can display a brief indicator and
             // continue rather than propagating an error.
@@ -188,6 +194,9 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult
             return Err(e.into());
         }
     };
+
+    // Restore default timeout after successful query.
+    let _ = client.execute("set statement_timeout = 0", &[]).await;
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -257,15 +266,16 @@ async fn query_ash_history_inner(
         order by bucket_start, wait_event"
     );
 
-    // Same observer-effect guard as live_snapshot: fail fast rather than
-    // blocking the TUI. History queries can be slow on wide windows.
-    let _ = client
-        .execute("set local statement_timeout = '500ms'", &[])
-        .await;
+    // Same observer-effect guard as live_snapshot.
+    let _ = client.execute("set statement_timeout = '500ms'", &[]).await;
 
     let rows = match client.query(sql.as_str(), &[]).await {
-        Ok(r) => r,
+        Ok(r) => {
+            let _ = client.execute("set statement_timeout = 0", &[]).await;
+            r
+        }
         Err(e) => {
+            let _ = client.execute("set statement_timeout = 0", &[]).await;
             return Err(anyhow::anyhow!("ash.wait_timeline query failed: {e}"));
         }
     };
