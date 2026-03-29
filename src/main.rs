@@ -863,21 +863,17 @@ async fn async_main() {
                     let ai = &settings.config.ai;
                     match (ai.provider.as_deref(), ai.api_key_env.as_deref()) {
                         (Some(provider), Some(env_var)) => {
-                            let key_set = std::env::var(env_var)
-                                .map(|v| !v.is_empty())
-                                .unwrap_or(false);
+                            let model = ai.model.as_deref().unwrap_or("default");
+                            let key_set = std::env::var_os(env_var).is_some_and(|v| !v.is_empty());
                             if key_set {
-                                format!("AI: {provider} (via ${env_var})")
+                                format!("AI: {provider}/{model}")
                             } else {
                                 format!(
-                                    "AI: {provider} configured but ${env_var} is not set — /fix /explain /optimize unavailable"
+                                    "AI: {provider}/{model} (key not set — /fix /optimize /explain unavailable)"
                                 )
                             }
                         }
-                        _ => {
-                            "AI: not configured — set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run: rpg --help-ai"
-                                .to_owned()
-                        }
+                        _ => "AI: not configured — edit ~/.config/rpg/config.toml".to_owned(),
                     }
                 };
                 println!("{ai_status}");
