@@ -349,6 +349,15 @@ struct Cli {
     /// Does not download or replace the binary.
     #[arg(long)]
     update_check: bool,
+
+    /// Show AI setup instructions and exit. No database connection required.
+    #[arg(long)]
+    ai_help: bool,
+
+    /// Interactively configure AI provider and write to config file, then exit.
+    /// No database connection required.
+    #[arg(long)]
+    ai_configure: bool,
 }
 
 impl Cli {
@@ -645,6 +654,118 @@ async fn async_main() {
         return;
     }
 
+    // --ai-help: print AI setup instructions and exit.
+    if cli.ai_help {
+        let config_path = config::user_config_path_display();
+        println!("rpg AI setup");
+        println!("{}", "─".repeat(40));
+        println!("Config file: {config_path}");
+        println!();
+        println!("To enable AI features (/fix, /optimize, /explain),");
+        println!("add an [ai] section to your config file:");
+        println!();
+        println!("  # Anthropic");
+        println!("  [ai]");
+        println!("  provider = \"anthropic\"");
+        println!("  model = \"claude-sonnet-4-6\"");
+        println!("  api_key_env = \"ANTHROPIC_API_KEY\"");
+        println!();
+        println!("  # OpenAI");
+        println!("  [ai]");
+        println!("  provider = \"openai\"");
+        println!("  model = \"gpt-4o\"");
+        println!("  api_key_env = \"OPENAI_API_KEY\"");
+        println!();
+        println!("Then set the env var and reconnect:");
+        println!("  export ANTHROPIC_API_KEY=sk-ant-...");
+        println!("  rpg <connection>");
+        println!();
+        println!("To configure interactively: rpg --ai-configure");
+        return;
+    }
+
+    // --ai-configure: interactive AI setup wizard and exit.
+    if cli.ai_configure {
+        use std::io::Write;
+        let config_path = config::user_config_path_display();
+        println!("rpg AI configuration");
+        println!("{}", "─".repeat(40));
+        println!("This will write [ai] settings to: {config_path}");
+        println!();
+
+        let providers = [
+            ("anthropic", "claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
+            ("openai", "gpt-4o", "OPENAI_API_KEY"),
+        ];
+
+        print!("Provider (1=anthropic, 2=openai) [1]: ");
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        let choice: usize = input.trim().parse().unwrap_or(1);
+        let (provider, default_model, default_env) = providers[if choice == 2 { 1 } else { 0 }];
+
+        print!("Model [{default_model}]: ");
+        std::io::stdout().flush().ok();
+        input.clear();
+        std::io::stdin().read_line(&mut input).ok();
+        let model = if input.trim().is_empty() {
+            default_model.to_owned()
+        } else {
+            input.trim().to_owned()
+        };
+
+        print!("API key env var [{default_env}]: ");
+        std::io::stdout().flush().ok();
+        input.clear();
+        std::io::stdin().read_line(&mut input).ok();
+        let env_var = if input.trim().is_empty() {
+            default_env.to_owned()
+        } else {
+            input.trim().to_owned()
+        };
+
+        let snippet = format!(
+            "\n[ai]\nprovider = \"{provider}\"\nmodel = \"{model}\"\napi_key_env = \"{env_var}\"\n"
+        );
+
+        // Ensure config dir exists and append (or create) config file.
+        if let Some(home) = dirs::home_dir() {
+            let config_dir = home.join(".config").join("rpg");
+            if let Err(e) = std::fs::create_dir_all(&config_dir) {
+                eprintln!("rpg: could not create config dir: {e}");
+                std::process::exit(1);
+            }
+            let config_file = config_dir.join("config.toml");
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&config_file)
+            {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(snippet.as_bytes()) {
+                        eprintln!("rpg: could not write config: {e}");
+                        std::process::exit(1);
+                    }
+                    println!();
+                    println!("Written to: {}", config_file.display());
+                    println!();
+                    println!("Now set your API key:");
+                    println!("  export {env_var}=...");
+                    println!("  rpg <connection>");
+                }
+                Err(e) => {
+                    eprintln!("rpg: could not open config file: {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            eprintln!("rpg: could not determine home directory");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // --update / --update-check: self-update logic (no DB connection needed).
     if cli.update || cli.update_check {
         let http = match reqwest::Client::builder().user_agent("rpg").build() {
@@ -881,7 +1002,7 @@ async fn async_main() {
                                 )
                             }
                         }
-                        _ => "AI: not configured — edit ~/.config/rpg/config.toml".to_owned(),
+                        _ => "AI: not configured — run: rpg --ai-help".to_owned(),
                     }
                 };
                 println!("{ai_status}");
