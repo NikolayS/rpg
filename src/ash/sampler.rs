@@ -145,7 +145,7 @@ pub enum LiveSnapshotResult {
 /// (`by_type`, `by_event`, `by_query`) without additional round-trips.
 ///
 /// Observer-effect protection: `SET statement_timeout = '500ms'` is applied
-/// before the query (matching the same guard used by pg_ash's per-second cron
+/// before the query (matching the same guard used by `pg_ash`'s per-second cron
 /// job) and reset to 0 afterwards.  If the query times out the tick is skipped
 /// and [`LiveSnapshotResult::Missed`] is returned instead of blocking the TUI.
 pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult> {
@@ -186,9 +186,7 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult
             // statement_timeout fires as SQLSTATE 57014 (query_canceled).
             // Return Missed so the TUI can display a brief indicator and
             // continue rather than propagating an error.
-            if e.code().map_or(false, |c| {
-                c == &tokio_postgres::error::SqlState::QUERY_CANCELED
-            }) {
+            if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
                 return Ok(LiveSnapshotResult::Missed);
             }
             return Err(e.into());
