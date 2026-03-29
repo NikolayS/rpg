@@ -971,8 +971,13 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
     } else {
         format!("{}h", actual_secs / 3600)
     };
+    let missed_label = if state.missed_samples > 0 {
+        format!("   missed: {}", state.missed_samples)
+    } else {
+        String::new()
+    };
     let status_text = format!(
-        "/ash  [{mode_label}]  interval: {}s   window: {}   active: {active}",
+        "/ash  [{mode_label}]  interval: {}s   window: {}   active: {active}{missed_label}",
         state.refresh_interval_secs, actual_window,
     );
     frame.render_widget(

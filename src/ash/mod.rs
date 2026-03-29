@@ -135,17 +135,25 @@ pub async fn run_ash(
                 }
             }
             ViewMode::Live => {
-                if let Ok(mut snap) = sampler::live_snapshot(client).await {
-                    // User-supplied --cpu N overrides auto-detected value.
-                    if cpu_override.is_some() {
-                        snap.cpu_count = cpu_override;
+                match sampler::live_snapshot(client).await {
+                    Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
+                        // User-supplied --cpu N overrides auto-detected value.
+                        if cpu_override.is_some() {
+                            snap.cpu_count = cpu_override;
+                        }
+                        if snapshots.len() == 600 {
+                            snapshots.pop_front();
+                        }
+                        snapshots.push_back(snap);
                     }
-                    if snapshots.len() == 600 {
-                        snapshots.pop_front();
+                    Ok(sampler::LiveSnapshotResult::Missed) => {
+                        // statement_timeout fired — skip this tick, bump counter.
+                        state.missed_samples = state.missed_samples.saturating_add(1);
                     }
-                    snapshots.push_back(snap);
+                    Err(_) => {
+                        // On transient errors: ring buffer retains prior data; keep looping.
+                    }
                 }
-                // On transient errors: ring buffer retains prior data; keep looping.
                 snapshots.iter().cloned().collect()
             }
         };

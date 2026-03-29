@@ -128,12 +128,27 @@ pub async fn detect_pg_ash(client: &Client) -> PgAshInfo {
     }
 }
 
+/// Outcome of a [`live_snapshot`] call.
+#[derive(Debug)]
+pub enum LiveSnapshotResult {
+    /// A snapshot was taken successfully.
+    Ok(AshSnapshot),
+    /// The query was cancelled by `statement_timeout` — the tick is skipped.
+    /// The TUI should display a brief "missed" indicator rather than blocking.
+    Missed,
+}
+
 /// Take a live snapshot by querying `pg_stat_activity`.
 ///
 /// A single SQL query aggregates all active backends (excluding the current
 /// connection).  The result set is folded in Rust into three views
 /// (`by_type`, `by_event`, `by_query`) without additional round-trips.
-pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
+///
+/// Observer-effect protection: `SET LOCAL statement_timeout = '500ms'` is
+/// applied before the query (matching the same guard used by pg_ash's
+/// per-second cron job).  If the query times out the tick is skipped and
+/// [`LiveSnapshotResult::Missed`] is returned instead of blocking the TUI.
+pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult> {
     let sql = "
         select
             case
@@ -152,7 +167,27 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
         order by cnt desc
     ";
 
-    let rows = client.query(sql, &[]).await?;
+    // Apply a short statement_timeout for observer-effect protection.
+    // SET LOCAL is transaction-scoped; we issue it as a plain statement before
+    // the query so it applies for this execution only and resets automatically.
+    client
+        .execute("set local statement_timeout = '500ms'", &[])
+        .await?;
+
+    let rows = match client.query(sql, &[]).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            // statement_timeout fires as SQLSTATE 57014 (query_canceled).
+            // Return Missed so the TUI can display a brief indicator and
+            // continue rather than propagating an error.
+            if e.code().map_or(false, |c| {
+                c == &tokio_postgres::error::SqlState::QUERY_CANCELED
+            }) {
+                return Ok(LiveSnapshotResult::Missed);
+            }
+            return Err(e.into());
+        }
+    };
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -175,7 +210,7 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
         fold_row(&mut snap, &wtype, &wevent, query_id, &q, count);
     }
 
-    Ok(snap)
+    Ok(LiveSnapshotResult::Ok(snap))
 }
 
 /// Pre-populate the ring buffer with historical snapshots from `pg_ash`.
