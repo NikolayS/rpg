@@ -1549,10 +1549,14 @@ pub(crate) async fn exec_lines(
         if is_quit_exit(line.trim(), buf.is_empty()) {
             break 'lines;
         }
-        if line.trim_start().starts_with('\\') {
+        // Interpolate variables first — a bare `:varname` that expands to a
+        // backslash command (e.g. `:dba` → `\i start.psql`) must be detected
+        // after interpolation, not before (psql behaviour).
+        let interpolated_line = settings.vars.interpolate(line.trim());
+        if interpolated_line.trim_start().starts_with('\\') {
             // Interpolate variables in the meta-command line (psql behaviour:
             // `:varname` is expanded before the backslash parser sees it).
-            let interpolated = settings.vars.interpolate(line.trim());
+            let interpolated = interpolated_line.clone();
             let mut parsed = crate::metacmd::parse(&interpolated);
             parsed.echo_hidden = settings.echo_hidden;
             let result = dispatch_meta(parsed, client, params, settings, tx).await;
@@ -4679,9 +4683,19 @@ async fn run_dumb_loop(
                 if is_quit_exit(line.trim(), buf.is_empty()) {
                     break;
                 }
-                if line.trim_start().starts_with('\\') {
-                    match handle_backslash_dumb(line.trim(), &mut buf, client, params, settings, tx)
-                        .await
+                // Interpolate first so `:varname` expanding to a `\cmd` is
+                // handled correctly (psql behaviour).
+                let interpolated_line = settings.vars.interpolate(line.trim());
+                if interpolated_line.trim_start().starts_with('\\') {
+                    match handle_backslash_dumb(
+                        &interpolated_line,
+                        &mut buf,
+                        client,
+                        params,
+                        settings,
+                        tx,
+                    )
+                    .await
                     {
                         HandleLineResult::Quit => break,
                         HandleLineResult::Reconnected(new_client, new_params) => {
@@ -5215,12 +5229,15 @@ async fn handle_line(
         return HandleLineResult::Continue;
     }
 
-    if line.trim_start().starts_with('\\') {
+    // Interpolate variables first so `:varname` expanding to a backslash
+    // command (e.g. `:dba` → `\i start.psql`) is detected and dispatched
+    // correctly, matching psql behaviour.
+    let interpolated = settings.vars.interpolate(line.trim());
+    if interpolated.trim_start().starts_with('\\') {
         // Backslash command — execute immediately, with access to the buffer.
         // Record the command in stmt_buf so the caller adds it to readline history.
         stmt_buf.clear();
         stmt_buf.push_str(line);
-        let interpolated = settings.vars.interpolate(line.trim());
         let mut parsed = crate::metacmd::parse(&interpolated);
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
