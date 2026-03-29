@@ -703,7 +703,7 @@ async fn async_main() {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).ok();
         let choice: usize = input.trim().parse().unwrap_or(1);
-        let (provider, default_model, default_env) = providers[if choice == 2 { 1 } else { 0 }];
+        let (provider, default_model, default_env) = providers[usize::from(choice == 2)];
 
         print!("Model [{default_model}]: ");
         std::io::stdout().flush().ok();
