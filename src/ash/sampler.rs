@@ -257,6 +257,12 @@ async fn query_ash_history_inner(
         order by bucket_start, wait_event"
     );
 
+    // Same observer-effect guard as live_snapshot: fail fast rather than
+    // blocking the TUI. History queries can be slow on wide windows.
+    let _ = client
+        .execute("set local statement_timeout = '500ms'", &[])
+        .await;
+
     let rows = match client.query(sql.as_str(), &[]).await {
         Ok(r) => r,
         Err(e) => {
