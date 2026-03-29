@@ -1552,11 +1552,8 @@ pub(crate) async fn exec_lines(
         // Interpolate variables first — a bare `:varname` that expands to a
         // backslash command (e.g. `:dba` → `\i start.psql`) must be detected
         // after interpolation, not before (psql behaviour).
-        let interpolated_line = settings.vars.interpolate(line.trim());
-        if interpolated_line.trim_start().starts_with('\\') {
-            // Interpolate variables in the meta-command line (psql behaviour:
-            // `:varname` is expanded before the backslash parser sees it).
-            let interpolated = interpolated_line.clone();
+        let interpolated = settings.vars.interpolate(line.trim());
+        if interpolated.trim_start().starts_with('\\') {
             let mut parsed = crate::metacmd::parse(&interpolated);
             parsed.echo_hidden = settings.echo_hidden;
             let result = dispatch_meta(parsed, client, params, settings, tx).await;
