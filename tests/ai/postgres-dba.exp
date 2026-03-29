@@ -48,8 +48,15 @@ expect -re {demo[=#>\|]} { wait 1 }
 
 wait 1
 
-# --- Load postgres_dba menu ---
-human_type "\\i /tmp/postgres_dba/start.psql"
+# --- Set :dba alias (mirrors ~/.psqlrc setup from postgres_dba README) ---
+human_type "\\set dba '\\\\i /tmp/postgres_dba/start.psql'"
+send "\r"
+expect -re {demo[=#>\|]} { wait 1 }
+
+wait 1
+
+# --- Invoke via :dba (variable expansion → \i start.psql) ---
+human_type ":dba"
 send "\r"
 
 # Wait for menu to render and \prompt to fire (cursor waiting)

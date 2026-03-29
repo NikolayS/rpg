@@ -23,25 +23,30 @@ git clone --depth=1 https://github.com/NikolayS/postgres_dba.git /tmp/postgres_d
 
 1. **Connect** — `rpg -U postgres -h demo -p 15433 demo`, wait for prompt
 
-2. **Load menu** — `\i /tmp/postgres_dba/start.psql`
+2. **Set alias** — `\set dba '\\i /tmp/postgres_dba/start.psql'`
+   (mirrors the `~/.psqlrc` setup from postgres_dba README)
+
+3. **Load menu via `:dba`** — type `:dba`, press Enter
+   - rpg interpolates `:dba` → `\i /tmp/postgres_dba/start.psql` before parsing
    - Menu renders with all options (0, 1, 2, 3, a1–v2, q)
    - `\prompt` fires, cursor waits for input
 
-3. **Choose option 1** (Databases: size, stats) — type `1`, press Enter
+4. **Choose option 1** (Databases: size, stats) — type `1`, press Enter
    - SQL runs, table of databases + sizes appears
    - "Press <Enter> to continue…" prompt appears
 
-4. **Continue** — press Enter
+5. **Continue** — press Enter
    - Menu re-renders (recursive `\ir ./start.psql`)
    - Cursor again waiting for input
 
-5. **Quit** — type `q`, press Enter
+6. **Quit** — type `q`, press Enter
    - "Bye!" prints
    - Returns to `demo=#` prompt cleanly
 
 ## Pass criteria
 
-- Menu renders without error after `\i start.psql`
+- `:dba` (variable expansion) triggers `\i start.psql` correctly — not treated as SQL
+- Menu renders without error
 - `\prompt` accepts input in interactive mode (raw mode active)
 - Choice `1` runs the databases SQL and displays results
 - "Press <Enter> to continue…" prompt works (second `\prompt`)
