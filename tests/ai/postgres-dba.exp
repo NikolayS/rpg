@@ -1,0 +1,93 @@
+#!/usr/bin/expect -f
+
+# Reliable sleep: busy-wait so asciinema timing is accurate
+proc wait {secs} {
+    set end [expr {[clock seconds] + $secs}]
+    while {[clock seconds] < $end} {
+        expect -timeout 1 -re {XXXXWILLNEVERMATCH} {}
+    }
+}
+
+# Human-like typing: one char at a time, 60-140ms per keystroke
+proc human_type {text} {
+    foreach char [split $text ""] {
+        send -- $char
+        after [expr {60 + int(rand() * 80)}]
+    }
+}
+
+set timeout 120
+
+# Load Anthropic key (not needed for this test but keeps env consistent)
+set keyfile [open /tmp/rpg-env r]
+set keyline [gets $keyfile]
+close $keyfile
+regexp {RPG_ANTHROPIC_KEY=(.+)} $keyline -> rpg_key
+
+spawn env TERM=xterm-256color COLORTERM=truecolor COLUMNS=120 LINES=35 \
+    RPG_ANTHROPIC_KEY=$rpg_key \
+    asciinema rec demos/postgres-dba.cast \
+    --overwrite --cols 120 --rows 35 \
+    --command {env PS1="$ " bash --norc --noprofile}
+
+# Wait for shell prompt
+expect -re {\$\s}
+
+# cd into repo
+send "cd /tmp/rpg-slash-rpg\r"
+expect -re {\$\s}
+
+wait 1
+
+# --- Connect ---
+human_type "./target/debug/rpg -U postgres -h localhost -p 15433 demo"
+send "\r"
+
+# Wait for rpg prompt
+expect -re {demo[=#>\|]} { wait 1 }
+
+wait 1
+
+# --- Load postgres_dba menu ---
+human_type "\\i /tmp/postgres_dba/start.psql"
+send "\r"
+
+# Wait for menu to render and \prompt to fire (cursor waiting)
+expect -re {press <Enter>:|Type your choice} { wait 1 }
+
+wait 1
+
+# --- Choose option 1: Databases ---
+human_type "1"
+send "\r"
+
+# Wait for query results and "Press <Enter> to continue"
+expect -re {Press <Enter> to continue} { wait 2 }
+
+# --- Press Enter to go back to menu ---
+send "\r"
+
+# Wait for menu to re-render
+expect -re {Type your choice} { wait 1 }
+
+wait 1
+
+# --- Quit ---
+human_type "q"
+send "\r"
+
+# Wait for Bye! and return to rpg prompt
+expect -re {Bye!} { wait 1 }
+expect -re {demo[=#>\|]} { wait 1 }
+
+wait 1
+
+# --- Exit rpg ---
+human_type "\\q"
+send "\r"
+
+wait 1
+
+# End recording
+send "\x04"
+catch {wait 1}
