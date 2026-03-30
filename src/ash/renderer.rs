@@ -1093,6 +1093,11 @@ fn render_timeline(
                 })
                 .collect();
             frame.render_widget(Paragraph::new(cursor_lines), cursor_rect);
+
+            // Floating overlay on the timeline showing wait breakdown for this bucket.
+            if let Some(info) = cursor_bucket_info(snapshots, state.bucket_secs(), col_from_right, no_color) {
+                render_cursor_overlay(frame, bar_area, cursor_x_offset, &info);
+            }
         }
     }
 }
@@ -1151,7 +1156,8 @@ fn cursor_bucket_info(
 
     let mut sorted: Vec<(String, f64)> = type_sums.into_iter().map(|(k, v)| (k, v / n)).collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    sorted.truncate(3);
+    // Keep all wait types with non-zero AAS for the timeline overlay.
+    sorted.retain(|(_, v)| *v > 0.0);
 
     let top_types = sorted
         .into_iter()
@@ -1171,6 +1177,97 @@ fn cursor_bucket_info(
         aas: total_aas,
         top_types,
     })
+}
+
+/// Render a floating legend overlay on the timeline at the cursor position.
+///
+/// Shows timestamp, total AAS, and a color swatch + name + AAS row for every
+/// non-zero wait type — matching the style in the screenshot reference.
+/// The overlay is positioned left or right of the cursor to avoid clipping.
+fn render_cursor_overlay(
+    frame: &mut Frame,
+    bar_area: ratatui::layout::Rect,
+    cursor_x_offset: u16,
+    info: &CursorInfo,
+) {
+    // Build overlay content.
+    let secs_in_day = 86400i64;
+    let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
+    let h = sod / 3600;
+    let m = (sod % 3600) / 60;
+    let s = sod % 60;
+    let ts_str = format!("{h:02}:{m:02}");
+
+    // Width: wide enough for "█ LWLock:BufferPin  0.00" + borders.
+    let overlay_w: u16 = 28;
+    // Height: 1 (header) + 1 (blank) + N wait types + 2 borders.
+    let overlay_h: u16 = 2 + 1 + 1 + info.top_types.len() as u16;
+    let overlay_h = overlay_h.min(bar_area.height);
+
+    // Position: prefer right of cursor; flip left if it would clip.
+    let cursor_abs = bar_area.x.saturating_add(cursor_x_offset);
+    let x = if cursor_abs + 2 + overlay_w <= bar_area.x + bar_area.width {
+        cursor_abs + 2
+    } else {
+        cursor_abs.saturating_sub(overlay_w + 1)
+    };
+    let x = x.max(bar_area.x);
+    // Anchor to bottom of bar area so timestamp sits at the bottom like the screenshot.
+    let y = bar_area.y.saturating_add(bar_area.height.saturating_sub(overlay_h));
+
+    let overlay_rect = ratatui::layout::Rect {
+        x,
+        y,
+        width: overlay_w,
+        height: overlay_h,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(overlay_rect);
+    frame.render_widget(block, overlay_rect);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Timestamp + total AAS header.
+    lines.push(Line::from(vec![
+        Span::styled(
+            ts_str,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {:.1}", info.aas),
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+
+    // One row per wait type: colored swatch + name + AAS.
+    for (name, type_aas, _pct, color) in &info.top_types {
+        let label = if name.len() > 18 {
+            name[..18].to_owned()
+        } else {
+            name.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("\u{2588} ", Style::default().fg(*color)),
+            Span::styled(
+                format!("{label:<18}"),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("{type_aas:>4.1}"),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(Color::Black)),
+        inner,
+    );
 }
 
 /// Render the cursor infobox into `area` (replaces the normal drill-down table
