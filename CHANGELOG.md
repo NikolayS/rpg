@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.2] - 2026-03-30
+
+### Added
+
+- **`/ash` statement_timeout protection.** Live `pg_stat_activity` queries and pg_ash history queries now run under a 500ms `statement_timeout`. On very busy clusters where the sample query itself takes too long, the tick is skipped and a `missed: N` counter appears in the status bar. The TUI never hangs. (#769, closes #769)
+
+### Fixed
+
+- **`/ash` Y-axis no longer skewed by key presses.** Arrow keys, space, and other inputs previously triggered an immediate re-sample, producing extra data points per second and inflating the Y-axis. Key events are now drained within the current sample interval (wall-clock anchored); the outer loop advances to the next sample only when the full interval has elapsed. Navigation and drill-down still feel instant — the frame redraws immediately on any key press. (#773)
+- **`:varname` aliases now expand before backslash dispatch.** Setting `\set dba '\i /path/start.psql'` and typing `:dba` now correctly triggers `\i` rather than being treated as SQL. (#741, closes #741)
+
+### Changed
+
+- **Richer connect banner.** Version string includes commit count and short hash when built past a release tag (e.g. `rpg 0.9.1+5-f7816078`). Full server version and AI provider/model shown on connect. (#766)
+- **`\` vs `/` command convention documented.** `\` = psql-compatible meta-commands (unchanged muscle memory); `/` = rpg-specific extensions (AI and non-AI). README and `\?` help updated. (#766)
+
+## [0.9.1] - 2026-03-29
+
+### Fixed
+
+- **`:varname` alias expansion before backslash dispatch** (#767, closes #741)
+
+### Changed
+
+- Version bump to 0.9.1 following v0.9.0 release.
+
+## [0.9.0] - 2026-03-28
+
+### Added
+
+- **pg_ash history integration in `/ash`.** When pg_ash is installed, `/ash` fetches historical ASH data and renders it in the same TUI. Press `h` to toggle history mode. (#762)
+- **Zoom window label shows actual data span**, not ring buffer capacity. (#763)
+- **`\` vs `/` command convention** in README. (#764)
+
 ## [0.8.4] - 2026-03-25
 
 ### Added
