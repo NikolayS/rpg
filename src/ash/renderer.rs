@@ -295,8 +295,7 @@ where
         .map(|chunk| {
             #[allow(clippy::cast_precision_loss)]
             let n = chunk.len() as f64;
-            let mut sums: std::collections::HashMap<String, f64> =
-                std::collections::HashMap::new();
+            let mut sums: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
             for snap in chunk {
                 for (k, &v) in get_map(snap) {
                     if let Some(label) = k.strip_prefix(prefix) {

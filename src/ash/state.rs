@@ -99,7 +99,7 @@ pub struct AshState {
     /// When true, render the color legend overlay (`l` key toggles).
     pub show_legend: bool,
 
-/// Number of live samples dropped due to `statement_timeout` this session.
+    /// Number of live samples dropped due to `statement_timeout` this session.
     /// Displayed in the status bar when non-zero.
     pub missed_samples: u32,
 
@@ -206,7 +206,7 @@ impl AshState {
             // Use refresh_interval_secs * 600 (the live ring buffer depth) as
             // a reasonable starting window; minimum 60 s.
             let now = SystemTime::now();
-            let window_secs = (u64::from(self.refresh_interval_secs) * 600).max(60);
+            let window_secs = (self.refresh_interval_secs * 600).max(60);
             let from = now - Duration::from_secs(window_secs);
             self.mode = ViewMode::History { from, to: now };
         }
