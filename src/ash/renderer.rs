@@ -78,6 +78,53 @@ pub fn wait_type_color(wait_event_type: &str, no_color: bool) -> Color {
     }
 }
 
+/// Number of slots in the deterministic label color palette.
+const LABEL_COLOR_COUNT: u64 = 10;
+
+/// Function pointer type for mapping a label string to a `Color`.
+type ColorFn = fn(&str, bool) -> Color;
+
+/// Return a deterministic color for a label string (wait event name, query
+/// label, etc.) using a simple hash to pick from a fixed palette.
+///
+/// Formula: `label.bytes().fold(0, |a,b| a.wrapping_mul(31).wrapping_add(b)) % 10`
+pub fn label_color(label: &str, no_color: bool) -> Color {
+    if no_color || std::env::var_os("NO_COLOR").is_some() {
+        return Color::Reset;
+    }
+    let idx = label
+        .bytes()
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(u64::from(b)))
+        % LABEL_COLOR_COUNT;
+    if terminal_has_truecolor() {
+        match idx {
+            0 => Color::Rgb(80, 250, 123),
+            1 => Color::Rgb(30, 100, 255),
+            2 => Color::Rgb(255, 85, 85),
+            3 => Color::Rgb(255, 121, 198),
+            4 => Color::Rgb(0, 200, 255),
+            5 => Color::Rgb(255, 220, 100),
+            6 => Color::Rgb(255, 165, 0),
+            7 => Color::Rgb(0, 210, 180),
+            8 => Color::Rgb(150, 100, 255),
+            _ => Color::Rgb(190, 150, 255),
+        }
+    } else {
+        match idx {
+            0 => Color::Indexed(84),
+            1 => Color::Indexed(27),
+            2 => Color::Indexed(203),
+            3 => Color::Indexed(212),
+            4 => Color::Indexed(45),
+            5 => Color::Indexed(221),
+            6 => Color::Indexed(214),
+            7 => Color::Indexed(43),
+            8 => Color::Indexed(135),
+            _ => Color::Indexed(183),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Timeline helpers
 // ---------------------------------------------------------------------------
@@ -181,6 +228,165 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
         .collect()
 }
 
+/// Aggregate snapshots by individual wait event, filtered to `selected_type`.
+///
+/// Produces `Bucket`s whose `by_type` entries are **wait event names** (with
+/// the `"<type>/"` prefix stripped), not wait event types.  Used for the
+/// context-sensitive timeline at `DrillLevel::WaitEvent`.
+fn aggregate_buckets_by_event(
+    snapshots: &[AshSnapshot],
+    selected_type: &str,
+    bucket_secs: u64,
+    max_cols: usize,
+) -> Vec<Bucket> {
+    if snapshots.is_empty() || max_cols == 0 {
+        return Vec::new();
+    }
+    let prefix = format!("{selected_type}/");
+    let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
+    let total = snapshots.len();
+    let remainder = total % step;
+
+    let mut chunks: Vec<&[AshSnapshot]> = Vec::new();
+    let mut offset = 0;
+    if remainder > 0 {
+        chunks.push(&snapshots[..remainder]);
+        offset = remainder;
+    }
+    while offset < total {
+        chunks.push(&snapshots[offset..offset + step]);
+        offset += step;
+    }
+    if chunks.len() > max_cols {
+        let drop = chunks.len() - max_cols;
+        chunks.drain(..drop);
+    }
+
+    let mut global_totals: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for snap in snapshots {
+        for (k, &v) in &snap.by_event {
+            if let Some(ev) = k.strip_prefix(&prefix) {
+                *global_totals.entry(ev.to_owned()).or_insert(0.0) += f64::from(v);
+            }
+        }
+    }
+    let mut global_order: Vec<String> = global_totals.keys().cloned().collect();
+    global_order.sort_by(|a, b| {
+        global_totals[b.as_str()]
+            .partial_cmp(&global_totals[a.as_str()])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            #[allow(clippy::cast_precision_loss)]
+            let n = chunk.len() as f64;
+            let mut event_sums: std::collections::HashMap<String, f64> =
+                std::collections::HashMap::new();
+            for snap in chunk {
+                for (k, &v) in &snap.by_event {
+                    if let Some(ev) = k.strip_prefix(&prefix) {
+                        *event_sums.entry(ev.to_owned()).or_insert(0.0) += f64::from(v);
+                    }
+                }
+            }
+            let by_type: Vec<(String, f64)> = global_order
+                .iter()
+                .map(|k| {
+                    let aas = event_sums.get(k.as_str()).copied().unwrap_or(0.0) / n;
+                    (k.clone(), aas)
+                })
+                .collect();
+            #[allow(clippy::cast_precision_loss)]
+            let aas: f64 = by_type.iter().map(|(_, v)| v).sum();
+            Bucket { aas, by_type }
+        })
+        .collect()
+}
+
+/// Aggregate snapshots by query label, filtered to `selected_type/selected_event`.
+///
+/// Produces `Bucket`s whose `by_type` entries are **query labels** (with the
+/// composite prefix stripped).  Used for the context-sensitive timeline at
+/// `DrillLevel::QueryId`.
+fn aggregate_buckets_by_query(
+    snapshots: &[AshSnapshot],
+    selected_type: &str,
+    selected_event: &str,
+    bucket_secs: u64,
+    max_cols: usize,
+) -> Vec<Bucket> {
+    if snapshots.is_empty() || max_cols == 0 {
+        return Vec::new();
+    }
+    let prefix = format!("{selected_type}/{selected_event}/");
+    let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
+    let total = snapshots.len();
+    let remainder = total % step;
+
+    let mut chunks: Vec<&[AshSnapshot]> = Vec::new();
+    let mut offset = 0;
+    if remainder > 0 {
+        chunks.push(&snapshots[..remainder]);
+        offset = remainder;
+    }
+    while offset < total {
+        chunks.push(&snapshots[offset..offset + step]);
+        offset += step;
+    }
+    if chunks.len() > max_cols {
+        let drop = chunks.len() - max_cols;
+        chunks.drain(..drop);
+    }
+
+    let mut global_totals: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for snap in snapshots {
+        for (k, &v) in &snap.by_query {
+            if let Some(label) = k.strip_prefix(&prefix) {
+                *global_totals.entry(label.to_owned()).or_insert(0.0) += f64::from(v);
+            }
+        }
+    }
+    let mut global_order: Vec<String> = global_totals.keys().cloned().collect();
+    global_order.sort_by(|a, b| {
+        global_totals[b.as_str()]
+            .partial_cmp(&global_totals[a.as_str()])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            #[allow(clippy::cast_precision_loss)]
+            let n = chunk.len() as f64;
+            let mut query_sums: std::collections::HashMap<String, f64> =
+                std::collections::HashMap::new();
+            for snap in chunk {
+                for (k, &v) in &snap.by_query {
+                    if let Some(label) = k.strip_prefix(&prefix) {
+                        *query_sums.entry(label.to_owned()).or_insert(0.0) += f64::from(v);
+                    }
+                }
+            }
+            let by_type: Vec<(String, f64)> = global_order
+                .iter()
+                .map(|k| {
+                    let aas = query_sums.get(k.as_str()).copied().unwrap_or(0.0) / n;
+                    (k.clone(), aas)
+                })
+                .collect();
+            #[allow(clippy::cast_precision_loss)]
+            let aas: f64 = by_type.iter().map(|(_, v)| v).sum();
+            Bucket { aas, by_type }
+        })
+        .collect()
+}
+
 /// One colored segment within a stacked timeline bar.
 ///
 /// Coordinates are in row-from-bottom space (1 = bottommost row).
@@ -248,7 +454,16 @@ fn build_yaxis_lines(max_aas: f64, chart_height: usize) -> Vec<Line<'static>> {
 /// Render the scrolling stacked-bar timeline into a vec of `Line`s.
 ///
 /// Build the stacked `Segment` list for one bucket column.
-fn bucket_segments(bucket: &Bucket, max_aas: f64, h: usize, no_color: bool) -> Vec<Segment> {
+/// `color_fn` maps a label (wait type name, event name, or query label) to a
+/// `Color`.  Pass `wait_type_color` at the top level and `label_color` for
+/// deeper drill levels.
+fn bucket_segments(
+    bucket: &Bucket,
+    max_aas: f64,
+    h: usize,
+    no_color: bool,
+    color_fn: fn(&str, bool) -> Color,
+) -> Vec<Segment> {
     #[allow(clippy::cast_precision_loss)]
     let h_f64 = h as f64;
     let mut segs: Vec<Segment> = Vec::new();
@@ -266,7 +481,7 @@ fn bucket_segments(bucket: &Bucket, max_aas: f64, h: usize, no_color: bool) -> V
             break;
         }
         segs.push(Segment {
-            color: wait_type_color(wtype, no_color),
+            color: color_fn(wtype, no_color),
             bottom,
             top,
         });
@@ -289,7 +504,32 @@ fn build_timeline_lines(
     let h = chart_height.max(1);
     let w = chart_width.max(1);
 
-    let buckets = aggregate_buckets(snapshots, state.bucket_secs(), w);
+    // Context-sensitive aggregation: deeper drill levels filter to the
+    // selected type/event and color by the sub-dimension label.
+    let (buckets, color_fn): (Vec<Bucket>, ColorFn) = match &state.level {
+        DrillLevel::WaitEvent { selected_type } => (
+            aggregate_buckets_by_event(snapshots, selected_type, state.bucket_secs(), w),
+            label_color,
+        ),
+        DrillLevel::QueryId {
+            selected_type,
+            selected_event,
+        } => (
+            aggregate_buckets_by_query(
+                snapshots,
+                selected_type,
+                selected_event,
+                state.bucket_secs(),
+                w,
+            ),
+            label_color,
+        ),
+        // WaitType and Pid: use the standard per-type aggregation and colors.
+        DrillLevel::WaitType | DrillLevel::Pid { .. } => (
+            aggregate_buckets(snapshots, state.bucket_secs(), w),
+            wait_type_color,
+        ),
+    };
 
     // Scale: find the maximum AAS across all buckets so bars fill the chart.
     let max_aas = buckets
@@ -304,7 +544,7 @@ fn build_timeline_lines(
     // Pre-compute per-column stacked segment boundaries.
     let col_segments: Vec<Vec<Segment>> = buckets
         .iter()
-        .map(|bucket| bucket_segments(bucket, max_aas, h, no_color))
+        .map(|bucket| bucket_segments(bucket, max_aas, h, no_color, color_fn))
         .collect();
 
     // CPU reference line — only drawn when cpu_count is known.
@@ -861,6 +1101,154 @@ fn render_timeline(
     if state.show_legend {
         render_legend(frame, bar_area, no_color);
     }
+
+    // Cursor crosshair — vertical │ line at cursor_col columns from the right.
+    if let Some(col_from_right) = state.cursor_col {
+        let bar_w = bar_area.width as usize;
+        // Only draw when the cursor column is within the visible bar area.
+        // col_from_right counts from the right edge (0 = rightmost column).
+        let cursor_x_in_bar = bar_w.saturating_sub(1 + col_from_right);
+        if col_from_right < bar_w {
+            let cursor_x_offset = u16::try_from(cursor_x_in_bar).unwrap_or(u16::MAX);
+            let cursor_rect = ratatui::layout::Rect {
+                x: bar_area.x.saturating_add(cursor_x_offset),
+                y: bar_area.y,
+                width: 1,
+                height: bar_area.height,
+            };
+            let cursor_lines: Vec<Line<'static>> = (0..bar_area.height as usize)
+                .map(|_| {
+                    Line::from(Span::styled(
+                        "\u{2502}", // │
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(cursor_lines), cursor_rect);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor bucket infobox
+// ---------------------------------------------------------------------------
+
+/// Aggregated data for the bucket under the cursor crosshair.
+struct CursorInfo {
+    /// Unix timestamp (seconds) of the most recent snapshot in the bucket.
+    ts: i64,
+    /// Average active sessions across the bucket.
+    aas: f64,
+    /// Top-3 wait types: `(name, aas, pct_of_total, color)`.
+    top_types: Vec<(String, f64, f64, Color)>,
+}
+
+/// Extract summary data for the bucket `cursor_col` columns from the right.
+///
+/// Returns `None` when the snapshot slice does not contain enough data to
+/// cover that bucket (cursor is beyond the visible history).
+fn cursor_bucket_info(
+    snapshots: &[AshSnapshot],
+    bucket_secs: u64,
+    cursor_col: usize,
+    no_color: bool,
+) -> Option<CursorInfo> {
+    if snapshots.is_empty() {
+        return None;
+    }
+    let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
+    let total = snapshots.len();
+
+    // Right-exclusive index of the cursor bucket's last sample.
+    let right_end = total.saturating_sub(cursor_col.saturating_mul(step));
+    let left_start = right_end.saturating_sub(step);
+
+    if right_end == 0 || left_start >= right_end {
+        return None;
+    }
+
+    let bucket_snaps = &snapshots[left_start..right_end];
+    let ts = bucket_snaps.last()?.ts;
+
+    let mut type_sums: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for snap in bucket_snaps {
+        for (k, &v) in &snap.by_type {
+            *type_sums.entry(k.clone()).or_insert(0.0) += f64::from(v);
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let n = bucket_snaps.len() as f64;
+    let total_aas: f64 = type_sums.values().sum::<f64>() / n;
+
+    let mut sorted: Vec<(String, f64)> = type_sums.into_iter().map(|(k, v)| (k, v / n)).collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.truncate(3);
+
+    let top_types = sorted
+        .into_iter()
+        .map(|(name, type_aas)| {
+            let pct = if total_aas > 0.0 {
+                type_aas / total_aas * 100.0
+            } else {
+                0.0
+            };
+            let color = wait_type_color(&name, no_color);
+            (name, type_aas, pct, color)
+        })
+        .collect();
+
+    Some(CursorInfo {
+        ts,
+        aas: total_aas,
+        top_types,
+    })
+}
+
+/// Render the cursor infobox into `area` (replaces the normal drill-down table
+/// while a column cursor is active).
+fn render_cursor_infobox(frame: &mut Frame, area: ratatui::layout::Rect, info: &CursorInfo) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Cursor — bucket info ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Format the bucket timestamp as HH:MM:SS UTC.
+    // ash.epoch = 2026-01-01 00:00:00 UTC = 1_735_689_600 Unix seconds.
+    // That is an exact multiple of 86400, so `ts % 86400` gives the correct
+    // seconds-since-midnight regardless of whether ts is relative to ash.epoch
+    // or to Unix epoch — the HH:MM:SS result is identical.
+    let secs_in_day = 86400i64;
+    let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
+    let h = sod / 3600;
+    let m = (sod % 3600) / 60;
+    let s = sod % 60;
+    let ts_str = format!("{h:02}:{m:02}:{s:02} UTC");
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(ts_str),
+        Span::raw("   "),
+        Span::styled("AAS: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(format!("{:.2}", info.aas)),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Top wait types:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    for (name, type_aas, pct, color) in &info.top_types {
+        lines.push(Line::from(vec![
+            Span::styled("\u{2588} ", Style::default().fg(*color)),
+            Span::raw(format!("{name:<20}  AAS: {type_aas:>5.2}  {pct:>5.1}%")),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Render the drill-down table band (chunk[3]) inside `draw_frame`.
@@ -873,6 +1261,16 @@ fn render_drill_table(
     db_time: f64,
     no_color: bool,
 ) {
+    // When a cursor column is active, replace the drill-down table with a
+    // per-bucket infobox so the user can inspect the highlighted moment.
+    if let Some(cursor_col) = state.cursor_col {
+        if let Some(info) = cursor_bucket_info(snapshots, state.bucket_secs(), cursor_col, no_color)
+        {
+            render_cursor_infobox(frame, area, &info);
+            return;
+        }
+    }
+
     let table_block = Block::default().borders(Borders::ALL).title(" Drill-down ");
     let table_inner = table_block.inner(area);
     frame.render_widget(table_block, area);

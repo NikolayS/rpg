@@ -49,8 +49,10 @@ pub enum ViewMode {
 }
 
 /// Minimum allowed history window (seconds).
+#[allow(dead_code)]
 const ZOOM_MIN_SECS: u64 = 10;
 /// Maximum allowed history window (seconds).
+#[allow(dead_code)]
 const ZOOM_MAX_SECS: u64 = 3600;
 
 /// Top-level state for the ASH TUI.
@@ -97,9 +99,21 @@ pub struct AshState {
     /// When true, render the color legend overlay (`l` key toggles).
     pub show_legend: bool,
 
-    /// Number of live samples dropped due to `statement_timeout` this session.
+/// Number of live samples dropped due to `statement_timeout` this session.
     /// Displayed in the status bar when non-zero.
     pub missed_samples: u32,
+
+    /// Cursor column index from the right of the timeline.
+    ///
+    /// `Some(n)` means the cursor line is drawn `n` columns from the right
+    /// edge of the bar area.  `None` means no cursor is shown (Live mode).
+    pub cursor_col: Option<usize>,
+
+    /// How many buckets the timeline has been panned back from "now".
+    ///
+    /// `0` = live end (cursor hidden, Live mode).  Incremented by `pan_left`,
+    /// decremented by `pan_right`.  Resets to `0` when returning to Live mode.
+    pub pan_offset: i64,
 }
 
 impl AshState {
@@ -115,6 +129,8 @@ impl AshState {
             zoom_level: 1,
             show_legend: false,
             missed_samples: 0,
+            cursor_col: None,
+            pan_offset: 0,
         }
     }
 
@@ -135,9 +151,9 @@ impl AshState {
     /// Shows `b/Esc:back` only when drilled below the top level.
     pub fn hint_line(&self) -> &'static str {
         if self.is_at_top_level() {
-            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh  l:legend"
+            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
         } else {
-            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh  l:legend"
+            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
         }
     }
 
@@ -178,6 +194,41 @@ impl AshState {
             self.zoom_level - 1
         };
         self.sync_refresh_to_zoom();
+    }
+
+    /// Pan the timeline one bucket to the left (into the past).
+    ///
+    /// Switches from Live to History mode on the first press, freezing the ring
+    /// buffer so new samples are not appended while the user scrubs history.
+    pub fn pan_left(&mut self) {
+        if matches!(self.mode, ViewMode::Live) {
+            // Initialise a non-zero window so the history query returns data.
+            // Use refresh_interval_secs * 600 (the live ring buffer depth) as
+            // a reasonable starting window; minimum 60 s.
+            let now = SystemTime::now();
+            let window_secs = (u64::from(self.refresh_interval_secs) * 600).max(60);
+            let from = now - Duration::from_secs(window_secs);
+            self.mode = ViewMode::History { from, to: now };
+        }
+        self.pan_offset += 1;
+        self.cursor_col = usize::try_from(self.pan_offset).ok();
+        self.sync_aliases();
+    }
+
+    /// Pan the timeline one bucket to the right (towards the present).
+    ///
+    /// Returns to Live mode and clears the cursor when the pan reaches "now".
+    pub fn pan_right(&mut self) {
+        if self.pan_offset > 0 {
+            self.pan_offset -= 1;
+        }
+        if self.pan_offset == 0 {
+            self.mode = ViewMode::Live;
+            self.cursor_col = None;
+        } else {
+            self.cursor_col = usize::try_from(self.pan_offset).ok();
+        }
+        self.sync_aliases();
     }
 
     /// Set `refresh_interval_secs` to match `bucket_secs` so the live
@@ -234,19 +285,17 @@ impl AshState {
             KeyCode::Char('b') => {
                 self.go_back();
             }
-            KeyCode::Left => {
+            KeyCode::Char('[') => {
                 self.zoom_cycle_back();
-                // Also shrink the History window when in History mode.
-                if matches!(self.mode, ViewMode::History { .. }) {
-                    self.zoom_in();
-                }
+            }
+            KeyCode::Char(']') => {
+                self.zoom_cycle_forward();
+            }
+            KeyCode::Left => {
+                self.pan_left();
             }
             KeyCode::Right => {
-                self.zoom_cycle_forward();
-                // Also expand the History window when in History mode.
-                if matches!(self.mode, ViewMode::History { .. }) {
-                    self.zoom_out();
-                }
+                self.pan_right();
             }
             KeyCode::Char('r') => {
                 self.cycle_refresh();
@@ -309,6 +358,7 @@ impl AshState {
     }
 
     /// Halve the history time window; no-op in live mode or if already at min.
+    #[allow(dead_code)]
     pub fn zoom_in(&mut self) {
         if let ViewMode::History { from, to } = &self.mode {
             let window = to
@@ -328,6 +378,7 @@ impl AshState {
     }
 
     /// Double the history time window; no-op in live mode or if already at max.
+    #[allow(dead_code)]
     pub fn zoom_out(&mut self) {
         if let ViewMode::History { from, to } = &self.mode {
             let window = to
