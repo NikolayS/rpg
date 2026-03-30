@@ -1092,7 +1092,9 @@ fn render_timeline(
             frame.render_widget(Paragraph::new(cursor_lines), cursor_rect);
 
             // Floating overlay on the timeline showing wait breakdown for this bucket.
-            if let Some(info) = cursor_bucket_info(snapshots, state.bucket_secs(), col_from_right, no_color) {
+            if let Some(info) =
+                cursor_bucket_info(snapshots, state.bucket_secs(), col_from_right, no_color)
+            {
                 render_cursor_overlay(frame, bar_area, cursor_x_offset, &info);
             }
         }
@@ -1192,7 +1194,7 @@ fn render_cursor_overlay(
     let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
     let h = sod / 3600;
     let m = (sod % 3600) / 60;
-    let s = sod % 60;
+    let _s = sod % 60;
     let ts_str = format!("{h:02}:{m:02}");
 
     // Width: wide enough for "█ LWLock:BufferPin  0.00" + borders.
@@ -1221,7 +1223,9 @@ fn render_cursor_overlay(
     };
     let x = x.max(bar_area.x);
     // Anchor to bottom of bar area so timestamp sits at the bottom like the screenshot.
-    let y = bar_area.y.saturating_add(bar_area.height.saturating_sub(overlay_h));
+    let y = bar_area
+        .y
+        .saturating_add(bar_area.height.saturating_sub(overlay_h));
 
     let overlay_rect = ratatui::layout::Rect {
         x,
@@ -1261,14 +1265,8 @@ fn render_cursor_overlay(
         };
         lines.push(Line::from(vec![
             Span::styled("\u{2588} ", Style::default().fg(*color)),
-            Span::styled(
-                format!("{label:<18}"),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(
-                format!("{type_aas:>4.1}"),
-                Style::default().fg(Color::Gray),
-            ),
+            Span::styled(format!("{label:<18}"), Style::default().fg(Color::White)),
+            Span::styled(format!("{type_aas:>4.1}"), Style::default().fg(Color::Gray)),
         ]));
     }
     if has_more {
