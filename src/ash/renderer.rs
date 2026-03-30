@@ -1077,12 +1077,17 @@ fn render_timeline(
                 width: 1,
                 height: bar_area.height,
             };
+            // Render the cursor column as a bright white vertical bar.
+            // We use a full-block █ with inverted colors so it's visible even
+            // when painted over colored █ bars (a plain │ char would be hidden
+            // behind the bar's background fill).
             let cursor_lines: Vec<Line<'static>> = (0..bar_area.height as usize)
                 .map(|_| {
                     Line::from(Span::styled(
-                        "\u{2502}", // │
+                        "\u{2588}", // █  full-block, inverted colors = bright white column
                         Style::default()
-                            .fg(Color::White)
+                            .fg(Color::Black)
+                            .bg(Color::White)
                             .add_modifier(Modifier::BOLD),
                     ))
                 })
