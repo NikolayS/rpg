@@ -113,53 +113,9 @@ pub async fn run_ash(
 
     'outer: loop {
         // 1. Collect snapshot data for this frame.
-        //
-        //    Live mode: take a fresh snapshot and append to the ring buffer.
-        //    History/cursor mode: keep sampling into the ring buffer so returning
-        //    to Live shows current data, but display is frozen on the historical
-        //    slice — we do NOT re-query on every tick.
         let in_history = state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
-
-        let snap_slice: Vec<sampler::AshSnapshot> = match &state.mode {
-            ViewMode::History { from, to } => {
-                let window = to
-                    .duration_since(*from)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .max(1);
-                // TODO: cache history result for ~1s to avoid a DB round-trip
-                // on every frame when the user holds arrow keys to adjust zoom.
-                let v = sampler::query_ash_history(client, window).await;
-                if v.is_empty() {
-                    // Fall back to live ring buffer when history is unavailable.
-                    snapshots.iter().cloned().collect()
-                } else {
-                    v
-                }
-            }
-            ViewMode::Live => {
-                match sampler::live_snapshot(client).await {
-                    Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
-                        // User-supplied --cpu N overrides auto-detected value.
-                        if cpu_override.is_some() {
-                            snap.cpu_count = cpu_override;
-                        }
-                        if snapshots.len() == 600 {
-                            snapshots.pop_front();
-                        }
-                        snapshots.push_back(snap);
-                    }
-                    Ok(sampler::LiveSnapshotResult::Missed) => {
-                        // statement_timeout fired — skip this tick, bump counter.
-                        state.missed_samples = state.missed_samples.saturating_add(1);
-                    }
-                    Err(_) => {
-                        // On transient errors: ring buffer retains prior data; keep looping.
-                    }
-                }
-                snapshots.iter().cloned().collect()
-            }
-        };
+        let snap_slice =
+            collect_frame_snapshots(client, &mut snapshots, &mut state, cpu_override).await;
 
         // 2. Draw frame.
         terminal.draw(|f| {
@@ -238,6 +194,53 @@ pub async fn run_ash(
 // ---------------------------------------------------------------------------
 
 /// Return the number of rows in the current drill-down level.
+/// Collect the snapshot slice to display for this frame.
+///
+/// In Live mode: take a fresh 1-second sample, append to the ring buffer,
+/// and return the ring as a slice.
+/// In History mode: query `pg_ash` for the configured window (falls back to
+/// the live ring when `pg_ash` is unavailable).
+async fn collect_frame_snapshots(
+    client: &Client,
+    snapshots: &mut std::collections::VecDeque<sampler::AshSnapshot>,
+    state: &mut AshState,
+    cpu_override: Option<u32>,
+) -> Vec<sampler::AshSnapshot> {
+    match &state.mode {
+        ViewMode::History { from, to } => {
+            let window = to
+                .duration_since(*from)
+                .unwrap_or_default()
+                .as_secs()
+                .max(1);
+            let v = sampler::query_ash_history(client, window).await;
+            if v.is_empty() {
+                snapshots.iter().cloned().collect()
+            } else {
+                v
+            }
+        }
+        ViewMode::Live => {
+            match sampler::live_snapshot(client).await {
+                Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
+                    if cpu_override.is_some() {
+                        snap.cpu_count = cpu_override;
+                    }
+                    if snapshots.len() == 600 {
+                        snapshots.pop_front();
+                    }
+                    snapshots.push_back(snap);
+                }
+                Ok(sampler::LiveSnapshotResult::Missed) => {
+                    state.missed_samples = state.missed_samples.saturating_add(1);
+                }
+                Err(_) => {}
+            }
+            snapshots.iter().cloned().collect()
+        }
+    }
+}
+
 fn compute_list_len(snapshots: &[sampler::AshSnapshot], state: &AshState) -> usize {
     use state::DrillLevel;
     let Some(snap) = snapshots.last() else {

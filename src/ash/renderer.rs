@@ -1192,10 +1192,9 @@ fn render_cursor_overlay(
     // Build overlay content.
     let secs_in_day = 86400i64;
     let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
-    let h = sod / 3600;
-    let m = (sod % 3600) / 60;
-    let _s = sod % 60;
-    let ts_str = format!("{h:02}:{m:02}");
+    let hour = sod / 3600;
+    let min = (sod % 3600) / 60;
+    let ts_str = format!("{hour:02}:{min:02}");
 
     // Width: wide enough for "█ LWLock:BufferPin  0.00" + borders.
     let overlay_w: u16 = 28;
@@ -1211,7 +1210,10 @@ fn render_cursor_overlay(
         (max_type_rows.saturating_sub(1), true)
     };
     // Height: 2 (borders) + 1 (header) + visible type rows [+ 1 "more" row].
-    let overlay_h: u16 = 2 + 1 + visible_types as u16 + if has_more { 1 } else { 0 };
+    let more_row = u16::from(has_more);
+    let overlay_h: u16 = 3_u16
+        .saturating_add(u16::try_from(visible_types).unwrap_or(u16::MAX))
+        .saturating_add(more_row);
     let overlay_h = overlay_h.min(bar_area.height);
 
     // Position: prefer right of cursor; flip left if it would clip.
