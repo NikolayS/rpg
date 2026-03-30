@@ -233,96 +233,26 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
 /// Produces `Bucket`s whose `by_type` entries are **wait event names** (with
 /// the `"<type>/"` prefix stripped), not wait event types.  Used for the
 /// context-sensitive timeline at `DrillLevel::WaitEvent`.
-fn aggregate_buckets_by_event(
-    snapshots: &[AshSnapshot],
-    selected_type: &str,
-    bucket_secs: u64,
-    max_cols: usize,
-) -> Vec<Bucket> {
-    if snapshots.is_empty() || max_cols == 0 {
-        return Vec::new();
-    }
-    let prefix = format!("{selected_type}/");
-    let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
-    let total = snapshots.len();
-    let remainder = total % step;
-
-    let mut chunks: Vec<&[AshSnapshot]> = Vec::new();
-    let mut offset = 0;
-    if remainder > 0 {
-        chunks.push(&snapshots[..remainder]);
-        offset = remainder;
-    }
-    while offset < total {
-        chunks.push(&snapshots[offset..offset + step]);
-        offset += step;
-    }
-    if chunks.len() > max_cols {
-        let drop = chunks.len() - max_cols;
-        chunks.drain(..drop);
-    }
-
-    let mut global_totals: std::collections::HashMap<String, f64> =
-        std::collections::HashMap::new();
-    for snap in snapshots {
-        for (k, &v) in &snap.by_event {
-            if let Some(ev) = k.strip_prefix(&prefix) {
-                *global_totals.entry(ev.to_owned()).or_insert(0.0) += f64::from(v);
-            }
-        }
-    }
-    let mut global_order: Vec<String> = global_totals.keys().cloned().collect();
-    global_order.sort_by(|a, b| {
-        global_totals[b.as_str()]
-            .partial_cmp(&global_totals[a.as_str()])
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.cmp(b))
-    });
-
-    chunks
-        .into_iter()
-        .map(|chunk| {
-            #[allow(clippy::cast_precision_loss)]
-            let n = chunk.len() as f64;
-            let mut event_sums: std::collections::HashMap<String, f64> =
-                std::collections::HashMap::new();
-            for snap in chunk {
-                for (k, &v) in &snap.by_event {
-                    if let Some(ev) = k.strip_prefix(&prefix) {
-                        *event_sums.entry(ev.to_owned()).or_insert(0.0) += f64::from(v);
-                    }
-                }
-            }
-            let by_type: Vec<(String, f64)> = global_order
-                .iter()
-                .map(|k| {
-                    let aas = event_sums.get(k.as_str()).copied().unwrap_or(0.0) / n;
-                    (k.clone(), aas)
-                })
-                .collect();
-            #[allow(clippy::cast_precision_loss)]
-            let aas: f64 = by_type.iter().map(|(_, v)| v).sum();
-            Bucket { aas, by_type }
-        })
-        .collect()
-}
-
-/// Aggregate snapshots by query label, filtered to `selected_type/selected_event`.
+/// Shared aggregation helper for prefix-filtered, sub-label bucketing.
 ///
-/// Produces `Bucket`s whose `by_type` entries are **query labels** (with the
-/// composite prefix stripped).  Used for the context-sensitive timeline at
-/// `DrillLevel::QueryId`.
-fn aggregate_buckets_by_query(
+/// Both `aggregate_buckets_by_event` and `aggregate_buckets_by_query` reduce
+/// to the same chunking + global-order + per-chunk-sum pattern; only the
+/// key prefix and source map differ.  `get_map` extracts the relevant
+/// `HashMap<String, i32>` from a snapshot for both the global-order pass and
+/// the per-chunk-sum pass.
+fn aggregate_buckets_by_prefix<F>(
     snapshots: &[AshSnapshot],
-    selected_type: &str,
-    selected_event: &str,
+    prefix: &str,
     bucket_secs: u64,
     max_cols: usize,
-) -> Vec<Bucket> {
+    get_map: F,
+) -> Vec<Bucket>
+where
+    F: Fn(&AshSnapshot) -> &std::collections::HashMap<String, u32>,
+{
     if snapshots.is_empty() || max_cols == 0 {
         return Vec::new();
     }
-    let prefix = format!("{selected_type}/{selected_event}/");
     let step = usize::try_from(bucket_secs.max(1)).unwrap_or(usize::MAX);
     let total = snapshots.len();
     let remainder = total % step;
@@ -342,11 +272,12 @@ fn aggregate_buckets_by_query(
         chunks.drain(..drop);
     }
 
+    // Compute a stable global label order (descending total AAS, ties by name).
     let mut global_totals: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
     for snap in snapshots {
-        for (k, &v) in &snap.by_query {
-            if let Some(label) = k.strip_prefix(&prefix) {
+        for (k, &v) in get_map(snap) {
+            if let Some(label) = k.strip_prefix(prefix) {
                 *global_totals.entry(label.to_owned()).or_insert(0.0) += f64::from(v);
             }
         }
@@ -364,19 +295,19 @@ fn aggregate_buckets_by_query(
         .map(|chunk| {
             #[allow(clippy::cast_precision_loss)]
             let n = chunk.len() as f64;
-            let mut query_sums: std::collections::HashMap<String, f64> =
+            let mut sums: std::collections::HashMap<String, f64> =
                 std::collections::HashMap::new();
             for snap in chunk {
-                for (k, &v) in &snap.by_query {
-                    if let Some(label) = k.strip_prefix(&prefix) {
-                        *query_sums.entry(label.to_owned()).or_insert(0.0) += f64::from(v);
+                for (k, &v) in get_map(snap) {
+                    if let Some(label) = k.strip_prefix(prefix) {
+                        *sums.entry(label.to_owned()).or_insert(0.0) += f64::from(v);
                     }
                 }
             }
             let by_type: Vec<(String, f64)> = global_order
                 .iter()
                 .map(|k| {
-                    let aas = query_sums.get(k.as_str()).copied().unwrap_or(0.0) / n;
+                    let aas = sums.get(k.as_str()).copied().unwrap_or(0.0) / n;
                     (k.clone(), aas)
                 })
                 .collect();
@@ -385,6 +316,37 @@ fn aggregate_buckets_by_query(
             Bucket { aas, by_type }
         })
         .collect()
+}
+
+/// Aggregate snapshots by individual wait event, filtered to `selected_type`.
+///
+/// Produces `Bucket`s whose `by_type` entries are wait event names (with the
+/// `"<type>/"` prefix stripped).  Used for the context-sensitive timeline at
+/// `DrillLevel::WaitEvent`.
+fn aggregate_buckets_by_event(
+    snapshots: &[AshSnapshot],
+    selected_type: &str,
+    bucket_secs: u64,
+    max_cols: usize,
+) -> Vec<Bucket> {
+    let prefix = format!("{selected_type}/");
+    aggregate_buckets_by_prefix(snapshots, &prefix, bucket_secs, max_cols, |s| &s.by_event)
+}
+
+/// Aggregate snapshots by query label, filtered to `selected_type/selected_event`.
+///
+/// Produces `Bucket`s whose `by_type` entries are query labels (with the
+/// composite prefix stripped).  Used for the context-sensitive timeline at
+/// `DrillLevel::QueryId`.
+fn aggregate_buckets_by_query(
+    snapshots: &[AshSnapshot],
+    selected_type: &str,
+    selected_event: &str,
+    bucket_secs: u64,
+    max_cols: usize,
+) -> Vec<Bucket> {
+    let prefix = format!("{selected_type}/{selected_event}/");
+    aggregate_buckets_by_prefix(snapshots, &prefix, bucket_secs, max_cols, |s| &s.by_query)
 }
 
 /// One colored segment within a stacked timeline bar.
