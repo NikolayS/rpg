@@ -162,3 +162,12 @@ findings, they are not blocking for this project.
 - Config file (`~/.config/rpg/config.toml`) or environment variables only
 - If you need to demonstrate a key works, show the *result* of using it, not the key itself
 - If a key is accidentally exposed in a comment, rotate it immediately and delete/minimize the comment
+
+## Release checklist
+
+Every time a new version is released (tag + GitHub release), update:
+1. **`Cargo.toml`** — bump `version = "X.Y.Z"`
+2. **`CHANGELOG.md`** — add `## [X.Y.Z] - YYYY-MM-DD` section with Added/Fixed/Changed entries
+3. **`README.md`** — update all `vX.Y.Z` references (clone branch example, release notes link)
+
+Do all three in a single commit: `chore: bump version to X.Y.Z (#PR)` on the release PR or as a follow-up commit before tagging.

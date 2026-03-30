@@ -96,6 +96,10 @@ pub struct AshState {
 
     /// When true, render the color legend overlay (`l` key toggles).
     pub show_legend: bool,
+
+    /// Number of live samples dropped due to `statement_timeout` this session.
+    /// Displayed in the status bar when non-zero.
+    pub missed_samples: u32,
 }
 
 impl AshState {
@@ -110,6 +114,7 @@ impl AshState {
             refresh_secs: 1,
             zoom_level: 1,
             show_legend: false,
+            missed_samples: 0,
         }
     }
 

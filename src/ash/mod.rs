@@ -26,7 +26,7 @@ pub mod state;
 
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -111,7 +111,7 @@ pub async fn run_ash(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    loop {
+    'outer: loop {
         // 1. Collect snapshot data for this frame.
         //
         //    Live mode: take a fresh snapshot and append to the ring buffer.
@@ -135,17 +135,25 @@ pub async fn run_ash(
                 }
             }
             ViewMode::Live => {
-                if let Ok(mut snap) = sampler::live_snapshot(client).await {
-                    // User-supplied --cpu N overrides auto-detected value.
-                    if cpu_override.is_some() {
-                        snap.cpu_count = cpu_override;
+                match sampler::live_snapshot(client).await {
+                    Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
+                        // User-supplied --cpu N overrides auto-detected value.
+                        if cpu_override.is_some() {
+                            snap.cpu_count = cpu_override;
+                        }
+                        if snapshots.len() == 600 {
+                            snapshots.pop_front();
+                        }
+                        snapshots.push_back(snap);
                     }
-                    if snapshots.len() == 600 {
-                        snapshots.pop_front();
+                    Ok(sampler::LiveSnapshotResult::Missed) => {
+                        // statement_timeout fired — skip this tick, bump counter.
+                        state.missed_samples = state.missed_samples.saturating_add(1);
                     }
-                    snapshots.push_back(snap);
+                    Err(_) => {
+                        // On transient errors: ring buffer retains prior data; keep looping.
+                    }
                 }
-                // On transient errors: ring buffer retains prior data; keep looping.
                 snapshots.iter().cloned().collect()
             }
         };
@@ -155,27 +163,50 @@ pub async fn run_ash(
             renderer::draw_frame(f, &snap_slice, &state, no_color);
         })?;
 
-        // 3. Poll crossterm events with timeout = refresh_interval_secs.
-        let timeout = Duration::from_secs(state.refresh_interval_secs);
-        if event::poll(timeout)? {
+        // 3. Drain key events for the full refresh interval without re-sampling.
+        //
+        //    Previously a single event::poll(timeout) meant any key press caused
+        //    an immediate re-sample at the top of the outer loop, producing extra
+        //    data points and skewing the Y-axis. Now we loop until the interval
+        //    elapses, handling as many key events as arrive, then break out to
+        //    take the next scheduled sample.
+        let deadline = Instant::now() + Duration::from_secs(state.refresh_interval_secs);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if !event::poll(remaining)? {
+                // Timeout elapsed — time for the next sample.
+                break;
+            }
             if let Event::Key(key) = event::read()? {
-                // 5. Enter: drill into selected row.
+                // Enter: drill into selected row.
                 if key.code == KeyCode::Enter {
-                    // Compute row data from the current snapshot for drill_into.
                     if let Some(last) = snap_slice.last() {
                         if let Some((wtype, wevent, qid)) = collect_selected_row_data(last, &state)
                         {
                             state.drill_into(&wtype, &wevent, qid);
                         }
                     }
+                    // Redraw immediately after drill-in so the view updates
+                    // without waiting for the next sample tick.
+                    terminal.draw(|f| {
+                        renderer::draw_frame(f, &snap_slice, &state, no_color);
+                    })?;
                     continue;
                 }
 
-                // 4. All other keys go through handle_key; true = exit.
+                // All other keys go through handle_key; true = exit.
                 let list_len = compute_list_len(&snap_slice, &state);
                 if state.handle_key(key, list_len) {
-                    break;
+                    break 'outer;
                 }
+                // Redraw after state change (selection move, zoom, legend toggle)
+                // so the UI feels responsive within the same sample tick.
+                terminal.draw(|f| {
+                    renderer::draw_frame(f, &snap_slice, &state, no_color);
+                })?;
             }
         }
     }

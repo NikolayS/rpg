@@ -9,6 +9,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum time allowed for a single `/ash` sample query (`pg_stat_activity`
+/// or `ash.wait_timeline`).  Matches the same guard used by `pg_ash`'s
+/// per-second `pg_cron` job — fail fast rather than block the TUI.
+///
+/// Future: move to `[ash]` config section so users can tune it.
+/// See: <https://github.com/NikolayS/rpg/issues/771>
+const ASH_QUERY_TIMEOUT_MS: u64 = 500;
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -128,12 +140,28 @@ pub async fn detect_pg_ash(client: &Client) -> PgAshInfo {
     }
 }
 
+/// Outcome of a [`live_snapshot`] call.
+#[derive(Debug)]
+pub enum LiveSnapshotResult {
+    /// A snapshot was taken successfully.
+    Ok(AshSnapshot),
+    /// The query was cancelled by `statement_timeout` — the tick is skipped.
+    /// The TUI should display a brief "missed" indicator rather than blocking.
+    Missed,
+}
+
 /// Take a live snapshot by querying `pg_stat_activity`.
 ///
 /// A single SQL query aggregates all active backends (excluding the current
 /// connection).  The result set is folded in Rust into three views
 /// (`by_type`, `by_event`, `by_query`) without additional round-trips.
-pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
+///
+/// Observer-effect protection: `SET statement_timeout` is applied before the
+/// query (see [`ASH_QUERY_TIMEOUT_MS`], matching the same guard used by
+/// `pg_ash`'s per-second cron job) and reset to 0 afterwards.  If the query
+/// times out the tick is skipped and [`LiveSnapshotResult::Missed`] is
+/// returned instead of blocking the TUI.
+pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult> {
     let sql = "
         select
             case
@@ -152,7 +180,37 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
         order by cnt desc
     ";
 
-    let rows = client.query(sql, &[]).await?;
+    // Observer-effect protection: apply a short statement_timeout so a slow
+    // pg_stat_activity scan fails fast rather than blocking the TUI.
+    //
+    // SET LOCAL requires an active transaction block (it's a no-op outside
+    // one). Use SET + reset instead: set for this query, restore default after.
+    // This is a session-level change but is immediately restored, so it does
+    // not leak across queries in the connection pool.
+    client
+        .execute(
+            &format!("set statement_timeout = '{ASH_QUERY_TIMEOUT_MS}ms'"),
+            &[],
+        )
+        .await?;
+
+    let rows = match client.query(sql, &[]).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Restore statement_timeout before returning — best-effort.
+            let _ = client.execute("set statement_timeout = 0", &[]).await;
+            // statement_timeout fires as SQLSTATE 57014 (query_canceled).
+            // Return Missed so the TUI can display a brief indicator and
+            // continue rather than propagating an error.
+            if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
+                return Ok(LiveSnapshotResult::Missed);
+            }
+            return Err(e.into());
+        }
+    };
+
+    // Restore default timeout after successful query.
+    let _ = client.execute("set statement_timeout = 0", &[]).await;
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -175,7 +233,7 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<AshSnapshot> {
         fold_row(&mut snap, &wtype, &wevent, query_id, &q, count);
     }
 
-    Ok(snap)
+    Ok(LiveSnapshotResult::Ok(snap))
 }
 
 /// Pre-populate the ring buffer with historical snapshots from `pg_ash`.
@@ -222,9 +280,21 @@ async fn query_ash_history_inner(
         order by bucket_start, wait_event"
     );
 
+    // Same observer-effect guard as live_snapshot.
+    let _ = client
+        .execute(
+            &format!("set statement_timeout = '{ASH_QUERY_TIMEOUT_MS}ms'"),
+            &[],
+        )
+        .await;
+
     let rows = match client.query(sql.as_str(), &[]).await {
-        Ok(r) => r,
+        Ok(r) => {
+            let _ = client.execute("set statement_timeout = 0", &[]).await;
+            r
+        }
         Err(e) => {
+            let _ = client.execute("set statement_timeout = 0", &[]).await;
             return Err(anyhow::anyhow!("ash.wait_timeline query failed: {e}"));
         }
     };
