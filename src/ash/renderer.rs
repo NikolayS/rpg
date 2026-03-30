@@ -1197,8 +1197,19 @@ fn render_cursor_overlay(
 
     // Width: wide enough for "█ LWLock:BufferPin  0.00" + borders.
     let overlay_w: u16 = 28;
-    // Height: 1 (header) + 1 (blank) + N wait types + 2 borders.
-    let overlay_h: u16 = 2 + 1 + 1 + info.top_types.len() as u16;
+    // Max rows we can show inside the bar area (leave 2 for borders).
+    let max_inner_h = bar_area.height.saturating_sub(2) as usize;
+    // Reserve 1 row for header; remaining rows for wait types (+1 "more" if truncated).
+    let max_type_rows = max_inner_h.saturating_sub(1);
+    let total_types = info.top_types.len();
+    let (visible_types, has_more) = if total_types <= max_type_rows {
+        (total_types, false)
+    } else {
+        // Keep one row for "+N more" indicator.
+        (max_type_rows.saturating_sub(1), true)
+    };
+    // Height: 2 (borders) + 1 (header) + visible type rows [+ 1 "more" row].
+    let overlay_h: u16 = 2 + 1 + visible_types as u16 + if has_more { 1 } else { 0 };
     let overlay_h = overlay_h.min(bar_area.height);
 
     // Position: prefer right of cursor; flip left if it would clip.
@@ -1241,8 +1252,8 @@ fn render_cursor_overlay(
         ),
     ]));
 
-    // One row per wait type: colored swatch + name + AAS.
-    for (name, type_aas, _pct, color) in &info.top_types {
+    // One row per wait type: colored swatch + name + AAS (truncated to visible_types).
+    for (name, type_aas, _pct, color) in info.top_types.iter().take(visible_types) {
         let label = if name.len() > 18 {
             name[..18].to_owned()
         } else {
@@ -1259,6 +1270,13 @@ fn render_cursor_overlay(
                 Style::default().fg(Color::Gray),
             ),
         ]));
+    }
+    if has_more {
+        let remaining = total_types - visible_types;
+        lines.push(Line::from(Span::styled(
+            format!("  +{remaining} more"),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     frame.render_widget(

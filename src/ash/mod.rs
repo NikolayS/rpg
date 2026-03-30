@@ -115,8 +115,11 @@ pub async fn run_ash(
         // 1. Collect snapshot data for this frame.
         //
         //    Live mode: take a fresh snapshot and append to the ring buffer.
-        //    History mode: fetch from pg_ash; on error or if not installed,
-        //    fall back to the live ring buffer so the TUI never goes blank.
+        //    History/cursor mode: keep sampling into the ring buffer so returning
+        //    to Live shows current data, but display is frozen on the historical
+        //    slice — we do NOT re-query on every tick.
+        let in_history = state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
+
         let snap_slice: Vec<sampler::AshSnapshot> = match &state.mode {
             ViewMode::History { from, to } => {
                 let window = to
@@ -163,21 +166,37 @@ pub async fn run_ash(
             renderer::draw_frame(f, &snap_slice, &state, no_color);
         })?;
 
-        // 3. Drain key events for the full refresh interval without re-sampling.
+        // 3. Drain key events.
+        //
+        //    In History/cursor mode: block indefinitely waiting for a keypress —
+        //    the display is frozen so there's no need for a periodic redraw.
+        //    In Live mode: loop until the refresh interval elapses, then re-sample.
         //
         //    Previously a single event::poll(timeout) meant any key press caused
         //    an immediate re-sample at the top of the outer loop, producing extra
         //    data points and skewing the Y-axis. Now we loop until the interval
         //    elapses, handling as many key events as arrive, then break out to
         //    take the next scheduled sample.
-        let deadline = Instant::now() + Duration::from_secs(state.refresh_interval_secs);
+        let deadline = if in_history {
+            // Frozen: no timeout — wait indefinitely for a keypress.
+            None
+        } else {
+            Some(Instant::now() + Duration::from_secs(state.refresh_interval_secs))
+        };
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
+            let remaining = match deadline {
+                Some(d) => {
+                    let r = d.saturating_duration_since(Instant::now());
+                    if r.is_zero() {
+                        break;
+                    }
+                    r
+                }
+                // History mode: long poll — effectively infinite wait for keypress.
+                None => Duration::from_secs(60),
+            };
             if !event::poll(remaining)? {
-                // Timeout elapsed — time for the next sample.
+                // Timeout elapsed (Live mode) — time for the next sample.
                 break;
             }
             if let Event::Key(key) = event::read()? {

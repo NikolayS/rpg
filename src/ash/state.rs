@@ -150,7 +150,9 @@ impl AshState {
     ///
     /// Shows `b/Esc:back` only when drilled below the top level.
     pub fn hint_line(&self) -> &'static str {
-        if self.is_at_top_level() {
+        if self.pan_offset > 0 {
+            "q:quit  Esc:live  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
+        } else if self.is_at_top_level() {
             "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
         } else {
             "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
@@ -261,8 +263,16 @@ impl AshState {
             return true;
         }
 
-        // Esc: back one drill level, or quit when already at top level.
+        // Esc: if in History/cursor mode, snap back to Live first.
+        // If already Live at top drill level, quit.
         if key.code == KeyCode::Esc {
+            if self.pan_offset > 0 {
+                // Exit pan/cursor mode → return to live view.
+                self.pan_offset = 0;
+                self.cursor_col = None;
+                self.mode = ViewMode::Live;
+                return false;
+            }
             if self.is_at_top_level() {
                 return true;
             }
