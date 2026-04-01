@@ -72,8 +72,7 @@ impl Drop for TerminalGuard {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Entry point. Blocks until the user exits with `q`, `Esc`, or `Ctrl-C`.
-/// Entry point for the `/ash` TUI.
+/// Entry point for the `/ash` TUI. Blocks until the user exits with `q`, `Esc`, or `Ctrl-C`.
 ///
 /// `cpu_override` — explicit vCPU count supplied via `/ash --cpu N`.
 /// When `None`, the sampler tries `pg_proctab`; if unavailable the CPU
@@ -193,7 +192,6 @@ pub async fn run_ash(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the number of rows in the current drill-down level.
 /// Collect the snapshot slice to display for this frame.
 ///
 /// In Live mode: take a fresh 1-second sample, append to the ring buffer,
@@ -241,6 +239,7 @@ async fn collect_frame_snapshots(
     }
 }
 
+/// Return the number of rows in the current drill-down level.
 fn compute_list_len(snapshots: &[sampler::AshSnapshot], state: &AshState) -> usize {
     use state::DrillLevel;
     let Some(snap) = snapshots.last() else {

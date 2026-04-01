@@ -48,13 +48,6 @@ pub enum ViewMode {
     History { from: SystemTime, to: SystemTime },
 }
 
-/// Minimum allowed history window (seconds).
-#[allow(dead_code)]
-const ZOOM_MIN_SECS: u64 = 10;
-/// Maximum allowed history window (seconds).
-#[allow(dead_code)]
-const ZOOM_MAX_SECS: u64 = 3600;
-
 /// Top-level state for the ASH TUI.
 #[derive(Debug)]
 pub struct AshState {
@@ -84,7 +77,7 @@ pub struct AshState {
     pub refresh_secs: u32,
 
     /// Zoom level for bucket aggregation (1–6). Active in both Live and
-    /// History mode. Cycles forward on `→` and backward on `←`.
+    /// History mode. Cycles forward on `]` and backward on `[`.
     ///
     /// | Level | bucket_secs |
     /// |-------|-------------|
@@ -367,46 +360,6 @@ impl AshState {
         self.selected_row = 0;
     }
 
-    /// Halve the history time window; no-op in live mode or if already at min.
-    #[allow(dead_code)]
-    pub fn zoom_in(&mut self) {
-        if let ViewMode::History { from, to } = &self.mode {
-            let window = to
-                .duration_since(*from)
-                .unwrap_or(Duration::from_secs(ZOOM_MIN_SECS));
-            let new_window = window / 2;
-            if new_window.as_secs() >= ZOOM_MIN_SECS {
-                let new_to = *to;
-                let new_from = new_to - new_window;
-                self.mode = ViewMode::History {
-                    from: new_from,
-                    to: new_to,
-                };
-                self.sync_aliases();
-            }
-        }
-    }
-
-    /// Double the history time window; no-op in live mode or if already at max.
-    #[allow(dead_code)]
-    pub fn zoom_out(&mut self) {
-        if let ViewMode::History { from, to } = &self.mode {
-            let window = to
-                .duration_since(*from)
-                .unwrap_or(Duration::from_secs(ZOOM_MIN_SECS));
-            let new_window = window * 2;
-            if new_window.as_secs() <= ZOOM_MAX_SECS {
-                let new_to = *to;
-                let new_from = new_to - new_window;
-                self.mode = ViewMode::History {
-                    from: new_from,
-                    to: new_to,
-                };
-                self.sync_aliases();
-            }
-        }
-    }
-
     /// Cycle refresh interval: 1 -> 5 -> 10 -> 1.
     pub fn cycle_refresh(&mut self) {
         self.refresh_interval_secs = match self.refresh_interval_secs {
@@ -420,11 +373,9 @@ impl AshState {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime};
-
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{AshState, DrillLevel, ViewMode};
+    use super::{AshState, DrillLevel};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -633,68 +584,7 @@ mod tests {
         assert_eq!(s.selected_row, 0);
     }
 
-    // --- zoom_in / zoom_out ---
-
-    fn history_state(window_secs: u64) -> AshState {
-        let to = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let from = to - Duration::from_secs(window_secs);
-        let mut s = AshState::new(false);
-        s.mode = ViewMode::History { from, to };
-        s.is_history = true;
-        s
-    }
-
-    fn window_secs(s: &AshState) -> u64 {
-        if let ViewMode::History { from, to } = s.mode {
-            to.duration_since(from).unwrap_or_default().as_secs()
-        } else {
-            panic!("not in history mode");
-        }
-    }
-
-    #[test]
-    fn zoom_in_halves_window() {
-        let mut s = history_state(60);
-        s.zoom_in();
-        assert_eq!(window_secs(&s), 30);
-    }
-
-    #[test]
-    fn zoom_in_clamps_at_min() {
-        let mut s = history_state(10);
-        s.zoom_in(); // 10/2 = 5 < ZOOM_MIN_SECS → no-op
-        assert_eq!(window_secs(&s), 10);
-    }
-
-    #[test]
-    fn zoom_out_doubles_window() {
-        let mut s = history_state(60);
-        s.zoom_out();
-        assert_eq!(window_secs(&s), 120);
-    }
-
-    #[test]
-    fn zoom_out_clamps_at_max() {
-        let mut s = history_state(3600);
-        s.zoom_out(); // 3600*2 = 7200 > ZOOM_MAX_SECS → no-op
-        assert_eq!(window_secs(&s), 3600);
-    }
-
-    #[test]
-    fn zoom_in_no_op_in_live_mode() {
-        let mut s = AshState::new(false);
-        s.zoom_in(); // should not panic
-        assert!(matches!(s.mode, ViewMode::Live));
-    }
-
-    #[test]
-    fn zoom_out_no_op_in_live_mode() {
-        let mut s = AshState::new(false);
-        s.zoom_out(); // should not panic
-        assert!(matches!(s.mode, ViewMode::Live));
-    }
-
-    /// Zooming via `←`/`→` must keep `refresh_interval_secs` in sync with
+    /// Zooming via `[`/`]` must keep `refresh_interval_secs` in sync with
     /// `bucket_secs`, capped at 60s.
     #[test]
     fn zoom_cycle_syncs_refresh_to_bucket() {
