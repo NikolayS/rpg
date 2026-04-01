@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0] - 2026-04-01
+
+### Added
+
+- **`/ash` history pan with `←`/`→`.** Left arrow pans backward in time (auto-switches Live → History mode); right arrow pans forward and returns to Live when reaching "now". Display freezes during pan so the user can inspect a specific moment. (#774, closes #773)
+- **`/ash` cursor crosshair.** When panning, a bright yellow `▌` line marks the selected column. A floating overlay shows timestamp, total AAS, and a color-coded breakdown of all non-zero wait types for that bucket. (#774)
+- **`/ash` context-sensitive timeline.** At the WaitEvent drill level, the stacked bar chart shows individual wait events within the selected type. At the QueryId level, it shows queries within the selected event. Each sub-dimension uses a deterministic color palette. (#774)
+
+### Changed
+
+- **`/ash` zoom keys reassigned to `[`/`]`.** Frees up `←`/`→` for history pan. Footer hint updated. (#774)
+
 ## [0.9.2] - 2026-03-30
 
 ### Added
