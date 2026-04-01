@@ -72,8 +72,7 @@ impl Drop for TerminalGuard {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Entry point. Blocks until the user exits with `q`, `Esc`, or `Ctrl-C`.
-/// Entry point for the `/ash` TUI.
+/// Entry point for the `/ash` TUI. Blocks until the user exits with `q`, `Esc`, or `Ctrl-C`.
 ///
 /// `cpu_override` — explicit vCPU count supplied via `/ash --cpu N`.
 /// When `None`, the sampler tries `pg_proctab`; if unavailable the CPU
@@ -113,71 +112,46 @@ pub async fn run_ash(
 
     'outer: loop {
         // 1. Collect snapshot data for this frame.
-        //
-        //    Live mode: take a fresh snapshot and append to the ring buffer.
-        //    History mode: fetch from pg_ash; on error or if not installed,
-        //    fall back to the live ring buffer so the TUI never goes blank.
-        let snap_slice: Vec<sampler::AshSnapshot> = match &state.mode {
-            ViewMode::History { from, to } => {
-                let window = to
-                    .duration_since(*from)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .max(1);
-                // TODO: cache history result for ~1s to avoid a DB round-trip
-                // on every frame when the user holds arrow keys to adjust zoom.
-                let v = sampler::query_ash_history(client, window).await;
-                if v.is_empty() {
-                    // Fall back to live ring buffer when history is unavailable.
-                    snapshots.iter().cloned().collect()
-                } else {
-                    v
-                }
-            }
-            ViewMode::Live => {
-                match sampler::live_snapshot(client).await {
-                    Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
-                        // User-supplied --cpu N overrides auto-detected value.
-                        if cpu_override.is_some() {
-                            snap.cpu_count = cpu_override;
-                        }
-                        if snapshots.len() == 600 {
-                            snapshots.pop_front();
-                        }
-                        snapshots.push_back(snap);
-                    }
-                    Ok(sampler::LiveSnapshotResult::Missed) => {
-                        // statement_timeout fired — skip this tick, bump counter.
-                        state.missed_samples = state.missed_samples.saturating_add(1);
-                    }
-                    Err(_) => {
-                        // On transient errors: ring buffer retains prior data; keep looping.
-                    }
-                }
-                snapshots.iter().cloned().collect()
-            }
-        };
+        let snap_slice =
+            collect_frame_snapshots(client, &mut snapshots, &mut state, cpu_override).await;
+        let in_history = state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
 
         // 2. Draw frame.
         terminal.draw(|f| {
             renderer::draw_frame(f, &snap_slice, &state, no_color);
         })?;
 
-        // 3. Drain key events for the full refresh interval without re-sampling.
+        // 3. Drain key events.
+        //
+        //    In History/cursor mode: block indefinitely waiting for a keypress —
+        //    the display is frozen so there's no need for a periodic redraw.
+        //    In Live mode: loop until the refresh interval elapses, then re-sample.
         //
         //    Previously a single event::poll(timeout) meant any key press caused
         //    an immediate re-sample at the top of the outer loop, producing extra
         //    data points and skewing the Y-axis. Now we loop until the interval
         //    elapses, handling as many key events as arrive, then break out to
         //    take the next scheduled sample.
-        let deadline = Instant::now() + Duration::from_secs(state.refresh_interval_secs);
+        let deadline = if in_history {
+            // Frozen: no timeout — wait indefinitely for a keypress.
+            None
+        } else {
+            Some(Instant::now() + Duration::from_secs(state.refresh_interval_secs))
+        };
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
+            let remaining = match deadline {
+                Some(d) => {
+                    let r = d.saturating_duration_since(Instant::now());
+                    if r.is_zero() {
+                        break;
+                    }
+                    r
+                }
+                // History mode: long poll — effectively infinite wait for keypress.
+                None => Duration::from_secs(60),
+            };
             if !event::poll(remaining)? {
-                // Timeout elapsed — time for the next sample.
+                // Timeout elapsed (Live mode) — time for the next sample.
                 break;
             }
             if let Event::Key(key) = event::read()? {
@@ -217,6 +191,53 @@ pub async fn run_ash(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Collect the snapshot slice to display for this frame.
+///
+/// In Live mode: take a fresh 1-second sample, append to the ring buffer,
+/// and return the ring as a slice.
+/// In History mode: query `pg_ash` for the configured window (falls back to
+/// the live ring when `pg_ash` is unavailable).
+async fn collect_frame_snapshots(
+    client: &Client,
+    snapshots: &mut std::collections::VecDeque<sampler::AshSnapshot>,
+    state: &mut AshState,
+    cpu_override: Option<u32>,
+) -> Vec<sampler::AshSnapshot> {
+    match &state.mode {
+        ViewMode::History { from, to } => {
+            let window = to
+                .duration_since(*from)
+                .unwrap_or_default()
+                .as_secs()
+                .max(1);
+            let v = sampler::query_ash_history(client, window).await;
+            if v.is_empty() {
+                snapshots.iter().cloned().collect()
+            } else {
+                v
+            }
+        }
+        ViewMode::Live => {
+            match sampler::live_snapshot(client).await {
+                Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
+                    if cpu_override.is_some() {
+                        snap.cpu_count = cpu_override;
+                    }
+                    if snapshots.len() == 600 {
+                        snapshots.pop_front();
+                    }
+                    snapshots.push_back(snap);
+                }
+                Ok(sampler::LiveSnapshotResult::Missed) => {
+                    state.missed_samples = state.missed_samples.saturating_add(1);
+                }
+                Err(_) => {}
+            }
+            snapshots.iter().cloned().collect()
+        }
+    }
+}
 
 /// Return the number of rows in the current drill-down level.
 fn compute_list_len(snapshots: &[sampler::AshSnapshot], state: &AshState) -> usize {

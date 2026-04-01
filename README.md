@@ -35,14 +35,14 @@ Single binary, no dependencies, cross-platform.
 Build the latest stable release from source (requires Rust 1.85+):
 
 ```bash
-git clone --branch v0.9.2 --depth 1 https://github.com/NikolayS/rpg.git
+git clone --branch v0.10.0 --depth 1 https://github.com/NikolayS/rpg.git
 cd rpg
 cargo build --release
 sudo cp ./target/release/rpg /usr/local/bin/
 ```
 
 > **Note:** `main` is under active development and may be unstable. Pin to a
-> release tag (e.g. `v0.9.2`) for a known-good build. Release notes:
+> release tag (e.g. `v0.10.0`) for a known-good build. Release notes:
 > [github.com/NikolayS/rpg/releases](https://github.com/NikolayS/rpg/releases)
 
 ## Connect

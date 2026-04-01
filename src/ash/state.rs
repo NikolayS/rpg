@@ -48,11 +48,6 @@ pub enum ViewMode {
     History { from: SystemTime, to: SystemTime },
 }
 
-/// Minimum allowed history window (seconds).
-const ZOOM_MIN_SECS: u64 = 10;
-/// Maximum allowed history window (seconds).
-const ZOOM_MAX_SECS: u64 = 3600;
-
 /// Top-level state for the ASH TUI.
 #[derive(Debug)]
 pub struct AshState {
@@ -82,7 +77,7 @@ pub struct AshState {
     pub refresh_secs: u32,
 
     /// Zoom level for bucket aggregation (1–6). Active in both Live and
-    /// History mode. Cycles forward on `→` and backward on `←`.
+    /// History mode. Cycles forward on `]` and backward on `[`.
     ///
     /// | Level | bucket_secs |
     /// |-------|-------------|
@@ -100,6 +95,18 @@ pub struct AshState {
     /// Number of live samples dropped due to `statement_timeout` this session.
     /// Displayed in the status bar when non-zero.
     pub missed_samples: u32,
+
+    /// Cursor column index from the right of the timeline.
+    ///
+    /// `Some(n)` means the cursor line is drawn `n` columns from the right
+    /// edge of the bar area.  `None` means no cursor is shown (Live mode).
+    pub cursor_col: Option<usize>,
+
+    /// How many buckets the timeline has been panned back from "now".
+    ///
+    /// `0` = live end (cursor hidden, Live mode).  Incremented by `pan_left`,
+    /// decremented by `pan_right`.  Resets to `0` when returning to Live mode.
+    pub pan_offset: i64,
 }
 
 impl AshState {
@@ -115,6 +122,8 @@ impl AshState {
             zoom_level: 1,
             show_legend: false,
             missed_samples: 0,
+            cursor_col: None,
+            pan_offset: 0,
         }
     }
 
@@ -132,12 +141,19 @@ impl AshState {
 
     /// Context-sensitive key hint line for the footer.
     ///
-    /// Shows `b/Esc:back` only when drilled below the top level.
+    /// Three states:
+    /// - Panning (`pan_offset > 0`): Esc returns to live; show `b:back` if drilled.
+    /// - Top level, not panning: q/Esc both quit.
+    /// - Drilled below top level, not panning: Esc/b go back one level.
     pub fn hint_line(&self) -> &'static str {
-        if self.is_at_top_level() {
-            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh  l:legend"
+        if self.pan_offset > 0 && !self.is_at_top_level() {
+            "q:quit  b:back  Esc:live  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
+        } else if self.pan_offset > 0 {
+            "q:quit  Esc:live  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
+        } else if self.is_at_top_level() {
+            "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
         } else {
-            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  \u{2190}\u{2192}:zoom  r:refresh  l:legend"
+            "q:quit  Esc/b:back  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
         }
     }
 
@@ -180,6 +196,41 @@ impl AshState {
         self.sync_refresh_to_zoom();
     }
 
+    /// Pan the timeline one bucket to the left (into the past).
+    ///
+    /// Switches from Live to History mode on the first press, freezing the ring
+    /// buffer so new samples are not appended while the user scrubs history.
+    pub fn pan_left(&mut self) {
+        if matches!(self.mode, ViewMode::Live) {
+            // Initialise a non-zero window so the history query returns data.
+            // Use refresh_interval_secs * 600 (the live ring buffer depth) as
+            // a reasonable starting window; minimum 60 s.
+            let now = SystemTime::now();
+            let window_secs = (self.refresh_interval_secs * 600).max(60);
+            let from = now - Duration::from_secs(window_secs);
+            self.mode = ViewMode::History { from, to: now };
+        }
+        self.pan_offset += 1;
+        self.cursor_col = usize::try_from(self.pan_offset).ok();
+        self.sync_aliases();
+    }
+
+    /// Pan the timeline one bucket to the right (towards the present).
+    ///
+    /// Returns to Live mode and clears the cursor when the pan reaches "now".
+    pub fn pan_right(&mut self) {
+        if self.pan_offset > 0 {
+            self.pan_offset -= 1;
+        }
+        if self.pan_offset == 0 {
+            self.mode = ViewMode::Live;
+            self.cursor_col = None;
+        } else {
+            self.cursor_col = usize::try_from(self.pan_offset).ok();
+        }
+        self.sync_aliases();
+    }
+
     /// Set `refresh_interval_secs` to match `bucket_secs` so the live
     /// sampling interval equals the display bucket granularity.
     ///
@@ -210,8 +261,16 @@ impl AshState {
             return true;
         }
 
-        // Esc: back one drill level, or quit when already at top level.
+        // Esc: if in History/cursor mode, snap back to Live first.
+        // If already Live at top drill level, quit.
         if key.code == KeyCode::Esc {
+            if self.pan_offset > 0 {
+                // Exit pan/cursor mode → return to live view.
+                self.pan_offset = 0;
+                self.cursor_col = None;
+                self.mode = ViewMode::Live;
+                return false;
+            }
             if self.is_at_top_level() {
                 return true;
             }
@@ -234,19 +293,17 @@ impl AshState {
             KeyCode::Char('b') => {
                 self.go_back();
             }
-            KeyCode::Left => {
+            KeyCode::Char('[') => {
                 self.zoom_cycle_back();
-                // Also shrink the History window when in History mode.
-                if matches!(self.mode, ViewMode::History { .. }) {
-                    self.zoom_in();
-                }
+            }
+            KeyCode::Char(']') => {
+                self.zoom_cycle_forward();
+            }
+            KeyCode::Left => {
+                self.pan_left();
             }
             KeyCode::Right => {
-                self.zoom_cycle_forward();
-                // Also expand the History window when in History mode.
-                if matches!(self.mode, ViewMode::History { .. }) {
-                    self.zoom_out();
-                }
+                self.pan_right();
             }
             KeyCode::Char('r') => {
                 self.cycle_refresh();
@@ -308,44 +365,6 @@ impl AshState {
         self.selected_row = 0;
     }
 
-    /// Halve the history time window; no-op in live mode or if already at min.
-    pub fn zoom_in(&mut self) {
-        if let ViewMode::History { from, to } = &self.mode {
-            let window = to
-                .duration_since(*from)
-                .unwrap_or(Duration::from_secs(ZOOM_MIN_SECS));
-            let new_window = window / 2;
-            if new_window.as_secs() >= ZOOM_MIN_SECS {
-                let new_to = *to;
-                let new_from = new_to - new_window;
-                self.mode = ViewMode::History {
-                    from: new_from,
-                    to: new_to,
-                };
-                self.sync_aliases();
-            }
-        }
-    }
-
-    /// Double the history time window; no-op in live mode or if already at max.
-    pub fn zoom_out(&mut self) {
-        if let ViewMode::History { from, to } = &self.mode {
-            let window = to
-                .duration_since(*from)
-                .unwrap_or(Duration::from_secs(ZOOM_MIN_SECS));
-            let new_window = window * 2;
-            if new_window.as_secs() <= ZOOM_MAX_SECS {
-                let new_to = *to;
-                let new_from = new_to - new_window;
-                self.mode = ViewMode::History {
-                    from: new_from,
-                    to: new_to,
-                };
-                self.sync_aliases();
-            }
-        }
-    }
-
     /// Cycle refresh interval: 1 -> 5 -> 10 -> 1.
     pub fn cycle_refresh(&mut self) {
         self.refresh_interval_secs = match self.refresh_interval_secs {
@@ -359,8 +378,6 @@ impl AshState {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime};
-
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{AshState, DrillLevel, ViewMode};
@@ -572,68 +589,7 @@ mod tests {
         assert_eq!(s.selected_row, 0);
     }
 
-    // --- zoom_in / zoom_out ---
-
-    fn history_state(window_secs: u64) -> AshState {
-        let to = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let from = to - Duration::from_secs(window_secs);
-        let mut s = AshState::new(false);
-        s.mode = ViewMode::History { from, to };
-        s.is_history = true;
-        s
-    }
-
-    fn window_secs(s: &AshState) -> u64 {
-        if let ViewMode::History { from, to } = s.mode {
-            to.duration_since(from).unwrap_or_default().as_secs()
-        } else {
-            panic!("not in history mode");
-        }
-    }
-
-    #[test]
-    fn zoom_in_halves_window() {
-        let mut s = history_state(60);
-        s.zoom_in();
-        assert_eq!(window_secs(&s), 30);
-    }
-
-    #[test]
-    fn zoom_in_clamps_at_min() {
-        let mut s = history_state(10);
-        s.zoom_in(); // 10/2 = 5 < ZOOM_MIN_SECS → no-op
-        assert_eq!(window_secs(&s), 10);
-    }
-
-    #[test]
-    fn zoom_out_doubles_window() {
-        let mut s = history_state(60);
-        s.zoom_out();
-        assert_eq!(window_secs(&s), 120);
-    }
-
-    #[test]
-    fn zoom_out_clamps_at_max() {
-        let mut s = history_state(3600);
-        s.zoom_out(); // 3600*2 = 7200 > ZOOM_MAX_SECS → no-op
-        assert_eq!(window_secs(&s), 3600);
-    }
-
-    #[test]
-    fn zoom_in_no_op_in_live_mode() {
-        let mut s = AshState::new(false);
-        s.zoom_in(); // should not panic
-        assert!(matches!(s.mode, ViewMode::Live));
-    }
-
-    #[test]
-    fn zoom_out_no_op_in_live_mode() {
-        let mut s = AshState::new(false);
-        s.zoom_out(); // should not panic
-        assert!(matches!(s.mode, ViewMode::Live));
-    }
-
-    /// Zooming via `←`/`→` must keep `refresh_interval_secs` in sync with
+    /// Zooming via `[`/`]` must keep `refresh_interval_secs` in sync with
     /// `bucket_secs`, capped at 60s.
     #[test]
     fn zoom_cycle_syncs_refresh_to_bucket() {
@@ -668,5 +624,147 @@ mod tests {
 
         s.zoom_cycle_back(); // back to level 1 → bucket_secs=1
         assert_eq!(s.refresh_interval_secs, 1);
+    }
+
+    // --- pan_left / pan_right ---
+
+    #[test]
+    fn pan_left_transitions_to_history() {
+        let mut s = AshState::new(false);
+        assert!(matches!(s.mode, ViewMode::Live));
+        assert_eq!(s.pan_offset, 0);
+
+        s.pan_left();
+
+        assert_eq!(s.pan_offset, 1);
+        assert_eq!(s.cursor_col, Some(1));
+        assert!(matches!(s.mode, ViewMode::History { .. }));
+        assert!(s.is_history);
+    }
+
+    #[test]
+    fn pan_left_increments_offset() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        s.pan_left();
+        s.pan_left();
+        assert_eq!(s.pan_offset, 3);
+        assert_eq!(s.cursor_col, Some(3));
+    }
+
+    #[test]
+    fn pan_right_decrements_offset() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        s.pan_left();
+        s.pan_left();
+        s.pan_right();
+        assert_eq!(s.pan_offset, 2);
+        assert_eq!(s.cursor_col, Some(2));
+        assert!(matches!(s.mode, ViewMode::History { .. }));
+    }
+
+    #[test]
+    fn pan_right_returns_to_live() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        assert!(matches!(s.mode, ViewMode::History { .. }));
+
+        s.pan_right();
+        assert_eq!(s.pan_offset, 0);
+        assert_eq!(s.cursor_col, None);
+        assert!(matches!(s.mode, ViewMode::Live));
+        assert!(!s.is_history);
+    }
+
+    #[test]
+    fn pan_right_noop_at_zero() {
+        let mut s = AshState::new(false);
+        s.pan_right();
+        assert_eq!(s.pan_offset, 0);
+        assert!(matches!(s.mode, ViewMode::Live));
+    }
+
+    // --- Esc returns to live ---
+
+    #[test]
+    fn esc_returns_to_live_when_panning() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        s.pan_left();
+        s.pan_left();
+        assert_eq!(s.pan_offset, 3);
+
+        let exit = s.handle_key(key(KeyCode::Esc), 5);
+        assert!(!exit, "Esc should not exit when panning");
+        assert_eq!(s.pan_offset, 0);
+        assert_eq!(s.cursor_col, None);
+        assert!(matches!(s.mode, ViewMode::Live));
+    }
+
+    #[test]
+    fn esc_returns_to_live_before_drill_back() {
+        let mut s = AshState::new(false);
+        s.drill_into("IO", "DataFileRead", None);
+        s.pan_left();
+        s.pan_left();
+
+        // Esc should clear pan first, not go back one drill level.
+        let exit = s.handle_key(key(KeyCode::Esc), 5);
+        assert!(!exit);
+        assert_eq!(s.pan_offset, 0);
+        assert!(matches!(s.level, DrillLevel::WaitEvent { .. }));
+    }
+
+    // --- hint_line ---
+
+    #[test]
+    fn hint_line_top_level() {
+        let s = AshState::new(false);
+        assert!(s.hint_line().contains("q/Esc:quit"));
+    }
+
+    #[test]
+    fn hint_line_panning() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        assert!(s.hint_line().contains("Esc:live"));
+        assert!(!s.hint_line().contains("b:back"));
+    }
+
+    #[test]
+    fn hint_line_drilled() {
+        let mut s = AshState::new(false);
+        s.drill_into("IO", "DataFileRead", None);
+        assert!(s.hint_line().contains("Esc/b:back"));
+    }
+
+    #[test]
+    fn hint_line_panning_and_drilled() {
+        let mut s = AshState::new(false);
+        s.drill_into("IO", "DataFileRead", None);
+        s.pan_left();
+        let hint = s.hint_line();
+        assert!(hint.contains("Esc:live"));
+        assert!(hint.contains("b:back"));
+    }
+
+    // --- key dispatch: Left/Right ---
+
+    #[test]
+    fn left_key_pans_left() {
+        let mut s = AshState::new(false);
+        s.handle_key(key(KeyCode::Left), 5);
+        assert_eq!(s.pan_offset, 1);
+        assert!(s.is_history);
+    }
+
+    #[test]
+    fn right_key_pans_right() {
+        let mut s = AshState::new(false);
+        s.handle_key(key(KeyCode::Left), 5);
+        s.handle_key(key(KeyCode::Right), 5);
+        assert_eq!(s.pan_offset, 0);
+        assert!(!s.is_history);
     }
 }
