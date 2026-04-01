@@ -141,9 +141,14 @@ impl AshState {
 
     /// Context-sensitive key hint line for the footer.
     ///
-    /// Shows `b/Esc:back` only when drilled below the top level.
+    /// Three states:
+    /// - Panning (`pan_offset > 0`): Esc returns to live; show `b:back` if drilled.
+    /// - Top level, not panning: q/Esc both quit.
+    /// - Drilled below top level, not panning: Esc/b go back one level.
     pub fn hint_line(&self) -> &'static str {
-        if self.pan_offset > 0 {
+        if self.pan_offset > 0 && !self.is_at_top_level() {
+            "q:quit  b:back  Esc:live  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
+        } else if self.pan_offset > 0 {
             "q:quit  Esc:live  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
         } else if self.is_at_top_level() {
             "q/Esc:quit  \u{2191}\u{2193}:select  Enter:drill  [/]:zoom  \u{2190}\u{2192}:pan  r:refresh  l:legend"
@@ -375,7 +380,7 @@ impl AshState {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{AshState, DrillLevel};
+    use super::{AshState, DrillLevel, ViewMode};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -619,5 +624,150 @@ mod tests {
 
         s.zoom_cycle_back(); // back to level 1 → bucket_secs=1
         assert_eq!(s.refresh_interval_secs, 1);
+    }
+
+    // --- pan_left / pan_right ---
+
+    #[test]
+    fn pan_left_transitions_to_history() {
+        let mut s = AshState::new(false);
+        assert!(matches!(s.mode, ViewMode::Live));
+        assert_eq!(s.pan_offset, 0);
+
+        s.pan_left();
+
+        assert_eq!(s.pan_offset, 1);
+        assert_eq!(s.cursor_col, Some(1));
+        assert!(matches!(s.mode, ViewMode::History { .. }));
+        assert!(s.is_history);
+    }
+
+    #[test]
+    fn pan_left_increments_offset() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        s.pan_left();
+        s.pan_left();
+        assert_eq!(s.pan_offset, 3);
+        assert_eq!(s.cursor_col, Some(3));
+    }
+
+    #[test]
+    fn pan_right_decrements_offset() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        s.pan_left();
+        s.pan_left();
+        s.pan_right();
+        assert_eq!(s.pan_offset, 2);
+        assert_eq!(s.cursor_col, Some(2));
+        assert!(matches!(s.mode, ViewMode::History { .. }));
+    }
+
+    #[test]
+    fn pan_right_returns_to_live() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        assert!(matches!(s.mode, ViewMode::History { .. }));
+
+        s.pan_right();
+        assert_eq!(s.pan_offset, 0);
+        assert_eq!(s.cursor_col, None);
+        assert!(matches!(s.mode, ViewMode::Live));
+        assert!(!s.is_history);
+    }
+
+    #[test]
+    fn pan_right_noop_at_zero() {
+        let mut s = AshState::new(false);
+        s.pan_right();
+        assert_eq!(s.pan_offset, 0);
+        assert!(matches!(s.mode, ViewMode::Live));
+    }
+
+    // --- Esc returns to live ---
+
+    #[test]
+    fn esc_returns_to_live_when_panning() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        s.pan_left();
+        s.pan_left();
+        assert_eq!(s.pan_offset, 3);
+
+        let exit = s.handle_key(key(KeyCode::Esc), 5);
+        assert!(!exit, "Esc should not exit when panning");
+        assert_eq!(s.pan_offset, 0);
+        assert_eq!(s.cursor_col, None);
+        assert!(matches!(s.mode, ViewMode::Live));
+    }
+
+    #[test]
+    fn esc_returns_to_live_before_drill_back() {
+        let mut s = AshState::new(false);
+        s.drill_into("IO", "DataFileRead", None);
+        s.pan_left();
+        s.pan_left();
+
+        // Esc should clear pan first, not go back one drill level.
+        let exit = s.handle_key(key(KeyCode::Esc), 5);
+        assert!(!exit);
+        assert_eq!(s.pan_offset, 0);
+        assert!(matches!(
+            s.level,
+            DrillLevel::WaitEvent { .. }
+        ));
+    }
+
+    // --- hint_line ---
+
+    #[test]
+    fn hint_line_top_level() {
+        let s = AshState::new(false);
+        assert!(s.hint_line().contains("q/Esc:quit"));
+    }
+
+    #[test]
+    fn hint_line_panning() {
+        let mut s = AshState::new(false);
+        s.pan_left();
+        assert!(s.hint_line().contains("Esc:live"));
+        assert!(!s.hint_line().contains("b:back"));
+    }
+
+    #[test]
+    fn hint_line_drilled() {
+        let mut s = AshState::new(false);
+        s.drill_into("IO", "DataFileRead", None);
+        assert!(s.hint_line().contains("Esc/b:back"));
+    }
+
+    #[test]
+    fn hint_line_panning_and_drilled() {
+        let mut s = AshState::new(false);
+        s.drill_into("IO", "DataFileRead", None);
+        s.pan_left();
+        let hint = s.hint_line();
+        assert!(hint.contains("Esc:live"));
+        assert!(hint.contains("b:back"));
+    }
+
+    // --- key dispatch: Left/Right ---
+
+    #[test]
+    fn left_key_pans_left() {
+        let mut s = AshState::new(false);
+        s.handle_key(key(KeyCode::Left), 5);
+        assert_eq!(s.pan_offset, 1);
+        assert!(s.is_history);
+    }
+
+    #[test]
+    fn right_key_pans_right() {
+        let mut s = AshState::new(false);
+        s.handle_key(key(KeyCode::Left), 5);
+        s.handle_key(key(KeyCode::Right), 5);
+        assert_eq!(s.pan_offset, 0);
+        assert!(!s.is_history);
     }
 }

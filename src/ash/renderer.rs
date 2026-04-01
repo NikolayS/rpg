@@ -228,17 +228,12 @@ fn aggregate_buckets(snapshots: &[AshSnapshot], bucket_secs: u64, max_cols: usiz
         .collect()
 }
 
-/// Aggregate snapshots by individual wait event, filtered to `selected_type`.
-///
-/// Produces `Bucket`s whose `by_type` entries are **wait event names** (with
-/// the `"<type>/"` prefix stripped), not wait event types.  Used for the
-/// context-sensitive timeline at `DrillLevel::WaitEvent`.
 /// Shared aggregation helper for prefix-filtered, sub-label bucketing.
 ///
 /// Both `aggregate_buckets_by_event` and `aggregate_buckets_by_query` reduce
 /// to the same chunking + global-order + per-chunk-sum pattern; only the
 /// key prefix and source map differ.  `get_map` extracts the relevant
-/// `HashMap<String, i32>` from a snapshot for both the global-order pass and
+/// `HashMap<String, u32>` from a snapshot for both the global-order pass and
 /// the per-chunk-sum pass.
 fn aggregate_buckets_by_prefix<F>(
     snapshots: &[AshSnapshot],
@@ -1111,7 +1106,7 @@ struct CursorInfo {
     ts: i64,
     /// Average active sessions across the bucket.
     aas: f64,
-    /// Top-3 wait types: `(name, aas, pct_of_total, color)`.
+    /// All non-zero wait types sorted by AAS descending: `(name, aas, pct_of_total, color)`.
     top_types: Vec<(String, f64, f64, Color)>,
 }
 
@@ -1260,10 +1255,9 @@ fn render_cursor_overlay(
 
     // One row per wait type: colored swatch + name + AAS (truncated to visible_types).
     for (name, type_aas, _pct, color) in info.top_types.iter().take(visible_types) {
-        let label = if name.len() > 18 {
-            name[..18].to_owned()
-        } else {
-            name.clone()
+        let label = match name.char_indices().nth(18) {
+            Some((idx, _)) => name[..idx].to_owned(),
+            None => name.clone(),
         };
         lines.push(Line::from(vec![
             Span::styled("\u{2588} ", Style::default().fg(*color)),
@@ -1295,7 +1289,7 @@ fn render_cursor_infobox(frame: &mut Frame, area: ratatui::layout::Rect, info: &
     frame.render_widget(block, area);
 
     // Format the bucket timestamp as HH:MM:SS UTC.
-    // ash.epoch = 2026-01-01 00:00:00 UTC = 1_735_689_600 Unix seconds.
+    // ash.epoch = 2025-01-01 00:00:00 UTC = 1_735_689_600 Unix seconds.
     // That is an exact multiple of 86400, so `ts % 86400` gives the correct
     // seconds-since-midnight regardless of whether ts is relative to ash.epoch
     // or to Unix epoch — the HH:MM:SS result is identical.

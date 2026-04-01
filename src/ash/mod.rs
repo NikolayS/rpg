@@ -112,9 +112,9 @@ pub async fn run_ash(
 
     'outer: loop {
         // 1. Collect snapshot data for this frame.
-        let in_history = state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
         let snap_slice =
             collect_frame_snapshots(client, &mut snapshots, &mut state, cpu_override).await;
+        let in_history = state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
 
         // 2. Draw frame.
         terminal.draw(|f| {
