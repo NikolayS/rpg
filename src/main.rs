@@ -35,6 +35,14 @@ mod pattern;
 mod query;
 mod repl;
 mod report;
+#[allow(
+    clippy::all,
+    dead_code,
+    unused_imports,
+    clippy::pedantic,
+    clippy::nursery
+)]
+mod rpg;
 mod safety;
 mod session;
 mod session_store;

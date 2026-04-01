@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.1] - 2026-04-01
+
+### Added
+
+- **`/rpg` — The Haunted Cluster.** A secret PostgreSQL text adventure Easter egg. Fight the Seq Scan Ogre, solve DBA puzzles, and defeat the Absent Daemon before XID wraparound destroys the cluster. Type `/rpg` at the prompt to play.
+
 ## [0.10.0] - 2026-04-01
 
 ### Added
