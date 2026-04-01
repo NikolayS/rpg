@@ -81,7 +81,13 @@ pub fn run_combat(player: &mut Player, enemy: &mut Enemy) -> CombatResult {
             print_info(&format!("   You attack for {} damage.", dmg));
         } else if cmd.starts_with("use ") {
             let item_name = cmd.trim_start_matches("use ").trim();
-            let used = use_item_combat(player, enemy, item_name, &mut vacuum_full_stun, &mut player_stunned);
+            let used = use_item_combat(
+                player,
+                enemy,
+                item_name,
+                &mut vacuum_full_stun,
+                &mut player_stunned,
+            );
             if !used {
                 print_warn("   No such item in your inventory.");
                 continue; // don't advance enemy turn
