@@ -958,12 +958,17 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
     };
 
     // Build a flat char buffer, then turn it into a styled Line.
+    // Labels are right-aligned to match the bar rendering (bars occupy
+    // the rightmost `visible` columns with left padding).
     let mut buf: Vec<char> = vec![' '; w];
+    let pad = w.saturating_sub(visible);
 
-    // Place left label at col 0.
+    // Place left label at the leftmost bar column.
+    let left_col = pad;
     for (i, c) in left_label.chars().enumerate() {
-        if i < w {
-            buf[i] = c;
+        let col = left_col + i;
+        if col < w {
+            buf[col] = c;
         }
     }
     // Place right label flush-right.
@@ -974,10 +979,11 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
             buf[col] = c;
         }
     }
-    // Place mid label only if it won't overlap left/right.
+    // Place mid label between left and right, only if it won't overlap.
+    let bar_mid_col = pad + visible / 2;
     if w >= min_w_for_mid && !mid_label.is_empty() {
-        let mid_col = w / 2 - label_w / 2;
-        let overlap_left = mid_col < label_w + 1;
+        let mid_col = bar_mid_col.saturating_sub(label_w / 2);
+        let overlap_left = mid_col < left_col + label_w + 1;
         let overlap_right = mid_col + label_w + 1 >= right_start;
         if !overlap_left && !overlap_right {
             for (i, c) in mid_label.chars().enumerate() {
@@ -1189,7 +1195,8 @@ fn render_cursor_overlay(
     let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
     let hour = sod / 3600;
     let min = (sod % 3600) / 60;
-    let ts_str = format!("{hour:02}:{min:02}");
+    let sec = sod % 60;
+    let ts_str = format!("{hour:02}:{min:02}:{sec:02}");
 
     // Width: wide enough for "█ LWLock:BufferPin  0.00" + borders.
     let overlay_w: u16 = 28;

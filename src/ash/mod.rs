@@ -181,6 +181,14 @@ pub async fn run_ash(
                 terminal.draw(|f| {
                     renderer::draw_frame(f, &snap_slice, &state, no_color);
                 })?;
+                // If we just transitioned from History/cursor → Live (e.g. Esc),
+                // break the inner loop so the outer loop recomputes `in_history`
+                // and sets a proper deadline instead of the 60s poll.
+                let still_in_history =
+                    state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
+                if in_history && !still_in_history {
+                    break;
+                }
             }
         }
     }
