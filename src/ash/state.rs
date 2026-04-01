@@ -713,10 +713,7 @@ mod tests {
         let exit = s.handle_key(key(KeyCode::Esc), 5);
         assert!(!exit);
         assert_eq!(s.pan_offset, 0);
-        assert!(matches!(
-            s.level,
-            DrillLevel::WaitEvent { .. }
-        ));
+        assert!(matches!(s.level, DrillLevel::WaitEvent { .. }));
     }
 
     // --- hint_line ---
