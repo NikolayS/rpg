@@ -1012,7 +1012,7 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
     }
 
     let s: String = buf.into_iter().collect();
-    Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)))
+    Line::from(Span::styled(s, Style::default().fg(Color::Gray)))
 }
 
 fn render_timeline(
