@@ -449,6 +449,7 @@ fn bucket_segments(
     segs
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_timeline_lines(
     snapshots: &[AshSnapshot],
     state: &AshState,
@@ -560,18 +561,36 @@ fn build_timeline_lines(
         }
 
         // One span per column.
-        for segs in &col_segments {
+        for (col_idx, segs) in col_segments.iter().enumerate() {
+            // Is this the cursor column? (cursor_col counts from right)
+            let is_cursor = state.cursor_col.is_some_and(|c| {
+                let n = col_segments.len();
+                col_idx == n.saturating_sub(1 + c)
+            });
+
             // Find which segment covers this row, if any.
             let seg = segs
                 .iter()
                 .find(|s| row_from_bottom >= s.bottom && row_from_bottom <= s.top);
 
-            let (ch, style) = if let Some(s) = seg {
-                ("\u{2588}".to_owned(), Style::default().fg(s.color)) // █ filled
+            let (ch, style) = if is_cursor {
+                if let Some(s) = seg {
+                    // ▐ right half block: left half = bg (white cursor line),
+                    // right half = fg (bar color preserved).
+                    (
+                        "\u{2590}",
+                        Style::default().fg(s.color).bg(Color::White),
+                    )
+                } else {
+                    // Empty cell in cursor column: thin white line.
+                    ("\u{2502}", Style::default().fg(Color::White)) // │
+                }
+            } else if let Some(s) = seg {
+                ("\u{2588}", Style::default().fg(s.color)) // █ filled
             } else if is_cpu_line {
-                ("\u{2500}".to_owned(), Style::default().fg(cpu_line_color)) // ─
+                ("\u{2500}", Style::default().fg(cpu_line_color)) // ─
             } else {
-                (" ".to_owned(), Style::default())
+                (" ", Style::default())
             };
 
             spans.push(Span::styled(ch, style));
@@ -1064,35 +1083,12 @@ fn render_timeline(
         render_legend(frame, bar_area, no_color);
     }
 
-    // Cursor crosshair — vertical │ line at cursor_col columns from the right.
+    // Cursor floating overlay — positioned to the LEFT of the cursor column.
     if let Some(col_from_right) = state.cursor_col {
         let bar_w = bar_area.width as usize;
-        // Only draw when the cursor column is within the visible bar area.
-        // col_from_right counts from the right edge (0 = rightmost column).
-        let cursor_x_in_bar = bar_w.saturating_sub(1 + col_from_right);
         if col_from_right < bar_w {
+            let cursor_x_in_bar = bar_w.saturating_sub(1 + col_from_right);
             let cursor_x_offset = u16::try_from(cursor_x_in_bar).unwrap_or(u16::MAX);
-            let cursor_rect = ratatui::layout::Rect {
-                x: bar_area.x.saturating_add(cursor_x_offset),
-                y: bar_area.y,
-                width: 1,
-                height: bar_area.height,
-            };
-            // Render the cursor as a half-block ▌ in bright yellow — visually
-            // narrow (~50% cell width) but high-contrast against any wait color.
-            let cursor_lines: Vec<Line<'static>> = (0..bar_area.height as usize)
-                .map(|_| {
-                    Line::from(Span::styled(
-                        "\u{258c}", // ▌  left half-block
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(cursor_lines), cursor_rect);
-
-            // Floating overlay on the timeline showing wait breakdown for this bucket.
             if let Some(info) =
                 cursor_bucket_info(snapshots, state.bucket_secs(), col_from_right, no_color)
             {
@@ -1218,14 +1214,19 @@ fn render_cursor_overlay(
         .saturating_add(more_row);
     let overlay_h = overlay_h.min(bar_area.height);
 
-    // Position: prefer right of cursor; flip left if it would clip.
+    // Position: prefer LEFT of cursor (overlay + ▶ pointing right at cursor).
+    // Fall back to right if there's no room on the left.
     let cursor_abs = bar_area.x.saturating_add(cursor_x_offset);
-    let x = if cursor_abs + 2 + overlay_w <= bar_area.x + bar_area.width {
+    let x = if cursor_abs > bar_area.x + overlay_w {
+        // Fits to the left: place overlay so its right edge is 1 col before cursor.
+        cursor_abs.saturating_sub(overlay_w + 1)
+    } else if cursor_abs + 2 + overlay_w <= bar_area.x + bar_area.width {
+        // Doesn't fit left — place to the right.
         cursor_abs + 2
     } else {
-        cursor_abs.saturating_sub(overlay_w + 1)
+        // Neither fits well — clamp to left edge.
+        bar_area.x
     };
-    let x = x.max(bar_area.x);
     // Anchor to bottom of bar area so timestamp sits at the bottom like the screenshot.
     let y = bar_area
         .y
@@ -1244,6 +1245,31 @@ fn render_cursor_overlay(
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(overlay_rect);
     frame.render_widget(block, overlay_rect);
+
+    // ▶ pointer between overlay and cursor line (when overlay is to the left).
+    let overlay_right_edge = overlay_rect.x.saturating_add(overlay_rect.width);
+    if overlay_right_edge < cursor_abs {
+        // Place ▶ at the column just after the overlay's right border,
+        // vertically centered on the overlay.
+        let arrow_y = overlay_rect
+            .y
+            .saturating_add(overlay_rect.height / 2);
+        let arrow_rect = ratatui::layout::Rect {
+            x: overlay_right_edge,
+            y: arrow_y,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "\u{25b6}",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            arrow_rect,
+        );
+    }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     // Timestamp + total AAS header.
