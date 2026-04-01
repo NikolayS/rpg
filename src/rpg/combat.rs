@@ -81,7 +81,7 @@ pub fn run_combat(player: &mut Player, enemy: &mut Enemy) -> CombatResult {
             print_info(&format!("   You attack for {} damage.", dmg));
         } else if cmd.starts_with("use ") {
             let item_name = cmd.trim_start_matches("use ").trim();
-            let used = use_item_combat(player, enemy, item_name, &mut vacuum_full_stun);
+            let used = use_item_combat(player, enemy, item_name, &mut vacuum_full_stun, &mut player_stunned);
             if !used {
                 print_warn("   No such item in your inventory.");
                 continue; // don't advance enemy turn
@@ -122,7 +122,7 @@ pub fn run_combat(player: &mut Player, enemy: &mut Enemy) -> CombatResult {
             }
 
             let dmg = rng.gen_range(enemy.attack_min, enemy.attack_max);
-            player.hp -= dmg;
+            player.hp = (player.hp - dmg).max(0);
             print_warn(&format!(
                 "   {} attacks you for {} damage.",
                 enemy.name, dmg
@@ -158,6 +158,7 @@ fn use_item_combat(
     enemy: &mut Enemy,
     name: &str,
     vacuum_stun: &mut i32,
+    player_stunned: &mut i32,
 ) -> bool {
     let mut rng = SimpleRng::new();
 
@@ -208,6 +209,8 @@ fn use_item_combat(
             player.take_item(ItemKind::WalSegment);
         }
         ItemKind::DiscardAllScroll => {
+            *player_stunned = 0;
+            *vacuum_stun = 0;
             print_info("   DISCARD ALL: all debuffs cleared.");
             player.take_item(ItemKind::DiscardAllScroll);
         }
@@ -243,7 +246,7 @@ fn victory_flavor(enemy: &Enemy) {
         crate::rpg::entities::EnemyKind::NplusOneHydra => {
             "   The N+1 Hydra falls. Someone finally used a JOIN."
         }
-        crate::rpg::entities::EnemyKind::AutvacuumBoss => {
+        crate::rpg::entities::EnemyKind::AutovacuumBoss => {
             "   The rotting elephant stills. A rumble echoes through the cluster."
         }
         _ => "   The enemy falls.",

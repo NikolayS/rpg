@@ -151,8 +151,9 @@ impl RpgGame {
         print_items(&self.room_items[self.current_room]);
         print_enemies(&self.room_enemies[self.current_room]);
 
-        // Checkpoint notice
+        // Checkpoint notice + update checkpoint_room
         if room.is_checkpoint {
+            self.player.checkpoint_room = self.current_room;
             print_info("  [Checkpoint — you will respawn here if you die]");
         }
 
@@ -192,11 +193,12 @@ impl RpgGame {
                 self.current_room = to;
                 self.look();
 
-                // Trigger puzzle if room has one and hasn't been solved
-                if self.rooms[self.current_room].puzzle.is_some()
-                    && self.visit_count[self.current_room] == 1
-                {
-                    self.run_puzzle();
+                // Trigger puzzle if room has one and reward not yet obtained
+                if let Some(puzzle) = &self.rooms[self.current_room].puzzle {
+                    let has_reward = self.player.has_item(puzzle.reward.clone());
+                    if !has_reward {
+                        self.run_puzzle();
+                    }
                 }
             }
         }
@@ -250,6 +252,17 @@ impl RpgGame {
                 }
             }
             Some(p) => {
+                // .pgpass Cloak: skip encounter (consume item)
+                if self.player.has_item(ItemKind::PgpassCloak) {
+                    let enemy_name = enemies[p].name;
+                    self.player.take_item(ItemKind::PgpassCloak);
+                    enemies.remove(p);
+                    print_info(&format!(
+                        "  Your .pgpass Cloak shimmers — {} doesn't notice you. It vanishes.",
+                        enemy_name
+                    ));
+                    return;
+                }
                 let mut enemy = enemies.remove(p);
                 let result = combat::run_combat(&mut self.player, &mut enemy);
                 match result {
@@ -261,7 +274,7 @@ impl RpgGame {
                             self.room_items[self.current_room].push(item);
                         }
                         // Final boss victory
-                        if enemy.kind == entities::EnemyKind::AutvacuumBoss {
+                        if enemy.kind == entities::EnemyKind::AutovacuumBoss {
                             print_victory();
                             // Signal game over by clearing game state
                             self.current_room = usize::MAX;
@@ -415,16 +428,19 @@ impl RpgGame {
         match idx {
             None => print_warn("  Invalid answer. The puzzle remains unsolved."),
             Some(i) => {
-                let (_, correct, feedback) = puzzle.options[i];
+                let (_, correct, feedback, dmg) = puzzle.options[i];
                 if correct {
                     print_info(&format!("  CORRECT! {}", feedback));
                     let reward = Item::new(puzzle.reward.clone());
                     print_info(&format!("  You receive: {}", reward.name));
                     self.player.inventory.push(reward);
                 } else {
-                    let dmg = 10i32;
                     self.player.hp = (self.player.hp - dmg).max(0);
-                    print_warn(&format!("  WRONG! {} You take {} damage.", feedback, dmg));
+                    if dmg > 0 {
+                        print_warn(&format!("  WRONG! {} You take {} damage.", feedback, dmg));
+                    } else {
+                        print_warn(&format!("  WRONG! {}", feedback));
+                    }
                 }
             }
         }
@@ -453,7 +469,7 @@ fn enemy_loot(kind: &entities::EnemyKind) -> Option<Item> {
         BloatElemental => Some(Item::new(ItemKind::WalSegment)),
         XidWraparoundDemon => Some(Item::new(ItemKind::AutovacuumAmulet)),
         CheckpointThrashHarpy => Some(Item::new(ItemKind::WalSegment)),
-        AutvacuumBoss => None,
+        AutovacuumBoss => None,
     }
 }
 

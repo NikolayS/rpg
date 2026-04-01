@@ -139,7 +139,7 @@ pub enum EnemyKind {
     BloatElemental,
     XidWraparoundDemon,
     CheckpointThrashHarpy,
-    AutvacuumBoss,
+    AutovacuumBoss,
 }
 
 #[derive(Debug, Clone)]
@@ -259,7 +259,7 @@ impl Enemy {
                 stunned_turns: 0,
                 stuns_player: false,
             },
-            EnemyKind::AutvacuumBoss => Enemy {
+            EnemyKind::AutovacuumBoss => Enemy {
                 kind,
                 name: "autovacuum: not running",
                 hp: 200,

@@ -12,7 +12,7 @@ pub struct Exit {
 #[derive(Debug, Clone)]
 pub struct Puzzle {
     pub prompt: &'static str,
-    pub options: &'static [(&'static str, bool, &'static str)], // (text, correct, feedback)
+    pub options: &'static [(&'static str, bool, &'static str, i32)], // (text, correct, feedback, damage)
     pub reward: ItemKind,
 }
 
@@ -63,9 +63,9 @@ pub fn build_world() -> Vec<Room> {
             puzzle: Some(Puzzle {
                 prompt: "A panicked DBA ghost blocks your path.\n\n'Quick! My app is throwing connection errors. I have max_connections=100. What do I do?'\n\n  a) Increase max_connections to 1000 and restart PostgreSQL\n  b) Deploy PgBouncer in transaction mode\n  c) Kill all idle connections with pg_terminate_backend",
                 options: &[
-                    ("a) Increase max_connections to 1000", false, "The ghost groans. 'Restart required, and now every connection uses 10MB of RAM. App died anyway.'"),
-                    ("b) Deploy PgBouncer in transaction mode", true,  "The ghost relaxes. 'Connection pooling. Of course. You may pass.' It drops a key."),
-                    ("c) Kill all idle connections", false, "'They reconnect immediately. I've been doing this for six hours.' The ghost weeps."),
+                    ("a) Increase max_connections to 1000", false, "The ghost groans. 'Restart required, and now every connection uses 10MB of RAM. App died anyway.'", 10),
+                    ("b) Deploy PgBouncer in transaction mode", true,  "The ghost relaxes. 'Connection pooling. Of course. You may pass.' It drops a key.", 0),
+                    ("c) Kill all idle connections", false, "'They reconnect immediately. I've been doing this for six hours.' The ghost weeps.", 10),
                 ],
                 reward: ItemKind::ConnectionStringKey,
             }),
@@ -119,9 +119,9 @@ pub fn build_world() -> Vec<Room> {
             puzzle: Some(Puzzle {
                 prompt: "A slow query writhes in the mud before you:\n\n  SELECT * FROM orders WHERE created_at > NOW() - interval '7 days'\n\nIt has been running for 4 minutes. A ghost asks: 'How do you fix this?'\n\n  a) Add an index on created_at\n  b) Add an index on id\n  c) VACUUM FULL the orders table",
                 options: &[
-                    ("a) Add an index on created_at", true,  "The query vanishes in milliseconds. The ghost hands you a lens. 'Always check the WHERE clause first.'"),
-                    ("b) Add an index on id",          false, "The query still crawls. 'id is not in the WHERE clause,' the ghost sighs. You lose 5 HP from embarrassment."),
-                    ("c) VACUUM FULL orders",           false, "'Table locked for 3 hours. Users very angry. App team called.' You lose 10 HP."),
+                    ("a) Add an index on created_at", true,  "The query vanishes in milliseconds. The ghost hands you a lens. 'Always check the WHERE clause first.'", 0),
+                    ("b) Add an index on id",          false, "The query still crawls. 'id is not in the WHERE clause,' the ghost sighs. You lose 5 HP from embarrassment.", 5),
+                    ("c) VACUUM FULL orders",           false, "'Table locked for 3 hours. Users very angry. App team called.' You lose 10 HP.", 10),
                 ],
                 reward: ItemKind::ReindexHammer,
             }),
@@ -157,9 +157,9 @@ pub fn build_world() -> Vec<Room> {
             puzzle: Some(Puzzle {
                 prompt: "A DBA spirit hovers over 47 bloated indexes.\n\n'I need to clean these up but I don't know which ones are safe to drop. How do I find unused indexes?'\n\n  a) SELECT indexname FROM pg_stat_user_indexes WHERE idx_scan = 0\n  b) DROP INDEX CONCURRENTLY on all indexes, then recreate the ones that break things\n  c) Run REINDEX DATABASE to refresh all stats",
                 options: &[
-                    ("a) pg_stat_user_indexes WHERE idx_scan = 0", true,  "The spirit beams. 'Surgical and safe. The stats reset on restart, so filter by pg_stat_reset_time too.' You earn a hammer."),
-                    ("b) DROP all, recreate later",                false, "'We lost 6 indexes we actually needed. App is down.' The spirit fades in shame."),
-                    ("c) REINDEX DATABASE",                        false, "'That rebuilds indexes, it doesn't identify unused ones.' A 4-hour table lock appears. You lose 15 HP."),
+                    ("a) pg_stat_user_indexes WHERE idx_scan = 0", true,  "The spirit beams. 'Surgical and safe. The stats reset on restart, so filter by pg_stat_reset_time too.' You earn a hammer.", 0),
+                    ("b) DROP all, recreate later",                false, "'We lost 6 indexes we actually needed. App is down.' The spirit fades in shame.", 10),
+                    ("c) REINDEX DATABASE",                        false, "'That rebuilds indexes, it doesn't identify unused ones.' A 4-hour table lock appears. You lose 15 HP.", 15),
                 ],
                 reward: ItemKind::AutovacuumAmulet,
             }),
@@ -243,9 +243,9 @@ pub fn build_world() -> Vec<Room> {
             puzzle: Some(Puzzle {
                 prompt: "The wraparound counter ticks. 3 turns remain.\n\nA ghost screams: 'HOW DO WE STOP IT?'\n\n  a) VACUUM FREEZE pg_class\n  b) VACUUM ANALYZE\n  c) pg_dump the database and restore it",
                 options: &[
-                    ("a) VACUUM FREEZE pg_class",          true,  "The counter stops. The cluster is saved. The ghost weeps with relief. 'Set vacuum_freeze_min_age lower next time.'"),
-                    ("b) VACUUM ANALYZE",                  false, "Not aggressive enough. The counter hits 2,147,483,647. The cluster enters emergency read-only mode. You lose 30 HP."),
-                    ("c) pg_dump and restore",              false, "'That takes 6 hours and requires downtime!' The cluster dies. You respawn at the checkpoint."),
+                    ("a) VACUUM FREEZE pg_class",          true,  "The counter stops. The cluster is saved. The ghost weeps with relief. 'Set vacuum_freeze_min_age lower next time.'", 0),
+                    ("b) VACUUM ANALYZE",                  false, "Not aggressive enough. The counter hits 2,147,483,647. The cluster enters emergency read-only mode. You lose 30 HP.", 30),
+                    ("c) pg_dump and restore",              false, "'That takes 6 hours and requires downtime!' The cluster dies. You respawn at the checkpoint.", 20),
                 ],
                 reward: ItemKind::PgpassCloak,
             }),
@@ -291,7 +291,7 @@ pub fn build_world() -> Vec<Room> {
                 Exit { direction: "south", short: "s", to_room: 13 },
             ],
             items: vec![],
-            enemies: vec![EnemyKind::AutvacuumBoss],
+            enemies: vec![EnemyKind::AutovacuumBoss],
             puzzle: None,
             is_checkpoint: false,
             zone: 3,
