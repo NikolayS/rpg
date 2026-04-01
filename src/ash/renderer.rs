@@ -577,10 +577,7 @@ fn build_timeline_lines(
                 if let Some(s) = seg {
                     // ▐ right half block: left half = bg (white cursor line),
                     // right half = fg (bar color preserved).
-                    (
-                        "\u{2590}",
-                        Style::default().fg(s.color).bg(Color::White),
-                    )
+                    ("\u{2590}", Style::default().fg(s.color).bg(Color::White))
                 } else {
                     // Empty cell in cursor column: thin white line.
                     ("\u{2502}", Style::default().fg(Color::White)) // │
@@ -1251,9 +1248,7 @@ fn render_cursor_overlay(
     if overlay_right_edge < cursor_abs {
         // Place ▶ at the column just after the overlay's right border,
         // vertically centered on the overlay.
-        let arrow_y = overlay_rect
-            .y
-            .saturating_add(overlay_rect.height / 2);
+        let arrow_y = overlay_rect.y.saturating_add(overlay_rect.height / 2);
         let arrow_rect = ratatui::layout::Rect {
             x: overlay_right_edge,
             y: arrow_y,
