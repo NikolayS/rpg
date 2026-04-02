@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -1107,8 +1107,123 @@ fn render_timeline(
         render_legend(frame, bar_area, no_color);
     }
 
-    // Cursor info is shown in the drill-down panel (render_cursor_infobox)
-    // rather than as a floating overlay on the bar area.
+    // Cursor floating overlay — positioned to the LEFT of the cursor column.
+    if let Some(col_from_right) = state.cursor_col {
+        let bar_w = bar_area.width as usize;
+        if col_from_right < bar_w {
+            let cursor_x_in_bar = bar_w.saturating_sub(1 + col_from_right);
+            let cursor_x_offset = u16::try_from(cursor_x_in_bar).unwrap_or(u16::MAX);
+            if let Some(info) =
+                cursor_bucket_info(snapshots, state.bucket_secs(), col_from_right, no_color)
+            {
+                render_cursor_overlay(frame, bar_area, cursor_x_offset, &info);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor floating overlay
+// ---------------------------------------------------------------------------
+
+/// Render a floating overlay on the timeline showing wait breakdown for the
+/// bucket under the cursor.  Uses `Clear` to erase underlying bar colors
+/// before rendering the box content.
+fn render_cursor_overlay(
+    frame: &mut Frame,
+    bar_area: ratatui::layout::Rect,
+    cursor_x_offset: u16,
+    info: &CursorInfo,
+) {
+    let secs_in_day = 86400i64;
+    let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
+    let hour = sod / 3600;
+    let min = (sod % 3600) / 60;
+    let sec = sod % 60;
+    let ts_str = format!("{hour:02}:{min:02}:{sec:02}");
+
+    let overlay_w: u16 = 28;
+    let max_inner_h = bar_area.height.saturating_sub(2) as usize;
+    let max_type_rows = max_inner_h.saturating_sub(1);
+    let total_types = info.top_types.len();
+    let (visible_types, has_more) = if total_types <= max_type_rows {
+        (total_types, false)
+    } else {
+        (max_type_rows.saturating_sub(1), true)
+    };
+    let more_row = u16::from(has_more);
+    let overlay_h: u16 = 3_u16
+        .saturating_add(u16::try_from(visible_types).unwrap_or(u16::MAX))
+        .saturating_add(more_row);
+    let overlay_h = overlay_h.min(bar_area.height);
+
+    // Position: prefer LEFT of cursor; fall back to right.
+    let cursor_abs = bar_area.x.saturating_add(cursor_x_offset);
+    let x = if cursor_abs > bar_area.x + overlay_w {
+        cursor_abs.saturating_sub(overlay_w + 1)
+    } else if cursor_abs + 2 + overlay_w <= bar_area.x + bar_area.width {
+        cursor_abs + 2
+    } else {
+        bar_area.x
+    };
+    let y = bar_area
+        .y
+        .saturating_add(bar_area.height.saturating_sub(overlay_h));
+
+    let overlay_rect = ratatui::layout::Rect {
+        x,
+        y,
+        width: overlay_w,
+        height: overlay_h,
+    };
+
+    // Clear underlying bar colors first — prevents transparency artifacts.
+    frame.render_widget(Clear, overlay_rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(overlay_rect);
+    frame.render_widget(block, overlay_rect);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            ts_str,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {:.1}", info.aas),
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+
+    for (name, type_aas, _pct, color) in info.top_types.iter().take(visible_types) {
+        let label = match name.char_indices().nth(18) {
+            Some((idx, _)) => name[..idx].to_owned(),
+            None => name.clone(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("\u{2588} ", Style::default().fg(*color)),
+            Span::styled(format!("{label:<18}"), Style::default().fg(Color::White)),
+            Span::styled(format!("{type_aas:>4.1}"), Style::default().fg(Color::Gray)),
+        ]));
+    }
+    if has_more {
+        let remaining = total_types - visible_types;
+        lines.push(Line::from(Span::styled(
+            format!("  +{remaining} more"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(Color::Black)),
+        inner,
+    );
 }
 
 // ---------------------------------------------------------------------------
