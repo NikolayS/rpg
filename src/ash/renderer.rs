@@ -582,10 +582,7 @@ fn build_timeline_lines(
         // One span per column.
         for (col_idx, segs) in col_segments.iter().enumerate() {
             // Is this the cursor column? (cursor_col counts from right)
-            let is_cursor = state.cursor_col.is_some_and(|c| {
-                let n = col_segments.len();
-                col_idx == n.saturating_sub(1 + c)
-            });
+            let is_cursor = cursor_col_idx(state.cursor_col, col_idx, col_segments.len());
 
             // Find which segment covers this row, if any.
             let seg = segs
@@ -1123,6 +1120,38 @@ fn render_timeline(
 }
 
 // ---------------------------------------------------------------------------
+// Cursor column helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true if `col_idx` (0 = leftmost) is the cursor column.
+///
+/// `cursor_col` counts from the right (0 = rightmost rendered bucket).
+/// When `c >= n` the cursor is out of range — no column is highlighted.
+fn cursor_col_idx(cursor_col: Option<usize>, col_idx: usize, n: usize) -> bool {
+    match cursor_col {
+        Some(c) if c < n => col_idx == n - 1 - c,
+        _ => false,
+    }
+}
+
+/// Compute the x-coordinate for the floating overlay box.
+///
+/// Prefers placing the overlay to the LEFT of the cursor; falls back to RIGHT
+/// if there is not enough room; falls back to `bar_x` if the bar is too narrow.
+/// All arithmetic uses saturating operations to avoid `u16` overflow panics in
+/// debug builds.
+fn overlay_x(bar_x: u16, bar_w: u16, cursor_abs: u16, overlay_w: u16) -> u16 {
+    if cursor_abs > bar_x.saturating_add(overlay_w) {
+        cursor_abs.saturating_sub(overlay_w.saturating_add(1))
+    } else if cursor_abs.saturating_add(2).saturating_add(overlay_w) <= bar_x.saturating_add(bar_w)
+    {
+        cursor_abs.saturating_add(2)
+    } else {
+        bar_x
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cursor floating overlay
 // ---------------------------------------------------------------------------
 
@@ -1159,13 +1188,7 @@ fn render_cursor_overlay(
 
     // Position: prefer LEFT of cursor; fall back to right.
     let cursor_abs = bar_area.x.saturating_add(cursor_x_offset);
-    let x = if cursor_abs > bar_area.x + overlay_w {
-        cursor_abs.saturating_sub(overlay_w + 1)
-    } else if cursor_abs + 2 + overlay_w <= bar_area.x + bar_area.width {
-        cursor_abs + 2
-    } else {
-        bar_area.x
-    };
+    let x = overlay_x(bar_area.x, bar_area.width, cursor_abs, overlay_w);
     let y = bar_area
         .y
         .saturating_add(bar_area.height.saturating_sub(overlay_h));
@@ -1559,5 +1582,69 @@ mod tests {
             text.trim().is_empty(),
             "should be blank for empty snapshots"
         );
+    }
+
+    // --- cursor_col_idx ---
+
+    #[test]
+    fn cursor_col_idx_rightmost() {
+        // c=0 means rightmost bucket → column n-1
+        assert!(cursor_col_idx(Some(0), 9, 10));
+        assert!(!cursor_col_idx(Some(0), 8, 10));
+    }
+
+    #[test]
+    fn cursor_col_idx_middle() {
+        // c=4, n=10 → column n-1-4 = 5
+        assert!(cursor_col_idx(Some(4), 5, 10));
+        assert!(!cursor_col_idx(Some(4), 4, 10));
+        assert!(!cursor_col_idx(Some(4), 6, 10));
+    }
+
+    #[test]
+    fn cursor_col_idx_out_of_range() {
+        // c >= n: saturating_sub would give 0, falsely marking col 0 as cursor.
+        // The guard must return false for all columns.
+        assert!(!cursor_col_idx(Some(10), 0, 10));
+        assert!(!cursor_col_idx(Some(10), 5, 10));
+        assert!(!cursor_col_idx(Some(10), 9, 10));
+    }
+
+    #[test]
+    fn cursor_col_idx_none() {
+        assert!(!cursor_col_idx(None, 0, 10));
+        assert!(!cursor_col_idx(None, 9, 10));
+    }
+
+    // --- overlay_x ---
+
+    #[test]
+    fn overlay_x_prefers_left() {
+        // cursor far enough right → overlay placed left
+        // cursor_abs=100, bar_x=0, overlay_w=28 → 100 > 0+28 ✓ → 100-28-1=71
+        assert_eq!(overlay_x(0, 200, 100, 28), 71);
+    }
+
+    #[test]
+    fn overlay_x_falls_right_when_no_room_left() {
+        // cursor near left → not enough room on left, place right
+        // cursor_abs=10, bar_x=0, overlay_w=28: 10>28? No → right: 10+2=12
+        assert_eq!(overlay_x(0, 200, 10, 28), 12);
+    }
+
+    #[test]
+    fn overlay_x_fallback_to_bar_x() {
+        // bar too narrow for either left or right placement
+        // cursor_abs=10, bar_x=0, bar_w=30, overlay_w=28:
+        //   left: 10>28? No; right: 10+2+28=40 <= 30? No → fallback=0
+        assert_eq!(overlay_x(0, 30, 10, 28), 0);
+    }
+
+    #[test]
+    fn overlay_x_no_u16_overflow() {
+        // All additions must use saturating_add to avoid panics in debug builds.
+        // bar_x=65500, cursor_abs=65530, bar_w=100, overlay_w=28:
+        //   left: 65530 > sat(65500+28)=65528? Yes → sat(65530-28-1)=65501
+        assert_eq!(overlay_x(65500, 100, 65530, 28), 65501);
     }
 }
