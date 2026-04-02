@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -449,6 +449,7 @@ fn bucket_segments(
     segs
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_timeline_lines(
     snapshots: &[AshSnapshot],
     state: &AshState,
@@ -540,19 +541,38 @@ fn build_timeline_lines(
 
     let pad_cols = w.saturating_sub(buckets.len());
 
+    // Horizontal grid rows — same positions as Y-axis labels (faint ┈).
+    let grid_rows: Vec<usize> = if h <= 6 {
+        vec![0, h.saturating_sub(1)]
+    } else if h <= 14 {
+        vec![0, h / 2, h.saturating_sub(1)]
+    } else {
+        vec![0, h / 4, h / 2, h * 3 / 4, h.saturating_sub(1)]
+    };
+    let grid_style = Style::default().fg(Color::DarkGray);
+
     // Render rows top-to-bottom.
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(h);
     for row_from_top in 0..h {
         let row_from_bottom = h - row_from_top; // 1-indexed
         let is_cpu_line = cpu_row_from_bottom.is_some_and(|r| r == row_from_bottom);
+        let is_grid_line = grid_rows.contains(&row_from_top);
 
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(w + 1);
 
         // Left padding.
         if pad_cols > 0 {
-            let pad_ch = if is_cpu_line { "\u{2500}" } else { " " };
+            let pad_ch = if is_cpu_line {
+                "\u{2500}"
+            } else if is_grid_line {
+                "\u{2508}" // ┈ light quadruple dash
+            } else {
+                " "
+            };
             let pad_style = if is_cpu_line {
                 Style::default().fg(cpu_line_color)
+            } else if is_grid_line {
+                grid_style
             } else {
                 Style::default()
             };
@@ -560,18 +580,32 @@ fn build_timeline_lines(
         }
 
         // One span per column.
-        for segs in &col_segments {
+        for (col_idx, segs) in col_segments.iter().enumerate() {
+            // Is this the cursor column? (cursor_col counts from right)
+            let is_cursor = cursor_col_idx(state.cursor_col, col_idx, col_segments.len());
+
             // Find which segment covers this row, if any.
             let seg = segs
                 .iter()
                 .find(|s| row_from_bottom >= s.bottom && row_from_bottom <= s.top);
 
-            let (ch, style) = if let Some(s) = seg {
-                ("\u{2588}".to_owned(), Style::default().fg(s.color)) // █ filled
+            let (ch, style) = if is_cursor {
+                if let Some(s) = seg {
+                    // ▐ right half block: left half = bg (white cursor line),
+                    // right half = fg (bar color preserved).
+                    ("\u{2590}", Style::default().fg(s.color).bg(Color::White))
+                } else {
+                    // Empty cell in cursor column: thin white line.
+                    ("\u{2502}", Style::default().fg(Color::White)) // │
+                }
+            } else if let Some(s) = seg {
+                ("\u{2588}", Style::default().fg(s.color)) // █ filled
             } else if is_cpu_line {
-                ("\u{2500}".to_owned(), Style::default().fg(cpu_line_color)) // ─
+                ("\u{2500}", Style::default().fg(cpu_line_color)) // ─
+            } else if is_grid_line {
+                ("\u{2508}", grid_style) // ┈ faint grid
             } else {
-                (" ".to_owned(), Style::default())
+                (" ", Style::default())
             };
 
             spans.push(Span::styled(ch, style));
@@ -923,7 +957,11 @@ fn fmt_xaxis_ts(ts: i64, bucket_secs: u64) -> String {
 /// and — when the area is wide enough — a mid-point anchor.
 /// Format: `HH:MM:SS` at zoom 1–2 (bucket ≤ 15 s) so labels visibly shift
 /// every second; `HH:MM` at coarser zoom levels.
-fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -> Line<'static> {
+pub(crate) fn build_xaxis_line(
+    snapshots: &[AshSnapshot],
+    state: &AshState,
+    width: usize,
+) -> Line<'static> {
     let w = width.max(1);
     let bucket = state.bucket_secs();
     let label_w = xaxis_label_width(bucket);
@@ -958,26 +996,34 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
     };
 
     // Build a flat char buffer, then turn it into a styled Line.
+    // Labels are right-aligned to match the bar rendering (bars occupy
+    // the rightmost `visible` columns with left padding).
     let mut buf: Vec<char> = vec![' '; w];
+    let pad = w.saturating_sub(visible);
+    let right_start = w.saturating_sub(label_w);
+    let left_col = pad;
 
-    // Place left label at col 0.
-    for (i, c) in left_label.chars().enumerate() {
-        if i < w {
-            buf[i] = c;
+    // Place left label only if it won't overlap with the right label.
+    if left_col + label_w + 1 < right_start {
+        for (i, c) in left_label.chars().enumerate() {
+            let col = left_col + i;
+            if col < w {
+                buf[col] = c;
+            }
         }
     }
-    // Place right label flush-right.
-    let right_start = w.saturating_sub(label_w);
+    // Place right label flush-right (always shown).
     for (i, c) in right_label.chars().enumerate() {
         let col = right_start + i;
         if col < w {
             buf[col] = c;
         }
     }
-    // Place mid label only if it won't overlap left/right.
+    // Place mid label between left and right, only if it won't overlap.
+    let bar_mid_col = pad + visible / 2;
     if w >= min_w_for_mid && !mid_label.is_empty() {
-        let mid_col = w / 2 - label_w / 2;
-        let overlap_left = mid_col < label_w + 1;
+        let mid_col = bar_mid_col.saturating_sub(label_w / 2);
+        let overlap_left = mid_col < left_col + label_w + 1;
         let overlap_right = mid_col + label_w + 1 >= right_start;
         if !overlap_left && !overlap_right {
             for (i, c) in mid_label.chars().enumerate() {
@@ -990,7 +1036,7 @@ fn build_xaxis_line(snapshots: &[AshSnapshot], state: &AshState, width: usize) -
     }
 
     let s: String = buf.into_iter().collect();
-    Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)))
+    Line::from(Span::styled(s, Style::default().fg(Color::Gray)))
 }
 
 fn render_timeline(
@@ -1058,35 +1104,12 @@ fn render_timeline(
         render_legend(frame, bar_area, no_color);
     }
 
-    // Cursor crosshair — vertical │ line at cursor_col columns from the right.
+    // Cursor floating overlay — positioned to the LEFT of the cursor column.
     if let Some(col_from_right) = state.cursor_col {
         let bar_w = bar_area.width as usize;
-        // Only draw when the cursor column is within the visible bar area.
-        // col_from_right counts from the right edge (0 = rightmost column).
-        let cursor_x_in_bar = bar_w.saturating_sub(1 + col_from_right);
         if col_from_right < bar_w {
+            let cursor_x_in_bar = bar_w.saturating_sub(1 + col_from_right);
             let cursor_x_offset = u16::try_from(cursor_x_in_bar).unwrap_or(u16::MAX);
-            let cursor_rect = ratatui::layout::Rect {
-                x: bar_area.x.saturating_add(cursor_x_offset),
-                y: bar_area.y,
-                width: 1,
-                height: bar_area.height,
-            };
-            // Render the cursor as a half-block ▌ in bright yellow — visually
-            // narrow (~50% cell width) but high-contrast against any wait color.
-            let cursor_lines: Vec<Line<'static>> = (0..bar_area.height as usize)
-                .map(|_| {
-                    Line::from(Span::styled(
-                        "\u{258c}", // ▌  left half-block
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(cursor_lines), cursor_rect);
-
-            // Floating overlay on the timeline showing wait breakdown for this bucket.
             if let Some(info) =
                 cursor_bucket_info(snapshots, state.bucket_secs(), col_from_right, no_color)
             {
@@ -1094,6 +1117,136 @@ fn render_timeline(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor column helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true if `col_idx` (0 = leftmost) is the cursor column.
+///
+/// `cursor_col` counts from the right (0 = rightmost rendered bucket).
+/// When `c >= n` the cursor is out of range — no column is highlighted.
+fn cursor_col_idx(cursor_col: Option<usize>, col_idx: usize, n: usize) -> bool {
+    match cursor_col {
+        Some(c) if c < n => col_idx == n - 1 - c,
+        _ => false,
+    }
+}
+
+/// Compute the x-coordinate for the floating overlay box.
+///
+/// Prefers placing the overlay to the LEFT of the cursor; falls back to RIGHT
+/// if there is not enough room; falls back to `bar_x` if the bar is too narrow.
+/// All arithmetic uses saturating operations to avoid `u16` overflow panics in
+/// debug builds.
+fn overlay_x(bar_x: u16, bar_w: u16, cursor_abs: u16, overlay_w: u16) -> u16 {
+    if cursor_abs > bar_x.saturating_add(overlay_w) {
+        cursor_abs.saturating_sub(overlay_w.saturating_add(1))
+    } else if cursor_abs.saturating_add(2).saturating_add(overlay_w) <= bar_x.saturating_add(bar_w)
+    {
+        cursor_abs.saturating_add(2)
+    } else {
+        bar_x
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor floating overlay
+// ---------------------------------------------------------------------------
+
+/// Render a floating overlay on the timeline showing wait breakdown for the
+/// bucket under the cursor.  Uses `Clear` to erase underlying bar colors
+/// before rendering the box content.
+fn render_cursor_overlay(
+    frame: &mut Frame,
+    bar_area: ratatui::layout::Rect,
+    cursor_x_offset: u16,
+    info: &CursorInfo,
+) {
+    let secs_in_day = 86400i64;
+    let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
+    let hour = sod / 3600;
+    let min = (sod % 3600) / 60;
+    let sec = sod % 60;
+    let ts_str = format!("{hour:02}:{min:02}:{sec:02}");
+
+    let overlay_w: u16 = 28;
+    let max_inner_h = bar_area.height.saturating_sub(2) as usize;
+    let max_type_rows = max_inner_h.saturating_sub(1);
+    let total_types = info.top_types.len();
+    let (visible_types, has_more) = if total_types <= max_type_rows {
+        (total_types, false)
+    } else {
+        (max_type_rows.saturating_sub(1), true)
+    };
+    let more_row = u16::from(has_more);
+    let overlay_h: u16 = 3_u16
+        .saturating_add(u16::try_from(visible_types).unwrap_or(u16::MAX))
+        .saturating_add(more_row);
+    let overlay_h = overlay_h.min(bar_area.height);
+
+    // Position: prefer LEFT of cursor; fall back to right.
+    let cursor_abs = bar_area.x.saturating_add(cursor_x_offset);
+    let x = overlay_x(bar_area.x, bar_area.width, cursor_abs, overlay_w);
+    let y = bar_area
+        .y
+        .saturating_add(bar_area.height.saturating_sub(overlay_h));
+
+    let overlay_rect = ratatui::layout::Rect {
+        x,
+        y,
+        width: overlay_w,
+        height: overlay_h,
+    };
+
+    // Clear underlying bar colors first — prevents transparency artifacts.
+    frame.render_widget(Clear, overlay_rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(overlay_rect);
+    frame.render_widget(block, overlay_rect);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            ts_str,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {:.1}", info.aas),
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+
+    for (name, type_aas, _pct, color) in info.top_types.iter().take(visible_types) {
+        let label = match name.char_indices().nth(18) {
+            Some((idx, _)) => name[..idx].to_owned(),
+            None => name.clone(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("\u{2588} ", Style::default().fg(*color)),
+            Span::styled(format!("{label:<18}"), Style::default().fg(Color::White)),
+            Span::styled(format!("{type_aas:>4.1}"), Style::default().fg(Color::Gray)),
+        ]));
+    }
+    if has_more {
+        let remaining = total_types - visible_types;
+        lines.push(Line::from(Span::styled(
+            format!("  +{remaining} more"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(Color::Black)),
+        inner,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,112 +1324,6 @@ fn cursor_bucket_info(
         aas: total_aas,
         top_types,
     })
-}
-
-/// Render a floating legend overlay on the timeline at the cursor position.
-///
-/// Shows timestamp, total AAS, and a color swatch + name + AAS row for every
-/// non-zero wait type — matching the style in the screenshot reference.
-/// The overlay is positioned left or right of the cursor to avoid clipping.
-fn render_cursor_overlay(
-    frame: &mut Frame,
-    bar_area: ratatui::layout::Rect,
-    cursor_x_offset: u16,
-    info: &CursorInfo,
-) {
-    // Build overlay content.
-    let secs_in_day = 86400i64;
-    let sod = ((info.ts % secs_in_day) + secs_in_day) % secs_in_day;
-    let hour = sod / 3600;
-    let min = (sod % 3600) / 60;
-    let ts_str = format!("{hour:02}:{min:02}");
-
-    // Width: wide enough for "█ LWLock:BufferPin  0.00" + borders.
-    let overlay_w: u16 = 28;
-    // Max rows we can show inside the bar area (leave 2 for borders).
-    let max_inner_h = bar_area.height.saturating_sub(2) as usize;
-    // Reserve 1 row for header; remaining rows for wait types (+1 "more" if truncated).
-    let max_type_rows = max_inner_h.saturating_sub(1);
-    let total_types = info.top_types.len();
-    let (visible_types, has_more) = if total_types <= max_type_rows {
-        (total_types, false)
-    } else {
-        // Keep one row for "+N more" indicator.
-        (max_type_rows.saturating_sub(1), true)
-    };
-    // Height: 2 (borders) + 1 (header) + visible type rows [+ 1 "more" row].
-    let more_row = u16::from(has_more);
-    let overlay_h: u16 = 3_u16
-        .saturating_add(u16::try_from(visible_types).unwrap_or(u16::MAX))
-        .saturating_add(more_row);
-    let overlay_h = overlay_h.min(bar_area.height);
-
-    // Position: prefer right of cursor; flip left if it would clip.
-    let cursor_abs = bar_area.x.saturating_add(cursor_x_offset);
-    let x = if cursor_abs + 2 + overlay_w <= bar_area.x + bar_area.width {
-        cursor_abs + 2
-    } else {
-        cursor_abs.saturating_sub(overlay_w + 1)
-    };
-    let x = x.max(bar_area.x);
-    // Anchor to bottom of bar area so timestamp sits at the bottom like the screenshot.
-    let y = bar_area
-        .y
-        .saturating_add(bar_area.height.saturating_sub(overlay_h));
-
-    let overlay_rect = ratatui::layout::Rect {
-        x,
-        y,
-        width: overlay_w,
-        height: overlay_h,
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(Color::Black));
-    let inner = block.inner(overlay_rect);
-    frame.render_widget(block, overlay_rect);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    // Timestamp + total AAS header.
-    lines.push(Line::from(vec![
-        Span::styled(
-            ts_str,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {:.1}", info.aas),
-            Style::default().fg(Color::Gray),
-        ),
-    ]));
-
-    // One row per wait type: colored swatch + name + AAS (truncated to visible_types).
-    for (name, type_aas, _pct, color) in info.top_types.iter().take(visible_types) {
-        let label = match name.char_indices().nth(18) {
-            Some((idx, _)) => name[..idx].to_owned(),
-            None => name.clone(),
-        };
-        lines.push(Line::from(vec![
-            Span::styled("\u{2588} ", Style::default().fg(*color)),
-            Span::styled(format!("{label:<18}"), Style::default().fg(Color::White)),
-            Span::styled(format!("{type_aas:>4.1}"), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    if has_more {
-        let remaining = total_types - visible_types;
-        lines.push(Line::from(Span::styled(
-            format!("  +{remaining} more"),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(Color::Black)),
-        inner,
-    );
 }
 
 /// Render the cursor infobox into `area` (replaces the normal drill-down table
@@ -1468,4 +1515,136 @@ pub fn draw_frame(frame: &mut Frame, snapshots: &[AshSnapshot], state: &AshState
         Paragraph::new(state.hint_line()).style(Style::default().fg(Color::DarkGray)),
         chunks[3],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ash::sampler::AshSnapshot;
+    use crate::ash::state::AshState;
+    use std::collections::HashMap;
+
+    fn make_snapshot(ts: i64) -> AshSnapshot {
+        AshSnapshot {
+            ts,
+            by_type: HashMap::new(),
+            by_event: HashMap::new(),
+            by_query: HashMap::new(),
+            cpu_count: None,
+            active_count: 0,
+        }
+    }
+
+    /// Extract the visible (non-space) text from an X-axis Line.
+    fn xaxis_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn xaxis_labels_do_not_overlap() {
+        // 10 snapshots at bucket=1s in a 100-col-wide area.
+        // Left label starts at col 90, right at col 92 — they must not overlap.
+        let snaps: Vec<AshSnapshot> = (0..10).map(|i| make_snapshot(1000 + i)).collect();
+        let state = AshState::new(false);
+        let line = build_xaxis_line(&snaps, &state, 100);
+        let text = xaxis_text(&line);
+
+        // Count non-space characters — should have at most one label's worth
+        // if the two labels would overlap (right label only).
+        let labels: Vec<&str> = text.split_whitespace().collect();
+        // Labels should not visually merge into garbage.
+        for label in &labels {
+            // Each label should look like HH:MM:SS (8 chars).
+            assert!(label.len() <= 8, "label '{label}' looks merged/overlapping",);
+        }
+    }
+
+    #[test]
+    fn xaxis_right_label_always_present() {
+        let snaps: Vec<AshSnapshot> = (0..5).map(|i| make_snapshot(86400 + i)).collect();
+        let state = AshState::new(false);
+        let line = build_xaxis_line(&snaps, &state, 80);
+        let text = xaxis_text(&line);
+        // Right label should be "00:00:04" (last snapshot ts = 86404).
+        assert!(
+            text.contains("00:00:04"),
+            "right label missing from '{}'",
+            text.trim()
+        );
+    }
+
+    #[test]
+    fn xaxis_empty_snapshots() {
+        let state = AshState::new(false);
+        let line = build_xaxis_line(&[], &state, 50);
+        let text = xaxis_text(&line);
+        assert!(
+            text.trim().is_empty(),
+            "should be blank for empty snapshots"
+        );
+    }
+
+    // --- cursor_col_idx ---
+
+    #[test]
+    fn cursor_col_idx_rightmost() {
+        // c=0 means rightmost bucket → column n-1
+        assert!(cursor_col_idx(Some(0), 9, 10));
+        assert!(!cursor_col_idx(Some(0), 8, 10));
+    }
+
+    #[test]
+    fn cursor_col_idx_middle() {
+        // c=4, n=10 → column n-1-4 = 5
+        assert!(cursor_col_idx(Some(4), 5, 10));
+        assert!(!cursor_col_idx(Some(4), 4, 10));
+        assert!(!cursor_col_idx(Some(4), 6, 10));
+    }
+
+    #[test]
+    fn cursor_col_idx_out_of_range() {
+        // c >= n: saturating_sub would give 0, falsely marking col 0 as cursor.
+        // The guard must return false for all columns.
+        assert!(!cursor_col_idx(Some(10), 0, 10));
+        assert!(!cursor_col_idx(Some(10), 5, 10));
+        assert!(!cursor_col_idx(Some(10), 9, 10));
+    }
+
+    #[test]
+    fn cursor_col_idx_none() {
+        assert!(!cursor_col_idx(None, 0, 10));
+        assert!(!cursor_col_idx(None, 9, 10));
+    }
+
+    // --- overlay_x ---
+
+    #[test]
+    fn overlay_x_prefers_left() {
+        // cursor far enough right → overlay placed left
+        // cursor_abs=100, bar_x=0, overlay_w=28 → 100 > 0+28 ✓ → 100-28-1=71
+        assert_eq!(overlay_x(0, 200, 100, 28), 71);
+    }
+
+    #[test]
+    fn overlay_x_falls_right_when_no_room_left() {
+        // cursor near left → not enough room on left, place right
+        // cursor_abs=10, bar_x=0, overlay_w=28: 10>28? No → right: 10+2=12
+        assert_eq!(overlay_x(0, 200, 10, 28), 12);
+    }
+
+    #[test]
+    fn overlay_x_fallback_to_bar_x() {
+        // bar too narrow for either left or right placement
+        // cursor_abs=10, bar_x=0, bar_w=30, overlay_w=28:
+        //   left: 10>28? No; right: 10+2+28=40 <= 30? No → fallback=0
+        assert_eq!(overlay_x(0, 30, 10, 28), 0);
+    }
+
+    #[test]
+    fn overlay_x_no_u16_overflow() {
+        // All additions must use saturating_add to avoid panics in debug builds.
+        // bar_x=65500, cursor_abs=65530, bar_w=100, overlay_w=28:
+        //   left: 65530 > sat(65500+28)=65528? Yes → sat(65530-28-1)=65501
+        assert_eq!(overlay_x(65500, 100, 65530, 28), 65501);
+    }
 }
