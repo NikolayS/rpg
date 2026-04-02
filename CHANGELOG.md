@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.2] - 2026-04-02
+
+### Fixed
+
+- **`/ash` cursor no longer obscures bars.** The cursor column now renders as `▐` (right half-block) with bar color preserved in the right half and a white cursor line in the left half. (#777)
+- **`/ash` floating overlay moved LEFT** of the cursor with a `▶` arrow pointing to the cursor line, so the selected bucket's wait breakdown is fully visible. Uses `Clear` to prevent transparency artifacts. (#777)
+- **`/ash` display freeze after Esc fixed.** Pressing Esc to exit cursor/history mode now returns to Live immediately instead of hanging for up to 60 seconds. (#777)
+- **`/ash` overlay timestamp** now shows `HH:MM:SS` (was `HH:MM`). (#777)
+- **`/ash` X-axis labels** right-aligned with bars and visible even with few data points; overlap prevention added. (#777)
+- **`/ash` horizontal grid lines** (`┈`) added at Y-axis label rows for easier visual alignment. (#777)
+- **Cursor column detection** fixed: panning beyond history no longer incorrectly highlights the leftmost column. (#777)
+- **Overlay positioning** uses saturating arithmetic throughout, preventing `u16` overflow panics in debug builds on wide terminals. (#777)
+
 ## [0.10.1] - 2026-04-01
 
 ### Added
