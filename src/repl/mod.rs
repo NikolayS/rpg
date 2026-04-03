@@ -548,6 +548,95 @@ pub fn is_complete(buf: &str) -> bool {
     false
 }
 
+/// Return `true` when `buf` ends inside an unclosed dollar-quoted string.
+/// Used to decide whether to echo blank lines in `-a` mode: psql echoes blank
+/// lines inside dollar-quoted bodies but skips them between statements.
+fn is_inside_dollar_quote(buf: &str) -> bool {
+    let mut in_single = false;
+    let mut in_block_comment = false;
+    let mut dollar_tag: Option<String> = None;
+
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2;
+                in_block_comment = false;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'$' {
+            let rest = &buf[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    dollar_tag.is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Backslash command types
 // ---------------------------------------------------------------------------
@@ -1732,9 +1821,11 @@ pub(crate) async fn exec_lines(
                 }
             } else {
                 // -a / --echo-all: echo each SQL line to stdout as it is read.
-                // psql's `-a` echoes only "nonempty input lines" — blank lines
-                // are silently skipped, matching `psql --echo-all` behaviour.
-                if settings.echo_all && !line.trim().is_empty() {
+                // psql echoes blank lines inside dollar-quoted function bodies
+                // but skips blank lines between statements.
+                if settings.echo_all
+                    && (!line.trim().is_empty() || is_inside_dollar_quote(&buf))
+                {
                     if let Some(ref mut w) = settings.output_target {
                         let _ = writeln!(w, "{line}");
                     } else {

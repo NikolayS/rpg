@@ -31,9 +31,14 @@ fn infer_numeric_column(
     name: &str,
     rows: &[Vec<Option<String>>],
 ) -> bool {
-    // Column-name heuristic: names ending with _code are identifiers/codes,
-    // not numeric quantities (e.g. sql_error_code → SQLSTATE varchar(5)).
-    if name.to_lowercase().ends_with("_code") {
+    // Column-name heuristics: certain names always indicate text, not numbers.
+    let name_lc = name.to_lowercase();
+    // Names ending with _code → identifier/code columns (e.g. sql_error_code).
+    if name_lc.ends_with("_code") {
+        return false;
+    }
+    // to_char() always returns text; unaliased calls produce column "to_char".
+    if name_lc == "to_char" {
         return false;
     }
 
