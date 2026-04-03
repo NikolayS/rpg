@@ -887,6 +887,12 @@ pub struct ReplSettings {
     pub single_line: bool,
     /// Wrap `-f` file execution in `BEGIN` / `COMMIT` (`-1`).
     pub single_transaction: bool,
+    /// Echo all input to stdout before execution (`-a` / `--echo-all`).
+    ///
+    /// Mirrors psql's `-a` flag: every SQL statement and meta-command is
+    /// written to stdout before it is sent to the server.  Required to
+    /// reproduce the output format used by `pg_regress` (`psql -a -q`).
+    pub echo_all: bool,
     /// Quiet mode: suppress informational messages (`-q`).
     pub quiet: bool,
     /// Debug mode: enable debug output (`-D`).
@@ -1266,6 +1272,7 @@ impl Default for ReplSettings {
             log_file: None,
             echo_queries: false,
             echo_errors: false,
+            echo_all: false,
             single_step: false,
             single_line: false,
             single_transaction: false,
@@ -1554,6 +1561,14 @@ pub(crate) async fn exec_lines(
         // after interpolation, not before (psql behaviour).
         let interpolated = settings.vars.interpolate(line.trim());
         if interpolated.trim_start().starts_with('\\') {
+            // -a / --echo-all: echo meta-commands to stdout before dispatching.
+            if settings.echo_all {
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = writeln!(w, "{}", interpolated.trim());
+                } else {
+                    println!("{}", interpolated.trim());
+                }
+            }
             let mut parsed = crate::metacmd::parse(&interpolated);
             parsed.echo_hidden = settings.echo_hidden;
             let result = dispatch_meta(parsed, client, params, settings, tx).await;
@@ -1707,13 +1722,29 @@ pub(crate) async fn exec_lines(
                     _ => {}
                 }
             } else {
+                // -a / --echo-all: echo each SQL line to stdout as it is read,
+                // matching psql's `-a` behaviour (line-by-line echo before execution).
+                if settings.echo_all {
+                    if let Some(ref mut w) = settings.output_target {
+                        let _ = writeln!(w, "{line}");
+                    } else {
+                        println!("{line}");
+                    }
+                }
+
                 if !buf.is_empty() {
                     buf.push('\n');
                 }
                 buf.push_str(&line);
 
                 if is_complete(&buf) {
-                    if !execute_query(client, buf.trim(), settings, tx).await {
+                    // Disable per-statement echo in execute_query to avoid
+                    // double-echoing when echo_all is active (lines already echoed above).
+                    let saved_echo_all = settings.echo_all;
+                    settings.echo_all = false;
+                    let ok = execute_query(client, buf.trim(), settings, tx).await;
+                    settings.echo_all = saved_echo_all;
+                    if !ok {
                         exit_code = 1;
                         // In single-transaction mode, stop on first error so the
                         // caller can roll back and skip the rest.

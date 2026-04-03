@@ -17,9 +17,11 @@ use super::*;
 /// `col_names` and `rows` describe the result set. `is_select` indicates
 /// whether this was a SELECT-like statement (i.e. we received a
 /// `RowDescription` message, even if zero rows followed). `rows_affected`
-/// carries the `CommandComplete` count. `is_first` is `false` when this is
-/// a subsequent result set in a multi-statement query, in which case a blank
-/// separator line is printed before the table (matching psql behaviour).
+/// carries the `CommandComplete` count. `sql` is the original SQL statement,
+/// used to reconstruct the full psql-style command tag (e.g. `"INSERT 0 1"`).
+/// `is_first` is `false` when this is a subsequent result set in a
+/// multi-statement query, in which case a blank separator line is printed
+/// before the table (matching psql behaviour).
 /// `writer` is the output destination (stdout or a redirected file).
 pub(super) fn print_result_set_pset(
     writer: &mut dyn io::Write,
@@ -27,6 +29,7 @@ pub(super) fn print_result_set_pset(
     rows: &[Vec<Option<String>>],
     is_select: bool,
     rows_affected: u64,
+    sql: &str,
     is_first: bool,
     pset: &crate::output::PsetConfig,
 ) {
@@ -77,13 +80,16 @@ pub(super) fn print_result_set_pset(
         // matches psql's consistent blank line after every result set.
         // No extra separator is needed before subsequent results.
         let _ = writer.write_all(out.as_bytes());
-    } else if !is_select {
-        // Non-SELECT statement: show rows affected if > 0.
-        if rows_affected > 0 {
+    } else {
+        // Non-SELECT statement: show the psql-style command tag.
+        // tokio-postgres 0.7 only exposes the numeric count from
+        // CommandComplete; reconstruct the full tag from the SQL.
+        let tag = crate::query::reconstruct_command_tag(sql, rows_affected);
+        if !tag.is_empty() {
             if !is_first {
                 let _ = writeln!(writer);
             }
-            let _ = writeln!(writer, "{rows_affected}");
+            let _ = writeln!(writer, "{tag}");
         }
     }
 }
@@ -187,6 +193,17 @@ pub async fn execute_query(
         }
     }
 
+    // -a / --echo-all: print every statement to stdout before executing.
+    // This matches psql's `-a` flag and is required to reproduce the output
+    // format of pg_regress (which runs `psql -a -q`).
+    if settings.echo_all {
+        if let Some(ref mut w) = settings.output_target {
+            let _ = writeln!(w, "{sql_to_send}");
+        } else {
+            println!("{sql_to_send}");
+        }
+    }
+
     // -e / --echo-queries: print query to stderr before executing.
     if settings.echo_queries {
         eprintln!("{sql_to_send}");
@@ -287,6 +304,7 @@ pub async fn execute_query(
                             &rows,
                             is_select,
                             n,
+                            sql_to_send,
                             result_set_index == 0,
                             &settings.pset,
                         );
@@ -2050,6 +2068,7 @@ mod tests {
             &[vec![]], // one row, no cells
             true,      // is_select
             1,         // rows_affected (not used for SELECT)
+            "SELECT FROM t WHERE i = 10",
             true,      // is_first
             &PsetConfig::default(),
         );
@@ -2069,6 +2088,7 @@ mod tests {
             &[], // zero rows
             true,
             0,
+            "SELECT FROM t WHERE false",
             true,
             &PsetConfig::default(),
         );
@@ -2088,6 +2108,7 @@ mod tests {
             &[vec![]],
             true,
             1,
+            "SELECT FROM t",
             true,
             &PsetConfig::default(),
         );
@@ -2099,22 +2120,43 @@ mod tests {
     }
 
     #[test]
-    fn non_select_zero_rows_affected_produces_no_output() {
+    fn ddl_shows_command_tag() {
+        // DDL commands (rows_affected=0) must show their command tag to match psql.
         let mut buf: Vec<u8> = Vec::new();
         print_result_set_pset(
             &mut buf,
             &[],
             &[],
             false, // not a SELECT
-            0,     // zero rows affected (e.g. UPDATE that matched nothing)
+            0,     // DDL always has rows_affected=0
+            "CREATE TABLE foo (id int)",
             true,
             &PsetConfig::default(),
         );
         let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.is_empty(),
-            "non-SELECT with 0 rows affected must produce no output: {out:?}"
+        assert_eq!(
+            out.trim(),
+            "CREATE TABLE",
+            "CREATE TABLE must print its command tag: {out:?}"
         );
+    }
+
+    #[test]
+    fn update_zero_rows_shows_tag() {
+        // UPDATE with 0 matching rows must print "UPDATE 0" (matches psql).
+        let mut buf: Vec<u8> = Vec::new();
+        print_result_set_pset(
+            &mut buf,
+            &[],
+            &[],
+            false,
+            0, // 0 rows affected
+            "UPDATE foo SET x = 1 WHERE false",
+            true,
+            &PsetConfig::default(),
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(out.trim(), "UPDATE 0", "UPDATE 0 must print tag: {out:?}");
     }
 
     // -- is_explain_statement ------------------------------------------------
