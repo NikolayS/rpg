@@ -246,6 +246,12 @@ pub fn new_session_id() -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+    #[cfg(target_arch = "wasm32")]
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[cfg(not(target_arch = "wasm32"))]
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -258,6 +264,12 @@ pub fn new_session_id() -> String {
 ///
 /// Avoids the `chrono` crate — computes directly from `SystemTime`.
 pub fn now_iso8601() -> String {
+    #[cfg(target_arch = "wasm32")]
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[cfg(not(target_arch = "wasm32"))]
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
