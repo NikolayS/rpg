@@ -619,13 +619,13 @@ mod tests {
         );
     }
 
-    /// When TERM_PROGRAM is unset, DECSTBM should remain enabled (safe default).
+    /// When `TERM_PROGRAM` is unset, DECSTBM should remain enabled (safe default).
     #[test]
     fn no_term_program_keeps_decstbm() {
         let sl = StatusLine::new_with_term_program(true, None);
         assert!(
             sl.use_decstbm,
-            "unset TERM_PROGRAM must keep DECSTBM enabled"
+            "unset `TERM_PROGRAM` must keep DECSTBM enabled"
         );
     }
 
