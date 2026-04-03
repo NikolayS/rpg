@@ -8,7 +8,10 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -4288,6 +4291,8 @@ pub async fn run_repl(
     }
 
     // Auto-save current connection to session store (best-effort; non-fatal).
+    // Not available on WASM: requires filesystem access and std::time.
+    #[cfg(not(target_arch = "wasm32"))]
     session_store_auto_save(&params, &settings.session_id);
 
     // Execute startup file unless suppressed by -X.

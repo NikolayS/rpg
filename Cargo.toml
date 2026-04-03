@@ -62,6 +62,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # WASM-only dependencies: browser WebSocket transport, JS interop, and
 # panic diagnostics.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
 ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
 async_io_stream = { version = "0.3", features = ["tokio_io"] }
 wasm-bindgen = "0.2"
