@@ -12,6 +12,39 @@ use super::*;
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
 
+/// Infer whether a result-set column should be right-aligned (numeric).
+///
+/// Returns `true` when every non-NULL, non-empty cell parses as `f64` AND
+/// at least one cell has a value.  Values with a leading `+` sign are excluded
+/// because they indicate `to_char()`-formatted text output (e.g. `+456`) and
+/// never appear in raw integer or float column output.
+///
+/// Note: the simple query protocol carries no type OIDs, so this is a
+/// best-effort heuristic.  Columns that happen to contain numeric-looking
+/// text (e.g. SQLSTATE codes, `concat_ws` results) may be misidentified.
+/// Accurate alignment requires the extended query protocol (issue #21).
+fn infer_numeric_column(
+    col_idx: usize,
+    rows: &[Vec<Option<String>>],
+) -> bool {
+    let mut has_value = false;
+    let all_parseable = rows.iter().all(|row| {
+        match row.get(col_idx).and_then(|v| v.as_deref()) {
+            None | Some("") => true,
+            Some(val) => {
+                has_value = true;
+                // Leading '+' indicates to_char() formatted output, not raw
+                // numeric data.  Real integer/float columns never show '+'.
+                if val.starts_with('+') {
+                    return false;
+                }
+                val.parse::<f64>().is_ok()
+            }
+        }
+    });
+    all_parseable && has_value
+}
+
 /// Print a single result set using the active [`PsetConfig`].
 ///
 /// `col_names` and `rows` describe the result set. `is_select` indicates
@@ -52,21 +85,9 @@ pub(super) fn print_result_set_pset(
         let columns: Vec<ColumnMeta> = col_names
             .iter()
             .enumerate()
-            .map(|(col_idx, n)| {
-                let mut has_value = false;
-                let is_numeric = rows.iter().all(|row| {
-                    match row.get(col_idx).and_then(|v| v.as_deref()) {
-                        None | Some("") => true, // NULL or empty: skip, don't disqualify
-                        Some(val) => {
-                            has_value = true;
-                            val.parse::<f64>().is_ok()
-                        }
-                    }
-                }) && has_value;
-                ColumnMeta {
-                    name: n.clone(),
-                    is_numeric,
-                }
+            .map(|(col_idx, n)| ColumnMeta {
+                name: n.clone(),
+                is_numeric: infer_numeric_column(col_idx, rows),
             })
             .collect();
 
@@ -564,21 +585,9 @@ pub async fn execute_query_extended(
                 let columns: Vec<ColumnMeta> = col_names
                     .iter()
                     .enumerate()
-                    .map(|(col_idx, n)| {
-                        let mut has_value = false;
-                        let is_numeric = row_data.iter().all(|r| {
-                            match r.get(col_idx).and_then(|v| v.as_deref()) {
-                                None | Some("") => true,
-                                Some(val) => {
-                                    has_value = true;
-                                    val.parse::<f64>().is_ok()
-                                }
-                            }
-                        }) && has_value;
-                        ColumnMeta {
-                            name: n.clone(),
-                            is_numeric,
-                        }
+                    .map(|(col_idx, n)| ColumnMeta {
+                        name: n.clone(),
+                        is_numeric: infer_numeric_column(col_idx, &row_data),
                     })
                     .collect();
 
@@ -739,21 +748,9 @@ pub(super) async fn execute_named_stmt(
                 let columns: Vec<ColumnMeta> = col_names
                     .iter()
                     .enumerate()
-                    .map(|(col_idx, n)| {
-                        let mut has_value = false;
-                        let is_numeric = row_data.iter().all(|r| {
-                            match r.get(col_idx).and_then(|v| v.as_deref()) {
-                                None | Some("") => true,
-                                Some(val) => {
-                                    has_value = true;
-                                    val.parse::<f64>().is_ok()
-                                }
-                            }
-                        }) && has_value;
-                        ColumnMeta {
-                            name: n.clone(),
-                            is_numeric,
-                        }
+                    .map(|(col_idx, n)| ColumnMeta {
+                        name: n.clone(),
+                        is_numeric: infer_numeric_column(col_idx, &row_data),
                     })
                     .collect();
 

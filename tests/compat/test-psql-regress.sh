@@ -38,10 +38,58 @@ PGUSER="${PGUSER:-postgres}"
 PGDATABASE="${PGDATABASE:-postgres}"
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 
+# Use separate databases for psql and rpg so that DML executed by psql
+# does not contaminate the starting state for rpg (and vice versa).
+#
+# Strategy: create one "template" database with test_setup.sql applied,
+# then for each test clone it quickly into psql_test and rpg_test, run
+# each client against its own copy, and drop them afterwards.
+REGRESS_TEMPLATE_DB="${PGDATABASE}_regress_tmpl"
+PSQL_DBNAME="${PGDATABASE}_psql_regress"
+RPG_DBNAME="${PGDATABASE}_rpg_regress"
+
+_psql_admin() {
+  PAGER=cat psql \
+    --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+    -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+    "$@" > /dev/null 2>&1 || true
+}
+
+_drop_test_dbs() {
+  _psql_admin \
+    -c "DROP DATABASE IF EXISTS ${PSQL_DBNAME};" \
+    -c "DROP DATABASE IF EXISTS ${RPG_DBNAME};" \
+    -c "DROP DATABASE IF EXISTS ${REGRESS_TEMPLATE_DB};"
+}
+
+# Recreate isolated test databases before every test by cloning the
+# template (fast — no SQL re-execution needed).
+_reset_test_dbs() {
+  _psql_admin \
+    -c "DROP DATABASE IF EXISTS ${PSQL_DBNAME};" \
+    -c "DROP DATABASE IF EXISTS ${RPG_DBNAME};"
+  PAGER=cat psql \
+    --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+    -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+    -c "CREATE DATABASE ${PSQL_DBNAME} TEMPLATE ${REGRESS_TEMPLATE_DB};" \
+    -c "CREATE DATABASE ${RPG_DBNAME}  TEMPLATE ${REGRESS_TEMPLATE_DB};" \
+    > /dev/null 2>&1 || {
+      # Template cloning failed (e.g. no test_setup was run); fall back to
+      # creating plain empty databases.
+      PAGER=cat psql \
+        --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+        -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+        -c "CREATE DATABASE ${PSQL_DBNAME};" \
+        -c "CREATE DATABASE ${RPG_DBNAME};" \
+        > /dev/null 2>&1 || true
+    }
+}
+
 RESULTS_DIR="${RESULTS_DIR:-/tmp/rpg-regress-$$}"
 mkdir -p "${RESULTS_DIR}"
 
 cleanup() {
+  _drop_test_dbs
   if [[ -z "${KEEP_RESULTS:-}" ]]; then
     rm -rf "${RESULTS_DIR}"
   else
@@ -80,6 +128,10 @@ readonly SKIP_ALWAYS=(
   "collate"
   # Requires pg_regress C library
   "sqljson_jsontable"
+  # Uses libpq pipeline mode (\startpipeline / \endpipeline) which hangs
+  # when run non-interactively via -f against a server that does not have
+  # pipeline support enabled in the same way as pg_regress sets it up.
+  "psql_pipeline"
   # Triggers / rules that depend on earlier tests having run
   # (included in sequential schedule below, leave as-is)
 )
@@ -118,36 +170,41 @@ normalize() {
   '
 }
 
+# Per-test timeout (seconds). Override with TEST_TIMEOUT env var.
+TEST_TIMEOUT="${TEST_TIMEOUT:-120}"
+
 # run_psql FILE  — run a SQL file through psql, return normalized output
 run_psql() {
   local file="${1}"
-  PAGER=cat psql \
-    --no-psqlrc \
-    -X \
-    -a \
-    -q \
-    -v "ON_ERROR_STOP=0" \
-    -h "${PGHOST}" \
-    -p "${PGPORT}" \
-    -U "${PGUSER}" \
-    -d "${PGDATABASE}" \
-    -f "${file}" \
+  timeout "${TEST_TIMEOUT}" \
+    env PAGER=cat psql \
+      --no-psqlrc \
+      -X \
+      -a \
+      -q \
+      -v "ON_ERROR_STOP=0" \
+      -h "${PGHOST}" \
+      -p "${PGPORT}" \
+      -U "${PGUSER}" \
+      -d "${PSQL_DBNAME}" \
+      -f "${file}" \
     2>&1 | normalize
 }
 
 # run_rpg FILE  — run a SQL file through rpg, return normalized output
 run_rpg() {
   local file="${1}"
-  PAGER=cat "${RPG}" \
-    -X \
-    -a \
-    -q \
-    -v "ON_ERROR_STOP=0" \
-    -h "${PGHOST}" \
-    -p "${PGPORT}" \
-    -U "${PGUSER}" \
-    -d "${PGDATABASE}" \
-    -f "${file}" \
+  timeout "${TEST_TIMEOUT}" \
+    env PAGER=cat "${RPG}" \
+      -X \
+      -a \
+      -q \
+      -v "ON_ERROR_STOP=0" \
+      -h "${PGHOST}" \
+      -p "${PGPORT}" \
+      -U "${PGUSER}" \
+      -d "${RPG_DBNAME}" \
+      -f "${file}" \
     2>&1 | normalize
 }
 
@@ -212,6 +269,21 @@ compare_test() {
     return
   fi
 
+  # Recreate fresh isolated databases so each test starts from the same
+  # state regardless of what previous tests left behind.
+  _reset_test_dbs
+
+  # Run the regression setup into both isolated databases first so that
+  # any shared schema (sequence tables, etc.) is available.
+  if [[ -f "${REGRESS_SQL_DIR}/test_setup.sql" ]]; then
+    PAGER=cat psql --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+      -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PSQL_DBNAME}" \
+      -f "${REGRESS_SQL_DIR}/test_setup.sql" > /dev/null 2>&1 || true
+    PAGER=cat psql --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+      -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${RPG_DBNAME}" \
+      -f "${REGRESS_SQL_DIR}/test_setup.sql" > /dev/null 2>&1 || true
+  fi
+
   local psql_out rpg_out
   psql_out=$(run_psql "${sql_file}" 2>/dev/null || true)
   rpg_out=$(run_rpg  "${sql_file}" 2>/dev/null || true)
@@ -240,29 +312,36 @@ compare_test() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup: run test_setup.sql once to create the standard regression schema
+# Setup: create the template database with test_setup.sql applied, then clone
+# it into the initial psql and rpg test databases.
 # ---------------------------------------------------------------------------
 setup_regress_db() {
   echo "=== Setting up regression schema ==="
-  if [[ ! -f "${REGRESS_SQL_DIR}/test_setup.sql" ]]; then
+
+  # Drop any leftover databases from a previous interrupted run.
+  _drop_test_dbs
+
+  # Create the template database and apply test_setup.sql to it so that
+  # _reset_test_dbs() can clone it cheaply for each test.
+  echo "Creating template database..."
+  PAGER=cat psql \
+    --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+    -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+    -c "CREATE DATABASE ${REGRESS_TEMPLATE_DB};" \
+    > /dev/null 2>&1 || true
+
+  if [[ -f "${REGRESS_SQL_DIR}/test_setup.sql" ]]; then
+    PAGER=cat psql \
+      --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+      -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" \
+      -d "${REGRESS_TEMPLATE_DB}" \
+      -f "${REGRESS_SQL_DIR}/test_setup.sql" \
+      > /dev/null 2>&1 || true
+  else
     echo "WARNING: test_setup.sql not found — skipping schema setup"
-    return
   fi
 
-  # Run test_setup.sql through psql to create the standard tables / tablespace.
-  # Errors are ignored (idempotent: IF NOT EXISTS / OR REPLACE throughout).
-  PAGER=cat psql \
-    --no-psqlrc \
-    -X \
-    -q \
-    -v "ON_ERROR_STOP=0" \
-    -h "${PGHOST}" \
-    -p "${PGPORT}" \
-    -U "${PGUSER}" \
-    -d "${PGDATABASE}" \
-    -f "${REGRESS_SQL_DIR}/test_setup.sql" \
-    > /dev/null 2>&1 || true
-  echo "Setup complete."
+  echo "Done."
   echo ""
 }
 

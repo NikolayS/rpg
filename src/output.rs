@@ -339,8 +339,8 @@ fn column_widths(
 ///   ` |` suffix.
 ///
 /// `value_fn` maps `(column_meta, column_index) → String`.
-/// `is_header` – when true, text columns are center-aligned (matching psql).
-/// Numeric columns are always right-aligned (both header and data rows).
+/// `is_header` – when true, all headers are center-aligned (psql centers
+/// numeric headers too; only data rows are right-aligned for numeric columns).
 fn write_aligned_row_border<F>(
     out: &mut String,
     cols: &[ColumnMeta],
@@ -382,14 +382,15 @@ fn write_aligned_row_border<F>(
             }
         }
 
-        if col.is_numeric {
-            // Right-align numeric columns (both headers and data).
+        if col.is_numeric && !is_header {
+            // Right-align numeric data rows.
             for _ in 0..padding {
                 out.push(' ');
             }
             out.push_str(&val);
         } else if is_header {
-            // Center-align text headers (psql behaviour).
+            // Center-align all column headers (psql behaviour — numeric
+            // column headers are centered, not right-aligned).
             let left_pad = padding / 2;
             let right_pad = padding - left_pad;
             for _ in 0..left_pad {
@@ -427,8 +428,9 @@ fn write_aligned_row_border<F>(
 /// Write one row of the aligned table (header or data).
 ///
 /// `value_fn` maps `(column_meta, column_index) → String`.
-/// `is_header` – when true, text columns are center-aligned (matching psql).
-/// Numeric columns are always right-aligned (both header and data rows).
+/// `is_header` – when true, all column headers are center-aligned (matching
+/// psql: numeric headers are centered, not right-aligned; only data rows are
+/// right-aligned).
 fn write_aligned_row<F>(
     out: &mut String,
     cols: &[ColumnMeta],
