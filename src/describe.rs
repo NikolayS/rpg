@@ -2186,15 +2186,13 @@ order by 2, 3"
                 return false;
             }
 
-            for (i, (schema, name)) in matches.into_iter().enumerate() {
-                // Separate consecutive describes with a blank line (psql does this).
-                if i > 0 {
-                    println!();
-                }
+            for (schema, name) in matches {
                 // Use the exact schema-qualified name so describe_table resolves
                 // to exactly one object.
                 let qualified = format!("{schema}.{name}");
                 describe_table(client, meta, &qualified, settings).await;
+                // psql always prints a blank line after each \d table description.
+                println!();
             }
 
             // Return false unconditionally (only \q should exit the REPL).

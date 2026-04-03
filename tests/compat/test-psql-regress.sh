@@ -170,7 +170,11 @@ normalize() {
     -e '/^\\if /d' \
     -e '/^\\endif/d' \
     -e 's/_psql_regress/_test_regress/g' \
-    -e 's/_rpg_regress/_test_regress/g' | \
+    -e 's/_rpg_regress/_test_regress/g' \
+    -e '/^CONTEXT:  /d' \
+    -e '/^SQL function "[^"]*" statement /d' \
+    -e '/^PL\/pgSQL function "[^"]*" /d' \
+    -e '/^parallel worker$/d' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
