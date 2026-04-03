@@ -4898,6 +4898,26 @@ async fn run_wasm_loop(
                 }
                 HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
             }
+        } else if interpolated_line.trim_start().starts_with('/') {
+            // rpg slash commands (/ask, /dba, /version, etc.)
+            buf.clear();
+            if let Some(result) =
+                dispatch_ai_command(interpolated_line.trim(), client, params, settings, tx).await
+            {
+                match result {
+                    MetaResult::Reconnected(new_client, new_params) => {
+                        *client = *new_client;
+                        *params = *new_params;
+                        *tx = TxState::default();
+                        buf.clear();
+                        settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+                        settings.audit_dbname.clone_from(&params.dbname);
+                        settings.audit_user.clone_from(&params.user);
+                    }
+                    MetaResult::Quit => break,
+                    _ => {}
+                }
+            }
         } else if settings.cond.is_active() {
             if let Some(pos) = find_inline_backslash(&line) {
                 let sql_part = &line[..pos];
