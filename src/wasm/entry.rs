@@ -81,12 +81,9 @@ pub async fn run_rpg(
     // Create the input channel and expose the sender to JS.
     let (sender, reader) = wasm_line_channel();
     let js_sender = JsValue::from(sender);
-    js_sys::Reflect::set(&js_sys::global(), &"rpgLineSender".into(), &js_sender)
-        .map_err(|e| e)?;
+    js_sys::Reflect::set(&js_sys::global(), &"rpgLineSender".into(), &js_sender).map_err(|e| e)?;
 
-    web_sys::console::log_1(
-        &"rpg: ready — type SQL and press Enter; \\q or \\quit to exit".into(),
-    );
+    web_sys::console::log_1(&"rpg: ready — type SQL and press Enter; \\q or \\quit to exit".into());
 
     // Build minimal ConnParams and ReplSettings for the REPL.
     let mut params = crate::connection::ConnParams::default();

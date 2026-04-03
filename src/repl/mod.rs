@@ -4332,7 +4332,14 @@ pub async fn run_repl(
         #[cfg(target_arch = "wasm32")]
         {
             let _ = use_readline;
-            run_wasm_loop(&mut client, &mut params, &mut settings, &mut tx, wasm_reader).await
+            run_wasm_loop(
+                &mut client,
+                &mut params,
+                &mut settings,
+                &mut tx,
+                wasm_reader,
+            )
+            .await
         }
     };
 
@@ -4871,15 +4878,8 @@ async fn run_wasm_loop(
 
         let interpolated_line = settings.vars.interpolate(line.trim());
         if interpolated_line.trim_start().starts_with('\\') {
-            match handle_backslash_dumb(
-                &interpolated_line,
-                &mut buf,
-                client,
-                params,
-                settings,
-                tx,
-            )
-            .await
+            match handle_backslash_dumb(&interpolated_line, &mut buf, client, params, settings, tx)
+                .await
             {
                 HandleLineResult::Quit => break,
                 HandleLineResult::Reconnected(new_client, new_params) => {
@@ -4887,8 +4887,7 @@ async fn run_wasm_loop(
                     *params = *new_params;
                     *tx = TxState::default();
                     buf.clear();
-                    settings.is_superuser =
-                        crate::capabilities::detect_superuser(client).await;
+                    settings.is_superuser = crate::capabilities::detect_superuser(client).await;
                     settings.audit_dbname.clone_from(&params.dbname);
                     settings.audit_user.clone_from(&params.user);
                 }
@@ -4904,8 +4903,7 @@ async fn run_wasm_loop(
                     }
                     buf.push_str(sql_part.trim_end());
                 }
-                match handle_backslash_dumb(meta_part, &mut buf, client, params, settings, tx)
-                    .await
+                match handle_backslash_dumb(meta_part, &mut buf, client, params, settings, tx).await
                 {
                     HandleLineResult::Quit => break,
                     HandleLineResult::Reconnected(new_client, new_params) => {
@@ -4913,8 +4911,7 @@ async fn run_wasm_loop(
                         *params = *new_params;
                         *tx = TxState::default();
                         buf.clear();
-                        settings.is_superuser =
-                            crate::capabilities::detect_superuser(client).await;
+                        settings.is_superuser = crate::capabilities::detect_superuser(client).await;
                         settings.audit_dbname.clone_from(&params.dbname);
                         settings.audit_user.clone_from(&params.user);
                     }
