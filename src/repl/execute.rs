@@ -1059,6 +1059,16 @@ pub(super) async fn execute_query_interactive(
     // Determine terminal height; fall back to 24 if unavailable.
     let term_rows = crate::term::terminal_size().1 as usize;
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        // No pager in the browser — emit captured output line-by-line via
+        // console.log so xterm.js displays it.
+        let text_out = std::str::from_utf8(display_bytes).unwrap_or("");
+        for line in text_out.split('\n') {
+            web_sys::console::log_1(&line.into());
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if crate::pager::needs_paging_with_min(
         text,
         term_rows.saturating_sub(2),
