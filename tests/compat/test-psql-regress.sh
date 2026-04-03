@@ -105,7 +105,13 @@ normalize() {
     -e '/^Time: [0-9]/d' \
     -e '/^Timing is /d' \
     -e '/^Hint: /d' \
-    -e '/^\[auto-explain:/d' | \
+    -e '/^\[auto-explain:/d' \
+    -e 's/^psql:[^:]*:[0-9][0-9]*: //' \
+    -e 's/^rpg:[^:]*:[0-9][0-9]*: //' \
+    -e '/^rpg [0-9][0-9]*\./d' \
+    -e '/^You are now connected to database /d' \
+    -e '/^LINE [0-9][0-9]*: /d' \
+    -e '/^ *\^[ ~]*$/d' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
@@ -148,12 +154,16 @@ run_rpg() {
 # should_skip NAME — return 0 if the test should be skipped
 should_skip() {
   local name="${1}"
-  # User-specified skip list
-  for s in ${REGRESS_SKIP:-}; do
-    if [[ "${name}" == "${s}" ]]; then
-      return 0
-    fi
-  done
+  # User-specified skip list (use read -ra to split on spaces despite IFS=$'\n\t')
+  if [[ -n "${REGRESS_SKIP:-}" ]]; then
+    local -a skip_list
+    IFS=' ' read -ra skip_list <<< "${REGRESS_SKIP}"
+    for s in "${skip_list[@]}"; do
+      if [[ "${name}" == "${s}" ]]; then
+        return 0
+      fi
+    done
+  fi
   # Built-in skip list
   for s in "${SKIP_ALWAYS[@]}"; do
     if [[ "${name}" == "${s}" ]]; then
@@ -169,7 +179,10 @@ should_run() {
   if [[ -z "${REGRESS_ONLY:-}" ]]; then
     return 0
   fi
-  for r in ${REGRESS_ONLY}; do
+  # Use read -ra to split on spaces despite IFS=$'\n\t'
+  local -a only_list
+  IFS=' ' read -ra only_list <<< "${REGRESS_ONLY}"
+  for r in "${only_list[@]}"; do
     if [[ "${name}" == "${r}" ]]; then
       return 0
     fi
@@ -274,7 +287,9 @@ if [[ -f "${schedule_file}" ]]; then
   while IFS= read -r line; do
     # Lines like: test: boolean char name varchar ...
     if [[ "${line}" =~ ^test:[[:space:]]+(.*) ]]; then
-      for t in ${BASH_REMATCH[1]}; do
+      # Use read -ra to split on spaces (IFS=$'\n\t' prevents normal word-split)
+      IFS=' ' read -ra sched_tests <<< "${BASH_REMATCH[1]}"
+      for t in "${sched_tests[@]}"; do
         if [[ -z "${SEEN_TESTS[${t}]:-}" ]]; then
           ORDERED_TESTS+=("${t}")
           SEEN_TESTS["${t}"]=1

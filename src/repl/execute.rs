@@ -32,6 +32,7 @@ pub(super) fn print_result_set_pset(
     sql: &str,
     is_first: bool,
     pset: &crate::output::PsetConfig,
+    quiet: bool,
 ) {
     use crate::output::format_rowset_pset;
     use crate::query::{ColumnMeta, RowSet};
@@ -80,10 +81,11 @@ pub(super) fn print_result_set_pset(
         // matches psql's consistent blank line after every result set.
         // No extra separator is needed before subsequent results.
         let _ = writer.write_all(out.as_bytes());
-    } else {
+    } else if !quiet {
         // Non-SELECT statement: show the psql-style command tag.
         // tokio-postgres 0.7 only exposes the numeric count from
         // CommandComplete; reconstruct the full tag from the SQL.
+        // Suppressed in quiet mode (-q), matching psql behaviour.
         let tag = crate::query::reconstruct_command_tag(sql, rows_affected);
         if !tag.is_empty() {
             if !is_first {
@@ -307,6 +309,7 @@ pub async fn execute_query(
                             sql_to_send,
                             result_set_index == 0,
                             &settings.pset,
+                            settings.quiet,
                         );
 
                         // Mirror output to log file if active.
@@ -2071,6 +2074,7 @@ mod tests {
             "SELECT FROM t WHERE i = 10",
             true,      // is_first
             &PsetConfig::default(),
+            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert!(
@@ -2091,6 +2095,7 @@ mod tests {
             "SELECT FROM t WHERE false",
             true,
             &PsetConfig::default(),
+            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert!(
@@ -2111,6 +2116,7 @@ mod tests {
             "SELECT FROM t",
             true,
             &PsetConfig::default(),
+            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert!(
@@ -2132,6 +2138,7 @@ mod tests {
             "CREATE TABLE foo (id int)",
             true,
             &PsetConfig::default(),
+            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
@@ -2154,6 +2161,7 @@ mod tests {
             "UPDATE foo SET x = 1 WHERE false",
             true,
             &PsetConfig::default(),
+            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(out.trim(), "UPDATE 0", "UPDATE 0 must print tag: {out:?}");

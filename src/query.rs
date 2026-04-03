@@ -346,6 +346,16 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
 
 /// Skip leading whitespace and SQL comments (line `--` and block `/* */`)
 /// to find the first meaningful keyword in a SQL statement.
+/// Strip leading blank lines and line/block comments from a SQL string.
+///
+/// PostgreSQL counts lines from the start of the query string it receives.
+/// psql strips these leading decorations before sending so that LINE N in
+/// error messages is relative to the first real SQL token (LINE 1 for a
+/// single-statement query).  rpg must do the same to match psql output.
+pub fn strip_leading_preamble(sql: &str) -> &str {
+    skip_leading_comments(sql)
+}
+
 fn skip_leading_comments(sql: &str) -> &str {
     let mut s = sql.trim_start();
     loop {

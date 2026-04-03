@@ -1575,14 +1575,19 @@ pub(crate) async fn exec_lines(
             // Handle buffer-aware results that exec_lines must act on directly.
             match result {
                 MetaResult::ExecuteBuffer => {
-                    let sql = buf.trim().to_owned();
+                    // The buffer lines were already echoed individually above;
+                    // disable echo_all so execute_query doesn't echo again.
+                    let sql = crate::query::strip_leading_preamble(buf.trim()).to_owned();
                     buf.clear();
                     if !sql.is_empty() {
+                        let saved_echo = settings.echo_all;
+                        settings.echo_all = false;
                         let ok = if let Some(bp) = settings.pending_bind_params.take() {
                             execute_query_extended(client, &sql, &bp, settings, tx).await
                         } else {
                             execute_query(client, &sql, settings, tx).await
                         };
+                        settings.echo_all = saved_echo;
                         if !ok {
                             exit_code = 1;
                             if settings.single_transaction {
@@ -1675,14 +1680,18 @@ pub(crate) async fn exec_lines(
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
                     MetaResult::ExecuteBuffer => {
-                        let sql = buf.trim().to_owned();
+                        let sql =
+                            crate::query::strip_leading_preamble(buf.trim()).to_owned();
                         buf.clear();
                         if !sql.is_empty() {
+                            let saved_echo = settings.echo_all;
+                            settings.echo_all = false;
                             let ok = if let Some(bp) = settings.pending_bind_params.take() {
                                 execute_query_extended(client, &sql, &bp, settings, tx).await
                             } else {
                                 execute_query(client, &sql, settings, tx).await
                             };
+                            settings.echo_all = saved_echo;
                             if !ok {
                                 exit_code = 1;
                                 if settings.single_transaction {
@@ -1722,9 +1731,10 @@ pub(crate) async fn exec_lines(
                     _ => {}
                 }
             } else {
-                // -a / --echo-all: echo each SQL line to stdout as it is read,
-                // matching psql's `-a` behaviour (line-by-line echo before execution).
-                if settings.echo_all {
+                // -a / --echo-all: echo each SQL line to stdout as it is read.
+                // psql's `-a` echoes only "nonempty input lines" — blank lines
+                // are silently skipped, matching `psql --echo-all` behaviour.
+                if settings.echo_all && !line.trim().is_empty() {
                     if let Some(ref mut w) = settings.output_target {
                         let _ = writeln!(w, "{line}");
                     } else {
@@ -1738,11 +1748,16 @@ pub(crate) async fn exec_lines(
                 buf.push_str(&line);
 
                 if is_complete(&buf) {
+                    // Strip leading blank lines and comments so that PostgreSQL
+                    // reports LINE 1 for the first real SQL token — matching
+                    // psql's behaviour where leading decorations are not sent.
+                    let sql_to_exec =
+                        crate::query::strip_leading_preamble(buf.trim());
                     // Disable per-statement echo in execute_query to avoid
                     // double-echoing when echo_all is active (lines already echoed above).
                     let saved_echo_all = settings.echo_all;
                     settings.echo_all = false;
-                    let ok = execute_query(client, buf.trim(), settings, tx).await;
+                    let ok = execute_query(client, sql_to_exec, settings, tx).await;
                     settings.echo_all = saved_echo_all;
                     if !ok {
                         exit_code = 1;
@@ -1759,9 +1774,10 @@ pub(crate) async fn exec_lines(
     }
 
     // Execute any trailing SQL without a terminating semicolon.
-    if !buf.trim().is_empty()
+    let trailing = crate::query::strip_leading_preamble(buf.trim());
+    if !trailing.is_empty()
         && settings.cond.is_active()
-        && !execute_query(client, buf.trim(), settings, tx).await
+        && !execute_query(client, trailing, settings, tx).await
     {
         exit_code = 1;
     }
@@ -2462,6 +2478,9 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
 fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
     use crate::output::OutputFormat;
 
+    // In quiet mode (-q), psql suppresses all \pset confirmation messages.
+    let quiet = settings.quiet;
+
     if option.is_empty() {
         // Display all pset options.
         let text = pset_status_text(settings);
@@ -2473,7 +2492,9 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         "format" => {
             if value.is_none_or(str::is_empty) {
                 // \pset format (no value) — show current setting.
-                println!("Output format is {}.", format_name(&settings.pset.format));
+                if !quiet {
+                    println!("Output format is {}.", format_name(&settings.pset.format));
+                }
                 return;
             }
             let fmt = match value.unwrap_or("") {
@@ -2490,30 +2511,40 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.pset.format = fmt;
-            println!("Output format is {}.", format_name(&settings.pset.format));
+            if !quiet {
+                println!("Output format is {}.", format_name(&settings.pset.format));
+            }
         }
         "border" => {
             if let Some(v) = value.and_then(|s| s.parse::<u8>().ok()) {
                 settings.pset.border = v.min(2);
-                println!("Border style is {}.", settings.pset.border);
+                if !quiet {
+                    println!("Border style is {}.", settings.pset.border);
+                }
             } else {
                 eprintln!("\\pset: invalid border value");
             }
         }
         "null" => {
             let display = value.unwrap_or("").to_owned();
-            println!("Null display is \"{display}\".");
+            if !quiet {
+                println!("Null display is \"{display}\".");
+            }
             settings.pset.null_display = display;
         }
         "fieldsep" => {
             let sep = value.unwrap_or("|").to_owned();
-            println!("Field separator is \"{sep}\".");
+            if !quiet {
+                println!("Field separator is \"{sep}\".");
+            }
             settings.pset.field_sep = sep;
         }
         "recordsep" => {
             let sep = value.unwrap_or("\n").to_owned();
             settings.pset.record_sep = sep;
-            println!("Record separator is set.");
+            if !quiet {
+                println!("Record separator is set.");
+            }
         }
         "tuples_only" | "t" => {
             // psql does not print a confirmation message for tuples_only.
@@ -2525,9 +2556,11 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         }
         "title" => {
             settings.pset.title = value.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
-            match &settings.pset.title {
-                Some(t) => println!("Title is \"{t}\"."),
-                None => println!("Title is not set."),
+            if !quiet {
+                match &settings.pset.title {
+                    Some(t) => println!("Title is \"{t}\"."),
+                    None => println!("Title is not set."),
+                }
             }
         }
         "expanded" | "x" => {
@@ -2545,15 +2578,19 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.pset.expanded = mode;
-            println!(
-                "Expanded display is {}.",
-                expanded_mode_str(settings.pset.expanded)
-            );
+            if !quiet {
+                println!(
+                    "Expanded display is {}.",
+                    expanded_mode_str(settings.pset.expanded)
+                );
+            }
         }
         "pager_min_lines" => {
             if let Some(n) = value.and_then(|s| s.parse::<usize>().ok()) {
                 settings.pager_min_lines = n;
-                println!("Pager minimum lines is {n}.");
+                if !quiet {
+                    println!("Pager minimum lines is {n}.");
+                }
             } else {
                 eprintln!("\\pset: invalid pager_min_lines value");
             }
@@ -2573,7 +2610,9 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.explain_format = fmt;
-            println!("EXPLAIN format is {}.", fmt.as_str());
+            if !quiet {
+                println!("EXPLAIN format is {}.", fmt.as_str());
+            }
         }
         other => {
             eprintln!("\\pset: unknown option \"{other}\"");
@@ -3526,15 +3565,17 @@ async fn dispatch_meta(
                         }
                     }
                     // Detect server version to include in the reconnect
-                    // banner (always shown, matching psql behaviour).
+                    // banner. Suppressed in quiet mode (-q), matching psql.
                     let server_ver =
                         crate::capabilities::detect_server_version_pub(&new_client).await;
-                    let msg = crate::connection::reconnect_info(
-                        crate::version_string(),
-                        server_ver.as_deref(),
-                        &new_params,
-                    );
-                    println!("{msg}");
+                    if !settings.quiet {
+                        let msg = crate::connection::reconnect_info(
+                            crate::version_string(),
+                            server_ver.as_deref(),
+                            &new_params,
+                        );
+                        println!("{msg}");
+                    }
                     return MetaResult::Reconnected(Box::new(new_client), Box::new(new_params));
                 }
                 Err(e) => eprintln!("\\c: {e}"),
