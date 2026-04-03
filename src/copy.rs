@@ -370,7 +370,17 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
             // Validated earlier; this branch is unreachable in practice.
             return Err("\\copy: STDOUT is not valid for FROM direction".to_owned());
         }
-        CopySource::Program(cmd) => run_program_capture_stdout(cmd)?,
+        CopySource::Program(cmd) => {
+            // Process spawning is not available on WASM targets.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                run_program_capture_stdout(cmd)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            return Err(format!(
+                "\\copy: PROGRAM source not supported in browser (cmd: {cmd})"
+            ));
+        }
     };
 
     let sink = client
@@ -437,41 +447,49 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
             return Err("\\copy: STDIN is not valid for TO direction".to_owned());
         }
         CopySource::Program(cmd) => {
-            // Collect all data from the server, pipe it to the program's stdin,
-            // then wait for the program to exit.
-            let mut child = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("\\copy: could not spawn program '{cmd}': {e}"))?;
+            // Process spawning is not available on WASM targets.
+            #[cfg(target_arch = "wasm32")]
+            return Err(format!(
+                "\\copy: PROGRAM destination not supported in browser (cmd: {cmd})"
+            ));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // Collect all data from the server, pipe it to the program's stdin,
+                // then wait for the program to exit.
+                let mut child = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("\\copy: could not spawn program '{cmd}': {e}"))?;
 
-            let mut child_stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "\\copy: could not open program stdin".to_owned())?;
+                let mut child_stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| "\\copy: could not open program stdin".to_owned())?;
 
-            let mut row_count = 0u64;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
-                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
-                child_stdin
-                    .write_all(&chunk)
-                    .map_err(|e| format!("\\copy: write to program failed: {e}"))?;
-            }
-            // Drop stdin to signal EOF to the child process.
-            drop(child_stdin);
+                let mut row_count = 0u64;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
+                    row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
+                    child_stdin
+                        .write_all(&chunk)
+                        .map_err(|e| format!("\\copy: write to program failed: {e}"))?;
+                }
+                // Drop stdin to signal EOF to the child process.
+                drop(child_stdin);
 
-            let status = child
-                .wait()
-                .map_err(|e| format!("\\copy: waiting for program failed: {e}"))?;
-            if !status.success() {
-                let code = status
-                    .code()
-                    .map_or_else(|| "signal".to_owned(), |c| c.to_string());
-                return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
-            }
-            println!("COPY {row_count}");
+                let status = child
+                    .wait()
+                    .map_err(|e| format!("\\copy: waiting for program failed: {e}"))?;
+                if !status.success() {
+                    let code = status
+                        .code()
+                        .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+                    return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
+                }
+                println!("COPY {row_count}");
+            } // end #[cfg(not(target_arch = "wasm32"))]
         }
     }
 
@@ -500,6 +518,7 @@ fn read_stdin_until_terminator() -> Result<Vec<u8>, String> {
 
 /// Spawn `sh -c <cmd>`, wait for it to finish, and return its stdout bytes.
 /// Returns an error if the command exits with a non-zero status.
+#[cfg(not(target_arch = "wasm32"))]
 fn run_program_capture_stdout(cmd: &str) -> Result<Vec<u8>, String> {
     use std::process::Command;
 

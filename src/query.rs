@@ -8,7 +8,11 @@
 //! which returns every cell as text and provides a `CommandComplete` tag.
 //! This is the same protocol psql uses for interactive queries.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use thiserror::Error;
 use tokio_postgres::Client;
@@ -424,6 +428,7 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
 /// [`QueryError::Postgres`] variant if execution fails.
 // Public API kept for library consumers; main.rs reads the file directly so
 // it can supply the SQL string to the error formatter without a second read.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 pub async fn execute_file(client: &Client, path: &str) -> Result<QueryOutcome, QueryError> {
     let sql = std::fs::read_to_string(path).map_err(|e| QueryError::FileRead {

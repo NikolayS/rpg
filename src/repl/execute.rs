@@ -1057,10 +1057,18 @@ pub(super) async fn execute_query_interactive(
     let _ = &display; // suppress unused warning
 
     // Determine terminal height; fall back to 24 if unavailable.
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = crate::term::terminal_size().1 as usize;
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        // No pager in the browser — emit captured output line-by-line via
+        // console.log so xterm.js displays it.
+        let text_out = std::str::from_utf8(display_bytes).unwrap_or("");
+        for line in text_out.split('\n') {
+            web_sys::console::log_1(&line.into());
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if crate::pager::needs_paging_with_min(
         text,
         term_rows.saturating_sub(2),
@@ -1180,9 +1188,7 @@ pub(super) async fn execute_query_extended_interactive(
 
     let text = String::from_utf8_lossy(&captured);
 
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = crate::term::terminal_size().1 as usize;
 
     if crate::pager::needs_paging_with_min(
         &text,
@@ -1447,6 +1453,7 @@ pub(super) fn flush_audit_entry(settings: &mut ReplSettings, entry_text: &str) {
 ///
 /// Prints `-- Schema cache refreshed` on success.  Errors are silently
 /// ignored so that a cache refresh failure never disrupts normal output.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSettings) {
     if let Some(cache) = &settings.schema_cache {
         if let Ok(loaded) = load_schema_cache(client).await {
@@ -1454,6 +1461,12 @@ pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSett
             println!("-- Schema cache refreshed");
         }
     }
+}
+
+/// WASM stub: schema cache refresh is not available.
+#[cfg(target_arch = "wasm32")]
+pub(super) async fn auto_refresh_schema(_client: &Client, _settings: &mut ReplSettings) {
+    // Schema completion is not available on WASM.
 }
 
 /// Activate the appropriate pager for `text`.

@@ -52,7 +52,7 @@ impl StatusLine {
     /// The bar is enabled by default only when stderr is a terminal.
     /// Pass `enabled = false` for non-interactive / piped sessions.
     pub fn new(enabled: bool) -> Self {
-        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (cols, rows) = crate::term::terminal_size();
         Self {
             enabled,
             term_cols: cols,
@@ -123,7 +123,8 @@ impl StatusLine {
     pub fn on_resize(&mut self) {
         let old_rows = self.term_rows;
         let old_cols = self.term_cols;
-        if let Ok((cols, rows)) = crossterm::terminal::size() {
+        {
+            let (cols, rows) = crate::term::terminal_size();
             self.term_cols = cols;
             self.term_rows = rows;
         }
