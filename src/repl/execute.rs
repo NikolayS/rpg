@@ -15,27 +15,38 @@ use super::*;
 /// Infer whether a result-set column should be right-aligned (numeric).
 ///
 /// Returns `true` when every non-NULL, non-empty cell parses as `f64` AND
-/// at least one cell has a value.  Values with a leading `+` sign are excluded
-/// because they indicate `to_char()`-formatted text output (e.g. `+456`) and
-/// never appear in raw integer or float column output.
+/// at least one cell has a value, subject to the following exclusions:
+///
+/// - Column name ends with `_code` (e.g. `sql_error_code`) — these are
+///   code/identifier columns that happen to contain digit strings such as
+///   SQLSTATE codes (`22003`, `42601`), not numeric quantities.
+/// - Value starts with `+` — indicates `to_char()`-formatted text output
+///   (e.g. `+456`); raw integer/float columns never emit a leading `+`.
 ///
 /// Note: the simple query protocol carries no type OIDs, so this is a
-/// best-effort heuristic.  Columns that happen to contain numeric-looking
-/// text (e.g. SQLSTATE codes, `concat_ws` results) may be misidentified.
-/// Accurate alignment requires the extended query protocol (issue #21).
+/// best-effort heuristic.  Accurate alignment requires the extended query
+/// protocol (issue #21).
 fn infer_numeric_column(
     col_idx: usize,
+    name: &str,
     rows: &[Vec<Option<String>>],
 ) -> bool {
+    // Column-name heuristic: names ending with _code are identifiers/codes,
+    // not numeric quantities (e.g. sql_error_code → SQLSTATE varchar(5)).
+    if name.to_lowercase().ends_with("_code") {
+        return false;
+    }
+
     let mut has_value = false;
     let all_parseable = rows.iter().all(|row| {
         match row.get(col_idx).and_then(|v| v.as_deref()) {
             None | Some("") => true,
             Some(val) => {
                 has_value = true;
-                // Leading '+' indicates to_char() formatted output, not raw
-                // numeric data.  Real integer/float columns never show '+'.
-                if val.starts_with('+') {
+                // Leading '+' or double-leading-zero indicates to_char()
+                // formatted output (e.g. '+456', '0000000000000456'), not raw
+                // numeric data.  Real integer/float columns never emit these.
+                if val.starts_with('+') || val.starts_with("00") {
                     return false;
                 }
                 val.parse::<f64>().is_ok()
@@ -87,7 +98,7 @@ pub(super) fn print_result_set_pset(
             .enumerate()
             .map(|(col_idx, n)| ColumnMeta {
                 name: n.clone(),
-                is_numeric: infer_numeric_column(col_idx, rows),
+                is_numeric: infer_numeric_column(col_idx, n, rows),
             })
             .collect();
 
@@ -587,7 +598,7 @@ pub async fn execute_query_extended(
                     .enumerate()
                     .map(|(col_idx, n)| ColumnMeta {
                         name: n.clone(),
-                        is_numeric: infer_numeric_column(col_idx, &row_data),
+                        is_numeric: infer_numeric_column(col_idx, n, &row_data),
                     })
                     .collect();
 
@@ -750,7 +761,7 @@ pub(super) async fn execute_named_stmt(
                     .enumerate()
                     .map(|(col_idx, n)| ColumnMeta {
                         name: n.clone(),
-                        is_numeric: infer_numeric_column(col_idx, &row_data),
+                        is_numeric: infer_numeric_column(col_idx, n, &row_data),
                     })
                     .collect();
 
