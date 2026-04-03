@@ -33,7 +33,7 @@ thiserror = "2"
 # On WASM we use a single-threaded runtime without signal/process support.
 # The rt-multi-thread, signal, and process features are added for native
 # targets via the platform-specific section below.
-tokio = { version = "1", features = ["rt", "macros", "time", "io-util"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "io-util", "sync"] }
 unicode-width = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 

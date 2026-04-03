@@ -7,6 +7,7 @@ use clap::Parser;
 
 // Core modules.
 mod ai;
+#[cfg(not(target_arch = "wasm32"))]
 mod ash;
 mod capabilities;
 mod compat;
@@ -46,6 +47,7 @@ mod report;
     clippy::pedantic,
     clippy::nursery
 )]
+#[cfg(not(target_arch = "wasm32"))]
 mod rpg;
 mod safety;
 mod session;
@@ -600,22 +602,21 @@ fn build_settings(
 // ---------------------------------------------------------------------------
 
 fn main() {
-    // WASM (single-threaded): use current_thread runtime — no OS threads.
-    // Native: use multi-thread runtime for signal handling and concurrency.
-    #[cfg(target_arch = "wasm32")]
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build tokio runtime");
+    // On WASM, wasm-bindgen calls main() automatically via __wbindgen_start.
+    // block_on() is incompatible with the browser event loop, so main() is a
+    // no-op here — run_rpg() in src/wasm/entry.rs is the real browser entry.
     #[cfg(not(target_arch = "wasm32"))]
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build tokio runtime");
-    rt.block_on(async_main());
+    {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+        rt.block_on(async_main());
+    }
 }
 
 #[allow(clippy::too_many_lines)]
+#[cfg(not(target_arch = "wasm32"))]
 async fn async_main() {
     // Install the default rustls CryptoProvider before any TLS operations.
     // Required because multiple dependencies (tokio-postgres-rustls, reqwest)

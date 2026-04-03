@@ -500,12 +500,17 @@ pub(super) async fn dispatch_ai_command(
 
     // /ash — active session history TUI.
     } else if input == "/rpg" {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
-            eprintln!("/rpg requires an interactive terminal");
-            return None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::IsTerminal;
+            if !std::io::stdout().is_terminal() {
+                eprintln!("/rpg requires an interactive terminal");
+                return None;
+            }
+            crate::rpg::run_game();
         }
-        crate::rpg::run_game();
+        #[cfg(target_arch = "wasm32")]
+        eprintln!("/rpg is not available in the browser");
     } else if input == "/ash" || input.starts_with("/ash ") {
         use std::io::IsTerminal;
         if !std::io::stdout().is_terminal() {
@@ -515,9 +520,12 @@ pub(super) async fn dispatch_ai_command(
         // Parse optional --cpu N flag: /ash --cpu 8
         let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
         let cpu_override = parse_ash_cpu_flag(ash_args);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
             eprintln!("/ash: {e}");
         }
+        #[cfg(target_arch = "wasm32")]
+        eprintln!("/ash: not available in browser");
 
     // /sql — switch to SQL input mode.
     } else if input == "/sql" {
@@ -568,6 +576,7 @@ pub(super) async fn dispatch_ai_command(
 
     // /refresh — reload schema cache for tab completion.
     } else if input == "/refresh" {
+        #[cfg(not(target_arch = "wasm32"))]
         match &settings.schema_cache {
             None => {
                 eprintln!("/refresh: no active connection or not in interactive mode");
@@ -582,6 +591,8 @@ pub(super) async fn dispatch_ai_command(
                 }
             },
         }
+        #[cfg(target_arch = "wasm32")]
+        eprintln!("/refresh: schema completion not available in browser");
 
     // /session [subcommand] — session persistence.
     } else if let Some(rest) = input.strip_prefix("/session").map(str::trim) {

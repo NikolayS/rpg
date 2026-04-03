@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "rpg"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "async_io_stream",

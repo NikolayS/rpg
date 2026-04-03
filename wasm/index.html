@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>rpg — browser terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a1a1a; color: #d4d4d4; font-family: monospace; display: flex; flex-direction: column; height: 100vh; }
+    #toolbar {
+      background: #252526; border-bottom: 1px solid #333; padding: 8px 12px;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0;
+    }
+    #toolbar label { color: #9cdcfe; font-size: 12px; }
+    #toolbar input {
+      background: #1e1e1e; border: 1px solid #444; color: #d4d4d4;
+      padding: 4px 8px; border-radius: 3px; font-family: monospace; font-size: 12px;
+    }
+    #toolbar button {
+      background: #0e639c; color: #fff; border: none; padding: 4px 14px;
+      border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 12px;
+    }
+    #toolbar button:hover { background: #1177bb; }
+    #toolbar button:disabled { background: #444; cursor: default; }
+    #status { font-size: 11px; margin-left: auto; }
+    #status.connected { color: #4ec9b0; }
+    #status.error { color: #f48771; }
+    #terminal-container { flex: 1; padding: 4px; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <label>ws-proxy</label>
+    <input id="ws-url" value="ws://localhost:9091" size="26">
+    <label>database</label>
+    <input id="db" value="testdb" size="12">
+    <label>user</label>
+    <input id="user" value="testuser" size="10">
+    <label>password</label>
+    <input id="password" type="password" size="10">
+    <button id="connect-btn">Connect</button>
+    <span id="status">disconnected</span>
+  </div>
+  <div id="terminal-container"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <script type="module">
+    import init, { run_rpg } from './pkg/rpg.js';
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontFamily: '"Cascadia Code", "Fira Code", "Courier New", monospace',
+      fontSize: 14,
+      theme: {
+        background: '#0d0d0d',
+        foreground: '#d4d4d4',
+        cursor: '#4ec9b0',
+        selectionBackground: '#264f78',
+        black: '#1e1e1e', red: '#f44747', green: '#6a9955',
+        yellow: '#dcdcaa', blue: '#569cd6', magenta: '#c586c0',
+        cyan: '#4ec9b0', white: '#d4d4d4',
+        brightBlack: '#808080', brightRed: '#f48771', brightGreen: '#89d185',
+        brightYellow: '#d7ba7d', brightBlue: '#9cdcfe', brightMagenta: '#d19a66',
+        brightCyan: '#56b6c2', brightWhite: '#ffffff',
+      },
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal-container'));
+    fitAddon.fit();
+    window.addEventListener('resize', () => fitAddon.fit());
+
+    const status = document.getElementById('status');
+    const connectBtn = document.getElementById('connect-btn');
+
+    // Intercept console.log/warn/error → xterm output.
+    // Rust's web_sys::console::log_1 calls console.log.
+    const origLog   = console.log.bind(console);
+    const origWarn  = console.warn.bind(console);
+    const origError = console.error.bind(console);
+    console.log   = (...a) => { origLog(...a);   term.writeln(a.join(' ')); };
+    console.warn  = (...a) => { origWarn(...a);  term.writeln('\x1b[33m' + a.join(' ') + '\x1b[0m'); };
+    console.error = (...a) => { origError(...a); term.writeln('\x1b[31m' + a.join(' ') + '\x1b[0m'); };
+
+    // Line editing buffer for xterm.js keystrokes.
+    let lineBuffer = '';
+
+    term.onKey(({ key, domEvent }) => {
+      if (!window.rpgLineSender) return; // not connected yet
+
+      const code = domEvent.keyCode;
+
+      if (domEvent.key === 'Enter') {
+        term.writeln('');
+        window.rpgLineSender.push_line(lineBuffer);
+        lineBuffer = '';
+      } else if (domEvent.key === 'Backspace') {
+        if (lineBuffer.length > 0) {
+          lineBuffer = lineBuffer.slice(0, -1);
+          term.write('\b \b');
+        }
+      } else if (key.length === 1 && !domEvent.ctrlKey && !domEvent.altKey) {
+        lineBuffer += key;
+        term.write(key);
+      } else if (domEvent.ctrlKey && domEvent.key === 'd') {
+        window.rpgLineSender.send_eof();
+      }
+    });
+
+    // Load the WASM module.
+    term.writeln('Loading rpg.wasm...');
+    await init();
+    term.writeln('rpg.wasm loaded. Press \x1b[36mConnect\x1b[0m to start.');
+
+    connectBtn.addEventListener('click', async () => {
+      connectBtn.disabled = true;
+      status.textContent  = 'connecting…';
+      status.className    = '';
+
+      const wsUrl = document.getElementById('ws-url').value.trim();
+      const db    = document.getElementById('db').value.trim() || null;
+      const user  = document.getElementById('user').value.trim() || null;
+      const pass  = document.getElementById('password').value || null;
+
+      try {
+        await run_rpg(wsUrl, db, user, pass);
+        status.textContent = 'disconnected';
+        status.className   = '';
+        connectBtn.disabled = false;
+      } catch (err) {
+        term.writeln('\x1b[31mError: ' + err + '\x1b[0m');
+        status.textContent = 'error';
+        status.className   = 'error';
+        connectBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

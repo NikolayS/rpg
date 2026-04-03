@@ -5,7 +5,9 @@
 //!
 //! 1. Installs a panic hook that routes Rust panics to `console.error`.
 //! 2. Connects to Postgres through the [`WasmConnector`] WebSocket transport.
-//! 3. Launches the rpg REPL loop.
+//! 3. Creates a [`WasmLineSender`] and exposes it as `window.rpgLineSender`
+//!    so xterm.js can push input lines into the REPL channel.
+//! 4. Launches the rpg REPL loop via [`crate::repl::run_repl`].
 //!
 //! ## JavaScript usage
 //!
@@ -13,21 +15,31 @@
 //! import init, { run_rpg } from './pkg/rpg.js';
 //!
 //! await init();
-//! await run_rpg("ws://localhost:9091", "mydb");
+//! // run_rpg returns once the REPL exits (EOF / \quit).
+//! await run_rpg("ws://localhost:9091", "mydb", "myuser", null);
+//!
+//! // After calling run_rpg, xterm.js keystrokes should call:
+//! //   window.rpgLineSender.push_line(line);  // on Enter
+//! //   window.rpgLineSender.send_eof();        // on Ctrl-D
 //! ```
 
 use wasm_bindgen::prelude::*;
 
 use super::connector::{to_js_err, WasmConnector};
+use super::line_reader::wasm_line_channel;
 
 /// Start the rpg terminal in the browser.
+///
+/// Connects to Postgres via the WebSocket proxy at `ws_url`, then runs the
+/// rpg REPL.  Input is read from `window.rpgLineSender` which is set before
+/// the REPL loop starts so JS can immediately push lines.
 ///
 /// # Arguments
 ///
 /// * `ws_url` — WebSocket URL of the ws-proxy (e.g. `ws://localhost:9091`).
-/// * `initial_db` — Optional database name; overrides the connection string
-///   default if provided.
-/// * `user` — Optional Postgres user; defaults to `"rpg"` if not provided.
+/// * `initial_db` — Optional database name.
+/// * `user` — Optional Postgres user; defaults to `"rpg"` if omitted.
+/// * `password` — Optional Postgres password; omit for trust-auth connections.
 ///
 /// # Errors
 ///
@@ -38,70 +50,74 @@ pub async fn run_rpg(
     ws_url: String,
     initial_db: Option<String>,
     user: Option<String>,
+    password: Option<String>,
 ) -> Result<(), JsValue> {
-    // Route Rust panics to console.error for debuggability.
     console_error_panic_hook::set_once();
 
-    web_sys::console::log_1(&format!("rpg: connecting to ws-proxy at {ws_url}").into());
+    web_sys::console::log_1(&format!("rpg: connecting to {ws_url}").into());
 
-    // Build a tokio-postgres Config.  The actual TCP connection is handled
-    // by the ws-proxy — host/port here are placeholders required by
-    // tokio-postgres's config parser.  The ws_url is threaded through to
-    // WasmConnector which opens the real WebSocket connection.
+    // Build a tokio-postgres Config for the connection.
     let mut pg_config = tokio_postgres::Config::new();
-
-    // Parse host and port from the ws_url so tokio-postgres's config
-    // reflects the actual proxy target (for diagnostics / logging).
-    // Falls back to localhost:9091 if the URL cannot be parsed.
     let (ws_host, ws_port) = parse_ws_host_port(&ws_url);
     pg_config.host(&ws_host);
     pg_config.port(ws_port);
 
-    if let Some(ref db) = initial_db {
-        pg_config.dbname(db);
+    let db = initial_db.clone().unwrap_or_else(|| "postgres".to_owned());
+    let pg_user = user.clone().unwrap_or_else(|| "rpg".to_owned());
+    pg_config.dbname(&db);
+    pg_config.user(&pg_user);
+    if let Some(ref pw) = password {
+        pg_config.password(pw.as_str());
     }
-    pg_config.user(&user.unwrap_or_else(|| "rpg".to_owned()));
 
-    // TODO(s1-merge): thread ws_proxy_token from JS through run_rpg() args.
-    // For now, no token is passed (unauthenticated dev mode only).
     let connector = WasmConnector::new(&ws_url, None);
-    let _client = connector
+    let client = connector
         .connect_spawned(&pg_config)
         .await
-        .map_err(to_js_err)?;
+        .map_err(|e| to_js_err(e))?;
 
-    web_sys::console::log_1(&"rpg: connected to postgres".into());
+    web_sys::console::log_1(&format!("rpg: connected to {db} as {pg_user}").into());
 
-    // TODO(s1-merge): wire up the rpg REPL loop here.
-    //
-    // Once Sprint 1 lands, this will:
-    //   1. Initialize a WasmLineReader (browser-side input channel).
-    //   2. Create the rpg Repl struct with the client.
-    //   3. Enter the main REPL loop (repl::run).
-    //
-    // The WasmLineReader will bridge JavaScript input events (e.g. from an
-    // xterm.js terminal) into the Rust async channel that the REPL reads
-    // from, replacing rustyline which is not available in WASM.
+    // Create the input channel and expose the sender to JS.
+    let (sender, reader) = wasm_line_channel();
+    let js_sender = JsValue::from(sender);
+    js_sys::Reflect::set(&js_sys::global(), &"rpgLineSender".into(), &js_sender)
+        .map_err(|e| e)?;
 
-    // Placeholder — will be replaced once S1 merges the REPL plumbing.
-    web_sys::console::warn_1(&"rpg: REPL loop not yet wired (waiting for S1 merge)".into());
+    web_sys::console::log_1(
+        &"rpg: ready — type SQL and press Enter; \\q or \\quit to exit".into(),
+    );
 
+    // Build minimal ConnParams and ReplSettings for the REPL.
+    let mut params = crate::connection::ConnParams::default();
+    params.host = ws_host;
+    params.port = ws_port;
+    params.dbname = db;
+    params.user = pg_user;
+    params.password = password;
+
+    let settings = crate::repl::ReplSettings {
+        no_highlight: true,
+        config: crate::config::Config::default(),
+        ..crate::repl::ReplSettings::default()
+    };
+
+    crate::repl::run_repl(client, params, settings, true, true, reader).await;
+
+    web_sys::console::log_1(&"rpg: session ended".into());
     Ok(())
 }
 
 /// Extract host and port from a WebSocket URL.
 ///
-/// Parses URLs like `ws://host:port` or `wss://host:port/path`.
-/// Returns `("localhost", 9091)` if parsing fails.
+/// Parses `ws://host:port/path` or `wss://host:port/path`.
+/// Returns `("localhost", 9091)` on parse failure.
 fn parse_ws_host_port(url: &str) -> (String, u16) {
-    // Strip ws:// or wss:// prefix.
     let without_scheme = url
         .strip_prefix("wss://")
         .or_else(|| url.strip_prefix("ws://"))
         .unwrap_or(url);
-    // Strip path component.
     let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    // Split host:port.
     if let Some((host, port_str)) = authority.rsplit_once(':') {
         let port = port_str.parse::<u16>().unwrap_or(9091);
         (host.to_owned(), port)
