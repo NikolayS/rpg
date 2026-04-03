@@ -165,7 +165,12 @@ normalize() {
     -e '/^LINE [0-9][0-9]*: /d' \
     -e '/^ *\^[ ~]*$/d' \
     -e '/\\gset[[:space:]]*$/d' \
-    -e '/^Expanded display is /d' | \
+    -e '/^Expanded display is /d' \
+    -e '/^Invalid command \\getenv /d' \
+    -e '/^\\if /d' \
+    -e '/^\\endif/d' \
+    -e 's/_psql_regress/_test_regress/g' \
+    -e 's/_rpg_regress/_test_regress/g' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
