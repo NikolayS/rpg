@@ -43,13 +43,28 @@ fn infer_numeric_column(
             None | Some("") => true,
             Some(val) => {
                 has_value = true;
-                // Leading '+' or double-leading-zero indicates to_char()
-                // formatted output (e.g. '+456', '0000000000000456'), not raw
-                // numeric data.  Real integer/float columns never emit these.
-                if val.starts_with('+') || val.starts_with("00") {
+                // Leading '+' or a zero followed by another digit (e.g.
+                // '0000000000000456', '010101') indicates to_char()-formatted
+                // or bit-string output, not raw numeric data.
+                if val.starts_with('+') {
                     return false;
                 }
-                val.parse::<f64>().is_ok()
+                if val.len() > 1
+                    && val.starts_with('0')
+                    && val.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+                {
+                    return false;
+                }
+                // PostgreSQL money format: '$N.NN' or '-$N.NN'.
+                // Strip the currency prefix before testing parseability.
+                let numeric_part = if let Some(rest) = val.strip_prefix("$") {
+                    rest
+                } else if let Some(rest) = val.strip_prefix("-$") {
+                    rest
+                } else {
+                    val
+                };
+                numeric_part.parse::<f64>().is_ok()
             }
         }
     });

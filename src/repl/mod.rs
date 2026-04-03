@@ -2045,8 +2045,10 @@ fn expanded_mode_str(mode: ExpandedMode) -> &'static str {
 /// Apply a timing toggle/set and print the new state.
 fn apply_timing(settings: &mut ReplSettings, mode: Option<bool>) {
     settings.timing = mode.unwrap_or(!settings.timing);
-    let state = if settings.timing { "on" } else { "off" };
-    println!("Timing is {state}.");
+    if !settings.quiet {
+        let state = if settings.timing { "on" } else { "off" };
+        println!("Timing is {state}.");
+    }
 }
 
 /// Apply an expanded-display mode change and print the new state.
@@ -2067,10 +2069,12 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     };
     // Keep pset in sync so -c and -f paths see the updated setting.
     settings.pset.expanded = settings.expanded;
-    println!(
-        "Expanded display is {}.",
-        expanded_mode_str(settings.expanded)
-    );
+    if !settings.quiet {
+        println!(
+            "Expanded display is {}.",
+            expanded_mode_str(settings.expanded)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

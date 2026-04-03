@@ -163,7 +163,9 @@ normalize() {
     -e '/^rpg [0-9][0-9]*\./d' \
     -e '/^You are now connected to database /d' \
     -e '/^LINE [0-9][0-9]*: /d' \
-    -e '/^ *\^[ ~]*$/d' | \
+    -e '/^ *\^[ ~]*$/d' \
+    -e '/\\gset[[:space:]]*$/d' \
+    -e '/^Expanded display is /d' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
