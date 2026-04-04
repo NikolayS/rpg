@@ -1621,15 +1621,70 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     exit_code
 }
 
+/// Returns true if `sql` is a `COPY … TO STDOUT` statement.
+fn is_copy_to_stdout(sql: &str) -> bool {
+    let upper = sql.to_uppercase();
+    upper.trim_start().starts_with("COPY")
+        && (upper.contains("TO STDOUT") || upper.contains("TO\nSTDOUT"))
+}
+
+/// Execute an inline `COPY … TO STDOUT` statement by streaming the server
+/// output to the current output target.
+///
+/// Returns `true` on success, `false` on error.
+async fn execute_inline_copy_to(
+    client: &Client,
+    sql: &str,
+    settings: &mut ReplSettings,
+) -> bool {
+    use futures::StreamExt as _;
+
+    let stream = match client.copy_out(sql).await {
+        Ok(s) => s,
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors);
+            return false;
+        }
+    };
+
+    tokio::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = w.write_all(&bytes);
+                } else {
+                    use std::io::Write as _;
+                    let _ = std::io::stdout().write_all(&bytes);
+                }
+            }
+            Err(e) => {
+                crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors);
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Returns true if `sql` is a `COPY … FROM STDIN` statement.
 fn is_copy_from_stdin(sql: &str) -> bool {
     // Fast case-insensitive check: look for the COPY keyword and FROM STDIN.
     // This avoids a full parse; it may match rare edge-cases (e.g. COPY inside
     // a function body) but that is acceptable for the regression-test use case.
     let upper = sql.to_uppercase();
-    // Require both "COPY" at the start (possibly after whitespace) and "FROM STDIN".
-    upper.trim_start().starts_with("COPY")
-        && (upper.contains("FROM STDIN") || upper.contains("FROM\nSTDIN"))
+    let trimmed = upper.trim_start();
+    if !trimmed.starts_with("COPY") {
+        return false;
+    }
+    // COPY (SELECT ...) FROM STDIN is invalid SQL — the subselect form only
+    // works with TO.  If the first non-whitespace token after COPY is '(' we
+    // have the subselect form, so let PostgreSQL report the error normally.
+    let after_copy = trimmed[4..].trim_start();
+    if after_copy.starts_with('(') {
+        return false;
+    }
+    upper.contains("FROM STDIN") || upper.contains("FROM\nSTDIN")
 }
 
 /// Execute an inline `COPY … FROM STDIN` block where the data rows have
@@ -1913,6 +1968,21 @@ pub(crate) async fn exec_lines(
                     // psql's behaviour where leading decorations are not sent.
                     let sql_to_exec =
                         crate::query::strip_leading_preamble(buf.trim());
+
+                    // COPY … TO STDOUT: stream server output directly to
+                    // stdout (or the current \o target), matching psql behaviour.
+                    if is_copy_to_stdout(sql_to_exec) {
+                        let sql_owned = sql_to_exec.to_owned();
+                        buf.clear();
+                        let ok = execute_inline_copy_to(client, &sql_owned, settings).await;
+                        if !ok {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
+                        }
+                        continue 'lines;
+                    }
 
                     // COPY … FROM STDIN: collect the inline data block (lines
                     // until a bare `\.`) and execute via the copy protocol,

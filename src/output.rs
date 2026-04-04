@@ -420,12 +420,21 @@ fn write_aligned_row_border<F>(
     for phys_row in 0..max_physical_lines {
         let is_last_phys = phys_row == max_physical_lines - 1;
 
+        // Per-column continuation flag: true when this column has more content
+        // on the next physical row.  Used to place the `+` marker correctly.
+        let col_continues: Vec<bool> = (0..cols.len())
+            .map(|i| phys_row < split_lines[i].len().saturating_sub(1))
+            .collect();
+
         for (i, col) in cols.iter().enumerate() {
             let line = split_lines[i].get(phys_row).copied().unwrap_or("");
             let w = widths[i];
             let line_width = display_width(line);
             let padding = w.saturating_sub(line_width);
 
+            // Column prefix separator.  In border-1, if the PREVIOUS column
+            // has continuation on this physical row, its trailing-space slot
+            // becomes `+` — so use `+| ` instead of the normal ` | `.
             match border {
                 0 => {
                     if i > 0 {
@@ -442,6 +451,9 @@ fn write_aligned_row_border<F>(
                 _ => {
                     if i == 0 {
                         out.push(' ');
+                    } else if !is_last_phys && col_continues[i - 1] {
+                        // Previous column has continuation: `+| ` instead of ` | `.
+                        out.push_str("+| ");
                     } else {
                         out.push_str(" | ");
                     }
@@ -463,16 +475,17 @@ fn write_aligned_row_border<F>(
             }
         }
 
-        // Row suffix: for non-final physical lines replace the trailing space
-        // with `+` (psql's multi-line continuation marker).
+        // Row suffix.  For border-1, if the LAST column has continuation on
+        // this physical row the trailing space becomes `+`.
         match border {
             0 => {}
             2 => out.push_str(" |"),
             _ => {
-                if is_last_phys {
-                    out.push(' ');
-                } else {
+                let last_continues = col_continues.last().copied().unwrap_or(false);
+                if !is_last_phys && last_continues {
                     out.push('+');
+                } else {
+                    out.push(' ');
                 }
             }
         }
