@@ -1684,7 +1684,13 @@ fn is_copy_from_stdin(sql: &str) -> bool {
     if after_copy.starts_with('(') {
         return false;
     }
-    upper.contains("FROM STDIN") || upper.contains("FROM\nSTDIN")
+    // psql also treats "COPY … FROM STDOUT" the same as FROM STDIN when
+    // reading from a file: it reads inline data until \. and sends the
+    // query to the server as COPY … FROM STDIN.
+    upper.contains("FROM STDIN")
+        || upper.contains("FROM\nSTDIN")
+        || upper.contains("FROM STDOUT")
+        || upper.contains("FROM\nSTDOUT")
 }
 
 /// Execute an inline `COPY … FROM STDIN` block where the data rows have
@@ -1988,7 +1994,18 @@ pub(crate) async fn exec_lines(
                     // until a bare `\.`) and execute via the copy protocol,
                     // matching psql behaviour in -f / non-interactive mode.
                     if is_copy_from_stdin(sql_to_exec) {
-                        let sql_owned = sql_to_exec.to_owned();
+                        // Normalize: psql treats "FROM STDOUT" like "FROM STDIN"
+                        // for inline data; the server only understands FROM STDIN.
+                        let sql_owned = {
+                            let upper = sql_to_exec.to_uppercase();
+                            if let Some(pos) = upper.find("FROM STDOUT") {
+                                format!("{}FROM STDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
+                            } else if let Some(pos) = upper.find("FROM\nSTDOUT") {
+                                format!("{}FROM\nSTDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
+                            } else {
+                                sql_to_exec.to_owned()
+                            }
+                        };
                         buf.clear();
                         let mut copy_data = Vec::<String>::new();
                         while let Some(dl) = lines.next() {

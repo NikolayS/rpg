@@ -429,8 +429,6 @@ fn write_aligned_row_border<F>(
         for (i, col) in cols.iter().enumerate() {
             let line = split_lines[i].get(phys_row).copied().unwrap_or("");
             let w = widths[i];
-            let line_width = display_width(line);
-            let padding = w.saturating_sub(line_width);
 
             // Column prefix separator.  In border-1, if the PREVIOUS column
             // has continuation on this physical row, its trailing-space slot
@@ -460,15 +458,22 @@ fn write_aligned_row_border<F>(
                 }
             }
 
+            // Expand tabs in cell content before rendering (psql expands tabs
+            // from position 0 of each cell line, independent of the cell's
+            // column position in the output line).
+            let expanded_line = expand_cell_tabs(line);
+            let line_width = display_width(&expanded_line);
+            let padding = w.saturating_sub(line_width);
+
             if col.is_numeric {
                 // Right-align numeric data.
                 for _ in 0..padding {
                     out.push(' ');
                 }
-                out.push_str(line);
+                out.push_str(&expanded_line);
             } else {
                 // Left-align text data.
-                out.push_str(line);
+                out.push_str(&expanded_line);
                 for _ in 0..padding {
                     out.push(' ');
                 }
@@ -924,27 +929,90 @@ fn cell_display_width(escaped: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Returns the terminal display width of a string, handling multi-byte and
-/// double-width Unicode characters (CJK, emoji, …).
-pub fn display_width(s: &str) -> usize {
-    // Strip ANSI CSI escape sequences (ESC [ ... final-byte) before measuring
-    // so that colour codes embedded in cell values don't inflate the width.
-    let mut visible = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next(); // consume '['
-                          // Consume until the CSI final byte (0x40–0x7E).
-            for c in chars.by_ref() {
-                if ('\x40'..='\x7e').contains(&c) {
-                    break;
-                }
+/// Expand tab characters in a cell content line to spaces, using 8-space
+/// tab stops measured from the start of the cell content (column 0).
+///
+/// This matches psql's behaviour: tabs in cell values are expanded before
+/// adding the leading space, so the expansion is independent of the cell's
+/// position in the output line.
+fn expand_cell_tabs(s: &str) -> String {
+    if !s.contains('\t') {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut col: usize = 0;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let next_stop = (col / 8 + 1) * 8;
+            for _ in col..next_stop {
+                out.push(' ');
             }
+            col = next_stop;
         } else {
-            visible.push(ch);
+            out.push(ch);
+            col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
         }
     }
-    UnicodeWidthStr::width(visible.as_str())
+    out
+}
+
+/// Like `display_width`, but treats the string as starting at `start_col`
+/// for the purpose of tab-stop expansion.  Returns the number of display
+/// columns consumed by the string (not counting `start_col` itself).
+fn display_width_at_col(s: &str, start_col: usize) -> usize {
+    let mut col = start_col;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            '\t' => {
+                col = (col / 8 + 1) * 8;
+            }
+            c => {
+                col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            }
+        }
+    }
+    col - start_col
+}
+
+/// Returns the terminal display width of a string, handling multi-byte and
+/// double-width Unicode characters (CJK, emoji, …).
+///
+/// Tab characters (`\t`) are expanded to the next 8-space tab stop, matching
+/// psql's column-width calculation behaviour.
+pub fn display_width(s: &str) -> usize {
+    // Walk through characters, skipping ANSI CSI sequences and expanding tabs.
+    let mut width: usize = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next(); // consume '['
+                // Consume until the CSI final byte (0x40–0x7E).
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            '\t' => {
+                // Advance to the next 8-space tab stop.
+                width = (width / 8 + 1) * 8;
+            }
+            c => {
+                width += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            }
+        }
+    }
+    width
 }
 
 // ---------------------------------------------------------------------------

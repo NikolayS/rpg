@@ -73,6 +73,24 @@ fn infer_numeric_column(
             | "quote_nullable"
             | "to_hex"
             | "chr"
+            // PostgreSQL type names used as column labels for casts like
+            // '1'::json.  These are always text-typed and must be
+            // left-aligned regardless of value contents.
+            | "json"
+            | "jsonb"
+            | "xml"
+            | "text"
+            | "varchar"
+            | "bytea"
+            | "name"
+            | "regtype"
+            | "regclass"
+            | "regproc"
+            | "regprocedure"
+            | "regoper"
+            | "regoperator"
+            | "regconfig"
+            | "regdictionary"
     ) {
         return false;
     }
