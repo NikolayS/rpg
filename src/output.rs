@@ -308,8 +308,9 @@ fn column_widths_with_null(
             if i >= widths.len() {
                 break;
             }
-            let cell_str = cell.as_deref().unwrap_or(null_str);
-            let w = display_width(cell_str);
+            let raw = cell.as_deref().unwrap_or(null_str);
+            let escaped = psql_escape_cell(raw);
+            let w = cell_display_width(&escaped);
             if w > widths[i] {
                 widths[i] = w;
             }
@@ -351,46 +352,37 @@ fn write_aligned_row_border<F>(
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
-    for (i, col) in cols.iter().enumerate() {
-        let val = value_fn(col, i);
-        let w = widths[i];
-        let val_width = display_width(&val);
-        let padding = w.saturating_sub(val_width);
+    if is_header {
+        // Headers are always single-line: center-align, no escaping needed.
+        for (i, col) in cols.iter().enumerate() {
+            let val = value_fn(col, i);
+            let w = widths[i];
+            let val_width = display_width(&val);
+            let padding = w.saturating_sub(val_width);
 
-        match border {
-            0 => {
-                // border 0: no outer margins, columns separated by two spaces.
-                if i > 0 {
-                    out.push_str("  ");
+            match border {
+                0 => {
+                    if i > 0 {
+                        out.push_str("  ");
+                    }
+                }
+                2 => {
+                    if i == 0 {
+                        out.push_str("| ");
+                    } else {
+                        out.push_str(" | ");
+                    }
+                }
+                _ => {
+                    if i == 0 {
+                        out.push(' ');
+                    } else {
+                        out.push_str(" | ");
+                    }
                 }
             }
-            2 => {
-                // border 2: leading `| ` then ` | ` between columns.
-                if i == 0 {
-                    out.push_str("| ");
-                } else {
-                    out.push_str(" | ");
-                }
-            }
-            _ => {
-                // border 1 (default): leading space, ` | ` between columns.
-                if i == 0 {
-                    out.push(' ');
-                } else {
-                    out.push_str(" | ");
-                }
-            }
-        }
 
-        if col.is_numeric && !is_header {
-            // Right-align numeric data rows.
-            for _ in 0..padding {
-                out.push(' ');
-            }
-            out.push_str(&val);
-        } else if is_header {
-            // Center-align all column headers (psql behaviour — numeric
-            // column headers are centered, not right-aligned).
+            // Center-align all column headers (psql behaviour).
             let left_pad = padding / 2;
             let right_pad = padding - left_pad;
             for _ in 0..left_pad {
@@ -400,29 +392,92 @@ fn write_aligned_row_border<F>(
             for _ in 0..right_pad {
                 out.push(' ');
             }
-        } else {
-            // Left-align text data.
-            out.push_str(&val);
-            for _ in 0..padding {
-                out.push(' ');
-            }
         }
+        match border {
+            0 => {}
+            2 => out.push_str(" |"),
+            _ => out.push(' '),
+        }
+        out.push('\n');
+        return;
     }
 
-    match border {
-        0 => {
-            // border 0: no trailing margin.
+    // Data rows: escape control characters and handle multi-line cells.
+    //
+    // psql converts non-printable control characters (0x01–0x1F except LF/TAB,
+    // plus 0x7F) to visible escape sequences like `\x01`.  It also renders
+    // cells that contain embedded LF characters as multiple physical lines,
+    // appending a `+` continuation marker after each non-final physical line.
+    let escaped: Vec<String> = (0..cols.len())
+        .map(|i| psql_escape_cell(&value_fn(&cols[i], i)))
+        .collect();
+
+    // Split each cell into physical lines and determine how many physical rows
+    // this logical row requires.
+    let split_lines: Vec<Vec<&str>> = escaped.iter().map(|v| v.split('\n').collect()).collect();
+    let max_physical_lines = split_lines.iter().map(|v| v.len()).max().unwrap_or(1);
+
+    for phys_row in 0..max_physical_lines {
+        let is_last_phys = phys_row == max_physical_lines - 1;
+
+        for (i, col) in cols.iter().enumerate() {
+            let line = split_lines[i].get(phys_row).copied().unwrap_or("");
+            let w = widths[i];
+            let line_width = display_width(line);
+            let padding = w.saturating_sub(line_width);
+
+            match border {
+                0 => {
+                    if i > 0 {
+                        out.push_str("  ");
+                    }
+                }
+                2 => {
+                    if i == 0 {
+                        out.push_str("| ");
+                    } else {
+                        out.push_str(" | ");
+                    }
+                }
+                _ => {
+                    if i == 0 {
+                        out.push(' ');
+                    } else {
+                        out.push_str(" | ");
+                    }
+                }
+            }
+
+            if col.is_numeric {
+                // Right-align numeric data.
+                for _ in 0..padding {
+                    out.push(' ');
+                }
+                out.push_str(line);
+            } else {
+                // Left-align text data.
+                out.push_str(line);
+                for _ in 0..padding {
+                    out.push(' ');
+                }
+            }
         }
-        2 => {
-            // border 2: ` |` suffix.
-            out.push_str(" |");
+
+        // Row suffix: for non-final physical lines replace the trailing space
+        // with `+` (psql's multi-line continuation marker).
+        match border {
+            0 => {}
+            2 => out.push_str(" |"),
+            _ => {
+                if is_last_phys {
+                    out.push(' ');
+                } else {
+                    out.push('+');
+                }
+            }
         }
-        _ => {
-            // border 1: trailing space.
-            out.push(' ');
-        }
+        out.push('\n');
     }
-    out.push('\n');
 }
 
 /// Write one row of the aligned table (header or data).
@@ -789,6 +844,72 @@ pub fn format_duration(d: Duration) -> String {
 // ---------------------------------------------------------------------------
 // Unicode-aware display width
 // ---------------------------------------------------------------------------
+
+/// Escape non-printable characters in a cell value the same way psql does.
+///
+/// psql converts non-printable ASCII control characters to visible escape
+/// sequences when rendering table cells:
+/// - LF (0x0A): kept as `\n` (creates a multi-line cell)
+/// - TAB (0x09): kept as `\t` (expand converts to spaces)
+/// - CR (0x0D): converted to literal `\r`
+/// - DEL (0x7F) and other control chars (0x01–0x08, 0x0B–0x0C, 0x0E–0x1F):
+///   converted to `\xNN` (two uppercase hex digits)
+///
+/// Printable ASCII, non-ASCII Unicode, and NULL-replacement strings pass
+/// through unchanged.
+fn psql_escape_cell(s: &str) -> String {
+    // Fast path: if no control chars are present return the string as-is.
+    // ESC (0x1B) is excluded here; it is handled specially below (ANSI codes
+    // must pass through intact).
+    let needs_escape = s.chars().any(|c| {
+        matches!(c, '\x01'..='\x08' | '\x0b'..='\x0c' | '\x0e'..='\x1a' | '\x1c'..='\x1f' | '\x0d' | '\x7f')
+    });
+    if !needs_escape {
+        return s.to_owned();
+    }
+
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ANSI CSI escape sequence: ESC [ ... final-byte — pass through
+            // intact so that null-highlighting codes are not corrupted.
+            '\x1b' if chars.peek() == Some(&'[') => {
+                out.push('\x1b');
+                out.push('[');
+                chars.next(); // consume '['
+                for inner in chars.by_ref() {
+                    out.push(inner);
+                    if ('\x40'..='\x7e').contains(&inner) {
+                        break; // CSI final byte consumed
+                    }
+                }
+            }
+            '\n' | '\t' => out.push(c),
+            '\r' => out.push_str("\\r"),
+            '\x7f' => out.push_str("\\x7F"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\x{:02X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Returns the max per-line display width of a (possibly multi-line)
+/// already-escaped cell string.
+///
+/// For cells that span multiple physical lines (containing embedded LF), the
+/// column width is the widest individual line — matching psql which renders
+/// each line separately and appends a `+` continuation marker.
+fn cell_display_width(escaped: &str) -> usize {
+    escaped
+        .split('\n')
+        .map(|line| display_width(line))
+        .max()
+        .unwrap_or(0)
+}
 
 /// Returns the terminal display width of a string, handling multi-byte and
 /// double-width Unicode characters (CJK, emoji, …).

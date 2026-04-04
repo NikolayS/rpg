@@ -1621,6 +1621,74 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     exit_code
 }
 
+/// Returns true if `sql` is a `COPY … FROM STDIN` statement.
+fn is_copy_from_stdin(sql: &str) -> bool {
+    // Fast case-insensitive check: look for the COPY keyword and FROM STDIN.
+    // This avoids a full parse; it may match rare edge-cases (e.g. COPY inside
+    // a function body) but that is acceptable for the regression-test use case.
+    let upper = sql.to_uppercase();
+    // Require both "COPY" at the start (possibly after whitespace) and "FROM STDIN".
+    upper.trim_start().starts_with("COPY")
+        && (upper.contains("FROM STDIN") || upper.contains("FROM\nSTDIN"))
+}
+
+/// Execute an inline `COPY … FROM STDIN` block where the data rows have
+/// already been collected from the script source.
+///
+/// Sends the copy data via the PostgreSQL copy-in protocol and prints the
+/// `COPY N` command tag on success, or an error message on failure.
+///
+/// Returns `true` on success, `false` on error.
+async fn execute_inline_copy_from(
+    client: &Client,
+    sql: &str,
+    data_lines: &[String],
+    settings: &mut ReplSettings,
+) -> bool {
+    use futures::SinkExt as _;
+
+    // Build the copy payload: lines joined by LF with a final LF.
+    let mut payload = data_lines.join("\n");
+    if !payload.is_empty() {
+        payload.push('\n');
+    }
+
+    let sink = match client.copy_in(sql).await {
+        Ok(s) => s,
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors);
+            return false;
+        }
+    };
+
+    tokio::pin!(sink);
+    if let Err(e) = sink
+        .send(bytes::Bytes::from(payload.into_bytes()))
+        .await
+    {
+        crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors);
+        return false;
+    }
+
+    match sink.finish().await {
+        Ok(rows) => {
+            // Mirror psql's command tag output (suppressed in quiet mode).
+            if !settings.quiet {
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = writeln!(w, "COPY {rows}");
+                } else {
+                    println!("COPY {rows}");
+                }
+            }
+            true
+        }
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors);
+            false
+        }
+    }
+}
+
 /// Shared line-processing core for `exec_file`, `exec_stdin`, and
 /// `io::include_file`.
 ///
@@ -1639,8 +1707,9 @@ pub(crate) async fn exec_lines(
 ) -> i32 {
     let mut buf = String::new();
     let mut exit_code = 0i32;
+    let mut lines = lines;
 
-    'lines: for line in lines {
+    'lines: while let Some(line) = lines.next() {
         // `quit` / `exit` bare words work in all modes (psql behaviour).
         if is_quit_exit(line.trim(), buf.is_empty()) {
             break 'lines;
@@ -1844,6 +1913,39 @@ pub(crate) async fn exec_lines(
                     // psql's behaviour where leading decorations are not sent.
                     let sql_to_exec =
                         crate::query::strip_leading_preamble(buf.trim());
+
+                    // COPY … FROM STDIN: collect the inline data block (lines
+                    // until a bare `\.`) and execute via the copy protocol,
+                    // matching psql behaviour in -f / non-interactive mode.
+                    if is_copy_from_stdin(sql_to_exec) {
+                        let sql_owned = sql_to_exec.to_owned();
+                        buf.clear();
+                        let mut copy_data = Vec::<String>::new();
+                        while let Some(dl) = lines.next() {
+                            // psql does NOT echo inline COPY data lines even
+                            // with --echo-all; only the SQL statement itself
+                            // is echoed (already done above).
+                            if dl.trim() == "\\." {
+                                break;
+                            }
+                            copy_data.push(dl);
+                        }
+                        let ok = execute_inline_copy_from(
+                            client,
+                            &sql_owned,
+                            &copy_data,
+                            settings,
+                        )
+                        .await;
+                        if !ok {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
+                        }
+                        continue 'lines;
+                    }
+
                     // Disable per-statement echo in execute_query to avoid
                     // double-echoing when echo_all is active (lines already echoed above).
                     let saved_echo_all = settings.echo_all;
@@ -4950,12 +5052,14 @@ async fn run_dumb_loop(
 ///
 /// Returns `Some(offset)` if found, `None` if the line has no inline
 /// backslash command.  The scan respects single-quoted strings, dollar-quoted
-/// strings, line comments (`--`), and block comments (`/* … */`).
+/// strings, double-quoted identifiers, line comments (`--`), and block
+/// comments (`/* … */`).
 fn find_inline_backslash(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     let mut in_single = false;
+    let mut in_double = false;
     let mut in_block_comment = false;
     let mut dollar_tag: Option<String> = None;
 
@@ -4976,6 +5080,20 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
                 in_block_comment = false;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_double {
+            if bytes[i] == b'"' {
+                if i + 1 < len && bytes[i + 1] == b'"' {
+                    i += 2; // escaped double-quote ""
+                } else {
+                    in_double = false;
+                    i += 1;
+                }
             } else {
                 i += 1;
             }
@@ -5005,6 +5123,13 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
             in_block_comment = true;
             i += 2;
+            continue;
+        }
+
+        // Double-quoted identifier start
+        if bytes[i] == b'"' {
+            in_double = true;
+            i += 1;
             continue;
         }
 

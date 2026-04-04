@@ -37,8 +37,43 @@ fn infer_numeric_column(
     if name_lc.ends_with("_code") {
         return false;
     }
-    // to_char() always returns text; unaliased calls produce column "to_char".
-    if name_lc == "to_char" {
+    // Common text-returning functions: unaliased calls produce column names
+    // matching the function name. These never hold numeric data.
+    if matches!(
+        name_lc.as_str(),
+        "to_char"
+            | "substring"
+            | "substr"
+            | "concat"
+            | "concat_ws"
+            | "format"
+            | "upper"
+            | "lower"
+            | "initcap"
+            | "trim"
+            | "ltrim"
+            | "rtrim"
+            | "replace"
+            | "regexp_replace"
+            | "regexp_substr"
+            | "regexp_match"
+            | "translate"
+            | "overlay"
+            | "lpad"
+            | "rpad"
+            | "repeat"
+            | "reverse"
+            | "left"
+            | "right"
+            | "md5"
+            | "encode"
+            | "decode"
+            | "quote_ident"
+            | "quote_literal"
+            | "quote_nullable"
+            | "to_hex"
+            | "chr"
+    ) {
         return false;
     }
 
