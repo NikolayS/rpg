@@ -556,7 +556,7 @@ pub async fn execute_query(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
 
             // Capture context for /fix.
@@ -568,8 +568,14 @@ pub async fn execute_query(
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
                 error_message: error_message.clone(),
-                sqlstate,
+                sqlstate: sqlstate.clone(),
             });
+            // Update psql-compatible error variables for use in subsequent commands.
+            settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
+            settings.vars.set(
+                "LAST_ERROR_SQLSTATE",
+                sqlstate.as_deref().unwrap_or(""),
+            );
 
             // Inline error suggestion: if AI is configured and
             // auto_explain_errors is on, show a brief LLM hint.
@@ -714,7 +720,7 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
@@ -809,7 +815,7 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
 
             // Capture context for /fix.
@@ -962,7 +968,7 @@ pub(super) async fn execute_named_stmt(
             true
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, None, settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, None, settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
             false
         }
@@ -1742,7 +1748,7 @@ pub(super) async fn execute_gexec(
             cells
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
             return;
         }
@@ -1768,7 +1774,7 @@ pub(super) async fn execute_gexec(
                 tx.update_from_sql(&cell_sql);
             }
             Err(e) => {
-                crate::output::eprint_db_error(&e, Some(&cell_sql), settings.verbose_errors, settings.terse_errors);
+                crate::output::eprint_db_error(&e, Some(&cell_sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
                 tx.on_error();
             }
         }
@@ -1866,7 +1872,7 @@ pub(super) async fn execute_gset(
             }
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
         }
     }
@@ -1924,7 +1930,7 @@ pub(super) async fn execute_crosstabview(
             Some((col_names, rows))
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
             None
         }
@@ -1978,7 +1984,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
     let stmt = match client.prepare(buf).await {
         Ok(s) => s,
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(buf), verbose_errors, false);
+            crate::output::eprint_db_error(&e, Some(buf), verbose_errors, false, false);
             return;
         }
     };
@@ -2012,7 +2018,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
             .map(|i| row.get::<_, String>(i))
             .collect(),
         Err(e) => {
-            crate::output::eprint_db_error(&e, None, verbose_errors, false);
+            crate::output::eprint_db_error(&e, None, verbose_errors, false, false);
             return;
         }
     };

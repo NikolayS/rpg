@@ -80,6 +80,8 @@ pub enum MetaCmd {
     ListEventTriggers,
     /// `\do [pattern]` — list operators.
     ListOperators,
+    /// `\dX [pattern]` — list extended statistics.
+    ListExtStatistics,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -421,6 +423,7 @@ impl MetaCmd {
             Self::ListUserMappings => "\\deu",
             Self::ListEventTriggers => "\\dy",
             Self::ListOperators => "\\do",
+            Self::ListExtStatistics => "\\dX",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -1850,6 +1853,7 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("dp", MetaCmd::ListPrivileges),
     ("db", MetaCmd::ListTablespaces),
     ("dx", MetaCmd::ListExtensions),
+    ("dX", MetaCmd::ListExtStatistics),
     ("dd", MetaCmd::ListComments),
     ("dc", MetaCmd::ListConversions),
     ("dy", MetaCmd::ListEventTriggers),

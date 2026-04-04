@@ -62,6 +62,9 @@ pub struct OutputConfig {
     /// Suppress DETAIL/HINT lines in errors.
     /// Set when `\set VERBOSITY terse` is active.
     pub terse_errors: bool,
+    /// Show only the SQLSTATE code as the error message.
+    /// Set when `\set VERBOSITY sqlstate` is active.
+    pub sqlstate_errors: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -750,45 +753,51 @@ pub fn format_pg_error(
     let mut out = String::new();
 
     if let Some(db_err) = err.as_db_error() {
-        // Severity line — color the severity keyword.
         let colored = color_severity(db_err.severity());
-        let _ = writeln!(out, "{}:  {}", colored, db_err.message());
 
-        // Original position marker (shown right after severity in psql).
-        if let Some(pos) = db_err.position() {
-            if let tokio_postgres::error::ErrorPosition::Original(_) = pos {
-                if let Some(sql) = original_sql {
-                    write_error_position(&mut out, sql, pos);
+        if cfg.sqlstate_errors {
+            // sqlstate mode: show only the SQLSTATE code as the message.
+            let _ = writeln!(out, "{}:  {}", colored, db_err.code().code());
+        } else {
+            // Severity line — color the severity keyword.
+            let _ = writeln!(out, "{}:  {}", colored, db_err.message());
+
+            // Original position marker (shown right after severity in psql).
+            if let Some(pos) = db_err.position() {
+                if let tokio_postgres::error::ErrorPosition::Original(_) = pos {
+                    if let Some(sql) = original_sql {
+                        write_error_position(&mut out, sql, pos);
+                    }
                 }
             }
-        }
 
-        // DETAIL and HINT are suppressed in terse mode.
-        if !cfg.terse_errors {
-            if let Some(detail) = db_err.detail() {
-                let _ = writeln!(out, "DETAIL:  {detail}");
+            // DETAIL and HINT are suppressed in terse mode.
+            if !cfg.terse_errors {
+                if let Some(detail) = db_err.detail() {
+                    let _ = writeln!(out, "DETAIL:  {detail}");
+                }
+                if let Some(hint) = db_err.hint() {
+                    let _ = writeln!(out, "HINT:  {hint}");
+                }
             }
-            if let Some(hint) = db_err.hint() {
-                let _ = writeln!(out, "HINT:  {hint}");
+
+            // CONTEXT line (e.g. PL/pgSQL call stack).
+            if let Some(ctx) = db_err.where_() {
+                let _ = writeln!(out, "CONTEXT:  {ctx}");
             }
-        }
 
-        // CONTEXT line (e.g. PL/pgSQL call stack).
-        if let Some(ctx) = db_err.where_() {
-            let _ = writeln!(out, "CONTEXT:  {ctx}");
-        }
-
-        // Internal query + position (shown after CONTEXT in psql).
-        if let Some(pos) = db_err.position() {
-            if let tokio_postgres::error::ErrorPosition::Internal { query, .. } = pos {
-                let _ = writeln!(out, "QUERY:  {query}");
-                write_error_position(&mut out, query, pos);
+            // Internal query + position (shown after CONTEXT in psql).
+            if let Some(pos) = db_err.position() {
+                if let tokio_postgres::error::ErrorPosition::Internal { query, .. } = pos {
+                    let _ = writeln!(out, "QUERY:  {query}");
+                    write_error_position(&mut out, query, pos);
+                }
             }
-        }
 
-        // SQLSTATE: only shown in verbose mode (psql default: hidden).
-        if cfg.verbose_errors {
-            let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+            // SQLSTATE: only shown in verbose mode (psql default: hidden).
+            if cfg.verbose_errors {
+                let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+            }
         }
     } else {
         // Non-server error (I/O, protocol, …).
@@ -805,10 +814,11 @@ pub fn format_pg_error(
 /// not need the string representation.  `sql` is the original query text
 /// (used to render the position marker); pass `None` when unavailable.
 /// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
-pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool, terse: bool) {
+pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool, terse: bool, sqlstate: bool) {
     let cfg = OutputConfig {
         verbose_errors: verbose,
         terse_errors: terse,
+        sqlstate_errors: sqlstate,
         ..OutputConfig::default()
     };
     let msg = format_pg_error(err, sql, &cfg);

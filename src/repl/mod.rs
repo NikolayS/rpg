@@ -1238,6 +1238,9 @@ pub struct ReplSettings {
     /// Terse error mode: suppress DETAIL and HINT lines.
     /// Set when `\set VERBOSITY terse` is active.
     pub terse_errors: bool,
+    /// Sqlstate error mode: show only the SQLSTATE code as the error message.
+    /// Set when `\set VERBOSITY sqlstate` is active.
+    pub sqlstate_errors: bool,
     /// Use Vi keybinding mode in the REPL.
     ///
     /// Defaults to `false` (Emacs mode).  Set with `\set VI on`.
@@ -1551,6 +1554,7 @@ impl Default for ReplSettings {
             i_know_what_im_doing: false,
             verbose_errors: false,
             terse_errors: false,
+            sqlstate_errors: false,
             vi_mode: false,
             current_file: None,
             session_id: crate::session_store::new_session_id(),
@@ -1803,7 +1807,7 @@ async fn execute_inline_copy_to(
     let stream = match client.copy_out(sql).await {
         Ok(s) => s,
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             return false;
         }
     };
@@ -1820,7 +1824,7 @@ async fn execute_inline_copy_to(
                 }
             }
             Err(e) => {
-                crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors);
+                crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
                 return false;
             }
         }
@@ -1878,7 +1882,7 @@ async fn execute_inline_copy_from(
     let sink = match client.copy_in(sql).await {
         Ok(s) => s,
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             return false;
         }
     };
@@ -1888,7 +1892,7 @@ async fn execute_inline_copy_from(
         .send(bytes::Bytes::from(payload.into_bytes()))
         .await
     {
-        crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors);
+        crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
         return false;
     }
 
@@ -1905,7 +1909,7 @@ async fn execute_inline_copy_from(
             true
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors);
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             false
         }
     }
@@ -2019,6 +2023,7 @@ pub(crate) async fn exec_lines(
                                     Some(&sql),
                                     settings.verbose_errors,
                                     settings.terse_errors,
+                                    settings.sqlstate_errors,
                                 );
                                 exit_code = 1;
                                 if settings.single_transaction {
@@ -2701,10 +2706,12 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         settings.safety_enabled = value != "off" && value != "false" && value != "0";
     }
     // Mirror VERBOSITY into verbose/terse error settings.
-    // psql: verbose shows SQLSTATE; terse suppresses DETAIL/HINT.
+    // psql: verbose shows SQLSTATE; terse suppresses DETAIL/HINT;
+    //       sqlstate shows only the SQLSTATE code as the error message.
     if name == "VERBOSITY" {
         settings.verbose_errors = value == "verbose";
         settings.terse_errors = value == "terse";
+        settings.sqlstate_errors = value == "sqlstate";
     }
     // Mirror EXPLAIN into auto_explain.
     if name == "EXPLAIN" {
@@ -4253,6 +4260,7 @@ async fn dispatch_meta(
                     | MetaCmd::ListForeignTablesViaFdw
                     | MetaCmd::ListOperators
                     | MetaCmd::ListUserMappings
+                    | MetaCmd::ListExtStatistics
             ) =>
         {
             crate::describe::execute(
@@ -5748,7 +5756,7 @@ async fn handle_backslash_dumb(
                         settings.named_statements.insert(name.clone(), stmt);
                     }
                     Err(e) => {
-                        crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors, settings.terse_errors);
+                        crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
                     }
                 }
             }
@@ -6099,7 +6107,7 @@ async fn handle_line(
                             settings.named_statements.insert(name.clone(), stmt);
                         }
                         Err(e) => {
-                            crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors, settings.terse_errors);
+                            crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
                         }
                     }
                 }
