@@ -2348,10 +2348,11 @@ async fn describe_table(
         else coalesce(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
     end";
 
-    // 1. Columns
-    let cols_sql = if meta.plus {
-        format!(
-            "select
+    // 1. Columns — query depends on object type and plus mode.
+    // Build two variants: one for tables (\d+ shows Compression/Stats target),
+    // one for views/sequences/composites (\d+ shows Storage+Description but not Compression).
+    let cols_sql_table_plus = format!(
+        "select
     a.attname as \"Column\",
     pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
     coalesce(
@@ -2390,7 +2391,51 @@ where a.attnum > 0
     and not a.attisdropped
     and {name_cond}
 order by a.attnum"
-        )
+    );
+    let cols_sql_view_plus = format!(
+        "select
+    a.attname as \"Column\",
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
+    coalesce(
+        (select c2.collname
+         from pg_catalog.pg_collation as c2
+         join pg_catalog.pg_namespace as nc
+             on nc.oid = c2.collnamespace
+         where c2.oid = a.attcollation
+           and a.attcollation <> (
+               select t.typcollation
+               from pg_catalog.pg_type as t
+               where t.oid = a.atttypid
+           )),
+        ''
+    ) as \"Collation\",
+    case when a.attnotnull then 'not null' else '' end as \"Nullable\",
+    {default_expr} as \"Default\",
+    case a.attstorage
+        when 'p' then 'plain'
+        when 'e' then 'external'
+        when 'x' then 'extended'
+        when 'm' then 'main'
+        else a.attstorage::text
+    end as \"Storage\",
+    coalesce(pg_catalog.col_description(a.attrelid, a.attnum), '') as \"Description\"
+from pg_catalog.pg_attribute as a
+join pg_catalog.pg_class as c
+    on c.oid = a.attrelid
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_attrdef as d
+    on d.adrelid = a.attrelid and d.adnum = a.attnum
+where a.attnum > 0
+    and not a.attisdropped
+    and {name_cond}
+order by a.attnum"
+    );
+    // Placeholder: will be resolved after fetching relkind below.
+    // For non-plus mode, always use the 5-column variant.
+    let cols_sql_base = if meta.plus {
+        // Will be replaced based on relkind below
+        cols_sql_table_plus.clone()
     } else {
         format!(
             "select
@@ -2435,14 +2480,17 @@ left join pg_catalog.pg_namespace as n
 where {name_cond}
 limit 1"
     );
-    let (obj_label, display_name) = {
+    let (obj_label, display_name, relkind_char) = {
         let mut label = "Table";
         let mut resolved_schema = String::new();
+        let mut rk = 'r';
         if let Ok(msgs) = client.simple_query(&relkind_sql).await {
             use tokio_postgres::SimpleQueryMessage;
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
-                    label = match row.get(0).unwrap_or("r") {
+                    let kind_str = row.get(0).unwrap_or("r");
+                    rk = kind_str.chars().next().unwrap_or('r');
+                    label = match kind_str {
                         "r" => "Table",
                         "p" => "Partitioned table",
                         "v" => "View",
@@ -2465,7 +2513,18 @@ limit 1"
         } else {
             format!("{resolved_schema}.{name_part}")
         };
-        (label, fq_name)
+        (label, fq_name, rk)
+    };
+
+    // Choose columns query based on relkind and plus mode.
+    // Tables and foreign tables get Compression + Stats target in \d+ mode;
+    // views, sequences, composite types do not.
+    let cols_sql = if meta.plus && matches!(relkind_char, 'r' | 'p' | 'f') {
+        cols_sql_table_plus
+    } else if meta.plus {
+        cols_sql_view_plus
+    } else {
+        cols_sql_base
     };
 
     // Build the centered title and pass it to run_and_print_no_count so it is
@@ -2520,6 +2579,32 @@ limit 1"
         .collect();
         parts.join(" AND ")
     };
+
+    // 1b. View definition — shown for views and materialized views in \d+ mode only.
+    if meta.plus && matches!(relkind_char, 'v' | 'm') {
+        let viewdef_sql = format!(
+            "select pg_catalog.pg_get_viewdef(c.oid, true)
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+limit 1"
+        );
+        if let Ok(msgs) = client.simple_query(&viewdef_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let def = row.get(0).unwrap_or("");
+                    if !def.is_empty() {
+                        println!("View definition:");
+                        for vline in def.lines() {
+                            println!("{vline}");
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     // 2. Indexes — query returns raw fields; we format as psql indented text.
     // psql format: "name" PRIMARY KEY, btree (cols)  or  "name" btree (cols)
@@ -2748,6 +2833,285 @@ order by 1, 2"
         }
     }
 
+    // Partition info — "Partition of:" for children, "Partition key:" for parents.
+    let part_sql = format!(
+        "select c.relkind,
+    case when c.relispartition then
+        pg_catalog.pg_get_expr(c.relpartbound, c.oid, true)
+    else '' end as partbound,
+    case when c.relkind = 'p' then
+        pg_catalog.pg_get_partkeydef(c.oid)
+    else '' end as partkeydef,
+    case when c.relispartition then
+        (select case when pg_catalog.pg_table_is_visible(p.oid)
+                     then p.relname
+                     else n2.nspname || '.' || p.relname end
+         from pg_catalog.pg_class as p
+         join pg_catalog.pg_namespace as n2 on n2.oid = p.relnamespace
+         where p.oid = (select inhparent from pg_catalog.pg_inherits
+                        where inhrelid = c.oid limit 1))
+    else '' end as parent_name,
+    pg_catalog.pg_get_constraintdef(
+        (select con.oid from pg_catalog.pg_constraint as con
+         where con.conrelid = c.oid and con.contype = 'c'
+           and con.conislocal and con.connoinherit limit 1), true
+    ) as part_constraint
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+limit 1"
+    );
+    if let Ok(messages) = client.simple_query(&part_sql).await {
+        use tokio_postgres::SimpleQueryMessage;
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let relkind = row.get(0).unwrap_or("");
+                let partbound = row.get(1).unwrap_or("");
+                let partkeydef = row.get(2).unwrap_or("");
+                let parent_name = row.get(3).unwrap_or("");
+
+                // Partition child: show "Partition of:" and partition constraint
+                if !partbound.is_empty() && !parent_name.is_empty() {
+                    println!("Partition of: {parent_name} {partbound}");
+                    // Show partition constraint from pg_constraint
+                    let pcon_sql = format!(
+                        "select pg_catalog.pg_get_constraintdef(con.oid, true)
+from pg_catalog.pg_constraint as con
+where con.conrelid = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1)
+  and con.contype = 'c' and con.conislocal and con.connoinherit
+limit 1"
+                    );
+                    if let Ok(pmsgs) = client.simple_query(&pcon_sql).await {
+                        for pmsg in pmsgs {
+                            if let SimpleQueryMessage::Row(prow) = pmsg {
+                                let pcon = prow.get(0).unwrap_or("");
+                                if !pcon.is_empty() {
+                                    println!("Partition constraint: {pcon}");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Partition parent: show "Partition key:" and "Partitions:" or "Number of partitions:"
+                if relkind == "p" && !partkeydef.is_empty() {
+                    println!("Partition key: {partkeydef}");
+                    // Count partitions
+                    let count_sql = format!(
+                        "select count(*) from pg_catalog.pg_inherits
+where inhparent = (select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1)"
+                    );
+                    let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
+                        cmsgs.iter().find_map(|m| {
+                            if let SimpleQueryMessage::Row(r) = m {
+                                r.get(0).and_then(|v| v.parse::<u64>().ok())
+                            } else {
+                                None
+                            }
+                        }).unwrap_or(0)
+                    } else { 0 };
+
+                    if meta.plus || num_parts <= 32 {
+                        // List individual partitions
+                        let parts_list_sql = format!(
+                            "select c2.relnamespace::pg_catalog.regnamespace || '.' || c2.relname as partname,
+    pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) as partbound,
+    c2.relkind
+from pg_catalog.pg_inherits as i
+join pg_catalog.pg_class as c2 on c2.oid = i.inhrelid
+where i.inhparent = (select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1)
+order by 2"
+                        );
+                        if let Ok(pmsgs) = client.simple_query(&parts_list_sql).await {
+                            let mut parts: Vec<(String, String, bool)> = Vec::new();
+                            for pmsg in pmsgs {
+                                if let SimpleQueryMessage::Row(prow) = pmsg {
+                                    let pname = prow.get(0).unwrap_or("").to_owned();
+                                    let pbound = prow.get(1).unwrap_or("").to_owned();
+                                    let pkind = prow.get(2).unwrap_or("") == "p";
+                                    parts.push((pname, pbound, pkind));
+                                }
+                            }
+                            if !parts.is_empty() {
+                                // Format as multiline if needed
+                                println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, is_p))| {
+                                    let suffix = if *is_p { ", PARTITIONED" } else { "" };
+                                    if i == 0 {
+                                        format!("{pn} {pb}{suffix}")
+                                    } else {
+                                        format!("            {pn} {pb}{suffix}")
+                                    }
+                                }).collect::<Vec<_>>().join(",\n"));
+                            } else {
+                                println!("Number of partitions: 0");
+                            }
+                        }
+                    } else {
+                        println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Triggers — print as "Triggers:" section.
+    let trig_sql = format!(
+        "select tg.tgname,
+    pg_catalog.pg_get_triggerdef(tg.oid, true) as tgdef,
+    tg.tgenabled,
+    case when tg.tgparentid <> 0 then
+        (select case when pg_catalog.pg_table_is_visible(pt.tgrelid)
+                     then (select relname from pg_catalog.pg_class where oid = pt.tgrelid)
+                     else (select n2.nspname || '.' || c2.relname
+                           from pg_catalog.pg_class c2
+                           join pg_catalog.pg_namespace n2 on n2.oid = c2.relnamespace
+                           where c2.oid = pt.tgrelid)
+                end
+         from pg_catalog.pg_trigger pt where pt.oid = tg.tgparentid)
+    else null end as parent_table
+from pg_catalog.pg_trigger as tg
+where tg.tgrelid = (
+    select c.oid
+    from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond}
+    limit 1
+)
+and not tg.tgisinternal
+order by 1"
+    );
+    if let Ok(messages) = client.simple_query(&trig_sql).await {
+        use tokio_postgres::SimpleQueryMessage;
+        let mut trigger_lines: Vec<String> = Vec::new();
+        let mut disabled_lines: Vec<String> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let tgname = row.get(0).unwrap_or("").to_owned();
+                let tgdef_full = row.get(1).unwrap_or("").to_owned();
+                let tgenabled = row.get(2).unwrap_or("O");
+                let parent_table = row.get(3).unwrap_or("");
+                // pg_get_triggerdef returns "CREATE TRIGGER name ..."
+                // psql shows "    name ..." (strip "CREATE TRIGGER name ")
+                let prefix = format!("CREATE TRIGGER {tgname} ");
+                let body = if let Some(rest) = tgdef_full.strip_prefix(&prefix) {
+                    rest.to_owned()
+                } else {
+                    tgdef_full.clone()
+                };
+                // For inherited triggers (from partitioned parent), append ", ON TABLE parent"
+                let suffix = if !parent_table.is_empty() {
+                    format!(", ON TABLE {parent_table}")
+                } else {
+                    String::new()
+                };
+                let entry = format!("    {tgname} {body}{suffix}");
+                match tgenabled {
+                    "D" => disabled_lines.push(entry),
+                    _ => trigger_lines.push(entry),
+                }
+            }
+        }
+        if !trigger_lines.is_empty() {
+            println!("Triggers:");
+            for line in &trigger_lines {
+                println!("{line}");
+            }
+        }
+        if !disabled_lines.is_empty() {
+            println!("Disabled user triggers:");
+            for line in &disabled_lines {
+                println!("{line}");
+            }
+        }
+    }
+
+    // Rules — print as "Rules:" section.
+    let rules_sql = format!(
+        "select r.rulename, trim(trailing ';' from pg_catalog.pg_get_ruledef(r.oid, true)) as ruledef
+from pg_catalog.pg_rewrite as r
+where r.ev_class = (
+    select c.oid
+    from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond}
+    limit 1
+)
+and r.rulename != '_RETURN'
+order by 1"
+    );
+    if let Ok(messages) = client.simple_query(&rules_sql).await {
+        use tokio_postgres::SimpleQueryMessage;
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or("").to_owned();
+                let def = row.get(1).unwrap_or("").to_owned();
+                lines.push((name, def));
+            }
+        }
+        if !lines.is_empty() {
+            println!("Rules:");
+            for (name, def) in &lines {
+                println!("    {name} AS");
+                // Indent the rule definition body (skip CREATE RULE name prefix)
+                let body = if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
+                    rest.trim()
+                } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
+                    // Skip "name AS" prefix
+                    rest.splitn(3, ' ').nth(2).unwrap_or(def.as_str()).trim()
+                } else {
+                    def.as_str()
+                };
+                // Wrap each line with 4 spaces indent
+                for line in body.lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+    }
+
+
+    // Inherits — show parent table(s) for non-partition inheritance.
+    let inherits_sql = format!(
+        "select case when pg_catalog.pg_table_is_visible(c2.oid)
+         then c2.relname
+         else n2.nspname || '.' || c2.relname end as parent_name
+from pg_catalog.pg_inherits as i
+join pg_catalog.pg_class as c2 on c2.oid = i.inhparent
+join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
+where i.inhrelid = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1)
+  and (select not c.relispartition from pg_catalog.pg_class c
+       left join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+       where {name_cond} limit 1)
+order by 1"
+    );
+    if let Ok(messages) = client.simple_query(&inherits_sql).await {
+        use tokio_postgres::SimpleQueryMessage;
+        let mut parents: Vec<String> = Vec::new();
+        for msg in messages {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let parent = row.get(0).unwrap_or("").to_owned();
+                if !parent.is_empty() {
+                    parents.push(parent);
+                }
+            }
+        }
+        if !parents.is_empty() {
+            println!("Inherits: {}", parents.join(", "));
+        }
+    }
     // Access method — shown by psql \d+ for tables and materialized views.
     if meta.plus {
         let am_sql = format!(
