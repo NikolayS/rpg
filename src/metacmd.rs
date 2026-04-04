@@ -80,6 +80,8 @@ pub enum MetaCmd {
     ListEventTriggers,
     /// `\do [pattern]` — list operators.
     ListOperators,
+    /// `\dX [pattern]` — list extended statistics.
+    ListExtStatistics,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -421,6 +423,7 @@ impl MetaCmd {
             Self::ListUserMappings => "\\deu",
             Self::ListEventTriggers => "\\dy",
             Self::ListOperators => "\\do",
+            Self::ListExtStatistics => "\\dX",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -467,6 +470,15 @@ pub struct ParsedMeta {
     /// Set by the caller from [`crate::repl::ReplSettings::echo_hidden`] at
     /// dispatch time; the parser always initialises this to `false`.
     pub echo_hidden: bool,
+    /// Optional prokind filter for `\df` variants:
+    /// `'f'` = normal functions (`\dfn`), `'p'` = procedures (`\dfp`),
+    /// `'a'` = aggregates (`\dfa`), `'w'` = window functions (`\dfw`).
+    /// `None` means show all kinds (`\df`).
+    pub kind_filter: Option<char>,
+    /// When multiple backslash commands are concatenated on one line (e.g.
+    /// `\a\t`), this holds the remaining text (starting with `\`) after the
+    /// current command was consumed.  The caller must parse and dispatch it.
+    pub continuation: Option<String>,
 }
 
 impl ParsedMeta {
@@ -478,6 +490,8 @@ impl ParsedMeta {
             system: false,
             pattern: None,
             echo_hidden: false,
+            kind_filter: None,
+            continuation: None,
         }
     }
 }
@@ -520,6 +534,8 @@ pub fn parse(input: &str) -> ParsedMeta {
                             Some(text.to_owned())
                         },
                         echo_hidden: false,
+                        kind_filter: None,
+            continuation: None,
                     };
                 }
             }
@@ -551,6 +567,7 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('m') => parse_m_family(input),
         Some('y') => parse_y_family(input),
         Some('!') => parse_shell(input),
+        Some('z') => parse_z(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
 }
@@ -570,9 +587,23 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     // `input` has had the leading `\` stripped already.
     // Accept `token` optionally followed by whitespace (any trailing arg is
     // ignored for these commands, matching psql behaviour).
+    // Also accept another `\` immediately — e.g. `\a\t` on one line means two
+    // commands (`\a` then `\t`); the remainder is stored in `continuation`.
     let rest = input.strip_prefix(token).unwrap_or("");
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
         ParsedMeta::simple(cmd)
+    } else if rest.starts_with('\\') {
+        // Another backslash command follows immediately — current command is
+        // complete; store the rest for the caller to dispatch.
+        ParsedMeta {
+            cmd,
+            plus: false,
+            system: false,
+            pattern: None,
+            echo_hidden: false,
+            kind_filter: None,
+            continuation: Some(rest.to_owned()),
+        }
     } else {
         ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
     }
@@ -815,6 +846,21 @@ fn parse_m_family(input: &str) -> ParsedMeta {
 ///
 /// Note: `\dy` starts with `d`, so it is handled in `parse_d_family` via the
 /// `D_SUBCMDS` table.  This function handles remaining `y`-prefixed commands.
+/// Parse `\z [pattern]` — alias for `\dp` (list access privileges).
+fn parse_z(input: &str) -> ParsedMeta {
+    let rest = input.strip_prefix('z').unwrap_or("");
+    let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
+    ParsedMeta {
+        cmd: MetaCmd::ListPrivileges,
+        plus,
+        system,
+        pattern,
+        echo_hidden: false,
+        kind_filter: None,
+        continuation: None,
+    }
+}
+
 fn parse_y_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("yolo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -916,6 +962,8 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     system: false,
                     pattern: None,
                     echo_hidden: false,
+                    kind_filter: None,
+            continuation: None,
                 };
             }
         }
@@ -970,6 +1018,8 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     Some(dir.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -987,6 +1037,8 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     Some(pattern.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1013,6 +1065,8 @@ fn parse_h(input: &str) -> ParsedMeta {
             Some(pattern_str.to_owned())
         },
         echo_hidden: false,
+        kind_filter: None,
+            continuation: None,
     }
 }
 
@@ -1028,6 +1082,8 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             system: false,
             pattern,
             echo_hidden: false,
+            kind_filter: None,
+            continuation: None,
         };
     }
     if let Some(rest) = input.strip_prefix("sf") {
@@ -1038,6 +1094,8 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             system: false,
             pattern,
             echo_hidden: false,
+            kind_filter: None,
+            continuation: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1082,6 +1140,8 @@ fn parse_l(input: &str) -> ParsedMeta {
         system,
         pattern,
         echo_hidden: false,
+        kind_filter: None,
+            continuation: None,
     }
 }
 
@@ -1117,10 +1177,17 @@ fn parse_lo_family(input: &str) -> ParsedMeta {
         }
     }
 
-    // `\lo_list`
+    // `\lo_list` / `\lo_list+`
     if let Some(rest) = input.strip_prefix("list") {
+        let (plus, rest) = if let Some(r) = rest.strip_prefix('+') {
+            (true, r)
+        } else {
+            (false, rest)
+        };
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ParsedMeta::simple(MetaCmd::LoList);
+            let mut m = ParsedMeta::simple(MetaCmd::LoList);
+            m.plus = plus;
+            return m;
         }
     }
 
@@ -1209,6 +1276,8 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(enc.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1227,6 +1296,8 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(text.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1260,6 +1331,8 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(arg.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1296,6 +1369,8 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1312,6 +1387,8 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1335,6 +1412,8 @@ fn parse_o(input: &str) -> ParsedMeta {
                 Some(path.to_owned())
             },
             echo_hidden: false,
+            kind_filter: None,
+            continuation: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1377,6 +1456,8 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(arg.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1394,6 +1475,8 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(text.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1410,6 +1493,8 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1433,6 +1518,8 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                     Some(user.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1489,6 +1576,8 @@ fn parse_shell(input: &str) -> ParsedMeta {
             Some(cmd.to_owned())
         },
         echo_hidden: false,
+        kind_filter: None,
+            continuation: None,
     }
 }
 
@@ -1725,6 +1814,8 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 system: false,
                 pattern: None,
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1743,6 +1834,8 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 system: false,
                 pattern: None,
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1781,8 +1874,10 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("du", MetaCmd::ListRoles),
     ("dg", MetaCmd::ListRoles),
     ("dp", MetaCmd::ListPrivileges),
+    ("z", MetaCmd::ListPrivileges),
     ("db", MetaCmd::ListTablespaces),
     ("dx", MetaCmd::ListExtensions),
+    ("dX", MetaCmd::ListExtStatistics),
     ("dd", MetaCmd::ListComments),
     ("dc", MetaCmd::ListConversions),
     ("dy", MetaCmd::ListEventTriggers),
@@ -1799,6 +1894,47 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
 fn parse_d_family(input: &str) -> ParsedMeta {
     // `input` has already had the leading `\` stripped.
 
+    // \dfn / \dfp / \dfa / \dfw — psql function-kind filter variants.
+    // Check before the generic D_SUBCMDS loop so the longer prefix wins.
+    if let Some(rest) = input.strip_prefix("df") {
+        // The next char (if present) may be a kind qualifier: n, p, a, w.
+        // Anything else falls through to the normal \df handling below.
+        let (kind_char, rest2) = match rest.chars().next() {
+            Some(k @ ('n' | 'p' | 'a' | 'w')) => (Some(k), &rest[1..]),
+            _ => (None, rest),
+        };
+        if kind_char.is_some() || rest2.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S') || rest2.is_empty() {
+            let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
+            return ParsedMeta {
+                cmd: MetaCmd::ListFunctions,
+                plus,
+                system,
+                pattern,
+                echo_hidden: false,
+                kind_filter: kind_char,
+            continuation: None,
+            };
+        }
+    }
+
+    // \da [pattern] — shorthand for \dfa (list aggregate functions).
+    if let Some(rest) = input.strip_prefix("da") {
+        if rest.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S')
+            || rest.is_empty()
+        {
+            let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
+            return ParsedMeta {
+                cmd: MetaCmd::ListFunctions,
+                plus,
+                system,
+                pattern,
+                echo_hidden: false,
+                kind_filter: Some('a'),
+                continuation: None,
+            };
+        }
+    }
+
     // Try each sub-command prefix (they all include the leading `d`).
     // `D_SUBCMDS` is ordered longest-first so greedy matching is correct.
     for (prefix, cmd) in D_SUBCMDS {
@@ -1811,6 +1947,8 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 system,
                 pattern,
                 echo_hidden: false,
+                kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1824,6 +1962,8 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         system,
         pattern,
         echo_hidden: false,
+        kind_filter: None,
+            continuation: None,
     }
 }
 

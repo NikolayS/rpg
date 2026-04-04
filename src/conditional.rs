@@ -38,6 +38,19 @@ pub fn eval_bool(expr: &str) -> bool {
     )
 }
 
+/// Like `eval_bool` but distinguishes invalid expressions from valid false.
+///
+/// Returns `Some(true)` for recognised truthy values, `Some(false)` for
+/// recognised falsy values (`false`, `off`, `0`, `no`, `f`, `n`, ``),
+/// and `None` for anything that is not a recognised boolean.
+pub fn eval_bool_strict(expr: &str) -> Option<bool> {
+    match expr.trim().to_lowercase().as_str() {
+        "true" | "on" | "1" | "yes" | "t" | "y" => Some(true),
+        "false" | "off" | "0" | "no" | "f" | "n" | "" => Some(false),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CondBlock
 // ---------------------------------------------------------------------------
@@ -53,6 +66,11 @@ struct CondBlock {
     ///
     /// Used to detect an erroneous second `\else` or an `\elif` after `\else`.
     seen_else: bool,
+    /// Was this block opened with an invalid boolean expression?
+    ///
+    /// When true, psql echoes (but does not execute) the lines inside the
+    /// suppressed branch — mirroring psql's error-conditional behaviour.
+    error: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -67,13 +85,16 @@ struct CondBlock {
 #[derive(Debug, Default)]
 pub struct ConditionalState {
     stack: Vec<CondBlock>,
+    /// Number of currently-open blocks that were opened with an invalid
+    /// boolean expression (error-conditional mode).
+    error_depth: usize,
 }
 
 impl ConditionalState {
     /// Create a new, empty (unconstrained) state.
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self { stack: Vec::new() }
+        Self { stack: Vec::new(), error_depth: 0 }
     }
 
     /// Return `true` when every open block is currently active.
@@ -89,6 +110,15 @@ impl ConditionalState {
         self.stack.len()
     }
 
+    /// Return `true` when at least one currently-open block was opened with
+    /// an invalid boolean expression (psql error-conditional mode).
+    ///
+    /// In this mode the REPL echoes (but does not execute) SQL lines inside
+    /// the suppressed block, matching psql's `-a` behaviour.
+    pub fn is_error_conditional(&self) -> bool {
+        self.error_depth > 0
+    }
+
     /// Process `\if <condition>`.
     ///
     /// Pushes a new block.  The block is active only when the condition is
@@ -101,7 +131,27 @@ impl ConditionalState {
             any_true: active,
             active,
             seen_else: false,
+            error: false,
         });
+    }
+
+    /// Like `push_if(false)` but marks the block as an error-conditional.
+    ///
+    /// Called when `\if` receives an expression that is not a recognised
+    /// boolean value.  The block behaves as `\if false` but the caller is
+    /// responsible for printing the appropriate error message, and the REPL
+    /// will echo (without executing) SQL inside the suppressed branch.
+    pub fn push_if_error(&mut self) {
+        let outer_active = self.is_active();
+        self.stack.push(CondBlock {
+            any_true: false,
+            active: false,
+            seen_else: false,
+            error: outer_active, // only track error when outer is active
+        });
+        if outer_active {
+            self.error_depth += 1;
+        }
     }
 
     /// Process `\elif <condition>`.
@@ -167,10 +217,14 @@ impl ConditionalState {
     /// # Errors
     /// Returns an error string when no `\if` is open.
     pub fn pop_endif(&mut self) -> Result<(), String> {
-        if self.stack.pop().is_some() {
-            Ok(())
-        } else {
-            Err("\\endif without \\if".to_owned())
+        match self.stack.pop() {
+            Some(block) => {
+                if block.error {
+                    self.error_depth = self.error_depth.saturating_sub(1);
+                }
+                Ok(())
+            }
+            None => Err("\\endif without \\if".to_owned()),
         }
     }
 }

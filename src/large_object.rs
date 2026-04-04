@@ -152,17 +152,29 @@ async fn run_lo_export(client: &Client, loid: u32, filename: &str) -> Result<(),
 // lo_list  (\dl)
 // ---------------------------------------------------------------------------
 
-/// Implement `\lo_list` / `\dl`.
+/// Implement `\lo_list` / `\dl` / `\lo_list+`.
 ///
 /// Queries `pg_largeobject_metadata` and prints the result as an aligned
-/// table matching psql's output format.
-pub async fn lo_list(client: &Client) {
-    let sql = "\
-        select \
-            lom.oid as \"ID\", \
+/// table matching psql's output format.  With `plus = true` also shows
+/// access privileges.
+pub async fn lo_list(client: &Client, plus: bool) {
+    let sql = if plus {
+        "select lom.oid as \"ID\", \
+            pg_catalog.pg_get_userbyid(lom.lomowner) as \"Owner\", \
+            pg_catalog.array_to_string(\
+              pg_catalog.array(\
+                select pg_catalog.pg_get_acl_entry(unnest(lom.lomacl))\
+              ), E'\\n') as \"Access privileges\", \
             pg_catalog.obj_description(lom.oid, 'pg_largeobject') as \"Description\" \
         from pg_catalog.pg_largeobject_metadata as lom \
-        order by lom.oid";
+        order by lom.oid"
+    } else {
+        "select lom.oid as \"ID\", \
+            pg_catalog.pg_get_userbyid(lom.lomowner) as \"Owner\", \
+            pg_catalog.obj_description(lom.oid, 'pg_largeobject') as \"Description\" \
+        from pg_catalog.pg_largeobject_metadata as lom \
+        order by lom.oid"
+    };
 
     run_and_print(client, sql, Some("Large objects")).await;
 }

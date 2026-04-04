@@ -447,8 +447,12 @@ pub fn build_prompt_from_settings(
 /// - Parenthesis depth does not affect statement completion.
 pub fn is_complete(buf: &str) -> bool {
     let mut in_single = false;
-    let mut in_block_comment = false;
+    let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
+    // Tracks nesting depth of BEGIN ATOMIC … END blocks (SQL/PSM function
+    // bodies introduced in PostgreSQL 14).  A semicolon only terminates the
+    // statement when this counter is zero.
+    let mut begin_atomic_depth: u32 = 0;
 
     let bytes = buf.as_bytes();
     let len = bytes.len();
@@ -468,10 +472,13 @@ pub fn is_complete(buf: &str) -> bool {
             continue;
         }
 
-        if in_block_comment {
+        if block_comment_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
-                in_block_comment = false;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
             } else {
                 i += 1;
             }
@@ -505,7 +512,7 @@ pub fn is_complete(buf: &str) -> bool {
 
         // Block comment start
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block_comment = true;
+            block_comment_depth += 1;
             i += 2;
             continue;
         }
@@ -537,15 +544,249 @@ pub fn is_complete(buf: &str) -> bool {
             }
         }
 
-        // Semicolon terminates (outside quotes/comments)
+        // Detect BEGIN ATOMIC (SQL/PSM function body) and matching END.
+        // We only look at letters here; non-letter chars advance normally.
+        if bytes[i].is_ascii_alphabetic() {
+            // Extract the keyword at position i (uppercase for comparison).
+            let kw_start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let kw = buf[kw_start..i].to_ascii_uppercase();
+            // Check that the keyword is preceded by a word boundary.
+            let at_word_start = kw_start == 0
+                || !buf.as_bytes()[kw_start - 1].is_ascii_alphanumeric();
+
+            if at_word_start {
+                if kw == "BEGIN" {
+                    // Look ahead for ATOMIC (skipping whitespace).
+                    let rest = buf[i..].trim_start();
+                    let rest_upper = rest.to_ascii_uppercase();
+                    if rest_upper.starts_with("ATOMIC")
+                        && rest
+                            .as_bytes()
+                            .get(6)
+                            .map_or(true, |&b| !b.is_ascii_alphanumeric())
+                    {
+                        begin_atomic_depth += 1;
+                    }
+                } else if kw == "END" && begin_atomic_depth > 0 {
+                    // Only close a BEGIN ATOMIC block when:
+                    //   1. END is followed by `;` (possibly with whitespace)
+                    //   2. END appears at the start of a line (only whitespace
+                    //      precedes it on the current line) — this distinguishes
+                    //      the function-body END from inline CASE…END expressions
+                    //      whose END is always part of a larger expression.
+                    let rest_after_end = buf[i..].trim_start();
+                    let line_before = &buf[..kw_start];
+                    let at_line_start = line_before
+                        .rfind('\n')
+                        .map(|nl| buf[nl + 1..kw_start].chars().all(char::is_whitespace))
+                        .unwrap_or_else(|| buf[..kw_start].chars().all(char::is_whitespace));
+                    if rest_after_end.starts_with(';') && at_line_start {
+                        begin_atomic_depth -= 1;
+                    }
+                }
+            }
+            continue; // `i` already advanced past the keyword
+        }
+
+        // Semicolon terminates (outside quotes/comments, not inside BEGIN ATOMIC)
         if bytes[i] == b';' {
-            return true;
+            if begin_atomic_depth == 0 {
+                return true;
+            }
         }
 
         i += 1;
     }
 
     false
+}
+
+/// Return `true` when `buf` ends inside an unclosed dollar-quoted string.
+/// Used to decide whether to echo blank lines in `-a` mode: psql echoes blank
+/// lines inside dollar-quoted bodies but skips them between statements.
+/// Returns `true` if the buffer ends inside any string literal (dollar-quoted
+/// or single-quoted).  Used to decide whether blank lines should be echoed in
+/// `--echo-all` mode — psql echoes blank lines inside function bodies but
+/// skips them between statements or when only comments are buffered.
+fn is_inside_string_literal(buf: &str) -> bool {
+    let mut in_single = false;
+    let mut block_comment_depth: u32 = 0;
+    let mut dollar_tag: Option<String> = None;
+
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth += 1;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'$' {
+            let rest = &buf[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    in_single || dollar_tag.is_some()
+}
+
+fn is_inside_dollar_quote(buf: &str) -> bool {
+    let mut in_single = false;
+    let mut block_comment_depth: u32 = 0;
+    let mut dollar_tag: Option<String> = None;
+
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth += 1;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'$' {
+            let rest = &buf[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    dollar_tag.is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -887,8 +1128,18 @@ pub struct ReplSettings {
     pub single_line: bool,
     /// Wrap `-f` file execution in `BEGIN` / `COMMIT` (`-1`).
     pub single_transaction: bool,
+    /// Echo all input to stdout before execution (`-a` / `--echo-all`).
+    ///
+    /// Mirrors psql's `-a` flag: every SQL statement and meta-command is
+    /// written to stdout before it is sent to the server.  Required to
+    /// reproduce the output format used by `pg_regress` (`psql -a -q`).
+    pub echo_all: bool,
     /// Quiet mode: suppress informational messages (`-q`).
     pub quiet: bool,
+    /// Interactive mode: true when running with a readline prompt (not -f/-c).
+    /// Used to suppress status messages (e.g. "Output format is unaligned.")
+    /// that psql only prints in interactive sessions.
+    pub is_interactive: bool,
     /// Debug mode: enable debug output (`-D`).
     pub debug: bool,
     /// Conditional execution state (`\if` / `\elif` / `\else` / `\endif`).
@@ -984,6 +1235,12 @@ pub struct ReplSettings {
     /// When `true`, SQLSTATE codes are appended to error output.
     /// Defaults to `false` (psql default).
     pub verbose_errors: bool,
+    /// Terse error mode: suppress DETAIL and HINT lines.
+    /// Set when `\set VERBOSITY terse` is active.
+    pub terse_errors: bool,
+    /// Sqlstate error mode: show only the SQLSTATE code as the error message.
+    /// Set when `\set VERBOSITY sqlstate` is active.
+    pub sqlstate_errors: bool,
     /// Use Vi keybinding mode in the REPL.
     ///
     /// Defaults to `false` (Emacs mode).  Set with `\set VI on`.
@@ -1266,10 +1523,12 @@ impl Default for ReplSettings {
             log_file: None,
             echo_queries: false,
             echo_errors: false,
+            echo_all: false,
             single_step: false,
             single_line: false,
             single_transaction: false,
             quiet: false,
+            is_interactive: false,
             debug: false,
             cond: crate::conditional::ConditionalState::default(),
             last_query: None,
@@ -1294,6 +1553,8 @@ impl Default for ReplSettings {
             db_capabilities: crate::capabilities::DbCapabilities::default(),
             i_know_what_im_doing: false,
             verbose_errors: false,
+            terse_errors: false,
+            sqlstate_errors: false,
             vi_mode: false,
             current_file: None,
             session_id: crate::session_store::new_session_id(),
@@ -1525,6 +1786,135 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     exit_code
 }
 
+/// Returns true if `sql` is a `COPY … TO STDOUT` statement.
+fn is_copy_to_stdout(sql: &str) -> bool {
+    let upper = sql.to_uppercase();
+    upper.trim_start().starts_with("COPY")
+        && (upper.contains("TO STDOUT") || upper.contains("TO\nSTDOUT"))
+}
+
+/// Execute an inline `COPY … TO STDOUT` statement by streaming the server
+/// output to the current output target.
+///
+/// Returns `true` on success, `false` on error.
+async fn execute_inline_copy_to(
+    client: &Client,
+    sql: &str,
+    settings: &mut ReplSettings,
+) -> bool {
+    use futures::StreamExt as _;
+
+    let stream = match client.copy_out(sql).await {
+        Ok(s) => s,
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            return false;
+        }
+    };
+
+    tokio::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = w.write_all(&bytes);
+                } else {
+                    use std::io::Write as _;
+                    let _ = std::io::stdout().write_all(&bytes);
+                }
+            }
+            Err(e) => {
+                crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Returns true if `sql` is a `COPY … FROM STDIN` statement.
+fn is_copy_from_stdin(sql: &str) -> bool {
+    // Fast case-insensitive check: look for the COPY keyword and FROM STDIN.
+    // This avoids a full parse; it may match rare edge-cases (e.g. COPY inside
+    // a function body) but that is acceptable for the regression-test use case.
+    let upper = sql.to_uppercase();
+    let trimmed = upper.trim_start();
+    if !trimmed.starts_with("COPY") {
+        return false;
+    }
+    // COPY (SELECT ...) FROM STDIN is invalid SQL — the subselect form only
+    // works with TO.  If the first non-whitespace token after COPY is '(' we
+    // have the subselect form, so let PostgreSQL report the error normally.
+    let after_copy = trimmed[4..].trim_start();
+    if after_copy.starts_with('(') {
+        return false;
+    }
+    // psql also treats "COPY … FROM STDOUT" the same as FROM STDIN when
+    // reading from a file: it reads inline data until \. and sends the
+    // query to the server as COPY … FROM STDIN.
+    upper.contains("FROM STDIN")
+        || upper.contains("FROM\nSTDIN")
+        || upper.contains("FROM STDOUT")
+        || upper.contains("FROM\nSTDOUT")
+}
+
+/// Execute an inline `COPY … FROM STDIN` block where the data rows have
+/// already been collected from the script source.
+///
+/// Sends the copy data via the PostgreSQL copy-in protocol and prints the
+/// `COPY N` command tag on success, or an error message on failure.
+///
+/// Returns `true` on success, `false` on error.
+async fn execute_inline_copy_from(
+    client: &Client,
+    sql: &str,
+    data_lines: &[String],
+    settings: &mut ReplSettings,
+) -> bool {
+    use futures::SinkExt as _;
+
+    // Build the copy payload: lines joined by LF with a final LF.
+    let mut payload = data_lines.join("\n");
+    if !payload.is_empty() {
+        payload.push('\n');
+    }
+
+    let sink = match client.copy_in(sql).await {
+        Ok(s) => s,
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            return false;
+        }
+    };
+
+    tokio::pin!(sink);
+    if let Err(e) = sink
+        .send(bytes::Bytes::from(payload.into_bytes()))
+        .await
+    {
+        crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+        return false;
+    }
+
+    match sink.finish().await {
+        Ok(rows) => {
+            // Mirror psql's command tag output (suppressed in quiet mode).
+            if !settings.quiet {
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = writeln!(w, "COPY {rows}");
+                } else {
+                    println!("COPY {rows}");
+                }
+            }
+            true
+        }
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            false
+        }
+    }
+}
+
 /// Shared line-processing core for `exec_file`, `exec_stdin`, and
 /// `io::include_file`.
 ///
@@ -1543,8 +1933,9 @@ pub(crate) async fn exec_lines(
 ) -> i32 {
     let mut buf = String::new();
     let mut exit_code = 0i32;
+    let mut lines = lines;
 
-    'lines: for line in lines {
+    'lines: while let Some(line) = lines.next() {
         // `quit` / `exit` bare words work in all modes (psql behaviour).
         if is_quit_exit(line.trim(), buf.is_empty()) {
             break 'lines;
@@ -1552,28 +1943,55 @@ pub(crate) async fn exec_lines(
         // Interpolate variables first — a bare `:varname` that expands to a
         // backslash command (e.g. `:dba` → `\i start.psql`) must be detected
         // after interpolation, not before (psql behaviour).
+        // Use trimmed input for meta-command detection; use raw (untrimmed but
+        // interpolated) for SQL accumulation to preserve indentation in echo.
         let interpolated = settings.vars.interpolate(line.trim());
+        let interpolated_raw = settings.vars.interpolate(&line);
         if interpolated.trim_start().starts_with('\\') {
-            let mut parsed = crate::metacmd::parse(&interpolated);
+            // -a / --echo-all: echo meta-commands to stdout before dispatching.
+            // Echo the raw (untrimmed) form to preserve original indentation.
+            if settings.echo_all {
+                if let Some(ref mut w) = settings.output_target {
+                    let _ = writeln!(w, "{}", line.trim_end());
+                } else {
+                    println!("{}", line.trim_end());
+                }
+            }
+            let mut remaining_meta: Option<String> = Some(interpolated.clone());
+            while let Some(ref meta_input) = remaining_meta.clone() {
+            let mut parsed = crate::metacmd::parse(meta_input);
             parsed.echo_hidden = settings.echo_hidden;
+            remaining_meta = parsed.continuation.take();
             let result = dispatch_meta(parsed, client, params, settings, tx).await;
             // Handle buffer-aware results that exec_lines must act on directly.
             match result {
                 MetaResult::ExecuteBuffer => {
-                    let sql = buf.trim().to_owned();
+                    // The buffer lines were already echoed individually above;
+                    // disable echo_all so execute_query doesn't echo again.
+                    let sql = crate::query::strip_leading_preamble(buf.trim()).to_owned();
                     buf.clear();
                     if !sql.is_empty() {
+                        let saved_echo = settings.echo_all;
+                        settings.echo_all = false;
                         let ok = if let Some(bp) = settings.pending_bind_params.take() {
                             execute_query_extended(client, &sql, &bp, settings, tx).await
                         } else {
                             execute_query(client, &sql, settings, tx).await
                         };
+                        settings.echo_all = saved_echo;
                         if !ok {
                             exit_code = 1;
                             if settings.single_transaction {
                                 break 'lines;
                             }
                         }
+                    }
+                }
+                MetaResult::GExecBuffer => {
+                    let sql = buf.trim().to_owned();
+                    buf.clear();
+                    if !sql.is_empty() {
+                        execute_gexec(client, &sql, settings, tx).await;
                     }
                 }
                 MetaResult::DescribeBuffer => {
@@ -1604,6 +2022,8 @@ pub(crate) async fn exec_lines(
                                     &e,
                                     Some(&sql),
                                     settings.verbose_errors,
+                                    settings.terse_errors,
+                                    settings.sqlstate_errors,
                                 );
                                 exit_code = 1;
                                 if settings.single_transaction {
@@ -1643,6 +2063,7 @@ pub(crate) async fn exec_lines(
             if settings.prompt_interrupted {
                 break 'lines;
             }
+            } // end while remaining_meta
         } else if settings.cond.is_active() {
             // Check for inline backslash command (e.g. `select 1 \gset`).
             if let Some(pos) = find_inline_backslash(&line) {
@@ -1660,14 +2081,18 @@ pub(crate) async fn exec_lines(
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
                     MetaResult::ExecuteBuffer => {
-                        let sql = buf.trim().to_owned();
+                        let sql =
+                            crate::query::strip_leading_preamble(buf.trim()).to_owned();
                         buf.clear();
                         if !sql.is_empty() {
+                            let saved_echo = settings.echo_all;
+                            settings.echo_all = false;
                             let ok = if let Some(bp) = settings.pending_bind_params.take() {
                                 execute_query_extended(client, &sql, &bp, settings, tx).await
                             } else {
                                 execute_query(client, &sql, settings, tx).await
                             };
+                            settings.echo_all = saved_echo;
                             if !ok {
                                 exit_code = 1;
                                 if settings.single_transaction {
@@ -1707,30 +2132,164 @@ pub(crate) async fn exec_lines(
                     _ => {}
                 }
             } else {
-                if !buf.is_empty() {
-                    buf.push('\n');
-                }
-                buf.push_str(&line);
+                // Split on \; separators (psql multi-command separator).
+                // Each segment before a \; is sent immediately as a complete
+                // statement; the last segment is processed normally.
+                // Use the raw (untrimmed, interpolated) form to preserve indentation.
+                let segments = split_on_backslash_semicolon(&interpolated_raw);
+                let num_segments = segments.len();
+                let has_separator = num_segments > 1;
+                let mut should_break = false;
 
-                if is_complete(&buf) {
-                    if !execute_query(client, buf.trim(), settings, tx).await {
-                        exit_code = 1;
-                        // In single-transaction mode, stop on first error so the
-                        // caller can roll back and skip the rest.
-                        if settings.single_transaction {
-                            break 'lines;
+                // -a / --echo-all: echo the WHOLE original line once (before splitting).
+                // psql echoes the raw input line first, then executes each segment.
+                // For lines without \;, echo segment-by-segment (inside the loop below)
+                // so blank lines inside string literals are echoed correctly.
+                if settings.echo_all && has_separator {
+                    let raw_line = line.trim_end();
+                    if !raw_line.is_empty() {
+                        if let Some(ref mut w) = settings.output_target {
+                            let _ = writeln!(w, "{raw_line}");
+                        } else {
+                            println!("{raw_line}");
                         }
                     }
-                    buf.clear();
                 }
+
+                'segs: for (seg_idx, segment) in segments.iter().enumerate() {
+                    let force_execute = seg_idx < num_segments - 1;
+
+                        // -a / --echo-all: for lines without \;, echo each segment.
+                    // psql echoes the original (pre-interpolation) line to show
+                    // :varname references unexpanded, and echoes blank lines inside
+                    // string literals but skips them between statements.
+                    if settings.echo_all && !has_separator
+                        && (!segment.trim().is_empty() || is_inside_string_literal(&buf))
+                    {
+                        // Echo original raw line (trim trailing only) on first segment,
+                        // subsequent segments (shouldn't happen for !has_separator) also raw.
+                        let echo_line = if seg_idx == 0 { line.trim_end() } else { segment.trim_end() };
+                        if let Some(ref mut w) = settings.output_target {
+                            let _ = writeln!(w, "{echo_line}");
+                        } else {
+                            println!("{echo_line}");
+                        }
+                    }
+
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(segment);
+
+                    if force_execute || is_complete(&buf) {
+                        // Strip leading blank lines and comments so that PostgreSQL
+                        // reports LINE 1 for the first real SQL token — matching
+                        // psql's behaviour where leading decorations are not sent.
+                        let sql_to_exec =
+                            crate::query::strip_leading_preamble(buf.trim());
+
+                        // COPY … TO STDOUT: stream server output directly to
+                        // stdout (or the current \o target), matching psql behaviour.
+                        if is_copy_to_stdout(sql_to_exec) {
+                            let sql_owned = sql_to_exec.to_owned();
+                            buf.clear();
+                            let ok = execute_inline_copy_to(client, &sql_owned, settings).await;
+                            if !ok {
+                                exit_code = 1;
+                                if has_separator || settings.single_transaction {
+                                    should_break = settings.single_transaction;
+                                    break 'segs;
+                                }
+                            }
+                            continue 'segs;
+                        }
+
+                        // COPY … FROM STDIN: collect the inline data block (lines
+                        // until a bare `\.`) and execute via the copy protocol,
+                        // matching psql behaviour in -f / non-interactive mode.
+                        if is_copy_from_stdin(sql_to_exec) {
+                            // Normalize: psql treats "FROM STDOUT" like "FROM STDIN"
+                            // for inline data; the server only understands FROM STDIN.
+                            let sql_owned = {
+                                let upper = sql_to_exec.to_uppercase();
+                                if let Some(pos) = upper.find("FROM STDOUT") {
+                                    format!("{}FROM STDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
+                                } else if let Some(pos) = upper.find("FROM\nSTDOUT") {
+                                    format!("{}FROM\nSTDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
+                                } else {
+                                    sql_to_exec.to_owned()
+                                }
+                            };
+                            buf.clear();
+                            let mut copy_data = Vec::<String>::new();
+                            while let Some(dl) = lines.next() {
+                                // psql does NOT echo inline COPY data lines even
+                                // with --echo-all; only the SQL statement itself
+                                // is echoed (already done above).
+                                if dl.trim() == "\\." {
+                                    break;
+                                }
+                                copy_data.push(dl);
+                            }
+                            let ok = execute_inline_copy_from(
+                                client,
+                                &sql_owned,
+                                &copy_data,
+                                settings,
+                            )
+                            .await;
+                            if !ok {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    should_break = true;
+                                    break 'segs;
+                                }
+                            }
+                            continue 'segs;
+                        }
+
+                        if !sql_to_exec.is_empty() {
+                            // Disable per-statement echo in execute_query to avoid
+                            // double-echoing when echo_all is active (lines already echoed above).
+                            let saved_echo_all = settings.echo_all;
+                            settings.echo_all = false;
+                            let ok = execute_query(client, sql_to_exec, settings, tx).await;
+                            settings.echo_all = saved_echo_all;
+                            if !ok {
+                                exit_code = 1;
+                                // Stop the \; chain on first error (psql behaviour).
+                                // Also stop the entire input in single-transaction mode.
+                                if has_separator || settings.single_transaction {
+                                    should_break = settings.single_transaction;
+                                    buf.clear();
+                                    break 'segs;
+                                }
+                            }
+                        }
+                        buf.clear();
+                    }
+                }
+
+                if should_break {
+                    break 'lines;
+                }
+            }
+        } else if settings.echo_all && settings.cond.is_error_conditional() {
+            // Error-conditional mode: echo SQL lines without executing.
+            // Mirrors psql's `-a` behaviour when `\if` receives an invalid
+            // boolean expression — lines are shown but not run.
+            let raw = interpolated_raw.trim_end();
+            if !raw.is_empty() {
+                println!("{raw}");
             }
         }
     }
 
     // Execute any trailing SQL without a terminating semicolon.
-    if !buf.trim().is_empty()
+    let trailing = crate::query::strip_leading_preamble(buf.trim());
+    if !trailing.is_empty()
         && settings.cond.is_active()
-        && !execute_query(client, buf.trim(), settings, tx).await
+        && !execute_query(client, trailing, settings, tx).await
     {
         exit_code = 1;
     }
@@ -1998,8 +2557,10 @@ fn expanded_mode_str(mode: ExpandedMode) -> &'static str {
 /// Apply a timing toggle/set and print the new state.
 fn apply_timing(settings: &mut ReplSettings, mode: Option<bool>) {
     settings.timing = mode.unwrap_or(!settings.timing);
-    let state = if settings.timing { "on" } else { "off" };
-    println!("Timing is {state}.");
+    if !settings.quiet {
+        let state = if settings.timing { "on" } else { "off" };
+        println!("Timing is {state}.");
+    }
 }
 
 /// Apply an expanded-display mode change and print the new state.
@@ -2020,10 +2581,12 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     };
     // Keep pset in sync so -c and -f paths see the updated setting.
     settings.pset.expanded = settings.expanded;
-    println!(
-        "Expanded display is {}.",
-        expanded_mode_str(settings.expanded)
-    );
+    if !settings.quiet {
+        println!(
+            "Expanded display is {}.",
+            expanded_mode_str(settings.expanded)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2112,9 +2675,17 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             crate::logging::set_level(crate::logging::Level::Warn);
         }
     }
+    // Mirror ECHO into echo_all (psql-compatible: "all"/"queries" → on, "none"/"errors" → off).
+    if name == "ECHO" {
+        settings.echo_all = matches!(value, "all" | "queries");
+    }
     // Mirror ECHO_HIDDEN into the settings flag.
     if name == "ECHO_HIDDEN" {
         settings.echo_hidden = value == "on";
+    }
+    // Mirror QUIET into the quiet flag.
+    if name == "QUIET" {
+        settings.quiet = matches!(value, "on" | "true" | "1");
     }
     // Mirror HIGHLIGHT into the settings flag and pset config.
     if name == "HIGHLIGHT" {
@@ -2142,9 +2713,13 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "DESTRUCTIVE_WARNING" || name == "SAFETY" {
         settings.safety_enabled = value != "off" && value != "false" && value != "0";
     }
-    // Mirror VERBOSITY into verbose_errors (psql: verbose shows SQLSTATE).
+    // Mirror VERBOSITY into verbose/terse error settings.
+    // psql: verbose shows SQLSTATE; terse suppresses DETAIL/HINT;
+    //       sqlstate shows only the SQLSTATE code as the error message.
     if name == "VERBOSITY" {
         settings.verbose_errors = value == "verbose";
+        settings.terse_errors = value == "terse";
+        settings.sqlstate_errors = value == "sqlstate";
     }
     // Mirror EXPLAIN into auto_explain.
     if name == "EXPLAIN" {
@@ -2431,6 +3006,9 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
 fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
     use crate::output::OutputFormat;
 
+    // In quiet mode (-q), psql suppresses all \pset confirmation messages.
+    let quiet = settings.quiet;
+
     if option.is_empty() {
         // Display all pset options.
         let text = pset_status_text(settings);
@@ -2442,7 +3020,9 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         "format" => {
             if value.is_none_or(str::is_empty) {
                 // \pset format (no value) — show current setting.
-                println!("Output format is {}.", format_name(&settings.pset.format));
+                if !quiet {
+                    println!("Output format is {}.", format_name(&settings.pset.format));
+                }
                 return;
             }
             let fmt = match value.unwrap_or("") {
@@ -2459,30 +3039,40 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.pset.format = fmt;
-            println!("Output format is {}.", format_name(&settings.pset.format));
+            if !quiet {
+                println!("Output format is {}.", format_name(&settings.pset.format));
+            }
         }
         "border" => {
             if let Some(v) = value.and_then(|s| s.parse::<u8>().ok()) {
                 settings.pset.border = v.min(2);
-                println!("Border style is {}.", settings.pset.border);
+                if !quiet {
+                    println!("Border style is {}.", settings.pset.border);
+                }
             } else {
                 eprintln!("\\pset: invalid border value");
             }
         }
         "null" => {
             let display = value.unwrap_or("").to_owned();
-            println!("Null display is \"{display}\".");
+            if !quiet {
+                println!("Null display is \"{display}\".");
+            }
             settings.pset.null_display = display;
         }
         "fieldsep" => {
             let sep = value.unwrap_or("|").to_owned();
-            println!("Field separator is \"{sep}\".");
+            if !quiet {
+                println!("Field separator is \"{sep}\".");
+            }
             settings.pset.field_sep = sep;
         }
         "recordsep" => {
             let sep = value.unwrap_or("\n").to_owned();
             settings.pset.record_sep = sep;
-            println!("Record separator is set.");
+            if !quiet {
+                println!("Record separator is set.");
+            }
         }
         "tuples_only" | "t" => {
             // psql does not print a confirmation message for tuples_only.
@@ -2494,9 +3084,11 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         }
         "title" => {
             settings.pset.title = value.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
-            match &settings.pset.title {
-                Some(t) => println!("Title is \"{t}\"."),
-                None => println!("Title is not set."),
+            if !quiet {
+                match &settings.pset.title {
+                    Some(t) => println!("Title is \"{t}\"."),
+                    None => println!("Title is not set."),
+                }
             }
         }
         "expanded" | "x" => {
@@ -2514,15 +3106,19 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.pset.expanded = mode;
-            println!(
-                "Expanded display is {}.",
-                expanded_mode_str(settings.pset.expanded)
-            );
+            if !quiet {
+                println!(
+                    "Expanded display is {}.",
+                    expanded_mode_str(settings.pset.expanded)
+                );
+            }
         }
         "pager_min_lines" => {
             if let Some(n) = value.and_then(|s| s.parse::<usize>().ok()) {
                 settings.pager_min_lines = n;
-                println!("Pager minimum lines is {n}.");
+                if !quiet {
+                    println!("Pager minimum lines is {n}.");
+                }
             } else {
                 eprintln!("\\pset: invalid pager_min_lines value");
             }
@@ -2542,7 +3138,9 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.explain_format = fmt;
-            println!("EXPLAIN format is {}.", fmt.as_str());
+            if !quiet {
+                println!("EXPLAIN format is {}.", fmt.as_str());
+            }
         }
         other => {
             eprintln!("\\pset: unknown option \"{other}\"");
@@ -2623,7 +3221,9 @@ fn apply_toggle_align(settings: &mut ReplSettings) {
         OutputFormat::Aligned => OutputFormat::Unaligned,
         _ => OutputFormat::Aligned,
     };
-    println!("Output format is {}.", format_name(&settings.pset.format));
+    if settings.is_interactive {
+        println!("Output format is {}.", format_name(&settings.pset.format));
+    }
 }
 
 /// Apply `\t [on|off]` — tuples-only mode.
@@ -2634,7 +3234,9 @@ fn apply_tuples_only(settings: &mut ReplSettings, mode: Option<bool>) {
     } else {
         "off"
     };
-    println!("Tuples only is {state}.");
+    if settings.is_interactive {
+        println!("Tuples only is {state}.");
+    }
 }
 
 /// Apply `\f [sep]` — field separator.
@@ -3214,11 +3816,27 @@ async fn dispatch_meta(
     // -- Conditional commands: always process regardless of active state -----
     match &parsed.cmd {
         MetaCmd::If(expr) => {
+            use crate::conditional::eval_bool_strict;
             if expr.trim().is_empty() {
                 eprintln!("\\if: missing expression");
+                settings.cond.push_if(false);
+            } else {
+                match eval_bool_strict(expr) {
+                    Some(condition) => settings.cond.push_if(condition),
+                    None => {
+                        // Only emit the error when we are in an active context
+                        // (outer block is executing).  psql is silent about
+                        // errors inside already-suppressed blocks.
+                        if settings.cond.is_active() {
+                            eprintln!(
+                                "error: unrecognized value \"{expr}\" for \
+                                 \"\\if expression\": Boolean expected"
+                            );
+                        }
+                        settings.cond.push_if_error();
+                    }
+                }
             }
-            let condition = eval_bool(expr);
-            settings.cond.push_if(condition);
             return MetaResult::Continue;
         }
         MetaCmd::Elif(expr) => {
@@ -3495,15 +4113,17 @@ async fn dispatch_meta(
                         }
                     }
                     // Detect server version to include in the reconnect
-                    // banner (always shown, matching psql behaviour).
+                    // banner. Suppressed in quiet mode (-q), matching psql.
                     let server_ver =
                         crate::capabilities::detect_server_version_pub(&new_client).await;
-                    let msg = crate::connection::reconnect_info(
-                        crate::version_string(),
-                        server_ver.as_deref(),
-                        &new_params,
-                    );
-                    println!("{msg}");
+                    if !settings.quiet {
+                        let msg = crate::connection::reconnect_info(
+                            crate::version_string(),
+                            server_ver.as_deref(),
+                            &new_params,
+                        );
+                        println!("{msg}");
+                    }
                     return MetaResult::Reconnected(Box::new(new_client), Box::new(new_params));
                 }
                 Err(e) => eprintln!("\\c: {e}"),
@@ -3664,6 +4284,7 @@ async fn dispatch_meta(
                     | MetaCmd::ListForeignTablesViaFdw
                     | MetaCmd::ListOperators
                     | MetaCmd::ListUserMappings
+                    | MetaCmd::ListExtStatistics
             ) =>
         {
             crate::describe::execute(
@@ -3715,7 +4336,7 @@ async fn dispatch_meta(
             crate::large_object::lo_export(client, &loid, &filename).await;
         }
         MetaCmd::LoList => {
-            crate::large_object::lo_list(client).await;
+            crate::large_object::lo_list(client, parsed.plus).await;
         }
         MetaCmd::LoUnlink(ref loid) => {
             let loid = loid.clone();
@@ -4346,6 +4967,7 @@ async fn run_readline_loop(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> i32 {
+    settings.is_interactive = true;
     let edit_mode = if settings.vi_mode || settings.config.display.vi_mode {
         EditMode::Vi
     } else {
@@ -4783,13 +5405,15 @@ async fn run_dumb_loop(
 ///
 /// Returns `Some(offset)` if found, `None` if the line has no inline
 /// backslash command.  The scan respects single-quoted strings, dollar-quoted
-/// strings, line comments (`--`), and block comments (`/* … */`).
+/// strings, double-quoted identifiers, line comments (`--`), and block
+/// comments (`/* … */`).
 fn find_inline_backslash(line: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     let mut in_single = false;
-    let mut in_block_comment = false;
+    let mut in_double = false;
+    let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
 
     while i < len {
@@ -4805,10 +5429,27 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
             continue;
         }
 
-        if in_block_comment {
+        if block_comment_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
-                in_block_comment = false;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_double {
+            if bytes[i] == b'"' {
+                if i + 1 < len && bytes[i + 1] == b'"' {
+                    i += 2; // escaped double-quote ""
+                } else {
+                    in_double = false;
+                    i += 1;
+                }
             } else {
                 i += 1;
             }
@@ -4836,8 +5477,15 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
 
         // Block comment start
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block_comment = true;
+            block_comment_depth += 1;
             i += 2;
+            continue;
+        }
+
+        // Double-quoted identifier start
+        if bytes[i] == b'"' {
+            in_double = true;
+            i += 1;
             continue;
         }
 
@@ -4878,6 +5526,90 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Split a SQL line on unquoted `\;` separators (psql multi-command separator).
+///
+/// Returns a `Vec` of string slices, split at each unquoted `\;`.  If there
+/// are no `\;` in the line, returns a single-element vec containing the whole
+/// line.  The `\;` token itself is consumed (not included in any segment).
+fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut parts: Vec<&str> = Vec::new();
+    let mut seg_start = 0;
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut block_depth: u32 = 0;
+    let mut dollar_tag: Option<String> = None;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tb = tag.as_bytes();
+            if bytes[i..].starts_with(tb) {
+                i += tb.len();
+                dollar_tag = None;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if block_depth > 0 {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2; block_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2; block_depth += 1;
+            } else { i += 1; }
+            continue;
+        }
+        if in_double {
+            if bytes[i] == b'"' {
+                if i + 1 < len && bytes[i + 1] == b'"' { i += 2; }
+                else { in_double = false; i += 1; }
+            } else { i += 1; }
+            continue;
+        }
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' { i += 2; }
+                else { in_single = false; i += 1; }
+            } else { i += 1; }
+            continue;
+        }
+        // Line comment — rest of line is not SQL, stop scanning
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' { break; }
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_depth += 1; i += 2; continue;
+        }
+        if bytes[i] == b'"' { in_double = true; i += 1; continue; }
+        if bytes[i] == b'\'' { in_single = true; i += 1; continue; }
+        if bytes[i] == b'$' {
+            let rest = &line[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+        // Detect \;
+        if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1] == b';' {
+            parts.push(&line[seg_start..i]);
+            i += 2;
+            seg_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(&line[seg_start..]);
+    parts
 }
 
 /// Outcome of processing a single input line in the REPL.
@@ -5048,7 +5780,7 @@ async fn handle_backslash_dumb(
                         settings.named_statements.insert(name.clone(), stmt);
                     }
                     Err(e) => {
-                        crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors);
+                        crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
                     }
                 }
             }
@@ -5399,7 +6131,7 @@ async fn handle_line(
                             settings.named_statements.insert(name.clone(), stmt);
                         }
                         Err(e) => {
-                            crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors);
+                            crate::output::eprint_db_error(&e, Some(&sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
                         }
                     }
                 }

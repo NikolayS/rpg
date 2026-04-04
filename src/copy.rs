@@ -271,6 +271,23 @@ fn parse_copy_options(
 // Executor
 // ---------------------------------------------------------------------------
 
+/// Format a `tokio_postgres` error in psql's standard style:
+/// `ERROR:  message\nDETAIL:  ...\nHINT:  ...`
+fn format_pg_error_psql(e: &tokio_postgres::Error) -> String {
+    if let Some(db) = e.as_db_error() {
+        let mut msg = format!("ERROR:  {}", db.message());
+        if let Some(d) = db.detail() {
+            msg.push_str(&format!("\nDETAIL:  {d}"));
+        }
+        if let Some(h) = db.hint() {
+            msg.push_str(&format!("\nHINT:  {h}"));
+        }
+        msg
+    } else {
+        format!("\\copy: {e}")
+    }
+}
+
 /// Execute a parsed `\copy` specification against the given client.
 ///
 /// Prints `COPY N` on success (where N is the number of rows transferred).
@@ -376,7 +393,7 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
     let sink = client
         .copy_in(&sql)
         .await
-        .map_err(|e| format!("\\copy: {e}"))?;
+        .map_err(|e| format_pg_error_psql(&e))?;
 
     // CopyInSink is !Unpin; we must pin it on the stack before using SinkExt.
     tokio::pin!(sink);
@@ -401,7 +418,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
     let stream = client
         .copy_out(&sql)
         .await
-        .map_err(|e| format!("\\copy: {e}"))?;
+        .map_err(|e| format_pg_error_psql(&e))?;
 
     // CopyOutStream is !Unpin; pin it before using StreamExt.
     tokio::pin!(stream);
@@ -423,14 +440,12 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
         CopySource::Stdout => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            let mut row_count = 0u64;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
-                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
                 out.write_all(&chunk)
                     .map_err(|e| format!("\\copy: write error: {e}"))?;
             }
-            println!("COPY {row_count}");
+            // psql does not print "COPY N" when copying to stdout.
         }
         CopySource::Stdin => {
             // Validated earlier; this branch is unreachable in practice.
