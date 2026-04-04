@@ -447,7 +447,7 @@ pub fn build_prompt_from_settings(
 /// - Parenthesis depth does not affect statement completion.
 pub fn is_complete(buf: &str) -> bool {
     let mut in_single = false;
-    let mut in_block_comment = false;
+    let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
     // Tracks nesting depth of BEGIN ATOMIC … END blocks (SQL/PSM function
     // bodies introduced in PostgreSQL 14).  A semicolon only terminates the
@@ -472,10 +472,13 @@ pub fn is_complete(buf: &str) -> bool {
             continue;
         }
 
-        if in_block_comment {
+        if block_comment_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
-                in_block_comment = false;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
             } else {
                 i += 1;
             }
@@ -509,7 +512,7 @@ pub fn is_complete(buf: &str) -> bool {
 
         // Block comment start
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block_comment = true;
+            block_comment_depth += 1;
             i += 2;
             continue;
         }
@@ -610,7 +613,7 @@ pub fn is_complete(buf: &str) -> bool {
 /// skips them between statements or when only comments are buffered.
 fn is_inside_string_literal(buf: &str) -> bool {
     let mut in_single = false;
-    let mut in_block_comment = false;
+    let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
 
     let bytes = buf.as_bytes();
@@ -629,10 +632,13 @@ fn is_inside_string_literal(buf: &str) -> bool {
             continue;
         }
 
-        if in_block_comment {
+        if block_comment_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
-                in_block_comment = false;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
             } else {
                 i += 1;
             }
@@ -661,7 +667,7 @@ fn is_inside_string_literal(buf: &str) -> bool {
         }
 
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block_comment = true;
+            block_comment_depth += 1;
             i += 2;
             continue;
         }
@@ -696,7 +702,7 @@ fn is_inside_string_literal(buf: &str) -> bool {
 
 fn is_inside_dollar_quote(buf: &str) -> bool {
     let mut in_single = false;
-    let mut in_block_comment = false;
+    let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
 
     let bytes = buf.as_bytes();
@@ -715,10 +721,13 @@ fn is_inside_dollar_quote(buf: &str) -> bool {
             continue;
         }
 
-        if in_block_comment {
+        if block_comment_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
-                in_block_comment = false;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
             } else {
                 i += 1;
             }
@@ -747,7 +756,7 @@ fn is_inside_dollar_quote(buf: &str) -> bool {
         }
 
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block_comment = true;
+            block_comment_depth += 1;
             i += 2;
             continue;
         }
@@ -5351,7 +5360,7 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
     let mut i = 0;
     let mut in_single = false;
     let mut in_double = false;
-    let mut in_block_comment = false;
+    let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
 
     while i < len {
@@ -5367,10 +5376,13 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
             continue;
         }
 
-        if in_block_comment {
+        if block_comment_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                 i += 2;
-                in_block_comment = false;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
             } else {
                 i += 1;
             }
@@ -5412,7 +5424,7 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
 
         // Block comment start
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block_comment = true;
+            block_comment_depth += 1;
             i += 2;
             continue;
         }
@@ -5476,7 +5488,7 @@ fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
     let mut i = 0;
     let mut in_single = false;
     let mut in_double = false;
-    let mut in_block = false;
+    let mut block_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
 
     while i < len {
@@ -5490,9 +5502,11 @@ fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
             }
             continue;
         }
-        if in_block {
+        if block_depth > 0 {
             if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2; in_block = false;
+                i += 2; block_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2; block_depth += 1;
             } else { i += 1; }
             continue;
         }
@@ -5513,7 +5527,7 @@ fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
         // Line comment — rest of line is not SQL, stop scanning
         if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' { break; }
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            in_block = true; i += 2; continue;
+            block_depth += 1; i += 2; continue;
         }
         if bytes[i] == b'"' { in_double = true; i += 1; continue; }
         if bytes[i] == b'\'' { in_single = true; i += 1; continue; }

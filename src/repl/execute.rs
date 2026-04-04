@@ -91,6 +91,10 @@ fn infer_numeric_column(
             | "regoperator"
             | "regconfig"
             | "regdictionary"
+            // System catalog columns with non-numeric types that can hold
+            // numeric-looking values:
+            // proargtypes is oidvector (space-separated OIDs), left-aligned in psql.
+            | "proargtypes"
     ) {
         return false;
     }
@@ -126,7 +130,45 @@ fn infer_numeric_column(
             }
         }
     });
-    all_parseable && has_value
+    if !(all_parseable && has_value) {
+        return false;
+    }
+
+    // Cross-column interval guard: if this column's values are all "0"/"-0"/NULL
+    // (ambiguous zero), check whether any sibling column has interval-like values
+    // (e.g. "1-2", "1 2:03:04").  If so, treat this column as non-numeric to
+    // match psql's type-OID-based left-alignment for interval zero.
+    let only_zero_or_null = rows.iter().all(|row| {
+        matches!(
+            row.get(col_idx).and_then(|v| v.as_deref()),
+            None | Some("") | Some("0") | Some("-0")
+        )
+    });
+    if only_zero_or_null {
+        let has_interval_sibling = rows.iter().any(|row| {
+            row.iter().enumerate().any(|(idx, cell)| {
+                if idx == col_idx {
+                    return false;
+                }
+                let v = match cell.as_deref() {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return false,
+                };
+                // Interval patterns: "N-M" (year-month), "N H:MM:SS" (day-time),
+                // or any value containing ':' (time component).
+                v.contains(':')
+                    || (v.len() >= 3
+                        && v.contains('-')
+                        && v.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-')
+                        && v.chars().any(|c| c.is_ascii_digit()))
+            })
+        });
+        if has_interval_sibling {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Print a single result set using the active [`PsetConfig`].
@@ -166,12 +208,18 @@ pub(super) fn print_result_set_pset(
         // `SELECT FROM t WHERE ...`.  These are valid PostgreSQL queries that
         // return rows with no columns.  We must still render the row-count
         // footer (e.g. `(1 row)`) to match psql behaviour.
+        //
+        // SHOW commands return a single text column regardless of value content.
+        // psql left-aligns SHOW output because the underlying type is always text.
+        let is_show = sql.trim_start()
+            .get(..4)
+            .map_or(false, |p| p.eq_ignore_ascii_case("show"));
         let columns: Vec<ColumnMeta> = col_names
             .iter()
             .enumerate()
             .map(|(col_idx, n)| ColumnMeta {
                 name: n.clone(),
-                is_numeric: infer_numeric_column(col_idx, n, rows),
+                is_numeric: !is_show && infer_numeric_column(col_idx, n, rows),
             })
             .collect();
 

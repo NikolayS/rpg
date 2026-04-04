@@ -365,10 +365,26 @@ fn skip_leading_comments(sql: &str) -> &str {
                 .find('\n')
                 .map_or("", |i| s[i + 1..].trim_start());
         } else if s.starts_with("/*") {
-            // Block comment: skip to matching `*/`.
-            s = s
-                .find("*/")
-                .map_or("", |i| s[i + 2..].trim_start());
+            // Block comment: skip to matching `*/`, handling nesting.
+            let bytes = s.as_bytes();
+            let len = bytes.len();
+            let mut depth: u32 = 0;
+            let mut i = 0;
+            while i < len {
+                if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            s = s[i..].trim_start();
         } else {
             break;
         }
@@ -444,19 +460,26 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             continue;
         }
 
-        // -- block comment: /* … */ ----------------------------------------
+        // -- block comment: /* … */ (supports nesting: /* /* */ */) ----------
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
             flush_to!(current, i);
-            i += 2; // skip '/'  '*'
+            let mut depth: u32 = 0;
             while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
                     i += 2;
-                    break;
+                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
                 }
-                i += 1;
             }
-            // If '*/' was not found, consume to end of input.
-            if i + 1 >= len && !(i >= 2 && bytes[i - 2] == b'*' && bytes[i - 1] == b'/') {
+            // If comment was not closed, consume to end of input.
+            if depth > 0 {
                 i = len;
             }
             flush_to!(current, i);
