@@ -186,6 +186,22 @@ pub(super) fn print_result_set_pset(
         // matches psql's consistent blank line after every result set.
         // No extra separator is needed before subsequent results.
         let _ = writer.write_all(out.as_bytes());
+
+        // DML with RETURNING also emits a command tag in psql (e.g. INSERT 0 1).
+        // Detect INSERT/UPDATE/DELETE/MERGE that produced a RowDescription.
+        if !quiet {
+            let tag = crate::query::reconstruct_command_tag(sql, rows_affected);
+            if !tag.is_empty()
+                && tag
+                    .split_once(' ')
+                    .map(|(verb, _)| {
+                        matches!(verb, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+                    })
+                    .unwrap_or(false)
+            {
+                let _ = writeln!(writer, "{tag}");
+            }
+        }
     } else if !quiet {
         // Non-SELECT statement: show the psql-style command tag.
         // tokio-postgres 0.7 only exposes the numeric count from

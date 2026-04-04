@@ -2124,17 +2124,20 @@ pub(crate) async fn exec_lines(
                 'segs: for (seg_idx, segment) in segments.iter().enumerate() {
                     let force_execute = seg_idx < num_segments - 1;
 
-                    // -a / --echo-all: for lines without \;, echo each segment.
-                    // psql echoes blank lines inside string literals (single- or
-                    // dollar-quoted function bodies) but skips blank lines that
-                    // appear between statements or inside comment-only buffers.
+                        // -a / --echo-all: for lines without \;, echo each segment.
+                    // psql echoes the original (pre-interpolation) line to show
+                    // :varname references unexpanded, and echoes blank lines inside
+                    // string literals but skips them between statements.
                     if settings.echo_all && !has_separator
                         && (!segment.trim().is_empty() || is_inside_string_literal(&buf))
                     {
+                        // Echo original raw line (trim trailing only) on first segment,
+                        // subsequent segments (shouldn't happen for !has_separator) also raw.
+                        let echo_line = if seg_idx == 0 { line.trim_end() } else { segment.trim_end() };
                         if let Some(ref mut w) = settings.output_target {
-                            let _ = writeln!(w, "{segment}");
+                            let _ = writeln!(w, "{echo_line}");
                         } else {
-                            println!("{segment}");
+                            println!("{echo_line}");
                         }
                     }
 
@@ -2636,6 +2639,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     // Mirror ECHO_HIDDEN into the settings flag.
     if name == "ECHO_HIDDEN" {
         settings.echo_hidden = value == "on";
+    }
+    // Mirror QUIET into the quiet flag.
+    if name == "QUIET" {
+        settings.quiet = matches!(value, "on" | "true" | "1");
     }
     // Mirror HIGHLIGHT into the settings flag and pset config.
     if name == "HIGHLIGHT" {
