@@ -92,9 +92,14 @@ fn infer_numeric_column(
             | "regconfig"
             | "regdictionary"
             // System catalog columns with non-numeric types that can hold
-            // numeric-looking values:
-            // proargtypes is oidvector (space-separated OIDs), left-aligned in psql.
+            // numeric-looking values.
+            // oidvector columns (space-separated OIDs): left-aligned in psql.
             | "proargtypes"
+            | "indclass"
+            | "indkey"
+            | "indoption"
+            | "proargmodes"
+            | "proallargtypes"
     ) {
         return false;
     }
@@ -156,11 +161,14 @@ fn infer_numeric_column(
                 };
                 // Interval patterns: "N-M" (year-month), "N H:MM:SS" (day-time),
                 // or any value containing ':' (time component).
+                // Exclude values that parse as f64 (e.g. "-1.23e+200" contains
+                // '-' and digits but is a float, not an interval).
                 v.contains(':')
                     || (v.len() >= 3
                         && v.contains('-')
                         && v.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-')
-                        && v.chars().any(|c| c.is_ascii_digit()))
+                        && v.chars().any(|c| c.is_ascii_digit())
+                        && v.parse::<f64>().is_err())
             })
         });
         if has_interval_sibling {

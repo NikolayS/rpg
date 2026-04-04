@@ -472,6 +472,10 @@ pub struct ParsedMeta {
     /// `'a'` = aggregates (`\dfa`), `'w'` = window functions (`\dfw`).
     /// `None` means show all kinds (`\df`).
     pub kind_filter: Option<char>,
+    /// When multiple backslash commands are concatenated on one line (e.g.
+    /// `\a\t`), this holds the remaining text (starting with `\`) after the
+    /// current command was consumed.  The caller must parse and dispatch it.
+    pub continuation: Option<String>,
 }
 
 impl ParsedMeta {
@@ -484,6 +488,7 @@ impl ParsedMeta {
             pattern: None,
             echo_hidden: false,
             kind_filter: None,
+            continuation: None,
         }
     }
 }
@@ -527,6 +532,7 @@ pub fn parse(input: &str) -> ParsedMeta {
                         },
                         echo_hidden: false,
                         kind_filter: None,
+            continuation: None,
                     };
                 }
             }
@@ -577,9 +583,23 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     // `input` has had the leading `\` stripped already.
     // Accept `token` optionally followed by whitespace (any trailing arg is
     // ignored for these commands, matching psql behaviour).
+    // Also accept another `\` immediately — e.g. `\a\t` on one line means two
+    // commands (`\a` then `\t`); the remainder is stored in `continuation`.
     let rest = input.strip_prefix(token).unwrap_or("");
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
         ParsedMeta::simple(cmd)
+    } else if rest.starts_with('\\') {
+        // Another backslash command follows immediately — current command is
+        // complete; store the rest for the caller to dispatch.
+        ParsedMeta {
+            cmd,
+            plus: false,
+            system: false,
+            pattern: None,
+            echo_hidden: false,
+            kind_filter: None,
+            continuation: Some(rest.to_owned()),
+        }
     } else {
         ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
     }
@@ -924,6 +944,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     pattern: None,
                     echo_hidden: false,
                     kind_filter: None,
+            continuation: None,
                 };
             }
         }
@@ -979,6 +1000,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -997,6 +1019,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1024,6 +1047,7 @@ fn parse_h(input: &str) -> ParsedMeta {
         },
         echo_hidden: false,
         kind_filter: None,
+            continuation: None,
     }
 }
 
@@ -1040,6 +1064,7 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             pattern,
             echo_hidden: false,
             kind_filter: None,
+            continuation: None,
         };
     }
     if let Some(rest) = input.strip_prefix("sf") {
@@ -1051,6 +1076,7 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             pattern,
             echo_hidden: false,
             kind_filter: None,
+            continuation: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1096,6 +1122,7 @@ fn parse_l(input: &str) -> ParsedMeta {
         pattern,
         echo_hidden: false,
         kind_filter: None,
+            continuation: None,
     }
 }
 
@@ -1224,6 +1251,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1243,6 +1271,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1277,6 +1306,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1314,6 +1344,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1331,6 +1362,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1355,6 +1387,7 @@ fn parse_o(input: &str) -> ParsedMeta {
             },
             echo_hidden: false,
             kind_filter: None,
+            continuation: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1398,6 +1431,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1416,6 +1450,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1433,6 +1468,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1457,6 +1493,7 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1514,6 +1551,7 @@ fn parse_shell(input: &str) -> ParsedMeta {
         },
         echo_hidden: false,
         kind_filter: None,
+            continuation: None,
     }
 }
 
@@ -1751,6 +1789,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 pattern: None,
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1770,6 +1809,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 pattern: None,
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1844,6 +1884,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 pattern,
                 echo_hidden: false,
                 kind_filter: kind_char,
+            continuation: None,
             };
         }
     }
@@ -1861,6 +1902,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 pattern,
                 echo_hidden: false,
                 kind_filter: None,
+            continuation: None,
             };
         }
     }
@@ -1875,6 +1917,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         pattern,
         echo_hidden: false,
         kind_filter: None,
+            continuation: None,
     }
 }
 

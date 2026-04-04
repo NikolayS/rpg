@@ -1136,6 +1136,10 @@ pub struct ReplSettings {
     pub echo_all: bool,
     /// Quiet mode: suppress informational messages (`-q`).
     pub quiet: bool,
+    /// Interactive mode: true when running with a readline prompt (not -f/-c).
+    /// Used to suppress status messages (e.g. "Output format is unaligned.")
+    /// that psql only prints in interactive sessions.
+    pub is_interactive: bool,
     /// Debug mode: enable debug output (`-D`).
     pub debug: bool,
     /// Conditional execution state (`\if` / `\elif` / `\else` / `\endif`).
@@ -1518,6 +1522,7 @@ impl Default for ReplSettings {
             single_line: false,
             single_transaction: false,
             quiet: false,
+            is_interactive: false,
             debug: false,
             cond: crate::conditional::ConditionalState::default(),
             last_query: None,
@@ -1944,8 +1949,11 @@ pub(crate) async fn exec_lines(
                     println!("{}", line.trim_end());
                 }
             }
-            let mut parsed = crate::metacmd::parse(&interpolated);
+            let mut remaining_meta: Option<String> = Some(interpolated.clone());
+            while let Some(ref meta_input) = remaining_meta.clone() {
+            let mut parsed = crate::metacmd::parse(meta_input);
             parsed.echo_hidden = settings.echo_hidden;
+            remaining_meta = parsed.continuation.take();
             let result = dispatch_meta(parsed, client, params, settings, tx).await;
             // Handle buffer-aware results that exec_lines must act on directly.
             match result {
@@ -2045,6 +2053,7 @@ pub(crate) async fn exec_lines(
             if settings.prompt_interrupted {
                 break 'lines;
             }
+            } // end while remaining_meta
         } else if settings.cond.is_active() {
             // Check for inline backslash command (e.g. `select 1 \gset`).
             if let Some(pos) = find_inline_backslash(&line) {
@@ -3190,7 +3199,9 @@ fn apply_toggle_align(settings: &mut ReplSettings) {
         OutputFormat::Aligned => OutputFormat::Unaligned,
         _ => OutputFormat::Aligned,
     };
-    println!("Output format is {}.", format_name(&settings.pset.format));
+    if settings.is_interactive {
+        println!("Output format is {}.", format_name(&settings.pset.format));
+    }
 }
 
 /// Apply `\t [on|off]` — tuples-only mode.
@@ -3201,7 +3212,9 @@ fn apply_tuples_only(settings: &mut ReplSettings, mode: Option<bool>) {
     } else {
         "off"
     };
-    println!("Tuples only is {state}.");
+    if settings.is_interactive {
+        println!("Tuples only is {state}.");
+    }
 }
 
 /// Apply `\f [sep]` — field separator.
@@ -4915,6 +4928,7 @@ async fn run_readline_loop(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> i32 {
+    settings.is_interactive = true;
     let edit_mode = if settings.vi_mode || settings.config.display.vi_mode {
         EditMode::Vi
     } else {

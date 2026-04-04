@@ -2576,9 +2576,7 @@ order by a.attnum"
         // Footer: "amname, for table \"schema.table\""
         let idx_footer_sql = format!(
             "select am.amname,
-    case when pg_catalog.pg_table_is_visible(tc.oid)
-         then tc.relname
-         else tn.nspname || '.' || tc.relname end as table_name,
+    tn.nspname || '.' || tc.relname as table_name,
     ix.indisprimary, ix.indisunique,
     pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as predicate
 from pg_catalog.pg_class as c
@@ -2588,8 +2586,8 @@ join pg_catalog.pg_namespace as tn on tn.oid = tc.relnamespace
 join pg_catalog.pg_am as am on am.oid = c.relam
 left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
 where c.oid = (
-    select c2.oid from pg_catalog.pg_class as c2
-    left join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
     where {name_cond} limit 1
 )"
         );
@@ -3201,6 +3199,34 @@ order by 1"
         }
     }
 
+
+    // Typed table — show "Typed table of type: typename" when reloftype != 0.
+    // psql places this after indexes/constraints but before Inherits.
+    if matches!(relkind_char, 'r') {
+        let typed_sql = format!(
+            "select case when pg_catalog.pg_type_is_visible(t.oid) then t.typname
+         else nt.nspname || '.' || t.typname end as type_name
+from pg_catalog.pg_class as c
+join pg_catalog.pg_type as t on t.oid = c.reloftype
+join pg_catalog.pg_namespace as nt on nt.oid = t.typnamespace
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where c.reloftype != 0
+    and {name_cond}
+limit 1"
+        );
+        if let Ok(msgs) = client.simple_query(&typed_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let tname = row.get(0).unwrap_or("");
+                    if !tname.is_empty() {
+                        println!("Typed table of type: {tname}");
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     // Inherits — show parent table(s) for non-partition inheritance.
     let inherits_sql = format!(
