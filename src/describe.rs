@@ -2573,6 +2573,44 @@ order by a.attnum"
         )
         .await;
 
+        // Partition info: "Partition of: parent_index" and constraint.
+        // Only shown when the index itself is a partition (relispartition = true).
+        let idx_partition_sql = format!(
+            "select
+    case when pg_catalog.pg_class_is_visible(pi.oid)
+         then pi.relname
+         else pn.nspname || '.' || pi.relname end as parent_index,
+    pg_catalog.pg_get_partition_constraintdef(c.oid) as part_constraint
+from pg_catalog.pg_class as c
+join pg_catalog.pg_inherits as inh on inh.inhrelid = c.oid
+join pg_catalog.pg_class as pi on pi.oid = inh.inhparent
+join pg_catalog.pg_namespace as pn on pn.oid = pi.relnamespace
+where c.relispartition = true
+  and c.oid = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1
+  )"
+        );
+        if let Ok(msgs) = client.simple_query(&idx_partition_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let parent = row.get(0).unwrap_or("");
+                    let constraint = row.get(1).unwrap_or("");
+                    if !parent.is_empty() {
+                        println!("Partition of: {parent}");
+                        if constraint.is_empty() {
+                            println!("No partition constraint");
+                        } else {
+                            println!("Partition constraint: {constraint}");
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         // Footer: "amname, for table \"schema.table\""
         let idx_footer_sql = format!(
             "select am.amname,
@@ -3128,6 +3166,60 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
                 println!("Number of partitions: 0");
             } else {
                 println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+            }
+        }
+    }
+
+    // Statistics objects — print as "Statistics objects:" section.
+    // Shows extended statistics created with CREATE STATISTICS on this table.
+    if matches!(relkind_char, 'r' | 'p') {
+        let stat_sql = format!(
+            "select
+    quote_ident(sn.nspname) || '.' || quote_ident(s.stxname) as stat_name,
+    (select string_agg(k, ', ' order by ord)
+     from unnest(array(
+         select case c when 'd' then 'dependencies' when 'n' then 'ndistinct' when 'm' then 'mcv' else c end
+         from unnest(s.stxkind::text[]) with ordinality as u(c, ord)
+     )) with ordinality as t(k, ord)) as kinds,
+    (select string_agg(a.attname, ', ' order by array_position(s.stxkeys::int[], a.attnum))
+     from pg_catalog.pg_attribute as a
+     where a.attrelid = s.stxrelid
+       and a.attnum = any(s.stxkeys::int[])) as columns,
+    c.relname as table_name
+from pg_catalog.pg_statistic_ext as s
+join pg_catalog.pg_namespace as sn on sn.oid = s.stxnamespace
+join pg_catalog.pg_class as c on c.oid = s.stxrelid
+where s.stxrelid = (
+    select c.oid
+    from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond}
+    limit 1
+)
+order by stat_name"
+        );
+        if let Ok(messages) = client.simple_query(&stat_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut stat_rows: Vec<(String, String, String, String)> = Vec::new();
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let name = row.get(0).unwrap_or("").to_owned();
+                    let kinds = row.get(1).unwrap_or("").to_owned();
+                    let cols = row.get(2).unwrap_or("").to_owned();
+                    let tbl = row.get(3).unwrap_or("").to_owned();
+                    stat_rows.push((name, kinds, cols, tbl));
+                }
+            }
+            if !stat_rows.is_empty() {
+                println!("Statistics objects:");
+                for (name, kinds, cols, tbl) in &stat_rows {
+                    let kinds_str = if kinds.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({kinds})")
+                    };
+                    println!("    \"{name}\"{kinds_str} ON {cols} FROM {tbl}");
+                }
             }
         }
     }
