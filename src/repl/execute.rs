@@ -47,8 +47,6 @@ fn infer_numeric_column(
             | "concat"
             | "concat_ws"
             | "format"
-            | "upper"
-            | "lower"
             | "initcap"
             | "trim"
             | "ltrim"
