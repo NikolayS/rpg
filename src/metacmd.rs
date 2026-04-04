@@ -1889,6 +1889,24 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         }
     }
 
+    // \da [pattern] — shorthand for \dfa (list aggregate functions).
+    if let Some(rest) = input.strip_prefix("da") {
+        if rest.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S')
+            || rest.is_empty()
+        {
+            let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
+            return ParsedMeta {
+                cmd: MetaCmd::ListFunctions,
+                plus,
+                system,
+                pattern,
+                echo_hidden: false,
+                kind_filter: Some('a'),
+                continuation: None,
+            };
+        }
+    }
+
     // Try each sub-command prefix (they all include the leading `d`).
     // `D_SUBCMDS` is ordered longest-first so greedy matching is correct.
     for (prefix, cmd) in D_SUBCMDS {

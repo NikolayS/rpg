@@ -2187,7 +2187,9 @@ order by 2, 3"
             };
 
             if matches.is_empty() {
-                eprintln!("Did not find any relation named \"{pattern}\".");
+                if !settings.quiet {
+                    eprintln!("Did not find any relation named \"{pattern}\".");
+                }
                 return false;
             }
 
@@ -2616,7 +2618,9 @@ where c.relispartition = true
             "select am.amname,
     tn.nspname || '.' || tc.relname as table_name,
     ix.indisprimary, ix.indisunique,
-    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as predicate
+    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as predicate,
+    ix.indnullsnotdistinct,
+    c.reloptions
 from pg_catalog.pg_class as c
 join pg_catalog.pg_index as ix on ix.indexrelid = c.oid
 join pg_catalog.pg_class as tc on tc.oid = ix.indrelid
@@ -2638,11 +2642,17 @@ where c.oid = (
                     let is_primary = row.get(2).map(|v| v == "t").unwrap_or(false);
                     let is_unique = row.get(3).map(|v| v == "t").unwrap_or(false);
                     let pred = row.get(4).unwrap_or("");
+                    let nulls_not_distinct = row.get(5).map(|v| v == "t").unwrap_or(false);
+                    let reloptions = row.get(6).unwrap_or("");
                     let mut parts = Vec::new();
                     if is_primary {
                         parts.push("primary key".to_owned());
                     } else if is_unique {
-                        parts.push("unique".to_owned());
+                        if nulls_not_distinct {
+                            parts.push("unique nulls not distinct".to_owned());
+                        } else {
+                            parts.push("unique".to_owned());
+                        }
                     }
                     parts.push(am.to_owned());
                     let mut footer = parts.join(", ");
@@ -2651,6 +2661,16 @@ where c.oid = (
                         footer.push_str(&format!(" where {pred}"));
                     }
                     println!("{footer}");
+                    // Options (reloptions) — shown when present, e.g. "Options: fastupdate=on"
+                    if !reloptions.is_empty() {
+                        // reloptions is a PostgreSQL array literal like {key=val,key2=val2}
+                        let opts = reloptions
+                            .trim_start_matches('{')
+                            .trim_end_matches('}');
+                        if !opts.is_empty() {
+                            println!("Options: {opts}");
+                        }
+                    }
                     break;
                 }
             }
@@ -2775,7 +2795,8 @@ limit 1"
      from pg_catalog.pg_constraint
      where conrelid = ix.indrelid
        and conindid = i.oid
-     limit 1) as con_oid
+     limit 1) as con_oid,
+    ix.indnullsnotdistinct
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
     on i.oid = ix.indexrelid
@@ -2786,7 +2807,7 @@ join pg_catalog.pg_am as am
 left join pg_catalog.pg_namespace as tn
     on tn.oid = tc.relnamespace
 where {idx_name_cond}
-order by ix.indisprimary desc, ix.indisunique desc, i.relname"
+order by i.relname"
     );
 
     // 3. Check constraints
@@ -2927,8 +2948,8 @@ where {name_cond} limit 1"
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
-        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid)
-        let mut index_rows: Vec<(String, bool, bool, String, String, String, bool, String, String)> = Vec::new();
+        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct)
+        let mut index_rows: Vec<(String, bool, bool, String, String, String, bool, String, String, bool)> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
                 let idx_name = row.get(0).unwrap_or("").to_owned();
@@ -2945,6 +2966,8 @@ where {name_cond} limit 1"
                 let con_type = row.get(8).unwrap_or("").to_owned();
                 // col 9 = con_oid: OID of the backing constraint (for pg_get_constraintdef)
                 let con_oid = row.get(9).unwrap_or("").to_owned();
+                // col 10 = indnullsnotdistinct: NULLS NOT DISTINCT for unique indexes (PG15+)
+                let nulls_not_distinct = row.get(10).unwrap_or("f") == "t";
                 index_rows.push((
                     idx_name,
                     is_primary,
@@ -2955,12 +2978,13 @@ where {name_cond} limit 1"
                     is_valid,
                     con_type,
                     con_oid,
+                    nulls_not_distinct,
                 ));
             }
         }
         if !index_rows.is_empty() {
             println!("Indexes:");
-            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid) in &index_rows {
+            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct) in &index_rows {
                 // EXCLUDE constraints use pg_get_constraintdef for full definition.
                 let is_exclude = con_type == "x";
                 // Extract column list from pg_get_indexdef (the part inside parens).
@@ -3005,9 +3029,16 @@ where {name_cond} limit 1"
                 let type_label = if *is_primary {
                     " PRIMARY KEY,".to_owned()
                 } else if *is_unique {
-                    " UNIQUE CONSTRAINT,".to_owned()
+                    " UNIQUE,".to_owned()
                 } else {
                     String::new()
+                };
+
+                // NULLS NOT DISTINCT suffix for unique indexes (PG15+)
+                let nulls_not_distinct_suffix = if *is_unique && *nulls_not_distinct {
+                    " NULLS NOT DISTINCT"
+                } else {
+                    ""
                 };
 
                 // For EXCLUDE constraints, the full definition is already in col_expr.
@@ -3027,7 +3058,7 @@ where {name_cond} limit 1"
                     // EXCLUDE: show as "name" EXCLUDE USING ... (no amname prefix)
                     println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}");
                 } else {
-                    println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}{invalid_suffix}");
+                    println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{nulls_not_distinct_suffix}{pred_suffix}{invalid_suffix}");
                 }
             }
         }
@@ -3176,15 +3207,21 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
         let stat_sql = format!(
             "select
     quote_ident(sn.nspname) || '.' || quote_ident(s.stxname) as stat_name,
-    (select string_agg(k, ', ' order by ord)
-     from unnest(array(
-         select case c when 'd' then 'dependencies' when 'n' then 'ndistinct' when 'm' then 'mcv' else c end
-         from unnest(s.stxkind::text[]) with ordinality as u(c, ord)
-     )) with ordinality as t(k, ord)) as kinds,
-    (select string_agg(a.attname, ', ' order by array_position(s.stxkeys::int[], a.attnum))
+    (select string_agg(
+         case k::text
+         when 'd' then 'dependencies'
+         when 'n' then 'ndistinct'
+         when 'm' then 'mcv'
+         else k::text end,
+         ', ' order by 1)
+     from unnest(s.stxkind) as k) as kinds,
+    (select string_agg(a.attname, ', '
+         order by array_position(
+             array(select unnest(s.stxkeys)::int),
+             a.attnum::int))
      from pg_catalog.pg_attribute as a
      where a.attrelid = s.stxrelid
-       and a.attnum = any(s.stxkeys::int[])) as columns,
+       and a.attnum::int = any(array(select unnest(s.stxkeys)::int))) as columns,
     c.relname as table_name
 from pg_catalog.pg_statistic_ext as s
 join pg_catalog.pg_namespace as sn on sn.oid = s.stxnamespace
@@ -3322,19 +3359,19 @@ order by 1"
         if !lines.is_empty() {
             println!("Rules:");
             for (name, def) in &lines {
-                println!("    {name} AS");
-                // Indent the rule definition body (skip CREATE RULE name prefix)
+                println!(" {name} AS");
+                // Print the rule definition body (skip "CREATE RULE name AS\n" prefix)
+                // Preserve original indentation from pg_get_ruledef
                 let body = if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
-                    rest.trim()
+                    rest.strip_prefix('\n').unwrap_or(rest)
                 } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
-                    // Skip "name AS" prefix
-                    rest.splitn(3, ' ').nth(2).unwrap_or(def.as_str()).trim()
+                    // Skip "name AS\n" prefix
+                    rest.splitn(2, '\n').nth(1).unwrap_or("")
                 } else {
                     def.as_str()
                 };
-                // Wrap each line with 4 spaces indent
                 for line in body.lines() {
-                    println!("  {line}");
+                    println!("{line}");
                 }
             }
         }
@@ -3384,7 +3421,7 @@ where i.inhrelid = (
   and (select not c.relispartition from pg_catalog.pg_class c
        left join pg_catalog.pg_namespace n on n.oid = c.relnamespace
        where {name_cond} limit 1)
-order by 1"
+order by i.inhseqno"
     );
     if let Ok(messages) = client.simple_query(&inherits_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -3398,7 +3435,73 @@ order by 1"
             }
         }
         if !parents.is_empty() {
-            println!("Inherits: {}", parents.join(", "));
+            // psql formats multi-parent lists with each name on its own line,
+            // indented to align with the first name.
+            if parents.len() == 1 {
+                println!("Inherits: {}", parents[0]);
+            } else {
+                let prefix = "Inherits: ";
+                let indent = " ".repeat(prefix.len());
+                print!("{}{}", prefix, parents[0]);
+                for p in &parents[1..] {
+                    print!(",\n{}{}", indent, p);
+                }
+                println!();
+            }
+        }
+    }
+
+    // Child tables — shown for regular tables that have children (non-partition).
+    // In \d mode: shows "Number of child tables: N (Use \d+ to list them.)"
+    // In \d+ mode: shows each child table name.
+    let child_sql = format!(
+        "select case when pg_catalog.pg_table_is_visible(c2.oid)
+         then c2.relname
+         else n2.nspname || '.' || c2.relname end as child_name
+from pg_catalog.pg_inherits as i
+join pg_catalog.pg_class as c2 on c2.oid = i.inhrelid
+join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
+where not c2.relispartition
+  and i.inhparent = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1)
+order by 1"
+    );
+    if matches!(relkind_char, 'r') {
+        if let Ok(messages) = client.simple_query(&child_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut children: Vec<String> = Vec::new();
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let child = row.get(0).unwrap_or("").to_owned();
+                    if !child.is_empty() {
+                        children.push(child);
+                    }
+                }
+            }
+            if !children.is_empty() {
+                if meta.plus {
+                    // \d+ mode: list all child tables
+                    if children.len() == 1 {
+                        println!("Child tables: {}", children[0]);
+                    } else {
+                        let prefix = "Child tables: ";
+                        let indent = " ".repeat(prefix.len());
+                        print!("{}{}", prefix, children[0]);
+                        for c in &children[1..] {
+                            print!(",\n{}{}", indent, c);
+                        }
+                        println!();
+                    }
+                } else {
+                    // \d mode: show count summary
+                    let n = children.len();
+                    println!(
+                        "Number of child tables: {n} (Use \\d+ to list them.)"
+                    );
+                }
+            }
         }
     }
     // Access method — shown by psql \d+ for tables and materialized views.
