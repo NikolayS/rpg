@@ -604,6 +604,96 @@ pub fn is_complete(buf: &str) -> bool {
 /// Return `true` when `buf` ends inside an unclosed dollar-quoted string.
 /// Used to decide whether to echo blank lines in `-a` mode: psql echoes blank
 /// lines inside dollar-quoted bodies but skips them between statements.
+/// Returns `true` if the buffer ends inside any string literal (dollar-quoted
+/// or single-quoted).  Used to decide whether blank lines should be echoed in
+/// `--echo-all` mode — psql echoes blank lines inside function bodies but
+/// skips them between statements or when only comments are buffered.
+fn is_inside_string_literal(buf: &str) -> bool {
+    let mut in_single = false;
+    let mut in_block_comment = false;
+    let mut dollar_tag: Option<String> = None;
+
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2;
+                in_block_comment = false;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'$' {
+            let rest = &buf[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    in_single || dollar_tag.is_some()
+}
+
 fn is_inside_dollar_quote(buf: &str) -> bool {
     let mut in_single = false;
     let mut in_block_comment = false;
@@ -1831,14 +1921,18 @@ pub(crate) async fn exec_lines(
         // Interpolate variables first — a bare `:varname` that expands to a
         // backslash command (e.g. `:dba` → `\i start.psql`) must be detected
         // after interpolation, not before (psql behaviour).
+        // Use trimmed input for meta-command detection; use raw (untrimmed but
+        // interpolated) for SQL accumulation to preserve indentation in echo.
         let interpolated = settings.vars.interpolate(line.trim());
+        let interpolated_raw = settings.vars.interpolate(&line);
         if interpolated.trim_start().starts_with('\\') {
             // -a / --echo-all: echo meta-commands to stdout before dispatching.
+            // Echo the raw (untrimmed) form to preserve original indentation.
             if settings.echo_all {
                 if let Some(ref mut w) = settings.output_target {
-                    let _ = writeln!(w, "{}", interpolated.trim());
+                    let _ = writeln!(w, "{}", line.trim_end());
                 } else {
-                    println!("{}", interpolated.trim());
+                    println!("{}", line.trim_end());
                 }
             }
             let mut parsed = crate::metacmd::parse(&interpolated);
@@ -2006,18 +2100,36 @@ pub(crate) async fn exec_lines(
                 // Split on \; separators (psql multi-command separator).
                 // Each segment before a \; is sent immediately as a complete
                 // statement; the last segment is processed normally.
-                let segments = split_on_backslash_semicolon(&interpolated);
+                // Use the raw (untrimmed, interpolated) form to preserve indentation.
+                let segments = split_on_backslash_semicolon(&interpolated_raw);
                 let num_segments = segments.len();
+                let has_separator = num_segments > 1;
                 let mut should_break = false;
+
+                // -a / --echo-all: echo the WHOLE original line once (before splitting).
+                // psql echoes the raw input line first, then executes each segment.
+                // For lines without \;, echo segment-by-segment (inside the loop below)
+                // so blank lines inside string literals are echoed correctly.
+                if settings.echo_all && has_separator {
+                    let raw_line = line.trim_end();
+                    if !raw_line.is_empty() {
+                        if let Some(ref mut w) = settings.output_target {
+                            let _ = writeln!(w, "{raw_line}");
+                        } else {
+                            println!("{raw_line}");
+                        }
+                    }
+                }
 
                 'segs: for (seg_idx, segment) in segments.iter().enumerate() {
                     let force_execute = seg_idx < num_segments - 1;
 
-                    // -a / --echo-all: echo each SQL line to stdout as it is read.
-                    // psql echoes blank lines inside multi-line statements (when
-                    // buf already has content) but skips blank lines between statements.
-                    if settings.echo_all
-                        && (!segment.trim().is_empty() || !buf.is_empty())
+                    // -a / --echo-all: for lines without \;, echo each segment.
+                    // psql echoes blank lines inside string literals (single- or
+                    // dollar-quoted function bodies) but skips blank lines that
+                    // appear between statements or inside comment-only buffers.
+                    if settings.echo_all && !has_separator
+                        && (!segment.trim().is_empty() || is_inside_string_literal(&buf))
                     {
                         if let Some(ref mut w) = settings.output_target {
                             let _ = writeln!(w, "{segment}");
@@ -2046,8 +2158,8 @@ pub(crate) async fn exec_lines(
                             let ok = execute_inline_copy_to(client, &sql_owned, settings).await;
                             if !ok {
                                 exit_code = 1;
-                                if settings.single_transaction {
-                                    should_break = true;
+                                if has_separator || settings.single_transaction {
+                                    should_break = settings.single_transaction;
                                     break 'segs;
                                 }
                             }
@@ -2107,10 +2219,11 @@ pub(crate) async fn exec_lines(
                             settings.echo_all = saved_echo_all;
                             if !ok {
                                 exit_code = 1;
-                                // In single-transaction mode, stop on first error so the
-                                // caller can roll back and skip the rest.
-                                if settings.single_transaction {
-                                    should_break = true;
+                                // Stop the \; chain on first error (psql behaviour).
+                                // Also stop the entire input in single-transaction mode.
+                                if has_separator || settings.single_transaction {
+                                    should_break = settings.single_transaction;
+                                    buf.clear();
                                     break 'segs;
                                 }
                             }
