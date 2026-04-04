@@ -139,6 +139,26 @@ fn infer_numeric_column(
         return false;
     }
 
+    // Infinity guard: "infinity"/"-infinity" appears in both float8 columns
+    // (right-aligned) and timestamp columns (left-aligned).  When a column
+    // contains ONLY infinity/-infinity/NaN values (no other numeric literals),
+    // we cannot determine the type without OIDs.  Such columns are treated as
+    // non-numeric (timestamp-like), which is the safer choice since float8
+    // columns with only infinity are very rare in practice.
+    let all_inf_nan = rows.iter().all(|row| {
+        match row.get(col_idx).and_then(|v| v.as_deref()) {
+            None | Some("") => true,
+            Some(v) => {
+                v.eq_ignore_ascii_case("infinity")
+                    || v.eq_ignore_ascii_case("-infinity")
+                    || v.eq_ignore_ascii_case("nan")
+            }
+        }
+    });
+    if all_inf_nan {
+        return false;
+    }
+
     // Cross-column interval guard: if this column's values are all "0"/"-0"/NULL
     // (ambiguous zero), check whether any sibling column has interval-like values
     // (e.g. "1-2", "1 2:03:04").  If so, treat this column as non-numeric to
@@ -163,9 +183,12 @@ fn infer_numeric_column(
                 // or any value containing ':' (time component).
                 // Exclude values that parse as f64 (e.g. "-1.23e+200" contains
                 // '-' and digits but is a float, not an interval).
+                // Dates like "2005-07-21" have exactly 2 hyphens; year-month
+                // intervals like "1-2" have exactly 1 hyphen.  Filter out dates
+                // by requiring only one hyphen in the N-M check.
                 v.contains(':')
                     || (v.len() >= 3
-                        && v.contains('-')
+                        && v.bytes().filter(|&b| b == b'-').count() == 1
                         && v.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-')
                         && v.chars().any(|c| c.is_ascii_digit())
                         && v.parse::<f64>().is_err())

@@ -172,10 +172,12 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         OutputFormat::Markdown => format_markdown(out, rs, cfg),
     }
 
-    // psql always prints a blank line after each result set (the trailing
-    // newline after `(N rows)` plus one more).  Add it here so all formats
-    // get consistent behaviour regardless of whether a footer is shown.
-    out.push('\n');
+    // psql prints a blank line after each result set (the trailing newline
+    // after `(N rows)` plus one more).  In tuples-only mode there is no row
+    // count footer, and psql omits the trailing blank line entirely.
+    if !cfg.tuples_only {
+        out.push('\n');
+    }
 }
 
 // ---------------------------------------------------------------------------
