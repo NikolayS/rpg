@@ -630,17 +630,22 @@ async fn list_functions(
         "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
     };
 
+    // \dfn → only normal functions, \dfp → only procedures, etc.
+    let kind_filter = meta.kind_filter.map(|k| {
+        let pg_kind = match k {
+            'n' => "'f'",        // normal function
+            'p' => "'p'",        // procedure
+            'a' => "'a'",        // aggregate
+            'w' => "'w'",        // window function
+            _ => "null",
+        };
+        format!("p.prokind = {pg_kind}")
+    });
+
     let where_parts: Vec<&str> = [
-        if sys_filter.is_empty() {
-            None
-        } else {
-            Some(sys_filter.as_str())
-        },
-        if name_filter.is_empty() {
-            None
-        } else {
-            Some(name_filter.as_str())
-        },
+        if sys_filter.is_empty() { None } else { Some(sys_filter.as_str()) },
+        if name_filter.is_empty() { None } else { Some(name_filter.as_str()) },
+        kind_filter.as_deref(),
     ]
     .into_iter()
     .flatten()

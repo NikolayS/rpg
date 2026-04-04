@@ -467,6 +467,11 @@ pub struct ParsedMeta {
     /// Set by the caller from [`crate::repl::ReplSettings::echo_hidden`] at
     /// dispatch time; the parser always initialises this to `false`.
     pub echo_hidden: bool,
+    /// Optional prokind filter for `\df` variants:
+    /// `'f'` = normal functions (`\dfn`), `'p'` = procedures (`\dfp`),
+    /// `'a'` = aggregates (`\dfa`), `'w'` = window functions (`\dfw`).
+    /// `None` means show all kinds (`\df`).
+    pub kind_filter: Option<char>,
 }
 
 impl ParsedMeta {
@@ -478,6 +483,7 @@ impl ParsedMeta {
             system: false,
             pattern: None,
             echo_hidden: false,
+            kind_filter: None,
         }
     }
 }
@@ -520,6 +526,7 @@ pub fn parse(input: &str) -> ParsedMeta {
                             Some(text.to_owned())
                         },
                         echo_hidden: false,
+                        kind_filter: None,
                     };
                 }
             }
@@ -916,6 +923,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     system: false,
                     pattern: None,
                     echo_hidden: false,
+                    kind_filter: None,
                 };
             }
         }
@@ -970,6 +978,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     Some(dir.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -987,6 +996,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     Some(pattern.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1013,6 +1023,7 @@ fn parse_h(input: &str) -> ParsedMeta {
             Some(pattern_str.to_owned())
         },
         echo_hidden: false,
+        kind_filter: None,
     }
 }
 
@@ -1028,6 +1039,7 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             system: false,
             pattern,
             echo_hidden: false,
+            kind_filter: None,
         };
     }
     if let Some(rest) = input.strip_prefix("sf") {
@@ -1038,6 +1050,7 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             system: false,
             pattern,
             echo_hidden: false,
+            kind_filter: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1082,6 +1095,7 @@ fn parse_l(input: &str) -> ParsedMeta {
         system,
         pattern,
         echo_hidden: false,
+        kind_filter: None,
     }
 }
 
@@ -1209,6 +1223,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(enc.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1227,6 +1242,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(text.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1260,6 +1276,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(arg.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1296,6 +1313,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1312,6 +1330,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1335,6 +1354,7 @@ fn parse_o(input: &str) -> ParsedMeta {
                 Some(path.to_owned())
             },
             echo_hidden: false,
+            kind_filter: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1377,6 +1397,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(arg.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1394,6 +1415,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(text.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1410,6 +1432,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1433,6 +1456,7 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                     Some(user.to_owned())
                 },
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1489,6 +1513,7 @@ fn parse_shell(input: &str) -> ParsedMeta {
             Some(cmd.to_owned())
         },
         echo_hidden: false,
+        kind_filter: None,
     }
 }
 
@@ -1725,6 +1750,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 system: false,
                 pattern: None,
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1743,6 +1769,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 system: false,
                 pattern: None,
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1799,6 +1826,28 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
 fn parse_d_family(input: &str) -> ParsedMeta {
     // `input` has already had the leading `\` stripped.
 
+    // \dfn / \dfp / \dfa / \dfw — psql function-kind filter variants.
+    // Check before the generic D_SUBCMDS loop so the longer prefix wins.
+    if let Some(rest) = input.strip_prefix("df") {
+        // The next char (if present) may be a kind qualifier: n, p, a, w.
+        // Anything else falls through to the normal \df handling below.
+        let (kind_char, rest2) = match rest.chars().next() {
+            Some(k @ ('n' | 'p' | 'a' | 'w')) => (Some(k), &rest[1..]),
+            _ => (None, rest),
+        };
+        if kind_char.is_some() || rest2.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S') || rest2.is_empty() {
+            let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
+            return ParsedMeta {
+                cmd: MetaCmd::ListFunctions,
+                plus,
+                system,
+                pattern,
+                echo_hidden: false,
+                kind_filter: kind_char,
+            };
+        }
+    }
+
     // Try each sub-command prefix (they all include the leading `d`).
     // `D_SUBCMDS` is ordered longest-first so greedy matching is correct.
     for (prefix, cmd) in D_SUBCMDS {
@@ -1811,6 +1860,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 system,
                 pattern,
                 echo_hidden: false,
+                kind_filter: None,
             };
         }
     }
@@ -1824,6 +1874,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         system,
         pattern,
         echo_hidden: false,
+        kind_filter: None,
     }
 }
 

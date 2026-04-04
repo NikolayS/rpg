@@ -749,19 +749,11 @@ pub fn format_pg_error(
         let colored = color_severity(db_err.severity());
         let _ = writeln!(out, "{}:  {}", colored, db_err.message());
 
-        // Position marker.
+        // Original position marker (shown right after severity in psql).
         if let Some(pos) = db_err.position() {
-            match pos {
-                tokio_postgres::error::ErrorPosition::Original(_) => {
-                    if let Some(sql) = original_sql {
-                        write_error_position(&mut out, sql, pos);
-                    }
-                }
-                tokio_postgres::error::ErrorPosition::Internal { query, .. } => {
-                    // Internal position: show the internal query text in psql
-                    // style ("QUERY:  <query>") and the position within it.
-                    let _ = writeln!(out, "QUERY:  {query}");
-                    write_error_position(&mut out, query, pos);
+            if let tokio_postgres::error::ErrorPosition::Original(_) = pos {
+                if let Some(sql) = original_sql {
+                    write_error_position(&mut out, sql, pos);
                 }
             }
         }
@@ -774,6 +766,19 @@ pub fn format_pg_error(
         // HINT line.
         if let Some(hint) = db_err.hint() {
             let _ = writeln!(out, "HINT:  {hint}");
+        }
+
+        // CONTEXT line (e.g. PL/pgSQL call stack).
+        if let Some(ctx) = db_err.where_() {
+            let _ = writeln!(out, "CONTEXT:  {ctx}");
+        }
+
+        // Internal query + position (shown after CONTEXT in psql).
+        if let Some(pos) = db_err.position() {
+            if let tokio_postgres::error::ErrorPosition::Internal { query, .. } = pos {
+                let _ = writeln!(out, "QUERY:  {query}");
+                write_error_position(&mut out, query, pos);
+            }
         }
 
         // SQLSTATE: only shown in verbose mode (psql default: hidden).

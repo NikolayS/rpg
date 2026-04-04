@@ -2003,104 +2003,124 @@ pub(crate) async fn exec_lines(
                     _ => {}
                 }
             } else {
-                // -a / --echo-all: echo each SQL line to stdout as it is read.
-                // psql echoes blank lines inside dollar-quoted function bodies
-                // but skips blank lines between statements.
-                if settings.echo_all
-                    && (!line.trim().is_empty() || is_inside_dollar_quote(&buf))
-                {
-                    if let Some(ref mut w) = settings.output_target {
-                        let _ = writeln!(w, "{line}");
-                    } else {
-                        println!("{line}");
+                // Split on \; separators (psql multi-command separator).
+                // Each segment before a \; is sent immediately as a complete
+                // statement; the last segment is processed normally.
+                let segments = split_on_backslash_semicolon(&interpolated);
+                let num_segments = segments.len();
+                let mut should_break = false;
+
+                'segs: for (seg_idx, segment) in segments.iter().enumerate() {
+                    let force_execute = seg_idx < num_segments - 1;
+
+                    // -a / --echo-all: echo each SQL line to stdout as it is read.
+                    // psql echoes blank lines inside multi-line statements (when
+                    // buf already has content) but skips blank lines between statements.
+                    if settings.echo_all
+                        && (!segment.trim().is_empty() || !buf.is_empty())
+                    {
+                        if let Some(ref mut w) = settings.output_target {
+                            let _ = writeln!(w, "{segment}");
+                        } else {
+                            println!("{segment}");
+                        }
+                    }
+
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(segment);
+
+                    if force_execute || is_complete(&buf) {
+                        // Strip leading blank lines and comments so that PostgreSQL
+                        // reports LINE 1 for the first real SQL token — matching
+                        // psql's behaviour where leading decorations are not sent.
+                        let sql_to_exec =
+                            crate::query::strip_leading_preamble(buf.trim());
+
+                        // COPY … TO STDOUT: stream server output directly to
+                        // stdout (or the current \o target), matching psql behaviour.
+                        if is_copy_to_stdout(sql_to_exec) {
+                            let sql_owned = sql_to_exec.to_owned();
+                            buf.clear();
+                            let ok = execute_inline_copy_to(client, &sql_owned, settings).await;
+                            if !ok {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    should_break = true;
+                                    break 'segs;
+                                }
+                            }
+                            continue 'segs;
+                        }
+
+                        // COPY … FROM STDIN: collect the inline data block (lines
+                        // until a bare `\.`) and execute via the copy protocol,
+                        // matching psql behaviour in -f / non-interactive mode.
+                        if is_copy_from_stdin(sql_to_exec) {
+                            // Normalize: psql treats "FROM STDOUT" like "FROM STDIN"
+                            // for inline data; the server only understands FROM STDIN.
+                            let sql_owned = {
+                                let upper = sql_to_exec.to_uppercase();
+                                if let Some(pos) = upper.find("FROM STDOUT") {
+                                    format!("{}FROM STDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
+                                } else if let Some(pos) = upper.find("FROM\nSTDOUT") {
+                                    format!("{}FROM\nSTDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
+                                } else {
+                                    sql_to_exec.to_owned()
+                                }
+                            };
+                            buf.clear();
+                            let mut copy_data = Vec::<String>::new();
+                            while let Some(dl) = lines.next() {
+                                // psql does NOT echo inline COPY data lines even
+                                // with --echo-all; only the SQL statement itself
+                                // is echoed (already done above).
+                                if dl.trim() == "\\." {
+                                    break;
+                                }
+                                copy_data.push(dl);
+                            }
+                            let ok = execute_inline_copy_from(
+                                client,
+                                &sql_owned,
+                                &copy_data,
+                                settings,
+                            )
+                            .await;
+                            if !ok {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    should_break = true;
+                                    break 'segs;
+                                }
+                            }
+                            continue 'segs;
+                        }
+
+                        if !sql_to_exec.is_empty() {
+                            // Disable per-statement echo in execute_query to avoid
+                            // double-echoing when echo_all is active (lines already echoed above).
+                            let saved_echo_all = settings.echo_all;
+                            settings.echo_all = false;
+                            let ok = execute_query(client, sql_to_exec, settings, tx).await;
+                            settings.echo_all = saved_echo_all;
+                            if !ok {
+                                exit_code = 1;
+                                // In single-transaction mode, stop on first error so the
+                                // caller can roll back and skip the rest.
+                                if settings.single_transaction {
+                                    should_break = true;
+                                    break 'segs;
+                                }
+                            }
+                        }
+                        buf.clear();
                     }
                 }
 
-                if !buf.is_empty() {
-                    buf.push('\n');
-                }
-                buf.push_str(&line);
-
-                if is_complete(&buf) {
-                    // Strip leading blank lines and comments so that PostgreSQL
-                    // reports LINE 1 for the first real SQL token — matching
-                    // psql's behaviour where leading decorations are not sent.
-                    let sql_to_exec =
-                        crate::query::strip_leading_preamble(buf.trim());
-
-                    // COPY … TO STDOUT: stream server output directly to
-                    // stdout (or the current \o target), matching psql behaviour.
-                    if is_copy_to_stdout(sql_to_exec) {
-                        let sql_owned = sql_to_exec.to_owned();
-                        buf.clear();
-                        let ok = execute_inline_copy_to(client, &sql_owned, settings).await;
-                        if !ok {
-                            exit_code = 1;
-                            if settings.single_transaction {
-                                break 'lines;
-                            }
-                        }
-                        continue 'lines;
-                    }
-
-                    // COPY … FROM STDIN: collect the inline data block (lines
-                    // until a bare `\.`) and execute via the copy protocol,
-                    // matching psql behaviour in -f / non-interactive mode.
-                    if is_copy_from_stdin(sql_to_exec) {
-                        // Normalize: psql treats "FROM STDOUT" like "FROM STDIN"
-                        // for inline data; the server only understands FROM STDIN.
-                        let sql_owned = {
-                            let upper = sql_to_exec.to_uppercase();
-                            if let Some(pos) = upper.find("FROM STDOUT") {
-                                format!("{}FROM STDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
-                            } else if let Some(pos) = upper.find("FROM\nSTDOUT") {
-                                format!("{}FROM\nSTDIN{}", &sql_to_exec[..pos], &sql_to_exec[pos + 11..])
-                            } else {
-                                sql_to_exec.to_owned()
-                            }
-                        };
-                        buf.clear();
-                        let mut copy_data = Vec::<String>::new();
-                        while let Some(dl) = lines.next() {
-                            // psql does NOT echo inline COPY data lines even
-                            // with --echo-all; only the SQL statement itself
-                            // is echoed (already done above).
-                            if dl.trim() == "\\." {
-                                break;
-                            }
-                            copy_data.push(dl);
-                        }
-                        let ok = execute_inline_copy_from(
-                            client,
-                            &sql_owned,
-                            &copy_data,
-                            settings,
-                        )
-                        .await;
-                        if !ok {
-                            exit_code = 1;
-                            if settings.single_transaction {
-                                break 'lines;
-                            }
-                        }
-                        continue 'lines;
-                    }
-
-                    // Disable per-statement echo in execute_query to avoid
-                    // double-echoing when echo_all is active (lines already echoed above).
-                    let saved_echo_all = settings.echo_all;
-                    settings.echo_all = false;
-                    let ok = execute_query(client, sql_to_exec, settings, tx).await;
-                    settings.echo_all = saved_echo_all;
-                    if !ok {
-                        exit_code = 1;
-                        // In single-transaction mode, stop on first error so the
-                        // caller can roll back and skip the rest.
-                        if settings.single_transaction {
-                            break 'lines;
-                        }
-                    }
-                    buf.clear();
+                if should_break {
+                    break 'lines;
                 }
             }
         }
@@ -2495,6 +2515,10 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         } else {
             crate::logging::set_level(crate::logging::Level::Warn);
         }
+    }
+    // Mirror ECHO into echo_all (psql-compatible: "all"/"queries" → on, "none"/"errors" → off).
+    if name == "ECHO" {
+        settings.echo_all = matches!(value, "all" | "queries");
     }
     // Mirror ECHO_HIDDEN into the settings flag.
     if name == "ECHO_HIDDEN" {
@@ -5310,6 +5334,88 @@ fn find_inline_backslash(line: &str) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Split a SQL line on unquoted `\;` separators (psql multi-command separator).
+///
+/// Returns a `Vec` of string slices, split at each unquoted `\;`.  If there
+/// are no `\;` in the line, returns a single-element vec containing the whole
+/// line.  The `\;` token itself is consumed (not included in any segment).
+fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut parts: Vec<&str> = Vec::new();
+    let mut seg_start = 0;
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_block = false;
+    let mut dollar_tag: Option<String> = None;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tb = tag.as_bytes();
+            if bytes[i..].starts_with(tb) {
+                i += tb.len();
+                dollar_tag = None;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_block {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2; in_block = false;
+            } else { i += 1; }
+            continue;
+        }
+        if in_double {
+            if bytes[i] == b'"' {
+                if i + 1 < len && bytes[i + 1] == b'"' { i += 2; }
+                else { in_double = false; i += 1; }
+            } else { i += 1; }
+            continue;
+        }
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' { i += 2; }
+                else { in_single = false; i += 1; }
+            } else { i += 1; }
+            continue;
+        }
+        // Line comment — rest of line is not SQL, stop scanning
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' { break; }
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_block = true; i += 2; continue;
+        }
+        if bytes[i] == b'"' { in_double = true; i += 1; continue; }
+        if bytes[i] == b'\'' { in_single = true; i += 1; continue; }
+        if bytes[i] == b'$' {
+            let rest = &line[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+        // Detect \;
+        if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1] == b';' {
+            parts.push(&line[seg_start..i]);
+            i += 2;
+            seg_start = i;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(&line[seg_start..]);
+    parts
 }
 
 /// Outcome of processing a single input line in the REPL.
