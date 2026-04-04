@@ -170,7 +170,7 @@ pub async fn show_function_source(client: &Client, name: &str, plus: bool, echo_
     }
 
     if !found {
-        eprintln!("ERROR:  function {name} does not exist");
+        eprintln!("error: ERROR:  function \"{name}\" does not exist");
     }
 }
 

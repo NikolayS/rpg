@@ -2726,7 +2726,18 @@ limit 1"
        and conindid = i.oid
        and contype in ('p','u')
      limit 1) as con_name,
-    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as idx_pred
+    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as idx_pred,
+    ix.indisvalid,
+    (select contype
+     from pg_catalog.pg_constraint
+     where conrelid = ix.indrelid
+       and conindid = i.oid
+     limit 1) as con_type,
+    (select oid
+     from pg_catalog.pg_constraint
+     where conrelid = ix.indrelid
+       and conindid = i.oid
+     limit 1) as con_oid
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
     on i.oid = ix.indexrelid
@@ -2878,8 +2889,8 @@ where {name_cond} limit 1"
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
-        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred)
-        let mut index_rows: Vec<(String, bool, bool, String, String, String)> = Vec::new();
+        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid)
+        let mut index_rows: Vec<(String, bool, bool, String, String, String, bool, String, String)> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
                 let idx_name = row.get(0).unwrap_or("").to_owned();
@@ -2890,6 +2901,12 @@ where {name_cond} limit 1"
                 // col 5 = con_name (used implicitly via is_primary/is_unique flags)
                 // col 6 = pg_get_expr(indpred): non-empty for partial indexes
                 let idx_pred = row.get(6).unwrap_or("").to_owned();
+                // col 7 = indisvalid: false means the index is being rebuilt (INVALID)
+                let is_valid = row.get(7).unwrap_or("t") == "t";
+                // col 8 = contype: 'x' for EXCLUDE constraints
+                let con_type = row.get(8).unwrap_or("").to_owned();
+                // col 9 = con_oid: OID of the backing constraint (for pg_get_constraintdef)
+                let con_oid = row.get(9).unwrap_or("").to_owned();
                 index_rows.push((
                     idx_name,
                     is_primary,
@@ -2897,29 +2914,54 @@ where {name_cond} limit 1"
                     amname,
                     idx_oid_str,
                     idx_pred,
+                    is_valid,
+                    con_type,
+                    con_oid,
                 ));
             }
         }
         if !index_rows.is_empty() {
             println!("Indexes:");
-            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred) in &index_rows {
+            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid) in &index_rows {
+                // EXCLUDE constraints use pg_get_constraintdef for full definition.
+                let is_exclude = con_type == "x";
                 // Extract column list from pg_get_indexdef (the part inside parens).
-                let indexdef_sql =
-                    format!("select pg_catalog.pg_get_indexdef({idx_oid_str}, 0, true)");
-                let col_expr = if let Ok(def_msgs) = client.simple_query(&indexdef_sql).await {
-                    let mut expr = String::new();
-                    for def_msg in def_msgs {
-                        if let SimpleQueryMessage::Row(def_row) = def_msg {
-                            let full = def_row.get(0).unwrap_or("");
-                            if let (Some(open), Some(close)) = (full.find('('), full.rfind(')')) {
-                                full[open..=close].clone_into(&mut expr);
+                let col_expr = if is_exclude && !con_oid.is_empty() {
+                    // For EXCLUDE constraints, use pg_get_constraintdef which gives the
+                    // full "EXCLUDE USING gist (c4 WITH &&) INCLUDE ..." form.
+                    let condef_sql = format!(
+                        "select pg_catalog.pg_get_constraintdef({con_oid}, true)"
+                    );
+                    if let Ok(def_msgs) = client.simple_query(&condef_sql).await {
+                        let mut expr = String::new();
+                        for def_msg in def_msgs {
+                            if let SimpleQueryMessage::Row(def_row) = def_msg {
+                                expr = def_row.get(0).unwrap_or("").to_owned();
+                                break;
                             }
-                            break;
                         }
+                        expr
+                    } else {
+                        String::new()
                     }
-                    expr
                 } else {
-                    String::new()
+                    let indexdef_sql =
+                        format!("select pg_catalog.pg_get_indexdef({idx_oid_str}, 0, true)");
+                    if let Ok(def_msgs) = client.simple_query(&indexdef_sql).await {
+                        let mut expr = String::new();
+                        for def_msg in def_msgs {
+                            if let SimpleQueryMessage::Row(def_row) = def_msg {
+                                let full = def_row.get(0).unwrap_or("");
+                                if let (Some(open), Some(close)) = (full.find('('), full.rfind(')')) {
+                                    full[open..=close].clone_into(&mut expr);
+                                }
+                                break;
+                            }
+                        }
+                        expr
+                    } else {
+                        String::new()
+                    }
                 };
 
                 let type_label = if *is_primary {
@@ -2930,7 +2972,8 @@ where {name_cond} limit 1"
                     String::new()
                 };
 
-                let pred_suffix = if idx_pred.is_empty() {
+                // For EXCLUDE constraints, the full definition is already in col_expr.
+                let pred_suffix = if is_exclude || idx_pred.is_empty() {
                     String::new()
                 } else {
                     // pg_get_expr wraps in parens; psql strips the outer pair.
@@ -2941,7 +2984,13 @@ where {name_cond} limit 1"
                     format!(" WHERE {pred}")
                 };
 
-                println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}");
+                let invalid_suffix = if *is_valid { "" } else { " INVALID" };
+                if is_exclude {
+                    // EXCLUDE: show as "name" EXCLUDE USING ... (no amname prefix)
+                    println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}");
+                } else {
+                    println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}{invalid_suffix}");
+                }
             }
         }
     }

@@ -141,21 +141,22 @@ fn infer_numeric_column(
 
     // Infinity guard: "infinity"/"-infinity" appears in both float8 columns
     // (right-aligned) and timestamp columns (left-aligned).  When a column
-    // contains ONLY infinity/-infinity/NaN values (no other numeric literals),
+    // contains ONLY infinity/-infinity values (no other numeric literals),
     // we cannot determine the type without OIDs.  Such columns are treated as
     // non-numeric (timestamp-like), which is the safer choice since float8
     // columns with only infinity are very rare in practice.
-    let all_inf_nan = rows.iter().all(|row| {
+    // Note: NaN is unambiguously numeric (it never appears in timestamp
+    // columns), so it is NOT included in this guard.
+    let all_infinity = rows.iter().all(|row| {
         match row.get(col_idx).and_then(|v| v.as_deref()) {
             None | Some("") => true,
             Some(v) => {
                 v.eq_ignore_ascii_case("infinity")
                     || v.eq_ignore_ascii_case("-infinity")
-                    || v.eq_ignore_ascii_case("nan")
             }
         }
     });
-    if all_inf_nan {
+    if all_infinity {
         return false;
     }
 
@@ -180,13 +181,22 @@ fn infer_numeric_column(
                     _ => return false,
                 };
                 // Interval patterns: "N-M" (year-month), "N H:MM:SS" (day-time),
-                // or any value containing ':' (time component).
-                // Exclude values that parse as f64 (e.g. "-1.23e+200" contains
-                // '-' and digits but is a float, not an interval).
+                // or a time-like value containing ':' but NOT a timestamp.
+                //
+                // Timestamps look like "1997-02-11 01:32:01+00" — they start
+                // with a 4-digit year followed by '-'.  Pure interval time
+                // components look like "02:03:04" or "1 02:03:04" (integer +
+                // space + time).  We distinguish by checking whether the first
+                // non-space token before any ':' looks like a date (4-digit
+                // year) or a small integer (interval).
+                //
                 // Dates like "2005-07-21" have exactly 2 hyphens; year-month
                 // intervals like "1-2" have exactly 1 hyphen.  Filter out dates
                 // by requiring only one hyphen in the N-M check.
-                v.contains(':')
+                let looks_like_timestamp = v.len() > 10
+                    && v.as_bytes().get(4) == Some(&b'-')
+                    && v[..4].bytes().all(|b| b.is_ascii_digit());
+                (v.contains(':') && !looks_like_timestamp)
                     || (v.len() >= 3
                         && v.bytes().filter(|&b| b == b'-').count() == 1
                         && v.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-')
