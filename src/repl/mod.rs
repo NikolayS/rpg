@@ -449,6 +449,10 @@ pub fn is_complete(buf: &str) -> bool {
     let mut in_single = false;
     let mut in_block_comment = false;
     let mut dollar_tag: Option<String> = None;
+    // Tracks nesting depth of BEGIN ATOMIC … END blocks (SQL/PSM function
+    // bodies introduced in PostgreSQL 14).  A semicolon only terminates the
+    // statement when this counter is zero.
+    let mut begin_atomic_depth: u32 = 0;
 
     let bytes = buf.as_bytes();
     let len = bytes.len();
@@ -537,9 +541,58 @@ pub fn is_complete(buf: &str) -> bool {
             }
         }
 
-        // Semicolon terminates (outside quotes/comments)
+        // Detect BEGIN ATOMIC (SQL/PSM function body) and matching END.
+        // We only look at letters here; non-letter chars advance normally.
+        if bytes[i].is_ascii_alphabetic() {
+            // Extract the keyword at position i (uppercase for comparison).
+            let kw_start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let kw = buf[kw_start..i].to_ascii_uppercase();
+            // Check that the keyword is preceded by a word boundary.
+            let at_word_start = kw_start == 0
+                || !buf.as_bytes()[kw_start - 1].is_ascii_alphanumeric();
+
+            if at_word_start {
+                if kw == "BEGIN" {
+                    // Look ahead for ATOMIC (skipping whitespace).
+                    let rest = buf[i..].trim_start();
+                    let rest_upper = rest.to_ascii_uppercase();
+                    if rest_upper.starts_with("ATOMIC")
+                        && rest
+                            .as_bytes()
+                            .get(6)
+                            .map_or(true, |&b| !b.is_ascii_alphanumeric())
+                    {
+                        begin_atomic_depth += 1;
+                    }
+                } else if kw == "END" && begin_atomic_depth > 0 {
+                    // Only close a BEGIN ATOMIC block when:
+                    //   1. END is followed by `;` (possibly with whitespace)
+                    //   2. END appears at the start of a line (only whitespace
+                    //      precedes it on the current line) — this distinguishes
+                    //      the function-body END from inline CASE…END expressions
+                    //      whose END is always part of a larger expression.
+                    let rest_after_end = buf[i..].trim_start();
+                    let line_before = &buf[..kw_start];
+                    let at_line_start = line_before
+                        .rfind('\n')
+                        .map(|nl| buf[nl + 1..kw_start].chars().all(char::is_whitespace))
+                        .unwrap_or_else(|| buf[..kw_start].chars().all(char::is_whitespace));
+                    if rest_after_end.starts_with(';') && at_line_start {
+                        begin_atomic_depth -= 1;
+                    }
+                }
+            }
+            continue; // `i` already advanced past the keyword
+        }
+
+        // Semicolon terminates (outside quotes/comments, not inside BEGIN ATOMIC)
         if bytes[i] == b';' {
-            return true;
+            if begin_atomic_depth == 0 {
+                return true;
+            }
         }
 
         i += 1;

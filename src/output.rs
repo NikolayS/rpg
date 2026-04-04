@@ -751,8 +751,18 @@ pub fn format_pg_error(
 
         // Position marker.
         if let Some(pos) = db_err.position() {
-            if let Some(sql) = original_sql {
-                write_error_position(&mut out, sql, pos);
+            match pos {
+                tokio_postgres::error::ErrorPosition::Original(_) => {
+                    if let Some(sql) = original_sql {
+                        write_error_position(&mut out, sql, pos);
+                    }
+                }
+                tokio_postgres::error::ErrorPosition::Internal { query, .. } => {
+                    // Internal position: show the internal query text in psql
+                    // style ("QUERY:  <query>") and the position within it.
+                    let _ = writeln!(out, "QUERY:  {query}");
+                    write_error_position(&mut out, query, pos);
+                }
             }
         }
 
