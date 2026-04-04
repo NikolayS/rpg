@@ -1962,6 +1962,13 @@ pub(crate) async fn exec_lines(
                         }
                     }
                 }
+                MetaResult::GExecBuffer => {
+                    let sql = buf.trim().to_owned();
+                    buf.clear();
+                    if !sql.is_empty() {
+                        execute_gexec(client, &sql, settings, tx).await;
+                    }
+                }
                 MetaResult::DescribeBuffer => {
                     // Buffer is NOT cleared after \gdesc.
                     describe_buffer(client, buf.trim(), settings.verbose_errors).await;

@@ -2516,6 +2516,112 @@ limit 1"
         (label, fq_name, rk)
     };
 
+    // Special handling for indexes — completely different column schema.
+    if matches!(relkind_char, 'i' | 'I') {
+        let table_title = format!("{obj_label} \"{display_name}\"");
+        let idx_cols_sql = if meta.plus {
+            format!(
+                "select
+    a.attname as \"Column\",
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
+    case when a.attnum <= ix.indnkeyatts then 'yes' else 'no' end as \"Key?\",
+    pg_catalog.pg_get_indexdef(ix.indexrelid, a.attnum::int, true) as \"Definition\",
+    case a.attstorage
+        when 'p' then 'plain'
+        when 'e' then 'external'
+        when 'x' then 'extended'
+        when 'm' then 'main'
+        else a.attstorage::text
+    end as \"Storage\",
+    case when a.attstattarget = -1 then '' else a.attstattarget::text end as \"Stats target\"
+from pg_catalog.pg_attribute as a
+join pg_catalog.pg_index as ix on ix.indexrelid = a.attrelid
+where a.attrelid = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1
+)
+and a.attnum > 0
+and not a.attisdropped
+order by a.attnum"
+            )
+        } else {
+            format!(
+                "select
+    a.attname as \"Column\",
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
+    case when a.attnum <= ix.indnkeyatts then 'yes' else 'no' end as \"Key?\",
+    pg_catalog.pg_get_indexdef(ix.indexrelid, a.attnum::int, true) as \"Definition\"
+from pg_catalog.pg_attribute as a
+join pg_catalog.pg_index as ix on ix.indexrelid = a.attrelid
+where a.attrelid = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1
+)
+and a.attnum > 0
+and not a.attisdropped
+order by a.attnum"
+            )
+        };
+        run_and_print_no_count(
+            client,
+            &idx_cols_sql,
+            meta.echo_hidden,
+            Some(&table_title),
+            settings,
+        )
+        .await;
+
+        // Footer: "amname, for table \"schema.table\""
+        let idx_footer_sql = format!(
+            "select am.amname,
+    case when pg_catalog.pg_table_is_visible(tc.oid)
+         then tc.relname
+         else tn.nspname || '.' || tc.relname end as table_name,
+    ix.indisprimary, ix.indisunique,
+    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid) as predicate
+from pg_catalog.pg_class as c
+join pg_catalog.pg_index as ix on ix.indexrelid = c.oid
+join pg_catalog.pg_class as tc on tc.oid = ix.indrelid
+join pg_catalog.pg_namespace as tn on tn.oid = tc.relnamespace
+join pg_catalog.pg_am as am on am.oid = c.relam
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where c.oid = (
+    select c2.oid from pg_catalog.pg_class as c2
+    left join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
+    where {name_cond} limit 1
+)"
+        );
+        if let Ok(msgs) = client.simple_query(&idx_footer_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let am = row.get(0).unwrap_or("");
+                    let tname = row.get(1).unwrap_or("");
+                    let is_primary = row.get(2).map(|v| v == "t").unwrap_or(false);
+                    let is_unique = row.get(3).map(|v| v == "t").unwrap_or(false);
+                    let pred = row.get(4).unwrap_or("");
+                    let mut parts = Vec::new();
+                    if is_primary {
+                        parts.push("primary key".to_owned());
+                    } else if is_unique {
+                        parts.push("unique".to_owned());
+                    }
+                    parts.push(am.to_owned());
+                    let mut footer = parts.join(", ");
+                    footer.push_str(&format!(", for table \"{tname}\""));
+                    if !pred.is_empty() {
+                        footer.push_str(&format!(" where {pred}"));
+                    }
+                    println!("{footer}");
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+
     // Choose columns query based on relkind and plus mode.
     // Tables and foreign tables get Compression + Stats target in \d+ mode;
     // views, sequences, composite types do not.
@@ -2692,6 +2798,82 @@ where co.contype = 'f'
 order by 1, 2"
     );
 
+    // Partition info — query once, print in two phases:
+    //   Phase 1 (before indexes): Partition key / Partition of / Partition constraint
+    //   Phase 2 (after constraints): Partitions list / Number of partitions
+    let part_info_sql = format!(
+        "select c.relkind,
+    case when c.relispartition then
+        pg_catalog.pg_get_expr(c.relpartbound, c.oid, true)
+    else '' end as partbound,
+    case when c.relkind = 'p' then
+        pg_catalog.pg_get_partkeydef(c.oid)
+    else '' end as partkeydef,
+    case when c.relispartition then
+        (select case when pg_catalog.pg_table_is_visible(p.oid)
+                     then p.relname
+                     else n2.nspname || '.' || p.relname end
+         from pg_catalog.pg_class as p
+         join pg_catalog.pg_namespace as n2 on n2.oid = p.relnamespace
+         where p.oid = (select inhparent from pg_catalog.pg_inherits
+                        where inhrelid = c.oid limit 1))
+    else '' end as parent_name
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+limit 1"
+    );
+    // Fetch partition info; store for use in both phases.
+    let (part_relkind, partbound, partkeydef, parent_name) = {
+        let mut rk = String::new();
+        let mut pb = String::new();
+        let mut pk = String::new();
+        let mut pn = String::new();
+        if let Ok(msgs) = client.simple_query(&part_info_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    rk = row.get(0).unwrap_or("").to_owned();
+                    pb = row.get(1).unwrap_or("").to_owned();
+                    pk = row.get(2).unwrap_or("").to_owned();
+                    pn = row.get(3).unwrap_or("").to_owned();
+                    break;
+                }
+            }
+        }
+        (rk, pb, pk, pn)
+    };
+
+    // Phase 1: print "before indexes" partition info.
+    // For partition child: Partition of / Partition constraint (constraint only for \d+).
+    if !partbound.is_empty() && !parent_name.is_empty() {
+        println!("Partition of: {parent_name} {partbound}");
+        if meta.plus {
+            let pcon_sql = format!(
+                "select pg_catalog.pg_get_partition_constraintdef(c.oid)
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond} limit 1"
+            );
+            if let Ok(pmsgs) = client.simple_query(&pcon_sql).await {
+                use tokio_postgres::SimpleQueryMessage;
+                for pmsg in pmsgs {
+                    if let SimpleQueryMessage::Row(prow) = pmsg {
+                        let pcon = prow.get(0).unwrap_or("");
+                        if !pcon.is_empty() {
+                            println!("Partition constraint: {pcon}");
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // For partition parent: Partition key.
+    if part_relkind == "p" && !partkeydef.is_empty() {
+        println!("Partition key: {partkeydef}");
+    }
+
     // Indexes — print as indented text lines (psql format), not a table.
     if meta.echo_hidden {
         eprintln!("/******** QUERY *********/\n{idx_sql}\n/************************/");
@@ -2731,7 +2913,7 @@ order by 1, 2"
                     for def_msg in def_msgs {
                         if let SimpleQueryMessage::Row(def_row) = def_msg {
                             let full = def_row.get(0).unwrap_or("");
-                            if let (Some(open), Some(close)) = (full.rfind('('), full.rfind(')')) {
+                            if let (Some(open), Some(close)) = (full.find('('), full.rfind(')')) {
                                 full[open..=close].clone_into(&mut expr);
                             }
                             break;
@@ -2833,132 +3015,72 @@ order by 1, 2"
         }
     }
 
-    // Partition info — "Partition of:" for children, "Partition key:" for parents.
-    let part_sql = format!(
-        "select c.relkind,
-    case when c.relispartition then
-        pg_catalog.pg_get_expr(c.relpartbound, c.oid, true)
-    else '' end as partbound,
-    case when c.relkind = 'p' then
-        pg_catalog.pg_get_partkeydef(c.oid)
-    else '' end as partkeydef,
-    case when c.relispartition then
-        (select case when pg_catalog.pg_table_is_visible(p.oid)
-                     then p.relname
-                     else n2.nspname || '.' || p.relname end
-         from pg_catalog.pg_class as p
-         join pg_catalog.pg_namespace as n2 on n2.oid = p.relnamespace
-         where p.oid = (select inhparent from pg_catalog.pg_inherits
-                        where inhrelid = c.oid limit 1))
-    else '' end as parent_name,
-    pg_catalog.pg_get_constraintdef(
-        (select con.oid from pg_catalog.pg_constraint as con
-         where con.conrelid = c.oid and con.contype = 'c'
-           and con.conislocal and con.connoinherit limit 1), true
-    ) as part_constraint
-from pg_catalog.pg_class as c
-left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-where {name_cond}
-limit 1"
-    );
-    if let Ok(messages) = client.simple_query(&part_sql).await {
-        use tokio_postgres::SimpleQueryMessage;
-        for msg in messages {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let relkind = row.get(0).unwrap_or("");
-                let partbound = row.get(1).unwrap_or("");
-                let partkeydef = row.get(2).unwrap_or("");
-                let parent_name = row.get(3).unwrap_or("");
-
-                // Partition child: show "Partition of:" and partition constraint
-                if !partbound.is_empty() && !parent_name.is_empty() {
-                    println!("Partition of: {parent_name} {partbound}");
-                    // Show partition constraint from pg_constraint
-                    let pcon_sql = format!(
-                        "select pg_catalog.pg_get_constraintdef(con.oid, true)
-from pg_catalog.pg_constraint as con
-where con.conrelid = (
-    select c.oid from pg_catalog.pg_class as c
-    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-    where {name_cond} limit 1)
-  and con.contype = 'c' and con.conislocal and con.connoinherit
-limit 1"
-                    );
-                    if let Ok(pmsgs) = client.simple_query(&pcon_sql).await {
-                        for pmsg in pmsgs {
-                            if let SimpleQueryMessage::Row(prow) = pmsg {
-                                let pcon = prow.get(0).unwrap_or("");
-                                if !pcon.is_empty() {
-                                    println!("Partition constraint: {pcon}");
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Partition parent: show "Partition key:" and "Partitions:" or "Number of partitions:"
-                if relkind == "p" && !partkeydef.is_empty() {
-                    println!("Partition key: {partkeydef}");
-                    // Count partitions
-                    let count_sql = format!(
-                        "select count(*) from pg_catalog.pg_inherits
-where inhparent = (select c.oid from pg_catalog.pg_class as c
-    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-    where {name_cond} limit 1)"
-                    );
-                    let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
-                        cmsgs.iter().find_map(|m| {
-                            if let SimpleQueryMessage::Row(r) = m {
-                                r.get(0).and_then(|v| v.parse::<u64>().ok())
-                            } else {
-                                None
-                            }
-                        }).unwrap_or(0)
-                    } else { 0 };
-
-                    if meta.plus || num_parts <= 32 {
-                        // List individual partitions
-                        let parts_list_sql = format!(
-                            "select c2.relnamespace::pg_catalog.regnamespace || '.' || c2.relname as partname,
+    // Phase 2: print "after constraints" partition info for partition parents:
+    // "Partitions:" list (for \d+) or "Number of partitions: N" (for \d).
+    if part_relkind == "p" && !partkeydef.is_empty() {
+        if meta.plus {
+            // List individual partitions for \d+.
+            let parts_list_sql = format!(
+                "select case when pg_catalog.pg_table_is_visible(c2.oid)
+         then c2.relname
+         else n2.nspname || '.' || c2.relname end as partname,
     pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) as partbound,
     c2.relkind
 from pg_catalog.pg_inherits as i
 join pg_catalog.pg_class as c2 on c2.oid = i.inhrelid
+join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
 where i.inhparent = (select c.oid from pg_catalog.pg_class as c
     left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
     where {name_cond} limit 1)
-order by 2"
-                        );
-                        if let Ok(pmsgs) = client.simple_query(&parts_list_sql).await {
-                            let mut parts: Vec<(String, String, bool)> = Vec::new();
-                            for pmsg in pmsgs {
-                                if let SimpleQueryMessage::Row(prow) = pmsg {
-                                    let pname = prow.get(0).unwrap_or("").to_owned();
-                                    let pbound = prow.get(1).unwrap_or("").to_owned();
-                                    let pkind = prow.get(2).unwrap_or("") == "p";
-                                    parts.push((pname, pbound, pkind));
-                                }
-                            }
-                            if !parts.is_empty() {
-                                // Format as multiline if needed
-                                println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, is_p))| {
-                                    let suffix = if *is_p { ", PARTITIONED" } else { "" };
-                                    if i == 0 {
-                                        format!("{pn} {pb}{suffix}")
-                                    } else {
-                                        format!("            {pn} {pb}{suffix}")
-                                    }
-                                }).collect::<Vec<_>>().join(",\n"));
-                            } else {
-                                println!("Number of partitions: 0");
-                            }
-                        }
-                    } else {
-                        println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+order by c2.oid::pg_catalog.regclass::pg_catalog.text"
+            );
+            if let Ok(pmsgs) = client.simple_query(&parts_list_sql).await {
+                use tokio_postgres::SimpleQueryMessage;
+                let mut parts: Vec<(String, String, bool)> = Vec::new();
+                for pmsg in pmsgs {
+                    if let SimpleQueryMessage::Row(prow) = pmsg {
+                        let pname = prow.get(0).unwrap_or("").to_owned();
+                        let pbound = prow.get(1).unwrap_or("").to_owned();
+                        let pkind = prow.get(2).unwrap_or("") == "p";
+                        parts.push((pname, pbound, pkind));
                     }
                 }
-                break;
+                if !parts.is_empty() {
+                    println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, is_p))| {
+                        let suffix = if *is_p { ", PARTITIONED" } else { "" };
+                        if i == 0 {
+                            format!("{pn} {pb}{suffix}")
+                        } else {
+                            format!("            {pn} {pb}{suffix}")
+                        }
+                    }).collect::<Vec<_>>().join(",\n"));
+                } else {
+                    println!("Number of partitions: 0");
+                }
+            }
+        } else {
+            // For \d (non-plus), show "Number of partitions: N".
+            let count_sql = format!(
+                "select count(*) from pg_catalog.pg_inherits
+where inhparent = (select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1)"
+            );
+            let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
+                use tokio_postgres::SimpleQueryMessage;
+                cmsgs.iter().find_map(|m| {
+                    if let SimpleQueryMessage::Row(r) = m {
+                        r.get(0).and_then(|v| v.parse::<u64>().ok())
+                    } else {
+                        None
+                    }
+                }).unwrap_or(0)
+            } else { 0 };
+
+            if num_parts == 0 {
+                println!("Number of partitions: 0");
+            } else {
+                println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
             }
         }
     }

@@ -1671,8 +1671,11 @@ pub(super) async fn execute_gexec(
                         // tokio-postgres 0.7 CommandComplete carries only the
                         // row count as u64; derive the tag by inspecting the
                         // first keyword of the cell SQL.
-                        let tag = command_tag_for(&cell_sql, n);
-                        println!("{tag}");
+                        // Only print tag when echo is on (psql suppresses with ECHO=none).
+                        if settings.echo_all && !settings.quiet {
+                            let tag = command_tag_for(&cell_sql, n);
+                            println!("{tag}");
+                        }
                     }
                 }
                 tx.update_from_sql(&cell_sql);
