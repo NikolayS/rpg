@@ -209,7 +209,7 @@ async fn run_and_print_full(
             maybe_page(settings, &text);
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql), false);
+            crate::output::eprint_db_error(&e, Some(sql), false, false);
         }
     }
 

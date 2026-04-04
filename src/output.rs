@@ -59,6 +59,9 @@ pub struct OutputConfig {
     /// Show verbose error detail including SQLSTATE.
     /// psql does not show SQLSTATE by default; set this for `\set VERBOSITY verbose`.
     pub verbose_errors: bool,
+    /// Suppress DETAIL/HINT lines in errors.
+    /// Set when `\set VERBOSITY terse` is active.
+    pub terse_errors: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -760,14 +763,14 @@ pub fn format_pg_error(
             }
         }
 
-        // DETAIL line.
-        if let Some(detail) = db_err.detail() {
-            let _ = writeln!(out, "DETAIL:  {detail}");
-        }
-
-        // HINT line.
-        if let Some(hint) = db_err.hint() {
-            let _ = writeln!(out, "HINT:  {hint}");
+        // DETAIL and HINT are suppressed in terse mode.
+        if !cfg.terse_errors {
+            if let Some(detail) = db_err.detail() {
+                let _ = writeln!(out, "DETAIL:  {detail}");
+            }
+            if let Some(hint) = db_err.hint() {
+                let _ = writeln!(out, "HINT:  {hint}");
+            }
         }
 
         // CONTEXT line (e.g. PL/pgSQL call stack).
@@ -802,9 +805,10 @@ pub fn format_pg_error(
 /// not need the string representation.  `sql` is the original query text
 /// (used to render the position marker); pass `None` when unavailable.
 /// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
-pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool) {
+pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool, terse: bool) {
     let cfg = OutputConfig {
         verbose_errors: verbose,
+        terse_errors: terse,
         ..OutputConfig::default()
     };
     let msg = format_pg_error(err, sql, &cfg);
