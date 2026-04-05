@@ -880,8 +880,8 @@ pub fn format_pg_error(
             }
 
             // CONTEXT line (e.g. PL/pgSQL call stack).
-            // psql only shows this in verbose mode; suppress in default/terse.
-            if cfg.verbose_errors {
+            // psql shows this in default and verbose mode, but not in terse.
+            if !cfg.terse_errors {
                 if let Some(ctx) = db_err.where_() {
                     let _ = writeln!(out, "CONTEXT:  {ctx}");
                 }
