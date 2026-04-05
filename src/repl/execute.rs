@@ -669,8 +669,47 @@ pub async fn execute_query(
             // with "current transaction is aborted").  If the batch ends with
             // COMMIT / ROLLBACK / END / ABORT, the server rolled back and
             // returned to Idle — mirror that here so rpg's state stays in sync.
-            if let Some(last) = crate::query::split_statements(&interpolated).last() {
-                tx.apply_terminal(last);
+            {
+                let stmts = crate::query::split_statements(&interpolated);
+                if let Some(last) = stmts.last() {
+                    tx.apply_terminal(last);
+                }
+
+                // In multi-statement batches, COMMIT/ROLLBACK inside the batch
+                // cannot roll back a failed transaction — they also fail with
+                // "transaction aborted".  psql avoids this by sending statements
+                // individually.  We attempt to replicate psql's per-statement
+                // semantics by re-sending recovery statements after a failure.
+                if stmts.len() > 1 {
+                    let first_upper = stmts[0].trim().to_uppercase();
+                    let first_word = first_upper.split_whitespace().next().unwrap_or("");
+                    let last_stmt = stmts.last().unwrap().trim();
+                    let last_upper = last_stmt.to_uppercase();
+                    let mut last_words = last_upper.split_whitespace();
+                    let last_first = last_words.next().unwrap_or("");
+                    let last_second = last_words.next().unwrap_or("");
+
+                    if matches!(first_word, "BEGIN" | "START") {
+                        // The batch opened a transaction that failed midway.
+                        // COMMIT/ROLLBACK inside the batch also failed, so the
+                        // connection is left in E state.  Send a standalone
+                        // ROLLBACK to restore to Idle, matching psql semantics.
+                        let _ = client.simple_query("ROLLBACK").await;
+                        *tx = crate::repl::TxState::Idle;
+                    } else if matches!(last_first, "ROLLBACK" | "ABORT")
+                        && last_second == "TO"
+                        && *tx == crate::repl::TxState::Failed
+                    {
+                        // Batch ends with ROLLBACK TO <savepoint>: the DELETE/etc.
+                        // failed in the middle, leaving the batch's ROLLBACK TO
+                        // unable to execute.  Re-send it standalone so the
+                        // savepoint can actually be rolled back, matching psql's
+                        // per-statement execution where this succeeds.
+                        if client.simple_query(last_stmt).await.is_ok() {
+                            *tx = crate::repl::TxState::InTransaction;
+                        }
+                    }
+                }
             }
 
             // Capture context for /fix.
