@@ -3177,13 +3177,15 @@ where c.relispartition = true
     ix.indisprimary, ix.indisunique,
     pg_catalog.pg_get_expr(ix.indpred, ix.indrelid, true) as predicate,
     ix.indnullsnotdistinct,
-    c.reloptions
+    c.reloptions,
+    coalesce(spc.spcname, '') as idx_tablespace
 from pg_catalog.pg_class as c
 join pg_catalog.pg_index as ix on ix.indexrelid = c.oid
 join pg_catalog.pg_class as tc on tc.oid = ix.indrelid
 join pg_catalog.pg_namespace as tn on tn.oid = tc.relnamespace
 join pg_catalog.pg_am as am on am.oid = c.relam
 left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+left join pg_catalog.pg_tablespace as spc on spc.oid = c.reltablespace
 where c.oid = (
     select c.oid from pg_catalog.pg_class as c
     left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
@@ -3201,6 +3203,7 @@ where c.oid = (
                     let pred = row.get(4).unwrap_or("");
                     let nulls_not_distinct = row.get(5).map(|v| v == "t").unwrap_or(false);
                     let reloptions = row.get(6).unwrap_or("");
+                    let idx_tablespace = row.get(7).unwrap_or("");
                     let mut parts = Vec::new();
                     if is_primary {
                         parts.push("primary key".to_owned());
@@ -3230,10 +3233,81 @@ where c.oid = (
                             println!("Options: {opts}");
                         }
                     }
+
+                    // For partitioned indexes (relkind 'I'): partition count/list
+                    // comes BEFORE Tablespace, then Access method for \d+.
+                    // psql ordering: footer → partitions → tablespace → access method
+                    if relkind_char == 'I' {
+                        let count_sql = format!(
+                            "select count(*)
+from pg_catalog.pg_inherits
+where inhparent = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1
+)"
+                        );
+                        let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
+                            use tokio_postgres::SimpleQueryMessage;
+                            let mut n = 0usize;
+                            for cmsg in cmsgs {
+                                if let SimpleQueryMessage::Row(crow) = cmsg {
+                                    n = crow.get(0).unwrap_or("0").parse().unwrap_or(0);
+                                    break;
+                                }
+                            }
+                            n
+                        } else {
+                            0
+                        };
+                        if meta.plus {
+                            // \d+ lists the actual partitions.
+                            if num_parts > 0 {
+                                let parts_sql = format!(
+                                    "select n2.nspname || '.' || c2.relname
+from pg_catalog.pg_inherits as i
+join pg_catalog.pg_class as c2 on c2.oid = i.inhrelid
+join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
+where i.inhparent = (
+    select c.oid from pg_catalog.pg_class as c
+    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+    where {name_cond} limit 1
+)
+order by 1"
+                                );
+                                if let Ok(pmsgs) = client.simple_query(&parts_sql).await {
+                                    use tokio_postgres::SimpleQueryMessage;
+                                    let mut pnames: Vec<String> = Vec::new();
+                                    for pmsg in pmsgs {
+                                        if let SimpleQueryMessage::Row(prow) = pmsg {
+                                            pnames.push(prow.get(0).unwrap_or("").to_owned());
+                                        }
+                                    }
+                                    if !pnames.is_empty() {
+                                        println!("Partitions: {}", pnames.join(",\n            "));
+                                    }
+                                }
+                            }
+                        } else {
+                            println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+                        }
+                    }
+
+                    // Tablespace — shown when index is in a non-default tablespace.
+                    if !idx_tablespace.is_empty() {
+                        println!("Tablespace: \"{idx_tablespace}\"");
+                    }
+
+                    // Access method — shown for partitioned indexes in \d+ mode.
+                    if relkind_char == 'I' && meta.plus {
+                        println!("Access method: {am}");
+                    }
+
                     break;
                 }
             }
         }
+
         return true;
     }
 
@@ -3452,7 +3526,8 @@ limit 1"
      where conrelid = ix.indrelid
        and conindid = i.oid
      limit 1) as condeferrable,
-    ix.indisreplident
+    ix.indisreplident,
+    coalesce(spc.spcname, '') as idx_tablespace
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
     on i.oid = ix.indexrelid
@@ -3462,6 +3537,8 @@ join pg_catalog.pg_am as am
     on am.oid = i.relam
 left join pg_catalog.pg_namespace as tn
     on tn.oid = tc.relnamespace
+left join pg_catalog.pg_tablespace as spc
+    on spc.oid = i.reltablespace
 where {idx_name_cond}
 order by ix.indisprimary desc, i.relname"
     );
@@ -3635,8 +3712,8 @@ where {name_cond} limit 1"
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
-        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident)
-        type IndexRow = (String, bool, bool, String, String, String, bool, String, String, bool, bool, bool);
+        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident, idx_tablespace)
+        type IndexRow = (String, bool, bool, String, String, String, bool, String, String, bool, bool, bool, String);
         let mut index_rows: Vec<IndexRow> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
@@ -3660,6 +3737,8 @@ where {name_cond} limit 1"
                 let is_deferrable = row.get(11).map(|v| v == "t").unwrap_or(false);
                 // col 12 = indisreplident: true when this index is the replica identity index
                 let is_replident = row.get(12).map(|v| v == "t").unwrap_or(false);
+                // col 13 = idx_tablespace: non-empty when index is in non-default tablespace
+                let idx_tablespace = row.get(13).unwrap_or("").to_owned();
                 index_rows.push((
                     idx_name,
                     is_primary,
@@ -3673,12 +3752,13 @@ where {name_cond} limit 1"
                     nulls_not_distinct,
                     is_deferrable,
                     is_replident,
+                    idx_tablespace,
                 ));
             }
         }
         if !index_rows.is_empty() {
             println!("Indexes:");
-            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident) in &index_rows {
+            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident, idx_tablespace) in &index_rows {
                 // EXCLUDE constraints use pg_get_constraintdef for full definition.
                 let is_exclude = con_type == "x";
                 // Extract column list from pg_get_indexdef (the part inside parens).
@@ -3752,11 +3832,40 @@ where {name_cond} limit 1"
                 let invalid_suffix = if *is_valid { "" } else { " INVALID" };
                 let deferrable_suffix = if *is_deferrable { " DEFERRABLE" } else { "" };
                 let replident_suffix = if *is_replident { " REPLICA IDENTITY" } else { "" };
+                let tblspc_suffix = if idx_tablespace.is_empty() {
+                    String::new()
+                } else {
+                    format!(", tablespace \"{idx_tablespace}\"")
+                };
                 if is_exclude {
                     // EXCLUDE: show as "name" EXCLUDE USING ... (no amname prefix)
-                    println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}{replident_suffix}");
+                    println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
                 } else {
-                    println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{nulls_not_distinct_suffix}{pred_suffix}{deferrable_suffix}{invalid_suffix}{replident_suffix}");
+                    println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{nulls_not_distinct_suffix}{pred_suffix}{deferrable_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
+                }
+            }
+        }
+    }
+
+    // Tablespace footer — shown for tables/partitioned tables when stored in
+    // a non-default tablespace.  Placed after Indexes, matching psql ordering.
+    if matches!(relkind_char, 'r' | 'p') {
+        let tblspc_sql = format!(
+            "select coalesce(spc.spcname, '')
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+left join pg_catalog.pg_tablespace as spc on spc.oid = c.reltablespace
+where {name_cond} limit 1"
+        );
+        if let Ok(msgs) = client.simple_query(&tblspc_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let spcname = row.get(0).unwrap_or("");
+                    if !spcname.is_empty() {
+                        println!("Tablespace: \"{spcname}\"");
+                    }
+                    break;
                 }
             }
         }
