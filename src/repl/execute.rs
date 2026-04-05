@@ -2057,6 +2057,8 @@ pub(super) async fn execute_gset(
                 }
                 1 => {
                     tx.update_from_sql(sql_to_send);
+                    // Update ROW_COUNT to reflect the 1-row result.
+                    settings.vars.set("ROW_COUNT", "1");
                     // Store last query for \watch compatibility.
                     settings.last_query = Some(buf.to_owned());
                     let row = &rows[0];

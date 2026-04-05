@@ -3750,8 +3750,13 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 "html" => OutputFormat::Html,
                 "wrapped" => OutputFormat::Wrapped,
                 "markdown" => OutputFormat::Markdown,
+                "latex" => OutputFormat::Latex,
+                "latex-longtable" => OutputFormat::LatexLongtable,
+                "troff-ms" => OutputFormat::TroffMs,
+                "asciidoc" => OutputFormat::Asciidoc,
                 other => {
-                    eprintln!("\\pset: unknown format \"{other}\"");
+                    eprintln!("\\pset: allowed formats are aligned, asciidoc, csv, html, latex, latex-longtable, troff-ms, unaligned, wrapped");
+                    let _ = other; // suppress unused warning
                     return;
                 }
             };
@@ -3866,8 +3871,100 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 println!("EXPLAIN format is {}.", fmt.as_str());
             }
         }
+        "linestyle" => {
+            let ls = value.unwrap_or("ascii");
+            match ls {
+                "ascii" | "old-ascii" | "unicode" => {
+                    settings.pset.linestyle = ls.to_owned();
+                    if !quiet {
+                        println!("Line style is {ls}.");
+                    }
+                }
+                other => {
+                    eprintln!("\\pset: unknown option: linestyle {other}");
+                }
+            }
+        }
+        "columns" => {
+            let n = value.and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            settings.pset.columns = n;
+            if !quiet {
+                if n == 0 {
+                    println!("Target width is unset.");
+                } else {
+                    println!("Target width is {n}.");
+                }
+            }
+        }
+        "numericlocale" => {
+            settings.pset.numericlocale = bool_value(value, settings.pset.numericlocale);
+            // psql suppresses confirmation for numericlocale.
+        }
+        "tableattr" => {
+            settings.pset.tableattr = value.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+            if !quiet {
+                match &settings.pset.tableattr {
+                    Some(t) => println!("Table attributes are \"{t}\"."),
+                    None => println!("Table attributes unset."),
+                }
+            }
+        }
+        "unicode_border_linestyle" => {
+            let ls = value.unwrap_or("single");
+            settings.pset.unicode_border_linestyle = ls.to_owned();
+            if !quiet {
+                println!("Unicode border line style is \"{ls}\".");
+            }
+        }
+        "unicode_column_linestyle" => {
+            let ls = value.unwrap_or("single");
+            settings.pset.unicode_column_linestyle = ls.to_owned();
+            if !quiet {
+                println!("Unicode column line style is \"{ls}\".");
+            }
+        }
+        "unicode_header_linestyle" => {
+            let ls = value.unwrap_or("single");
+            settings.pset.unicode_header_linestyle = ls.to_owned();
+            if !quiet {
+                println!("Unicode header line style is \"{ls}\".");
+            }
+        }
+        "fieldsep_zero" => {
+            settings.pset.fieldsep_zero = bool_value(value, settings.pset.fieldsep_zero);
+            if !quiet {
+                let state = if settings.pset.fieldsep_zero { "on" } else { "off" };
+                println!("Field separator is zero byte is {state}.");
+            }
+        }
+        "recordsep_zero" => {
+            settings.pset.recordsep_zero = bool_value(value, settings.pset.recordsep_zero);
+            if !quiet {
+                let state = if settings.pset.recordsep_zero { "on" } else { "off" };
+                println!("Record separator is zero byte is {state}.");
+            }
+        }
+        "xheader_width" => {
+            settings.pset.xheader_width = value.unwrap_or("full").to_owned();
+            if !quiet {
+                println!("Expanded header width is \"{}\".", settings.pset.xheader_width);
+            }
+        }
+        "pager" => {
+            // psql supports: \pset pager [on|off|always]
+            match value.unwrap_or("").to_lowercase().as_str() {
+                "on" | "1" => settings.pager_enabled = true,
+                "off" | "0" => settings.pager_enabled = false,
+                "always" => settings.pager_enabled = true,
+                _ => settings.pager_enabled = !settings.pager_enabled,
+            }
+            if !quiet {
+                let state = if settings.pager_enabled { "on" } else { "off" };
+                println!("Pager usage is {state}.");
+            }
+        }
         other => {
-            eprintln!("\\pset: unknown option \"{other}\"");
+            eprintln!("\\pset: unknown option: {other}");
         }
     }
 
@@ -3895,6 +3992,10 @@ fn format_name(fmt: &crate::output::OutputFormat) -> &'static str {
         OutputFormat::Html => "html",
         OutputFormat::Wrapped => "wrapped",
         OutputFormat::Markdown => "markdown",
+        OutputFormat::Latex => "latex",
+        OutputFormat::LatexLongtable => "latex-longtable",
+        OutputFormat::TroffMs => "troff-ms",
+        OutputFormat::Asciidoc => "asciidoc",
     }
 }
 
@@ -3905,36 +4006,66 @@ fn pset_status_text(settings: &ReplSettings) -> String {
     use std::fmt::Write as FmtWrite;
     let mut out = String::new();
     let pset = &settings.pset;
-    let _ = writeln!(out, "border         = {}", pset.border);
-    let _ = writeln!(out, "expanded       = {}", expanded_mode_str(pset.expanded));
-    let _ = writeln!(out, "fieldsep       = \"{}\"", pset.field_sep);
+    // Match psql's \pset bare output format exactly.
+    let _ = writeln!(out, "border                   {}", pset.border);
+    let _ = writeln!(out, "columns                  {}", pset.columns);
+    let _ = writeln!(out, "csv_fieldsep             '{}'", pset.csv_field_sep);
+    let _ = writeln!(out, "expanded                 {}", expanded_mode_str(pset.expanded));
+    let _ = writeln!(out, "fieldsep                 '{}'", pset.field_sep);
     let _ = writeln!(
         out,
-        "footer         = {}",
+        "fieldsep_zero            {}",
+        if pset.fieldsep_zero { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        out,
+        "footer                   {}",
         if pset.footer { "on" } else { "off" }
     );
-    let _ = writeln!(out, "format         = {}", format_name(&pset.format));
-    let _ = writeln!(out, "linestyle      = ascii");
-    let _ = writeln!(out, "null           = \"{}\"", pset.null_display);
+    let _ = writeln!(out, "format                   {}", format_name(&pset.format));
+    let _ = writeln!(out, "linestyle                {}", pset.linestyle);
+    let _ = writeln!(out, "null                     '{}'", pset.null_display);
     let _ = writeln!(
         out,
-        "pager          = {}",
-        if settings.pager_enabled { "on" } else { "off" }
+        "numericlocale            {}",
+        if pset.numericlocale { "on" } else { "off" }
     );
     let _ = writeln!(
         out,
-        "tuples_only    = {}",
+        "pager                    {}",
+        if settings.pager_enabled { "1" } else { "0" }
+    );
+    let _ = writeln!(out, "pager_min_lines          {}", settings.pager_min_lines);
+    // psql shows recordsep as '\n' literally for newline
+    let rs_display = if pset.record_sep == "\n" {
+        r"'\n'".to_owned()
+    } else {
+        format!("'{}'", pset.record_sep)
+    };
+    let _ = writeln!(out, "recordsep                {rs_display}");
+    let _ = writeln!(
+        out,
+        "recordsep_zero           {}",
+        if pset.recordsep_zero { "on" } else { "off" }
+    );
+    // tableattr and title: show empty if not set (psql shows nothing after the key)
+    match &pset.tableattr {
+        Some(t) => { let _ = writeln!(out, "tableattr                {t}"); }
+        None => { let _ = writeln!(out, "tableattr"); }
+    }
+    match &pset.title {
+        Some(t) => { let _ = writeln!(out, "title                    {t}"); }
+        None => { let _ = writeln!(out, "title"); }
+    }
+    let _ = writeln!(
+        out,
+        "tuples_only              {}",
         if pset.tuples_only { "on" } else { "off" }
     );
-    match &pset.title {
-        Some(t) => {
-            let _ = writeln!(out, "title          = \"{t}\"");
-        }
-        None => {
-            let _ = writeln!(out, "title          = (not set)");
-        }
-    }
-    let _ = writeln!(out, "explain_format = {}", settings.explain_format.as_str());
+    let _ = writeln!(out, "unicode_border_linestyle {}", pset.unicode_border_linestyle);
+    let _ = writeln!(out, "unicode_column_linestyle {}", pset.unicode_column_linestyle);
+    let _ = writeln!(out, "unicode_header_linestyle {}", pset.unicode_header_linestyle);
+    let _ = writeln!(out, "xheader_width            {}", pset.xheader_width);
     out
 }
 

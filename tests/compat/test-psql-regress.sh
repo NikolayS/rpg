@@ -166,7 +166,7 @@ readonly SKIP_ALWAYS=(
 normalize() {
   expand | \
   sed \
-    -e 's/\x1b\[[0-9;]*m//g' \
+    -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' \
     -e 's/[[:space:]]*$//' \
     -e '/^Time: [0-9]/d' \
     -e '/^Timing is /d' \

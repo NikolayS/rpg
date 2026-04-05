@@ -171,6 +171,9 @@ async fn run_and_print_full(
     show_row_count: bool,
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
+    use crate::output::{OutputFormat, format_rowset_pset};
+    use crate::query::{RowSet, ColumnMeta};
+
     if echo_hidden {
         eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
     }
@@ -208,7 +211,40 @@ async fn run_and_print_full(
                 }
             }
 
-            let text = format_table_inner(&col_names, &rows, title, show_row_count);
+            let fmt = &settings.pset.format;
+            // Use format_rowset_pset for HTML/non-aligned formats to respect pset settings.
+            // For aligned/wrapped (default), use the custom format_table_inner which handles
+            // centered titles and describe-specific formatting.
+            let text = if matches!(fmt, OutputFormat::Aligned | OutputFormat::Wrapped)
+                && !settings.pset.tuples_only
+                && settings.pset.expanded == crate::output::ExpandedMode::Off
+            {
+                format_table_inner(&col_names, &rows, title, show_row_count)
+            } else {
+                // Build a RowSet and use pset-aware formatting.
+                let columns: Vec<ColumnMeta> = col_names
+                    .iter()
+                    .map(|name| ColumnMeta {
+                        name: name.clone(),
+                        // Describe queries return text; nothing is numeric.
+                        is_numeric: false,
+                    })
+                    .collect();
+                let rs_rows: Vec<Vec<Option<String>>> = rows
+                    .iter()
+                    .map(|r| r.iter().map(|v| Some(v.clone())).collect())
+                    .collect();
+                let rs = RowSet { columns, rows: rs_rows };
+                // Apply title to pset config temporarily.
+                let mut cfg = settings.pset.clone();
+                if let Some(t) = title {
+                    cfg.title = Some(t.to_owned());
+                }
+                cfg.footer = show_row_count && settings.pset.footer;
+                let mut out = String::new();
+                format_rowset_pset(&mut out, &rs, &cfg);
+                out
+            };
             maybe_page(settings, &text);
         }
         Err(e) => {
@@ -677,7 +713,9 @@ async fn list_functions(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "p.proname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
+    // When a pattern is given, show all schemas (including pg_catalog) like psql.
+    // When no pattern and no -S flag, only show user schemas.
+    let sys_filter = if meta.system || meta.pattern.is_some() {
         String::new()
     } else {
         "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
