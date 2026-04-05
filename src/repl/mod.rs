@@ -1230,6 +1230,11 @@ pub struct ReplSettings {
     /// (`client.query`) with these values as positional parameters.  The
     /// field is cleared to `None` after each query execution.
     pub pending_bind_params: Option<Vec<String>>,
+    /// Inline pset options for the next `\g` / `\gx` execution.
+    ///
+    /// Set by `\g (option=value ...)` or `\gx (option=value ...)` and
+    /// consumed after the next query execution.
+    pub pending_pset_opts: Vec<(String, Option<String>)>,
     /// Named prepared statements stored by `\parse`.
     ///
     /// Maps statement name → compiled [`tokio_postgres::Statement`].
@@ -1618,6 +1623,7 @@ impl Default for ReplSettings {
             cond: crate::conditional::ConditionalState::default(),
             last_query: None,
             pending_bind_params: None,
+            pending_pset_opts: Vec::new(),
             named_statements: HashMap::new(),
             no_highlight: false,
             no_completion: false,
@@ -2180,11 +2186,28 @@ pub(crate) async fn exec_lines(
                     if !sql.is_empty() {
                         let saved_echo = settings.echo_all;
                         settings.echo_all = false;
+                        // Apply any inline pset options (e.g. \g (format=csv)).
+                        let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                            let saved = settings.pset.clone();
+                            let opts = std::mem::take(&mut settings.pending_pset_opts);
+                            let saved_quiet = settings.quiet;
+                            settings.quiet = true;
+                            for (opt, val) in &opts {
+                                apply_pset(settings, opt, val.as_deref());
+                            }
+                            settings.quiet = saved_quiet;
+                            Some(saved)
+                        } else {
+                            None
+                        };
                         let ok = if let Some(bp) = settings.pending_bind_params.take() {
                             execute_query_extended(client, &sql, &bp, settings, tx).await
                         } else {
                             execute_query(client, &sql, settings, tx).await
                         };
+                        if let Some(saved) = saved_pset {
+                            settings.pset = saved;
+                        }
                         settings.echo_all = saved_echo;
                         if !ok {
                             exit_code = 1;
@@ -2210,10 +2233,29 @@ pub(crate) async fn exec_lines(
                         settings.echo_all = false;
                         settings.expanded = ExpandedMode::On;
                         settings.pset.expanded = ExpandedMode::On;
+                        // Apply any inline pset options (e.g. \gx (title='foo')).
+                        let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                            let saved = settings.pset.clone();
+                            let opts = std::mem::take(&mut settings.pending_pset_opts);
+                            let saved_quiet = settings.quiet;
+                            settings.quiet = true;
+                            for (opt, val) in &opts {
+                                apply_pset(settings, opt, val.as_deref());
+                            }
+                            settings.quiet = saved_quiet;
+                            Some(saved)
+                        } else {
+                            None
+                        };
                         let ok = execute_query(client, &sql, settings, tx).await;
-                        settings.echo_all = saved_echo;
-                        settings.expanded = saved_expanded;
+                        if let Some(saved) = saved_pset {
+                            settings.pset = saved;
+                        }
+                        // Always restore expanded mode (pset may have been saved
+                        // after setting expanded=On, so override here).
                         settings.pset.expanded = saved_expanded;
+                        settings.expanded = saved_expanded;
+                        settings.echo_all = saved_echo;
                         if !ok {
                             exit_code = 1;
                             if settings.single_transaction {
@@ -2407,11 +2449,27 @@ pub(crate) async fn exec_lines(
                             prev_buf = sql.clone();
                             let saved_echo = settings.echo_all;
                             settings.echo_all = false;
+                            let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                                let saved = settings.pset.clone();
+                                let opts = std::mem::take(&mut settings.pending_pset_opts);
+                                let saved_quiet = settings.quiet;
+                                settings.quiet = true;
+                                for (opt, val) in &opts {
+                                    apply_pset(settings, opt, val.as_deref());
+                                }
+                                settings.quiet = saved_quiet;
+                                Some(saved)
+                            } else {
+                                None
+                            };
                             let ok = if let Some(bp) = settings.pending_bind_params.take() {
                                 execute_query_extended(client, &sql, &bp, settings, tx).await
                             } else {
                                 execute_query(client, &sql, settings, tx).await
                             };
+                            if let Some(saved) = saved_pset {
+                                settings.pset = saved;
+                            }
                             settings.echo_all = saved_echo;
                             if !ok {
                                 exit_code = 1;
@@ -2437,10 +2495,26 @@ pub(crate) async fn exec_lines(
                             settings.echo_all = false;
                             settings.expanded = ExpandedMode::On;
                             settings.pset.expanded = ExpandedMode::On;
+                            let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                                let saved = settings.pset.clone();
+                                let opts = std::mem::take(&mut settings.pending_pset_opts);
+                                let saved_quiet = settings.quiet;
+                                settings.quiet = true;
+                                for (opt, val) in &opts {
+                                    apply_pset(settings, opt, val.as_deref());
+                                }
+                                settings.quiet = saved_quiet;
+                                Some(saved)
+                            } else {
+                                None
+                            };
                             execute_query(client, &sql, settings, tx).await;
-                            settings.echo_all = saved_echo;
-                            settings.expanded = saved_expanded;
+                            if let Some(saved) = saved_pset {
+                                settings.pset = saved;
+                            }
                             settings.pset.expanded = saved_expanded;
+                            settings.expanded = saved_expanded;
+                            settings.echo_all = saved_echo;
                         }
                     }
                     MetaResult::GSet(prefix) => {
@@ -3544,6 +3618,70 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
     }
 }
 
+/// Parse inline pset options from `\g (key=value key2=value2 ...)` syntax.
+///
+/// Returns a list of `(option, value)` pairs.  Single-quoted values are
+/// unquoted.  Options without a value (e.g. `\gx (tuples_only)`) map to
+/// `None` for the value.
+fn parse_inline_pset_opts(s: &str) -> Vec<(String, Option<String>)> {
+    // Strip surrounding parens.
+    let inner = s.trim().trim_start_matches('(').trim_end_matches(')').trim();
+    let mut opts = Vec::new();
+    let mut rest = inner;
+    while !rest.is_empty() {
+        // Skip leading whitespace.
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        // Read option name (up to '=' or whitespace).
+        let name_end = rest
+            .find(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let name = rest[..name_end].to_owned();
+        rest = &rest[name_end..];
+        if rest.starts_with('=') {
+            rest = &rest[1..]; // consume '='
+            // Read value: single-quoted or unquoted.
+            if rest.starts_with('\'') {
+                // Single-quoted value.
+                rest = &rest[1..];
+                let mut val = String::new();
+                let mut end_pos = rest.len();
+                let bytes = rest.as_bytes();
+                let mut bi = 0;
+                while bi < bytes.len() {
+                    if bytes[bi] == b'\'' {
+                        if bi + 1 < bytes.len() && bytes[bi + 1] == b'\'' {
+                            val.push('\'');
+                            bi += 2;
+                        } else {
+                            end_pos = bi + 1;
+                            break;
+                        }
+                    } else {
+                        val.push(bytes[bi] as char);
+                        bi += 1;
+                    }
+                }
+                rest = &rest[end_pos..];
+                opts.push((name, Some(val)));
+            } else {
+                // Unquoted value: up to next whitespace or ')'.
+                let val_end = rest
+                    .find(|c: char| c.is_whitespace() || c == ')')
+                    .unwrap_or(rest.len());
+                let val = rest[..val_end].to_owned();
+                rest = &rest[val_end..];
+                opts.push((name, Some(val)));
+            }
+        } else if !name.is_empty() {
+            opts.push((name, None));
+        }
+    }
+    opts
+}
+
 /// Apply a `\pset` command.
 #[allow(clippy::too_many_lines)]
 fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
@@ -3609,6 +3747,13 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 println!("Field separator is \"{sep}\".");
             }
             settings.pset.field_sep = sep;
+        }
+        "csv_fieldsep" => {
+            let sep = unescape_echo(value.unwrap_or(","));
+            if !quiet {
+                println!("CSV field separator is \"{sep}\".");
+            }
+            settings.pset.csv_field_sep = sep;
         }
         "recordsep" => {
             let sep = value.unwrap_or("\n").to_owned();
@@ -4050,6 +4195,11 @@ pub(super) async fn dispatch_io(
             let result = match target.as_deref() {
                 None => MetaResult::ExecuteBuffer,
                 Some(t) if t.starts_with('|') => MetaResult::ExecuteBufferPiped(t.to_owned()),
+                Some(t) if t.starts_with('(') => {
+                    // Inline pset options: \g (format=csv csv_fieldsep='\t')
+                    settings.pending_pset_opts = parse_inline_pset_opts(t);
+                    MetaResult::ExecuteBuffer
+                }
                 Some(f) => MetaResult::ExecuteBufferToFile(f.to_owned()),
             };
             Some(result)
@@ -4057,6 +4207,11 @@ pub(super) async fn dispatch_io(
         MetaCmd::GoExecuteExpanded(ref target) => {
             let result = match target.as_deref() {
                 None => MetaResult::ExecuteBufferExpanded,
+                Some(t) if t.starts_with('(') => {
+                    // Inline pset options: \gx (title='foo bar')
+                    settings.pending_pset_opts = parse_inline_pset_opts(t);
+                    MetaResult::ExecuteBufferExpanded
+                }
                 Some(f) => MetaResult::ExecuteBufferExpandedToFile(f.to_owned()),
             };
             Some(result)

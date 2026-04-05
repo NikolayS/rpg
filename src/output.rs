@@ -119,6 +119,8 @@ pub struct PsetConfig {
     pub null_display: String,
     /// Field separator for unaligned output (default `|`).
     pub field_sep: String,
+    /// Field separator for CSV output (default `,`).
+    pub csv_field_sep: String,
     /// Record separator for unaligned output (default `\n`).
     pub record_sep: String,
     /// Suppress headers and footers.
@@ -140,6 +142,7 @@ impl Default for PsetConfig {
             border: 1,
             null_display: String::new(),
             field_sep: "|".to_owned(),
+            csv_field_sep: ",".to_owned(),
             record_sep: "\n".to_owned(),
             tuples_only: false,
             footer: true,
@@ -1276,31 +1279,37 @@ pub fn format_unaligned(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 pub fn format_csv(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;
+    let sep = &cfg.csv_field_sep;
 
     if !cfg.tuples_only {
-        let header: Vec<String> = cols.iter().map(|c| csv_field(&c.name)).collect();
-        out.push_str(&header.join(","));
+        let header: Vec<String> = cols.iter().map(|c| csv_field_sep(&c.name, sep)).collect();
+        out.push_str(&header.join(sep.as_str()));
         out.push('\n');
     }
 
     for row in rows {
         let cells: Vec<String> = row
             .iter()
-            .map(|v| csv_field(v.as_deref().unwrap_or(&cfg.null_display)))
+            .map(|v| csv_field_sep(v.as_deref().unwrap_or(&cfg.null_display), sep))
             .collect();
-        out.push_str(&cells.join(","));
+        out.push_str(&cells.join(sep.as_str()));
         out.push('\n');
     }
 }
 
-/// RFC 4180: wrap in double-quotes if the value contains `,`, `"`, `\n`, or `\r`.
-fn csv_field(val: &str) -> String {
-    if val.contains(',') || val.contains('"') || val.contains('\n') || val.contains('\r') {
+/// RFC 4180: wrap in double-quotes if the value contains the separator, `"`, `\n`, or `\r`.
+fn csv_field_sep(val: &str, sep: &str) -> String {
+    if val.contains(sep) || val.contains('"') || val.contains('\n') || val.contains('\r') {
         let escaped = val.replace('"', "\"\"");
         format!("\"{escaped}\"")
     } else {
         val.to_owned()
     }
+}
+
+/// RFC 4180: wrap in double-quotes if the value contains `,`, `"`, `\n`, or `\r`.
+fn csv_field(val: &str) -> String {
+    csv_field_sep(val, ",")
 }
 
 // ---------------------------------------------------------------------------
