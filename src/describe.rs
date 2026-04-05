@@ -2216,17 +2216,21 @@ async fn list_ext_statistics(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "s.stxname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
+    // Use pg_statistics_obj_is_visible (which respects search_path) when no
+    // schema qualifier is present in the pattern, matching psql behaviour.
+    // When a schema qualifier is given, the name_filter already constrains the
+    // schema column so we skip the visibility filter (also matching psql).
+    let visibility_filter = if !name_filter.contains("n.nspname") {
+        "pg_catalog.pg_statistics_obj_is_visible(s.oid)"
     } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        ""
     };
 
     let where_parts: Vec<&str> = [
-        if sys_filter.is_empty() {
+        if visibility_filter.is_empty() {
             None
         } else {
-            Some(sys_filter.as_str())
+            Some(visibility_filter)
         },
         if name_filter.is_empty() {
             None

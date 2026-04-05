@@ -1649,16 +1649,26 @@ pub(super) fn is_no_tx_statement(sql: &str) -> bool {
     }
 }
 
-/// Return `true` when `sql` contains multiple statements and at least one of
-/// them is a no-transaction statement (see [`is_no_tx_statement`]).
+/// Return `true` when `sql` contains multiple statements that should be sent
+/// individually rather than as a single multi-statement simple-query batch.
 ///
-/// In that case `execute_query` must split the batch and send each statement
-/// individually so that `PostgreSQL`'s implicit-transaction wrapping of
-/// multi-statement simple-query strings does not cause
-/// `ERROR: … cannot run inside a transaction block`.
+/// PostgreSQL's simple-query protocol wraps multi-statement batches in an
+/// implicit transaction.  When a statement inside the batch fails, the server
+/// enters an aborted-transaction state and subsequent statements in the batch
+/// receive "current transaction is aborted" errors.  Even a trailing `COMMIT`
+/// does **not** roll back the aborted transaction in this context — it also
+/// errors, leaving the connection in the aborted state.
+///
+/// psql (in stdin / file mode) avoids this by sending each `;`-terminated
+/// statement as a separate simple query, not as one combined batch.  We match
+/// that behaviour here by always splitting when there are multiple statements.
+///
+/// The sole exception is when `exec_verbatim` is set (e.g. for `\;`-combined
+/// batches): in that case the caller explicitly requested batch semantics and
+/// we honour it.
 pub(super) fn needs_split_execution(sql: &str) -> bool {
     let stmts = crate::query::split_statements(sql);
-    stmts.len() > 1 && stmts.iter().any(|s| is_no_tx_statement(s))
+    stmts.len() > 1
 }
 
 // ---------------------------------------------------------------------------
@@ -2444,9 +2454,9 @@ mod tests {
     }
 
     #[test]
-    fn split_not_needed_two_regular_stmts() {
-        // Two normal statements: no split needed (server handles them fine).
-        assert!(!needs_split_execution("SELECT 1; SELECT 2"));
+    fn split_needed_two_regular_stmts() {
+        // Two statements always need split to avoid aborted-transaction bleeding.
+        assert!(needs_split_execution("SELECT 1; SELECT 2"));
     }
 
     #[test]
