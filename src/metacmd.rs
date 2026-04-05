@@ -100,6 +100,10 @@ pub enum MetaCmd {
     /// the name is given (displays the variable); `("", "")` when bare (lists
     /// all variables).
     Set(String, String),
+    /// `\getenv varname ENVVAR` — set psql variable from environment variable.
+    ///
+    /// Payload: `(var_name, env_var_name)`.
+    GetEnv(String, String),
     /// `\unset name` — unset a variable.
     Unset(String),
     /// `\prompt [text] name` — prompt the user for input and store in a variable.
@@ -696,10 +700,16 @@ fn parse_set(input: &str) -> ParsedMeta {
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("").to_owned();
     let raw_value = parts.next().map_or("", str::trim);
+    // In psql, `\\` on a meta-command line acts as a command separator.
+    // Stop collecting value tokens when we encounter `\\`.
     let value = if raw_value.is_empty() {
         String::new()
     } else {
-        split_params(raw_value).concat()
+        split_params(raw_value)
+            .into_iter()
+            .take_while(|t| t != "\\\\")
+            .collect::<Vec<_>>()
+            .concat()
     };
     ParsedMeta::simple(MetaCmd::Set(name, value))
 }
@@ -991,7 +1001,10 @@ fn parse_c_family(input: &str) -> ParsedMeta {
     // `\copy args` — client-side COPY.  Must be checked before bare `\c`.
     if let Some(rest) = input.strip_prefix("copy") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ParsedMeta::simple(MetaCmd::Copy(rest.trim().to_owned()));
+            // Strip trailing semicolon (psql treats ';' as command terminator,
+            // not part of the args — prevents "stdout;" being parsed as filename).
+            let args = rest.trim().trim_end_matches(';').trim_end();
+            return ParsedMeta::simple(MetaCmd::Copy(args.to_owned()));
         }
     }
     // `\close_prepared stmt_name` — deallocate a named prepared statement.
@@ -1776,6 +1789,16 @@ fn parse_g_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("gexec") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return ParsedMeta::simple(MetaCmd::GExec);
+        }
+    }
+
+    // `\getenv varname ENVVAR` — read an OS environment variable into a psql variable.
+    if let Some(rest) = input.strip_prefix("getenv") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let args: Vec<&str> = rest.split_whitespace().collect();
+            let var_name = args.first().map(|s| (*s).to_owned()).unwrap_or_default();
+            let env_name = args.get(1).map(|s| (*s).to_owned()).unwrap_or_default();
+            return ParsedMeta::simple(MetaCmd::GetEnv(var_name, env_name));
         }
     }
 

@@ -110,6 +110,15 @@ impl ConditionalState {
         self.stack.len()
     }
 
+    /// Discard all open blocks, resetting to the unconstrained state.
+    ///
+    /// Used when `\quit` fires inside a conditional block: psql does not
+    /// emit "unterminated \\if" warnings when the script exits via `\quit`.
+    pub fn reset(&mut self) {
+        self.stack.clear();
+        self.error_depth = 0;
+    }
+
     /// Return `true` when at least one currently-open block was opened with
     /// an invalid boolean expression (psql error-conditional mode).
     ///

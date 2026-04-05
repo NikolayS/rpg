@@ -1994,6 +1994,14 @@ pub(crate) async fn exec_lines(
                         execute_gexec(client, &sql, settings, tx).await;
                     }
                 }
+                MetaResult::GSet(prefix) => {
+                    let sql = buf.trim().to_owned();
+                    buf.clear();
+                    if !sql.is_empty() {
+                        execute_gset(client, &sql, prefix.as_deref(), settings, tx)
+                            .await;
+                    }
+                }
                 MetaResult::DescribeBuffer => {
                     // Buffer is NOT cleared after \gdesc.
                     describe_buffer(client, buf.trim(), settings.verbose_errors).await;
@@ -2056,6 +2064,13 @@ pub(crate) async fn exec_lines(
                              \"{name}\" does not exist"
                         );
                     }
+                }
+                MetaResult::Quit => {
+                    // Reset cond depth so callers don't emit a spurious
+                    // "unterminated \\if block" warning — psql does not warn
+                    // when \\quit is used to exit early from within an \\if.
+                    settings.cond.reset();
+                    break 'lines;
                 }
                 _ => {}
             }
@@ -2204,12 +2219,19 @@ pub(crate) async fn exec_lines(
                             continue 'segs;
                         }
 
-                        // COPY … FROM STDIN: collect the inline data block (lines
-                        // until a bare `\.`) and execute via the copy protocol,
-                        // matching psql behaviour in -f / non-interactive mode.
+                        // COPY … FROM STDIN: first try the COPY command; only
+                        // consume the inline data block (lines until `\.`) when
+                        // the server actually enters copy mode.  If the server
+                        // rejects the command before copy mode (e.g. invalid
+                        // option), leave remaining lines in the iterator so
+                        // psql treats them as regular SQL — matching psql
+                        // behaviour in -f / non-interactive mode.
                         if is_copy_from_stdin(sql_to_exec) {
-                            // Normalize: psql treats "FROM STDOUT" like "FROM STDIN"
-                            // for inline data; the server only understands FROM STDIN.
+                            use futures::SinkExt as _;
+
+                            // Normalize: psql treats "FROM STDOUT" like "FROM
+                            // STDIN" for inline data; the server only understands
+                            // FROM STDIN.
                             let sql_owned = {
                                 let upper = sql_to_exec.to_uppercase();
                                 if let Some(pos) = upper.find("FROM STDOUT") {
@@ -2221,28 +2243,94 @@ pub(crate) async fn exec_lines(
                                 }
                             };
                             buf.clear();
-                            let mut copy_data = Vec::<String>::new();
-                            while let Some(dl) = lines.next() {
-                                // psql does NOT echo inline COPY data lines even
-                                // with --echo-all; only the SQL statement itself
-                                // is echoed (already done above).
-                                if dl.trim() == "\\." {
-                                    break;
+
+                            // Try the COPY command.  copy_in() uses the
+                            // extended-query protocol: prepare → bind →
+                            // execute.  If the server rejects the COPY before
+                            // entering copy mode the protocol state may be
+                            // left inconsistent (CopyFail sent when not in
+                            // copy mode).  Resync with batch_execute("") after
+                            // any copy_in failure to drain pending responses
+                            // and restore a clean protocol state before the
+                            // next query.  We do NOT consume any data lines on
+                            // failure — they remain in the iterator for the
+                            // outer loop to process as regular SQL.
+                            match client.copy_in(&sql_owned).await {
+                                Err(e) => {
+                                    crate::output::eprint_db_error(
+                                        &e,
+                                        Some(&sql_owned),
+                                        settings.verbose_errors,
+                                        settings.terse_errors,
+                                        settings.sqlstate_errors,
+                                    );
+                                    exit_code = 1;
+                                    if settings.single_transaction {
+                                        should_break = true;
+                                        break 'segs;
+                                    }
                                 }
-                                copy_data.push(dl);
-                            }
-                            let ok = execute_inline_copy_from(
-                                client,
-                                &sql_owned,
-                                &copy_data,
-                                settings,
-                            )
-                            .await;
-                            if !ok {
-                                exit_code = 1;
-                                if settings.single_transaction {
-                                    should_break = true;
-                                    break 'segs;
+                                Ok(mut sink_val) => {
+                                    // Server entered copy mode — now read the
+                                    // data lines.  psql does NOT echo them even
+                                    // with --echo-all.
+                                    let mut copy_data = Vec::<String>::new();
+                                    while let Some(dl) = lines.next() {
+                                        if dl.trim() == "\\." {
+                                            break;
+                                        }
+                                        copy_data.push(dl);
+                                    }
+
+                                    let mut payload = copy_data.join("\n");
+                                    if !payload.is_empty() {
+                                        payload.push('\n');
+                                    }
+
+                                    tokio::pin!(sink_val);
+                                    let send_ok = sink_val
+                                        .send(bytes::Bytes::from(payload.into_bytes()))
+                                        .await;
+                                    if let Err(e) = send_ok {
+                                        crate::output::eprint_db_error(
+                                            &e,
+                                            Some(&sql_owned),
+                                            settings.verbose_errors,
+                                            settings.terse_errors,
+                                            settings.sqlstate_errors,
+                                        );
+                                        exit_code = 1;
+                                        if settings.single_transaction {
+                                            should_break = true;
+                                            break 'segs;
+                                        }
+                                    } else {
+                                        match sink_val.finish().await {
+                                            Ok(rows) => {
+                                                if !settings.quiet {
+                                                    if let Some(ref mut w) = settings.output_target {
+                                                        let _ = writeln!(w, "COPY {rows}");
+                                                    } else {
+                                                        println!("COPY {rows}");
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                crate::output::eprint_db_error(
+                                                    &e,
+                                                    Some(&sql_owned),
+                                                    settings.verbose_errors,
+                                                    settings.terse_errors,
+                                                    settings.sqlstate_errors,
+                                                );
+                                                exit_code = 1;
+                                                if settings.single_transaction {
+                                                    should_break = true;
+                                                    break 'segs;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             continue 'segs;
@@ -2720,6 +2808,7 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         settings.verbose_errors = value == "verbose";
         settings.terse_errors = value == "terse";
         settings.sqlstate_errors = value == "sqlstate";
+        crate::output::set_terse_notices(settings.terse_errors);
     }
     // Mirror EXPLAIN into auto_explain.
     if name == "EXPLAIN" {
@@ -4033,7 +4122,7 @@ async fn dispatch_meta(
                     eprintln!("{e}");
                 }
             } else {
-                eprintln!("Invalid command \\{name}. Try \\? for help.");
+                eprintln!("error: invalid command \\{name}");
             }
         }
         MetaCmd::SqlHelp => match crate::session::sql_help_text(parsed.pattern.as_deref()) {
@@ -4132,6 +4221,17 @@ async fn dispatch_meta(
         // Variable commands (issue #32).
         MetaCmd::Set(ref name, ref value) => {
             apply_set(settings, name, value);
+        }
+        MetaCmd::GetEnv(ref var_name, ref env_name) => {
+            // \getenv varname ENVVAR — set psql variable from OS environment.
+            // psql only sets the variable when the env var exists; if the env
+            // var is not defined, the psql variable is left unchanged (unset or
+            // preserving its current value).
+            if !var_name.is_empty() {
+                if let Ok(val) = std::env::var(env_name) {
+                    settings.vars.set(var_name, &val);
+                }
+            }
         }
         MetaCmd::Unset(ref name) => {
             apply_unset(settings, name);
@@ -4830,6 +4930,15 @@ pub async fn run_repl(
     // Populate audit connection context from the resolved params.
     settings.audit_dbname = params.dbname.clone();
     settings.audit_user = params.user.clone();
+
+    // Set psql-compatible built-in connection variables.
+    // These allow SQL scripts to use :'DBNAME', :'USER', etc.
+    settings.vars.set("DBNAME", &params.dbname);
+    settings.vars.set("USER", &params.user);
+    if !params.host.is_empty() {
+        settings.vars.set("HOST", &params.host);
+    }
+    settings.vars.set("PORT", &params.port.to_string());
 
     // Load custom Lua commands now that we know the database name.
     settings.lua_registry = crate::lua_commands::LuaRegistry::load(&params.dbname);

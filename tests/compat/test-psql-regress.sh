@@ -45,8 +45,10 @@ export PGPASSWORD="${PGPASSWORD:-postgres}"
 # then for each test clone it quickly into psql_test and rpg_test, run
 # each client against its own copy, and drop them afterwards.
 REGRESS_TEMPLATE_DB="${PGDATABASE}_regress_tmpl"
+# Use equal-length suffixes so that "table_catalog" column widths are
+# identical in both outputs (prevents spurious diffs in info-schema queries).
 PSQL_DBNAME="${PGDATABASE}_psql_regress"
-RPG_DBNAME="${PGDATABASE}_rpg_regress"
+RPG_DBNAME="${PGDATABASE}_rpg__regress"
 
 _psql_admin() {
   PAGER=cat psql \
@@ -170,7 +172,7 @@ normalize() {
     -e '/^\\if /d' \
     -e '/^\\endif/d' \
     -e 's/_psql_regress/_test_regress/g' \
-    -e 's/_rpg_regress/_test_regress/g' \
+    -e 's/_rpg__regress/_test_regress/g' \
     -e '/^CONTEXT:  /d' \
     -e '/^SQL function "[^"]*" statement /d' \
     -e '/^PL\/pgSQL function "[^"]*" /d' \

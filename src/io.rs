@@ -135,7 +135,17 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
                 .create(true)
                 .truncate(true)
                 .open(p)
-                .map_err(|e| format!("\\o: could not open \"{p}\": {e}"))?;
+                .map_err(|e| {
+                    // Match psql error format: "error: <path>: <strerror>"
+                    // Strip the " (os error N)" suffix that Rust appends.
+                    let msg = e.to_string();
+                    let msg = if let Some(pos) = msg.rfind(" (os error ") {
+                        &msg[..pos]
+                    } else {
+                        &msg
+                    };
+                    format!("error: {p}: {msg}")
+                })?;
             // Wrap in BufWriter so that large result sets are written in
             // batches rather than one syscall per write_all call.
             Ok(Some(Box::new(std::io::BufWriter::new(file))))

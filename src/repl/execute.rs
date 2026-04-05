@@ -12,6 +12,43 @@ use super::*;
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
 
+/// PostgreSQL built-in numeric type OIDs (typcategory = 'N' in pg_type).
+/// These are the fixed OIDs assigned to numeric base types in the PostgreSQL
+/// source; they never change across versions.
+const NUMERIC_TYPE_OIDS: &[u32] = &[
+    20,   // int8
+    21,   // int2
+    23,   // int4
+    700,  // float4
+    701,  // float8
+    790,  // money
+    1700, // numeric
+];
+
+/// Classify a column as numeric based on its PostgreSQL type OID.
+///
+/// Returns `Some(true)` for built-in numeric types, `Some(false)` for
+/// user-defined types (OID ≥ 16384, matching PostgreSQL's `FirstNormalObjectId`
+/// threshold — psql defaults these to text/left-aligned), and `None` when the
+/// OID is 0 (unknown) or a built-in non-numeric type (fall back to value
+/// heuristic).
+fn classify_numeric_by_oid(oid: u32) -> Option<bool> {
+    if oid == 0 {
+        return None; // OID unknown — use value heuristic
+    }
+    if NUMERIC_TYPE_OIDS.contains(&oid) {
+        return Some(true);
+    }
+    if oid >= 16384 {
+        // User-defined / extension type.  PostgreSQL assigns OIDs ≥ 16384
+        // (`FirstNormalObjectId`) to all user-created objects.  psql defaults
+        // unknown types to left-aligned (text category), so we do the same.
+        return Some(false);
+    }
+    // Built-in non-numeric type: fall through to value heuristic.
+    None
+}
+
 /// Infer whether a result-set column should be right-aligned (numeric).
 ///
 /// Returns `true` when every non-NULL, non-empty cell parses as `f64` AND
@@ -23,14 +60,20 @@ use super::*;
 /// - Value starts with `+` — indicates `to_char()`-formatted text output
 ///   (e.g. `+456`); raw integer/float columns never emit a leading `+`.
 ///
-/// Note: the simple query protocol carries no type OIDs, so this is a
-/// best-effort heuristic.  Accurate alignment requires the extended query
-/// protocol (issue #21).
+/// When `type_oid` is non-zero it is consulted first; user-defined types
+/// (OID ≥ 16384) are always treated as non-numeric.  Built-in numeric types
+/// (int2/int4/int8/float4/float8/numeric/money) are always numeric.
+/// For all other non-zero OIDs the value heuristic is applied.
 fn infer_numeric_column(
     col_idx: usize,
     name: &str,
     rows: &[Vec<Option<String>>],
+    type_oid: u32,
 ) -> bool {
+    // OID-based classification takes priority when available.
+    if let Some(is_num) = classify_numeric_by_oid(type_oid) {
+        return is_num;
+    }
     // Column-name heuristics: certain names always indicate text, not numbers.
     let name_lc = name.to_lowercase();
     // Names ending with _code → identifier/code columns (e.g. sql_error_code).
@@ -120,6 +163,12 @@ fn infer_numeric_column(
                 {
                     return false;
                 }
+                // PostgreSQL numeric NaN: always "NaN" (exactly).
+                // Rust's f64 parser does not accept "NaN" on all platforms,
+                // so check explicitly before falling through to parse::<f64>.
+                if val == "NaN" {
+                    return true;
+                }
                 // PostgreSQL money format: '$N.NN' or '-$N.NN'.
                 // Strip the currency prefix before testing parseability.
                 let numeric_part = if let Some(rest) = val.strip_prefix("$") {
@@ -129,6 +178,11 @@ fn infer_numeric_column(
                 } else {
                     val
                 };
+                // Also accept "Infinity"/"-Infinity" (capital I) which
+                // PostgreSQL uses for numeric/float types.
+                if numeric_part == "Infinity" || numeric_part == "-Infinity" {
+                    return true;
+                }
                 numeric_part.parse::<f64>().is_ok()
             }
         }
@@ -137,24 +191,17 @@ fn infer_numeric_column(
         return false;
     }
 
-    // Infinity guard: "infinity"/"-infinity" appears in both float8 columns
-    // (right-aligned) and timestamp columns (left-aligned).  When a column
-    // contains ONLY infinity/-infinity values (no other numeric literals),
-    // we cannot determine the type without OIDs.  Such columns are treated as
-    // non-numeric (timestamp-like), which is the safer choice since float8
-    // columns with only infinity are very rare in practice.
-    // Note: NaN is unambiguously numeric (it never appears in timestamp
-    // columns), so it is NOT included in this guard.
-    let all_infinity = rows.iter().all(|row| {
+    // Infinity guard: lowercase "infinity"/"−infinity" appears in timestamp
+    // columns (left-aligned in psql) but NOT in numeric/float columns (which
+    // always use capital "Infinity"/"-Infinity").  Only suppress numeric
+    // inference for the lowercase variant; capital-I Infinity is unambiguous.
+    let all_lowercase_infinity = rows.iter().all(|row| {
         match row.get(col_idx).and_then(|v| v.as_deref()) {
             None | Some("") => true,
-            Some(v) => {
-                v.eq_ignore_ascii_case("infinity")
-                    || v.eq_ignore_ascii_case("-infinity")
-            }
+            Some(v) => v == "infinity" || v == "-infinity",
         }
     });
-    if all_infinity {
+    if all_lowercase_infinity {
         return false;
     }
 
@@ -224,6 +271,7 @@ fn infer_numeric_column(
 pub(super) fn print_result_set_pset(
     writer: &mut dyn io::Write,
     col_names: &[String],
+    col_oids: &[u32],
     rows: &[Vec<Option<String>>],
     is_select: bool,
     rows_affected: u64,
@@ -258,7 +306,12 @@ pub(super) fn print_result_set_pset(
             .enumerate()
             .map(|(col_idx, n)| ColumnMeta {
                 name: n.clone(),
-                is_numeric: !is_show && infer_numeric_column(col_idx, n, rows),
+                is_numeric: !is_show && infer_numeric_column(
+                    col_idx,
+                    n,
+                    rows,
+                    col_oids.get(col_idx).copied().unwrap_or(0),
+                ),
             })
             .collect();
 
@@ -443,6 +496,7 @@ pub async fn execute_query(
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
+            let mut col_oids: Vec<u32> = Vec::new();
             let mut rows: Vec<Vec<Option<String>>> = Vec::new();
             // `is_select` is set to true when we receive a RowDescription
             // message (or any Row message).  This distinguishes an empty
@@ -459,6 +513,7 @@ pub async fn execute_query(
                         is_select = true;
                         if col_names.is_empty() {
                             col_names = cols.iter().map(|c| c.name().to_owned()).collect();
+                            col_oids = cols.iter().map(|c| c.type_oid()).collect();
                         }
                     }
                     SimpleQueryMessage::Row(row) => {
@@ -470,6 +525,9 @@ pub async fn execute_query(
                                         .get(i)
                                         .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
                                 })
+                                .collect();
+                            col_oids = (0..row.len())
+                                .map(|i| row.columns().get(i).map_or(0, |c| c.type_oid()))
                                 .collect();
                         }
                         let vals: Vec<Option<String>> = (0..row.len())
@@ -511,6 +569,7 @@ pub async fn execute_query(
                         print_result_set_pset(
                             &mut out_buf,
                             &col_names,
+                            &col_oids,
                             &rows,
                             is_select,
                             n,
@@ -539,6 +598,7 @@ pub async fn execute_query(
 
                         result_set_index += 1;
                         col_names.clear();
+                        col_oids.clear();
                         rows.clear();
                         is_select = false;
                     }
@@ -766,6 +826,9 @@ pub async fn execute_query_extended(
                 let col_names: Vec<String> =
                     stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
+                let col_oids: Vec<u32> =
+                    stmt.columns().iter().map(|c| c.type_().oid()).collect();
+
                 let row_data: Vec<Vec<Option<String>>> = rows
                     .iter()
                     .map(|row| {
@@ -780,7 +843,12 @@ pub async fn execute_query_extended(
                     .enumerate()
                     .map(|(col_idx, n)| ColumnMeta {
                         name: n.clone(),
-                        is_numeric: infer_numeric_column(col_idx, n, &row_data),
+                        is_numeric: infer_numeric_column(
+                            col_idx,
+                            n,
+                            &row_data,
+                            col_oids.get(col_idx).copied().unwrap_or(0),
+                        ),
                     })
                     .collect();
 
@@ -929,6 +997,9 @@ pub(super) async fn execute_named_stmt(
                 let col_names: Vec<String> =
                     stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
+                let col_oids: Vec<u32> =
+                    stmt.columns().iter().map(|c| c.type_().oid()).collect();
+
                 let row_data: Vec<Vec<Option<String>>> = rows
                     .iter()
                     .map(|row| {
@@ -943,7 +1014,12 @@ pub(super) async fn execute_named_stmt(
                     .enumerate()
                     .map(|(col_idx, n)| ColumnMeta {
                         name: n.clone(),
-                        is_numeric: infer_numeric_column(col_idx, n, &row_data),
+                        is_numeric: infer_numeric_column(
+                            col_idx,
+                            n,
+                            &row_data,
+                            col_oids.get(col_idx).copied().unwrap_or(0),
+                        ),
                     })
                     .collect();
 
@@ -2261,6 +2337,7 @@ mod tests {
         print_result_set_pset(
             &mut buf,
             &[],       // zero column names
+            &[],       // zero type OIDs
             &[vec![]], // one row, no cells
             true,      // is_select
             1,         // rows_affected (not used for SELECT)
@@ -2282,6 +2359,7 @@ mod tests {
         print_result_set_pset(
             &mut buf,
             &[], // zero column names
+            &[], // zero type OIDs
             &[], // zero rows
             true,
             0,
@@ -2302,6 +2380,7 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         print_result_set_pset(
             &mut buf,
+            &[],
             &[],
             &[vec![]],
             true,
@@ -2326,6 +2405,7 @@ mod tests {
             &mut buf,
             &[],
             &[],
+            &[],
             false, // not a SELECT
             0,     // DDL always has rows_affected=0
             "CREATE TABLE foo (id int)",
@@ -2347,6 +2427,7 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         print_result_set_pset(
             &mut buf,
+            &[],
             &[],
             &[],
             false,

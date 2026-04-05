@@ -8,11 +8,23 @@
 //! - Timing footer (`Time: X.XXX ms`)
 
 use std::fmt::Write as FmtWrite;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult};
+
+/// Global terse-errors flag, mirroring `\set VERBOSITY terse`.
+/// Set by the REPL when VERBOSITY changes; read by the notice handler
+/// in the connection task (which has no access to `Settings`).
+static TERSE_NOTICES: AtomicBool = AtomicBool::new(false);
+
+/// Update the global terse-notice flag.  Call this whenever
+/// `settings.terse_errors` changes.
+pub fn set_terse_notices(terse: bool) {
+    TERSE_NOTICES.store(terse, Ordering::Relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // ExpandedMode (shared between output, repl, and metacmd)
@@ -834,11 +846,14 @@ pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: 
 pub fn format_pg_notice(notice: &tokio_postgres::error::DbError) -> String {
     let colored = color_severity(notice.severity());
     let mut out = format!("{colored}:  {}\n", notice.message());
-    if let Some(detail) = notice.detail() {
-        let _ = writeln!(out, "DETAIL:  {detail}");
-    }
-    if let Some(hint) = notice.hint() {
-        let _ = writeln!(out, "HINT:  {hint}");
+    let terse = TERSE_NOTICES.load(Ordering::Relaxed);
+    if !terse {
+        if let Some(detail) = notice.detail() {
+            let _ = writeln!(out, "DETAIL:  {detail}");
+        }
+        if let Some(hint) = notice.hint() {
+            let _ = writeln!(out, "HINT:  {hint}");
+        }
     }
     out
 }
