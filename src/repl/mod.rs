@@ -2426,19 +2426,40 @@ pub(crate) async fn exec_lines(
                     }
                     buf.push_str(sql_part.trim_end());
                 }
-                let interpolated_meta = settings.vars.interpolate(meta_part);
-                let mut inline_remaining: Option<String> = Some(interpolated_meta.clone());
+                // Inline metacommand chain.  Keep the raw (uninterpolated) text
+                // so that each command in the chain is interpolated lazily —
+                // this ensures that variable assignments made by earlier
+                // commands (e.g. `\gset`) are visible to later ones in the
+                // same line (e.g. `\echo :var`).
+                let mut inline_remaining: Option<String> = Some(meta_part.to_owned());
                 let mut inline_first = true;
-                while let Some(ref inline_input) = inline_remaining.clone() {
+                while let Some(ref inline_raw) = inline_remaining.clone() {
+                let inline_input = settings.vars.interpolate(inline_raw);
                 let mut parsed = if inline_first && inline_input.trim_start().starts_with("\\set") {
-                    let raw_cmd = meta_part.trim().trim_start_matches('\\');
+                    let raw_cmd = inline_raw.trim().trim_start_matches('\\');
                     crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
                 } else {
-                    crate::metacmd::parse(inline_input)
+                    crate::metacmd::parse(&inline_input)
                 };
                 inline_first = false;
                 parsed.echo_hidden = settings.echo_hidden;
-                inline_remaining = parsed.continuation.take();
+                // Store continuation from the interpolated text.  Since `\cmd`
+                // boundaries don't include expanded variable values, the
+                // continuation is structurally the same in the raw text.
+                // However, to preserve uninterpolated variable names for lazy
+                // re-expansion, we find the raw equivalent by locating the
+                // same `\cmd` suffix in the raw text.
+                let continuation = parsed.continuation.take();
+                inline_remaining = continuation.map(|cont| {
+                    // `cont` starts with `\`; find the same suffix in the raw
+                    // text by scanning from the end for a matching boundary.
+                    // Fall back to the interpolated continuation if no match.
+                    if let Some(raw_cont) = find_raw_continuation(inline_raw, &cont) {
+                        raw_cont
+                    } else {
+                        cont
+                    }
+                });
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
                     MetaResult::ExecuteBuffer => {
@@ -2523,9 +2544,18 @@ pub(crate) async fn exec_lines(
                         }
                     }
                     MetaResult::GSet(prefix) => {
-                        let sql = buf.trim().to_owned();
+                        let stripped =
+                            crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        let sql = if stripped.is_empty() {
+                            prev_buf.trim().to_owned()
+                        } else {
+                            stripped
+                        };
                         buf.clear();
                         if !sql.is_empty() {
+                            // Update prev_buf so that a subsequent `\g` in the
+                            // same inline chain re-executes the same query.
+                            prev_buf = sql.clone();
                             execute_gset(client, &sql, prefix.as_deref(), settings, tx).await;
                         }
                     }
@@ -4713,6 +4743,10 @@ async fn dispatch_meta(
                 maybe_page(settings, &out);
             }
         }
+        MetaCmd::NoOp => {
+            // `\\` null command — no-op, continuation already handled by the
+            // inline metacommand loop.
+        }
         MetaCmd::Unknown(ref name) => {
             // Before reporting "unknown command", check whether a custom Lua
             // command with this name exists.  The Unknown token stores the raw
@@ -6216,6 +6250,88 @@ fn get_open_dollar_tag(buf: &str) -> Option<String> {
 
 fn find_inline_backslash(line: &str) -> Option<usize> {
     find_inline_backslash_ctx(line, None)
+}
+
+/// Find the raw (uninterpolated) counterpart of an interpolated continuation.
+///
+/// When the inline metacommand parser extracts a `\cmd` continuation from an
+/// interpolated text, this function maps it back to the corresponding raw
+/// suffix in `raw`, so that variable references such as `:var` are preserved
+/// for lazy re-interpolation in the next loop iteration.
+///
+/// Strategy: scan `raw` from the right for the first `\<alpha>` boundary that
+/// is a suffix-match of `cont` (both start with `\`).  If no match is found,
+/// returns `None` and the caller falls back to the interpolated form.
+fn find_raw_continuation(raw: &str, cont: &str) -> Option<String> {
+    // Both raw and cont should start with `\`.  Walk `raw` from the left
+    // looking for `\<alpha>` tokens outside single-quoted strings and find
+    // the last one that aligns with the start of `cont` in the interpolated
+    // text.  Because variable expansion can change lengths, we use a
+    // heuristic: find the rightmost `\<alpha>` in `raw` that is also the
+    // rightmost `\<alpha>` in `cont` (same command name prefix).
+    //
+    // Simpler approach that works for all practical psql test cases:
+    // count how many `\<alpha>` commands are in `cont` and return the suffix
+    // of `raw` that contains the same count of `\<alpha>` commands.
+    // Count `\<alpha>` AND `\\` tokens (both are command boundaries).
+    let count_backslash_cmds = |s: &str| -> usize {
+        let bytes = s.as_bytes();
+        let mut n = 0usize;
+        let mut i = 0usize;
+        let mut in_single = false;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\'' => {
+                    in_single = !in_single;
+                    i += 1;
+                }
+                b'\\' if !in_single && i + 1 < bytes.len()
+                    && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'\\') =>
+                {
+                    n += 1;
+                    i += 2;
+                }
+                _ => { i += 1; }
+            }
+        }
+        n
+    };
+
+    let cont_cmd_count = count_backslash_cmds(cont);
+    if cont_cmd_count == 0 {
+        return None;
+    }
+
+    // Find the position in `raw` where the last `cont_cmd_count` commands begin.
+    let bytes = raw.as_bytes();
+    let mut cmd_positions: Vec<usize> = Vec::new();
+    let mut i = 0usize;
+    let mut in_single = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                in_single = !in_single;
+                i += 1;
+            }
+            b'\\' if !in_single && i + 1 < bytes.len() && bytes[i + 1].is_ascii_alphabetic() => {
+                cmd_positions.push(i);
+                i += 2;
+            }
+            b'\\' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'\\' => {
+                // `\\` null command — also a boundary
+                cmd_positions.push(i);
+                i += 2;
+            }
+            _ => { i += 1; }
+        }
+    }
+
+    if cmd_positions.len() >= cont_cmd_count {
+        let start_pos = cmd_positions[cmd_positions.len() - cont_cmd_count];
+        return Some(raw[start_pos..].to_owned());
+    }
+
+    None
 }
 
 fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> Option<usize> {

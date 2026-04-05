@@ -395,6 +395,13 @@ pub enum MetaCmd {
     /// argument string (filename or pattern).
     History(Option<String>),
 
+    // -- Null command -----------------------------------------------------
+    /// `\\` — null command / inline separator (no-op in psql).
+    ///
+    /// In psql, `\\` on an inline command chain acts as a separator with no
+    /// side effects.  Any following `\cmd` text is set as `continuation`.
+    NoOp,
+
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -515,7 +522,23 @@ impl ParsedMeta {
 /// `input` may or may not include the leading `\`.  Surrounding whitespace is
 /// trimmed before parsing.
 pub fn parse(input: &str) -> ParsedMeta {
-    let input = input.trim().trim_start_matches('\\');
+    let trimmed = input.trim();
+
+    // `\\` — null command / inline separator.
+    // Matches `\\` possibly followed by more metacommands.  Everything
+    // after the `\\` (and leading whitespace) is returned as continuation.
+    if trimmed.starts_with("\\\\") {
+        let after = trimmed[2..].trim_start();
+        let mut m = ParsedMeta::simple(MetaCmd::NoOp);
+        m.continuation = if after.is_empty() {
+            None
+        } else {
+            Some(after.to_owned())
+        };
+        return m;
+    }
+
+    let input = trimmed.trim_start_matches('\\');
 
     if input.is_empty() {
         return ParsedMeta::simple(MetaCmd::Unknown(String::new()));
@@ -1499,20 +1522,36 @@ fn parse_e_family(input: &str) -> ParsedMeta {
     // `\echo [text]` — must come before bare `\e`.
     if let Some(rest) = input.strip_prefix("echo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let text = rest.trim();
-            return ParsedMeta {
+            let raw = rest.trim();
+            // Stop at the next `\<alpha>` continuation command.
+            let (tokens, cont) = split_params_with_continuation(raw);
+            let text = tokens.join(" ");
+            let mut m = ParsedMeta {
                 cmd: MetaCmd::Echo,
                 plus: false,
                 system: false,
-                pattern: if text.is_empty() {
-                    None
-                } else {
-                    Some(text.to_owned())
-                },
+                pattern: if text.is_empty() { None } else { Some(text) },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: cont,
             };
+            // Restore single-quoted text that was split — actually, for \echo
+            // we want the raw text between cmd boundaries, not tokenized.
+            // Re-derive the echo text as the raw text before the continuation.
+            if let Some(ref cont_str) = m.continuation {
+                // Find where the continuation starts in `raw`.
+                if let Some(cont_pos) = raw.find(cont_str.as_str()) {
+                    let echo_text = raw[..cont_pos].trim_end();
+                    m.pattern = if echo_text.is_empty() {
+                        None
+                    } else {
+                        Some(echo_text.to_owned())
+                    };
+                }
+            } else {
+                m.pattern = if raw.is_empty() { None } else { Some(raw.to_owned()) };
+            }
+            return m;
         }
     }
 
@@ -2090,12 +2129,30 @@ fn parse_g_family(input: &str) -> ParsedMeta {
     // `\gset [prefix]` — store each column of the single result row as a variable.
     if let Some(rest) = input.strip_prefix("gset") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let prefix = rest.trim();
-            return ParsedMeta::simple(MetaCmd::GSet(if prefix.is_empty() {
+            let trimmed = rest.trim();
+            // Prefix is the first whitespace-delimited token, but stop before
+            // any `\<alpha>` continuation command.
+            let (prefix_str, cont) = if trimmed.is_empty() {
+                ("", None)
+            } else if let Some(ws_pos) = trimmed.find(char::is_whitespace) {
+                let tok = &trimmed[..ws_pos];
+                let after = trimmed[ws_pos..].trim_start();
+                if after.starts_with('\\') {
+                    (tok, Some(after.to_owned()))
+                } else {
+                    // Multiple space-separated tokens after gset: only first is prefix
+                    (tok, None)
+                }
+            } else {
+                (trimmed, None)
+            };
+            let mut m = ParsedMeta::simple(MetaCmd::GSet(if prefix_str.is_empty() {
                 None
             } else {
-                Some(prefix.to_owned())
+                Some(prefix_str.to_owned())
             }));
+            m.continuation = cont;
+            return m;
         }
     }
 
@@ -2111,39 +2168,68 @@ fn parse_g_family(input: &str) -> ParsedMeta {
     // `\gx [file]` — expanded execute; must be checked before bare `\g`.
     if let Some(rest) = input.strip_prefix("gx") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let arg = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::GoExecuteExpanded(if arg.is_empty() {
-                    None
+            let raw_arg = rest.trim();
+            // Stop at the next `\<alpha>` continuation command.
+            let (file_arg, cont) = if raw_arg.starts_with('\\') {
+                // Argument IS a continuation command — no file arg.
+                (None, Some(raw_arg.to_owned()))
+            } else if let Some(ws) = raw_arg.find(char::is_whitespace) {
+                let first = &raw_arg[..ws];
+                let after = raw_arg[ws..].trim_start();
+                if after.starts_with('\\') {
+                    (Some(first.to_owned()), Some(after.to_owned()))
                 } else {
-                    Some(arg.to_owned())
-                }),
+                    (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+                }
+            } else {
+                (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+            };
+            let mut m = ParsedMeta {
+                cmd: MetaCmd::GoExecuteExpanded(file_arg),
                 plus: false,
                 system: false,
                 pattern: None,
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: cont,
             };
+            // Handle inline pset opts: `\gx (key=val ...)`
+            if let MetaCmd::GoExecuteExpanded(ref arg) = m.cmd {
+                if arg.as_deref().map_or(false, |a| a.starts_with('(')) {
+                    // Leave as-is; GoExecute dispatch handles pset parsing.
+                }
+            }
+            return m;
         }
     }
 
     // `\g [file||cmd]`
     if let Some(rest) = input.strip_prefix('g') {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let arg = rest.trim();
-            return ParsedMeta {
-                cmd: MetaCmd::GoExecute(if arg.is_empty() {
-                    None
+            let raw_arg = rest.trim();
+            // Stop at the next `\<alpha>` continuation command.
+            let (file_arg, cont) = if raw_arg.starts_with('\\') {
+                // Argument IS a continuation command — no file arg.
+                (None, Some(raw_arg.to_owned()))
+            } else if let Some(ws) = raw_arg.find(char::is_whitespace) {
+                let first = &raw_arg[..ws];
+                let after = raw_arg[ws..].trim_start();
+                if after.starts_with('\\') {
+                    (Some(first.to_owned()), Some(after.to_owned()))
                 } else {
-                    Some(arg.to_owned())
-                }),
+                    (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+                }
+            } else {
+                (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+            };
+            return ParsedMeta {
+                cmd: MetaCmd::GoExecute(file_arg),
                 plus: false,
                 system: false,
                 pattern: None,
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: cont,
             };
         }
     }

@@ -190,6 +190,29 @@ impl Variables {
 }
 
 // ---------------------------------------------------------------------------
+// Variable name validation
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `name` is a valid psql variable name.
+///
+/// psql allows letters, digits, and underscores; the name must not be empty
+/// and must not start with a digit.  Spaces, slashes, quotes, and other
+/// special characters are rejected.
+pub fn is_valid_variable_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    // First char: letter or underscore (not digit).
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    // Remaining chars: letter, digit, or underscore.
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+// ---------------------------------------------------------------------------
 // Quoting helpers
 // ---------------------------------------------------------------------------
 

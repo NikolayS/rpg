@@ -890,7 +890,7 @@ pub async fn execute_query_extended(
         None
     };
 
-    // Prepare the statement so we can execute with typed parameters.
+    // Prepare the statement so that the server can describe its columns.
     let stmt = match client.prepare(sql_to_send).await {
         Ok(s) => s,
         Err(e) => {
@@ -926,35 +926,41 @@ pub async fn execute_query_extended(
         }
     };
 
-    // Build the parameter list as &str references (text format).
-    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-    let dyn_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
+    // Get column metadata from the prepared statement for display.
+    let col_names: Vec<String> = stmt
+        .columns()
         .iter()
-        .map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync))
+        .map(|c| c.name().to_owned())
+        .collect();
+    let col_oids: Vec<u32> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.type_().oid())
         .collect();
 
-    let success = match client.query(&stmt, dyn_params.as_slice()).await {
-        Ok(rows) => {
-            // Print results using the same pset formatting as simple_query.
+    // Substitute $N parameters directly into the SQL and execute via
+    // simple_query.  This matches psql's text-parameter semantics: each
+    // bound value is treated as a text literal that the server coerces
+    // to the expected type (e.g. "2" → int via `$1::int`).
+    let parameterised_sql = substitute_bind_params(sql_to_send, params);
+
+    let success = match client.simple_query(&parameterised_sql).await {
+        Ok(messages) => {
+            use tokio_postgres::SimpleQueryMessage;
             use crate::output::format_rowset_pset;
             use crate::query::{ColumnMeta, RowSet};
 
-            if !rows.is_empty() || !stmt.columns().is_empty() {
-                let col_names: Vec<String> =
-                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
+            let mut row_data: Vec<Vec<Option<String>>> = Vec::new();
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let vals: Vec<Option<String>> = (0..row.len())
+                        .map(|i| row.get(i).map(str::to_owned))
+                        .collect();
+                    row_data.push(vals);
+                }
+            }
 
-                let col_oids: Vec<u32> =
-                    stmt.columns().iter().map(|c| c.type_().oid()).collect();
-
-                let row_data: Vec<Vec<Option<String>>> = rows
-                    .iter()
-                    .map(|row| {
-                        (0..col_names.len())
-                            .map(|i| row_cell_to_string(row, i))
-                            .collect()
-                    })
-                    .collect();
-
+            if !col_names.is_empty() || !row_data.is_empty() {
                 let columns: Vec<ColumnMeta> = col_names
                     .iter()
                     .enumerate()
@@ -968,30 +974,22 @@ pub async fn execute_query_extended(
                         ),
                     })
                     .collect();
-
-                let rs = RowSet {
-                    columns,
-                    rows: row_data,
-                };
-
+                let row_count = row_data.len();
+                let rs = RowSet { columns, rows: row_data };
                 let mut out = String::new();
                 format_rowset_pset(&mut out, &rs, &settings.pset);
-
                 let out_bytes = out.as_bytes();
-
+                settings.last_row_count = Some(row_count as u64);
+                settings.last_stmt_produced_rows = true;
                 if let Some(ref mut lf) = settings.log_file {
                     let _ = lf.write_all(out_bytes);
                 }
-
                 if let Some(ref mut w) = settings.output_target {
                     let _ = w.write_all(out_bytes);
                 } else {
                     let _ = io::stdout().write_all(out_bytes);
                 }
             }
-
-            // Store row count for audit log entry.
-            settings.last_row_count = Some(rows.len() as u64);
 
             tx.update_from_sql(sql_to_send);
             true
@@ -1003,7 +1001,6 @@ pub async fn execute_query_extended(
             crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
             tx.on_error();
 
-            // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
             let error_message = e
@@ -2055,25 +2052,42 @@ pub(super) async fn execute_gset(
 
             match rows.len() {
                 0 => {
-                    if !settings.quiet {
-                        eprintln!("\\gset: query returned no rows");
-                    }
+                    // Always print this error (not suppressed by \quiet).
+                    eprintln!("error: no rows returned for \\gset");
                 }
                 1 => {
                     tx.update_from_sql(sql_to_send);
                     // Store last query for \watch compatibility.
                     settings.last_query = Some(buf.to_owned());
                     let row = &rows[0];
+                    let mut had_error = false;
                     for (col, val) in col_names.iter().zip(row.iter()) {
                         let var_name = format!("{prefix}{col}");
+                        // Validate that the resulting variable name is legal
+                        // (no spaces, slashes, etc.).
+                        if !crate::vars::is_valid_variable_name(&var_name) {
+                            eprintln!("error: invalid variable name: \"{var_name}\"");
+                            had_error = true;
+                            continue;
+                        }
+                        // Warn about specially treated variables that psql
+                        // ignores when set via \gset.
+                        if is_specially_treated_gset_var(&var_name) {
+                            eprintln!(
+                                "warning: attempt to \\gset into specially treated \
+                                 variable \"{var_name}\" ignored"
+                            );
+                            continue;
+                        }
                         match val {
                             Some(v) => settings.vars.set(&var_name, v),
                             // NULL result → unset the variable (psql behaviour).
                             None => { settings.vars.unset(&var_name); }
                         }
                     }
+                    let _ = had_error;
                 }
-                n => eprintln!("\\gset: more than one row returned ({n} rows)"),
+                _ => eprintln!("error: more than one row returned for \\gset"),
             }
             // \gset stores results in variables, not displayed — psql does
             // not echo blank lines following \gset.
@@ -2085,6 +2099,201 @@ pub(super) async fn execute_gset(
             tx.on_error();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// \bind parameter substitution
+// ---------------------------------------------------------------------------
+
+/// Substitute `$N` positional parameters in `sql` with their quoted literal
+/// values from `params`, producing a plain SQL string safe for `simple_query`.
+///
+/// Each parameter value is wrapped in dollar-quoting (`$param_N$...$param_N$`)
+/// so that any embedded single quotes or backslashes are handled correctly.
+/// If the parameter appears to be NULL (the value is literally `\N` per psql
+/// convention), it is substituted as the SQL keyword `NULL`.
+fn substitute_bind_params(sql: &str, params: &[String]) -> String {
+    if params.is_empty() {
+        return sql.to_owned();
+    }
+
+    let mut out = String::with_capacity(sql.len() + params.iter().map(|p| p.len() + 20).sum::<usize>());
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_dollar: Option<String> = None;
+    let mut in_line_comment = false;
+    let mut in_block_comment: u32 = 0;
+
+    while i < len {
+        // Track line comments.
+        if !in_single && in_dollar.is_none() && in_block_comment == 0 && !in_line_comment
+            && i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-'
+        {
+            in_line_comment = true;
+            out.push('-');
+            out.push('-');
+            i += 2;
+            continue;
+        }
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        // Track block comments.
+        if !in_single && in_dollar.is_none() && i + 1 < len
+            && bytes[i] == b'/' && bytes[i + 1] == b'*'
+        {
+            in_block_comment += 1;
+            out.push('/');
+            out.push('*');
+            i += 2;
+            continue;
+        }
+        if in_block_comment > 0 {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                in_block_comment -= 1;
+                out.push('*');
+                out.push('/');
+                i += 2;
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Track single-quoted strings.
+        if bytes[i] == b'\'' {
+            if in_single {
+                // Check for escaped quote.
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    out.push('\'');
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            } else if in_dollar.is_none() {
+                in_single = true;
+            }
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+
+        // Track dollar-quoted strings.
+        if bytes[i] == b'$' && !in_single {
+            let rest = &sql[i..];
+            // Find closing $.
+            if let Some(end) = rest[1..].find('$') {
+                let tag = &rest[..end + 2]; // includes both $
+                let inner = &rest[1..end + 1];
+                let is_valid_tag = inner.is_empty()
+                    || (inner.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                        && inner.chars().all(|c| c.is_alphanumeric() || c == '_'));
+                if is_valid_tag {
+                    if let Some(ref open_tag) = in_dollar.clone() {
+                        if tag == open_tag {
+                            in_dollar = None;
+                            out.push_str(tag);
+                            i += tag.len();
+                            continue;
+                        }
+                    } else {
+                        in_dollar = Some(tag.to_owned());
+                        out.push_str(tag);
+                        i += tag.len();
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Substitute $N when outside strings/comments.
+        if bytes[i] == b'$' && !in_single && in_dollar.is_none() && !in_line_comment
+            && in_block_comment == 0
+        {
+            // Parse the number after $.
+            let start = i + 1;
+            let mut end = start;
+            while end < len && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end > start {
+                let num_str = &sql[start..end];
+                if let Ok(n) = num_str.parse::<usize>() {
+                    if n >= 1 {
+                        if let Some(val) = params.get(n - 1) {
+                            // Use dollar-quoting to safely embed the value.
+                            // Pick a tag that doesn't appear in the value.
+                            let tag = find_dollar_quote_tag(val);
+                            out.push_str(&tag);
+                            out.push_str(val);
+                            out.push_str(&tag);
+                            i = end;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+
+    out
+}
+
+/// Find a dollar-quoting tag that does not appear inside `val`.
+fn find_dollar_quote_tag(val: &str) -> String {
+    let base = "$param$";
+    if !val.contains(base) {
+        return base.to_owned();
+    }
+    for n in 0..100 {
+        let tag = format!("$param{n}$");
+        if !val.contains(&tag) {
+            return tag;
+        }
+    }
+    "$p$".to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// \gset helpers
+// ---------------------------------------------------------------------------
+
+/// Variables that psql treats specially and ignores when set via `\gset`.
+///
+/// These are read-only or specially handled internal variables.  When a
+/// `\gset` prefix+column would produce one of these names, psql prints a
+/// warning and skips the assignment.
+fn is_specially_treated_gset_var(name: &str) -> bool {
+    matches!(
+        name,
+        "IGNOREEOF"
+            | "DBNAME"
+            | "USER"
+            | "PORT"
+            | "HOST"
+            | "ENCODING"
+            | "HISTFILE"
+            | "HISTSIZE"
+            | "LASTOID"
+            | "PROMPT1"
+            | "PROMPT2"
+            | "PROMPT3"
+            | "VERBOSITY"
+            | "SHOW_CONTEXT"
+    )
 }
 
 // ---------------------------------------------------------------------------
