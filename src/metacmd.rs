@@ -1861,6 +1861,71 @@ pub(crate) fn split_params(s: &str) -> Vec<String> {
     result
 }
 
+/// Like `split_params` but stops parsing when it encounters `\<alpha>` outside
+/// of a quoted string (which starts a new metacommand).
+///
+/// Returns `(params, continuation)` where `continuation` is the remaining
+/// text starting with the next `\cmd`, if any.
+fn split_params_with_continuation(s: &str) -> (Vec<String>, Option<String>) {
+    let mut result = Vec::new();
+    let mut chars = s.char_indices().peekable();
+
+    while let Some(&(i, c)) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        // Detect start of next metacommand: `\` followed by alphabetic char.
+        if c == '\\' {
+            let rest = &s[i..];
+            let next = rest.chars().nth(1);
+            if next.map_or(false, |nc| nc.is_alphabetic()) {
+                return (result, Some(rest.to_owned()));
+            }
+        }
+        if c == '\'' {
+            // Quoted token.
+            chars.next();
+            let mut token = String::new();
+            loop {
+                match chars.next() {
+                    None => break,
+                    Some((_, '\'')) => {
+                        if chars.peek().map(|&(_, nc)| nc) == Some('\'') {
+                            chars.next();
+                            token.push('\'');
+                        } else {
+                            break;
+                        }
+                    }
+                    Some((_, '\\')) => {
+                        if chars.peek().map(|&(_, nc)| nc) == Some('\'') {
+                            chars.next();
+                            token.push('\'');
+                        } else {
+                            token.push('\\');
+                        }
+                    }
+                    Some((_, ch)) => token.push(ch),
+                }
+            }
+            result.push(token);
+        } else {
+            // Unquoted token: consume until whitespace or `\cmd`.
+            let mut token = String::new();
+            while let Some(&(_, ch)) = chars.peek() {
+                if ch.is_whitespace() {
+                    break;
+                }
+                token.push(ch);
+                chars.next();
+            }
+            result.push(token);
+        }
+    }
+    (result, None)
+}
+
 /// Parse `\bind`, `\bind_named`, and `\close_prepared`.
 ///
 /// Disambiguation order (longest match first):
@@ -1874,22 +1939,41 @@ fn parse_b_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("bind_named") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let rest = rest.trim();
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            let name = parts.next().unwrap_or("").to_owned();
-            let params_str = parts.next().unwrap_or("").trim();
-            let params = split_params(params_str);
+            // Find the statement name (first token).
+            let name_end = rest
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(rest.len());
+            let name = rest[..name_end].to_owned();
+            let params_str = rest[name_end..].trim();
+            let (params, cont) = split_params_with_continuation(params_str);
             if name.is_empty() {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
             }
-            return ParsedMeta::simple(MetaCmd::BindNamed(name, params));
+            return ParsedMeta {
+                cmd: MetaCmd::BindNamed(name, params),
+                plus: false,
+                system: false,
+                pattern: None,
+                echo_hidden: false,
+                kind_filter: None,
+                continuation: cont,
+            };
         }
     }
 
     // `\bind [params...]`
     if let Some(rest) = input.strip_prefix("bind") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let params = split_params(rest.trim());
-            return ParsedMeta::simple(MetaCmd::Bind(params));
+            let (params, cont) = split_params_with_continuation(rest.trim());
+            return ParsedMeta {
+                cmd: MetaCmd::Bind(params),
+                plus: false,
+                system: false,
+                pattern: None,
+                echo_hidden: false,
+                kind_filter: None,
+                continuation: cont,
+            };
         }
     }
 

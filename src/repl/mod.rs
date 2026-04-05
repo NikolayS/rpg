@@ -2427,13 +2427,18 @@ pub(crate) async fn exec_lines(
                     buf.push_str(sql_part.trim_end());
                 }
                 let interpolated_meta = settings.vars.interpolate(meta_part);
-                let mut parsed = if interpolated_meta.trim_start().starts_with("\\set") {
+                let mut inline_remaining: Option<String> = Some(interpolated_meta.clone());
+                let mut inline_first = true;
+                while let Some(ref inline_input) = inline_remaining.clone() {
+                let mut parsed = if inline_first && inline_input.trim_start().starts_with("\\set") {
                     let raw_cmd = meta_part.trim().trim_start_matches('\\');
                     crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
                 } else {
-                    crate::metacmd::parse(&interpolated_meta)
+                    crate::metacmd::parse(inline_input)
                 };
+                inline_first = false;
                 parsed.echo_hidden = settings.echo_hidden;
+                inline_remaining = parsed.continuation.take();
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
                     MetaResult::ExecuteBuffer => {
@@ -2547,6 +2552,7 @@ pub(crate) async fn exec_lines(
                     }
                     _ => {}
                 }
+                } // end while inline_remaining
             } else {
                 // Split on \; separators (psql multi-command separator).
                 // Use the raw (untrimmed, interpolated) form to preserve indentation.

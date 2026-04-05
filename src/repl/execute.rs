@@ -44,6 +44,30 @@ const TEXT_TYPE_OIDS: &[u32] = &[
     4072, // jsonpath (path expressions like "0.0" look numeric)
 ];
 
+/// Convert a cell from a tokio-postgres `Row` to an `Option<String>`.
+///
+/// Extended query results are typed, so we try String first (for text/varchar
+/// columns), then common numeric/bool types, falling back to None for NULLs.
+fn row_cell_to_string(row: &tokio_postgres::Row, i: usize) -> Option<String> {
+    // Attempt to read as Option<String> — works for text, varchar, name, etc.
+    if let Ok(v) = row.try_get::<_, Option<String>>(i) {
+        return v;
+    }
+    // Try common numeric types.
+    let oid = row.columns().get(i).map(|c| c.type_().oid()).unwrap_or(0);
+    match oid {
+        20 => return row.try_get::<_, Option<i64>>(i).ok().flatten().map(|v| v.to_string()),
+        21 => return row.try_get::<_, Option<i16>>(i).ok().flatten().map(|v| v.to_string()),
+        23 => return row.try_get::<_, Option<i32>>(i).ok().flatten().map(|v| v.to_string()),
+        700 => return row.try_get::<_, Option<f32>>(i).ok().flatten().map(|v| v.to_string()),
+        701 => return row.try_get::<_, Option<f64>>(i).ok().flatten().map(|v| v.to_string()),
+        16 => return row.try_get::<_, Option<bool>>(i).ok().flatten()
+            .map(|v: bool| if v { "t".to_owned() } else { "f".to_owned() }),
+        _ => {}
+    }
+    None
+}
+
 /// Classify a column as numeric based on its PostgreSQL type OID.
 ///
 /// Returns `Some(true)` for built-in numeric types, `Some(false)` for
@@ -926,7 +950,7 @@ pub async fn execute_query_extended(
                     .iter()
                     .map(|row| {
                         (0..col_names.len())
-                            .map(|i| row.try_get::<_, Option<String>>(i).unwrap_or(None))
+                            .map(|i| row_cell_to_string(row, i))
                             .collect()
                     })
                     .collect();
@@ -1097,7 +1121,7 @@ pub(super) async fn execute_named_stmt(
                     .iter()
                     .map(|row| {
                         (0..col_names.len())
-                            .map(|i| row.try_get::<_, Option<String>>(i).unwrap_or(None))
+                            .map(|i| row_cell_to_string(row, i))
                             .collect()
                     })
                     .collect();
