@@ -453,6 +453,10 @@ pub fn is_complete(buf: &str) -> bool {
     // bodies introduced in PostgreSQL 14).  A semicolon only terminates the
     // statement when this counter is zero.
     let mut begin_atomic_depth: u32 = 0;
+    // Tracks parenthesis depth so that semicolons inside `(…)` do not
+    // prematurely terminate the statement.  Needed for CREATE RULE … DO ALSO
+    // (stmt1; stmt2) and similar constructs.
+    let mut paren_depth: u32 = 0;
 
     let bytes = buf.as_bytes();
     let len = bytes.len();
@@ -591,11 +595,17 @@ pub fn is_complete(buf: &str) -> bool {
             continue; // `i` already advanced past the keyword
         }
 
-        // Semicolon terminates (outside quotes/comments, not inside BEGIN ATOMIC)
-        if bytes[i] == b';' {
-            if begin_atomic_depth == 0 {
-                return true;
-            }
+        // Track parenthesis depth outside strings/comments.
+        if bytes[i] == b'(' {
+            paren_depth += 1;
+        } else if bytes[i] == b')' {
+            paren_depth = paren_depth.saturating_sub(1);
+        }
+
+        // Semicolon terminates only at the top level (not inside BEGIN ATOMIC
+        // or parentheses such as CREATE RULE … DO ALSO (stmt1; stmt2)).
+        if bytes[i] == b';' && begin_atomic_depth == 0 && paren_depth == 0 {
+            return true;
         }
 
         i += 1;
@@ -1962,7 +1972,39 @@ pub(crate) async fn exec_lines(
             let mut parsed = crate::metacmd::parse(meta_input);
             parsed.echo_hidden = settings.echo_hidden;
             remaining_meta = parsed.continuation.take();
-            let result = dispatch_meta(parsed, client, params, settings, tx).await;
+            // Intercept `\copy ... from stdin` when running from a script:
+            // collect data lines from the iterator (same as SQL COPY FROM STDIN),
+            // then execute with the pre-collected inline data.
+            let result = if let crate::metacmd::MetaCmd::Copy(ref args) = parsed.cmd {
+                if let Ok(spec) = crate::copy::parse_copy_args(args) {
+                    if spec.direction == crate::copy::CopyDirection::From
+                        && spec.source == crate::copy::CopySource::Stdin
+                    {
+                        let mut inline: Vec<u8> = Vec::new();
+                        while let Some(dl) = lines.next() {
+                            if dl.trim() == "\\." {
+                                break;
+                            }
+                            inline.extend_from_slice(dl.as_bytes());
+                            inline.push(b'\n');
+                        }
+                        let inline_spec = crate::copy::CopySpec {
+                            source: crate::copy::CopySource::InlineData(inline),
+                            ..spec
+                        };
+                        if let Err(e) = crate::copy::execute_copy(client, &inline_spec, settings.quiet).await {
+                            eprintln!("{e}");
+                        }
+                        MetaResult::Continue
+                    } else {
+                        dispatch_meta(parsed, client, params, settings, tx).await
+                    }
+                } else {
+                    dispatch_meta(parsed, client, params, settings, tx).await
+                }
+            } else {
+                dispatch_meta(parsed, client, params, settings, tx).await
+            };
             // Handle buffer-aware results that exec_lines must act on directly.
             match result {
                 MetaResult::ExecuteBuffer => {
@@ -3614,7 +3656,7 @@ pub(super) async fn dispatch_io(
             let args = args.clone();
             match crate::copy::parse_copy_args(&args) {
                 Ok(spec) => {
-                    if let Err(e) = crate::copy::execute_copy(client, &spec).await {
+                    if let Err(e) = crate::copy::execute_copy(client, &spec, settings.quiet).await {
                         eprintln!("{e}");
                     }
                 }
@@ -4122,7 +4164,9 @@ async fn dispatch_meta(
                     eprintln!("{e}");
                 }
             } else {
-                eprintln!("error: invalid command \\{name}");
+                // Only print the command name (first word), not the args,
+                // matching psql's "error: invalid command \dG" format.
+                eprintln!("error: invalid command \\{cmd_name}");
             }
         }
         MetaCmd::SqlHelp => match crate::session::sql_help_text(parsed.pattern.as_deref()) {

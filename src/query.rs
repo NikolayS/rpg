@@ -446,6 +446,10 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     let mut current = String::new();
+    // Track parenthesis depth so that semicolons inside `(...)` do not split
+    // the statement.  This handles cases like CREATE RULE ... DO ALSO (s1; s2)
+    // and function calls with multiple arguments.
+    let mut paren_depth: u32 = 0;
 
     while i < len {
         let b = bytes[i];
@@ -565,8 +569,15 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             // Not a valid dollar-quote — fall through.
         }
 
-        // -- statement terminator -------------------------------------------
-        if b == b';' {
+        // -- parenthesis depth (outside strings/comments) ------------------
+        if b == b'(' {
+            paren_depth += 1;
+        } else if b == b')' {
+            paren_depth = paren_depth.saturating_sub(1);
+        }
+
+        // -- statement terminator (only at top-level, depth == 0) ----------
+        if b == b';' && paren_depth == 0 {
             flush_to!(current, i);
             let trimmed = current.trim().to_owned();
             if !trimmed.is_empty() {

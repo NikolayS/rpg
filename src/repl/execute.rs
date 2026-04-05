@@ -25,13 +25,31 @@ const NUMERIC_TYPE_OIDS: &[u32] = &[
     1700, // numeric
 ];
 
+/// PostgreSQL built-in string/text type OIDs that must never be right-aligned,
+/// even when their values happen to look numeric (e.g. text column with "31").
+const TEXT_TYPE_OIDS: &[u32] = &[
+    16,   // bool
+    17,   // bytea
+    18,   // char (single-byte internal type)
+    19,   // name (63-byte identifier)
+    25,   // text
+    114,  // json
+    142,  // xml
+    194,  // pg_node_tree
+    1042, // bpchar (char(n))
+    1043, // varchar
+    1560, // bit (fixed-length bit string, e.g. "1010")
+    1562, // varbit (variable-length bit string)
+    3802, // jsonb
+    4072, // jsonpath (path expressions like "0.0" look numeric)
+];
+
 /// Classify a column as numeric based on its PostgreSQL type OID.
 ///
 /// Returns `Some(true)` for built-in numeric types, `Some(false)` for
-/// user-defined types (OID ≥ 16384, matching PostgreSQL's `FirstNormalObjectId`
-/// threshold — psql defaults these to text/left-aligned), and `None` when the
-/// OID is 0 (unknown) or a built-in non-numeric type (fall back to value
-/// heuristic).
+/// string/text types and user-defined types (OID ≥ 16384), and `None`
+/// for other built-in types (e.g. xid, cid, regtype) that should fall
+/// through to the value heuristic.
 fn classify_numeric_by_oid(oid: u32) -> Option<bool> {
     if oid == 0 {
         return None; // OID unknown — use value heuristic
@@ -39,13 +57,14 @@ fn classify_numeric_by_oid(oid: u32) -> Option<bool> {
     if NUMERIC_TYPE_OIDS.contains(&oid) {
         return Some(true);
     }
-    if oid >= 16384 {
-        // User-defined / extension type.  PostgreSQL assigns OIDs ≥ 16384
-        // (`FirstNormalObjectId`) to all user-created objects.  psql defaults
-        // unknown types to left-aligned (text category), so we do the same.
-        return Some(false);
+    if TEXT_TYPE_OIDS.contains(&oid) {
+        return Some(false); // string type — never right-align
     }
-    // Built-in non-numeric type: fall through to value heuristic.
+    if oid >= 16384 {
+        return Some(false); // user-defined type
+    }
+    // Other built-in types (xid, cid, regtype, etc.): fall through to value
+    // heuristic for correct alignment.
     None
 }
 

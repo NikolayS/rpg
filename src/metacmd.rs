@@ -1917,6 +1917,13 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
 fn parse_d_family(input: &str) -> ParsedMeta {
     // `input` has already had the leading `\` stripped.
 
+    // `\dG` is a PG18 property graph command not yet implemented.
+    // Return unknown so we emit the correct "invalid command \dG" error,
+    // matching the behaviour of psql versions that pre-date PG18.
+    if input.starts_with("dG") {
+        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+    }
+
     // \dfn / \dfp / \dfa / \dfw — psql function-kind filter variants.
     // Check before the generic D_SUBCMDS loop so the longer prefix wins.
     if let Some(rest) = input.strip_prefix("df") {
