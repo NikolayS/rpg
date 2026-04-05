@@ -720,6 +720,201 @@ fn parse_set(input: &str) -> ParsedMeta {
     ParsedMeta::simple(MetaCmd::Set(name, value))
 }
 
+/// Parse `\set name value…` with **token-level** variable substitution.
+///
+/// Unlike the normal `parse_set` (which receives a line already interpolated
+/// by `Vars::interpolate`), this variant receives the **raw** command text and
+/// substitutes `:varname` / `:'varname'` / `:"varname"` references atomically
+/// — treating each substituted value as a single, indivisible token.
+///
+/// This matches psql semantics: in `\set dobody :dobody 'more text'`, the
+/// current value of `dobody` (which may contain spaces) is concatenated with
+/// `'more text'` intact, without the spaces causing re-tokenisation.
+///
+/// `raw_input` must be the full raw metacommand text **after** the leading `\`
+/// (i.e. it starts with `"set"`).
+pub fn parse_set_with_vars(raw_input: &str, vars: &crate::vars::Variables) -> ParsedMeta {
+    let Some(rest) = raw_input.strip_prefix("set") else {
+        return ParsedMeta::simple(MetaCmd::Unknown(raw_input.to_owned()));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return ParsedMeta::simple(MetaCmd::Set(String::new(), String::new()));
+    }
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").to_owned();
+    let raw_value = parts.next().map_or("", str::trim);
+    let value = if raw_value.is_empty() {
+        String::new()
+    } else {
+        split_params_set(raw_value, vars)
+    };
+    ParsedMeta::simple(MetaCmd::Set(name, value))
+}
+
+/// Tokenise a `\set` value string with **token-level** variable substitution.
+///
+/// Tokens:
+/// - Single-quoted `'...'`: strip quotes, preserve interior spaces.
+/// - `:'name'`: substitute variable as a SQL single-quoted string (like
+///   `Vars::interpolate` does for the `:'name'` form).
+/// - `:"name"`: substitute variable as a double-quoted identifier.
+/// - `:name`: substitute variable value **atomically** (spaces preserved).
+/// - Bare unquoted word (up to next space): used verbatim.
+/// - `\\`: command-separator stop signal — collect no more tokens.
+///
+/// All tokens are concatenated without separating spaces (psql behaviour).
+fn split_params_set(s: &str, vars: &crate::vars::Variables) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        // Skip whitespace between tokens.
+        if c.is_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        // Command separator `\\` — stop.
+        if c == '\\' {
+            let saved: Vec<char> = chars.clone().take(2).collect();
+            if saved.len() == 2 && saved[1] == '\\' {
+                break;
+            }
+        }
+
+        // Single-quoted token: `'...'`
+        if c == '\'' {
+            chars.next(); // consume opening quote
+            let mut token = String::new();
+            loop {
+                match chars.next() {
+                    None => break,
+                    Some('\'') => {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                            token.push('\'');
+                        } else {
+                            break;
+                        }
+                    }
+                    Some('\\') => {
+                        if chars.peek() == Some(&'\'') {
+                            chars.next();
+                            token.push('\'');
+                        } else {
+                            token.push('\\');
+                        }
+                    }
+                    Some(ch) => token.push(ch),
+                }
+            }
+            out.push_str(&token);
+            continue;
+        }
+
+        // Variable reference starting with `:`
+        if c == ':' {
+            // Peek ahead to see which form.
+            let mut peek_chars = chars.clone();
+            peek_chars.next(); // consume ':'
+            if let Some(&next) = peek_chars.peek() {
+                // `:'name'` — single-quoted literal substitution
+                if next == '\'' {
+                    peek_chars.next();
+                    let mut name = String::new();
+                    let mut found_close = false;
+                    for ch in peek_chars.by_ref() {
+                        if ch == '\'' {
+                            found_close = true;
+                            break;
+                        }
+                        name.push(ch);
+                    }
+                    if found_close && !name.is_empty() {
+                        if let Some(val) = vars.get(&name) {
+                            // SQL single-quote escape
+                            out.push('\'');
+                            out.push_str(&val.replace("'", "''"));
+                            out.push('\'');
+                            chars = peek_chars; // advance past consumed chars
+                            continue;
+                        }
+                    }
+                }
+                // `:"name"` — double-quoted identifier substitution
+                else if next == '"' {
+                    peek_chars.next();
+                    let mut name = String::new();
+                    let mut found_close = false;
+                    for ch in peek_chars.by_ref() {
+                        if ch == '"' {
+                            found_close = true;
+                            break;
+                        }
+                        name.push(ch);
+                    }
+                    if found_close && !name.is_empty() {
+                        if let Some(val) = vars.get(&name) {
+                            out.push('"');
+                            out.push_str(&val.replace("\"", "\"\""));
+                            out.push('"');
+                            chars = peek_chars;
+                            continue;
+                        }
+                    }
+                }
+                // `::` — Postgres cast operator, pass through verbatim
+                else if next == ':' {
+                    out.push(':');
+                    out.push(':');
+                    chars.next();
+                    chars.next();
+                    continue;
+                }
+                // `:name` — bare variable (substituted atomically)
+                else if next.is_alphabetic() || next == '_' {
+                    let mut name = String::new();
+                    let mut inner = peek_chars.clone();
+                    while let Some(&ch) = inner.peek() {
+                        if ch.is_alphanumeric() || ch == '_' {
+                            name.push(ch);
+                            inner.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if !name.is_empty() {
+                        if let Some(val) = vars.get(&name) {
+                            // Substitute the ENTIRE value as one token (no
+                            // re-tokenisation even if the value contains spaces).
+                            out.push_str(val);
+                            // Advance `chars` past `:` + the identifier chars.
+                            chars.next(); // consume `:`
+                            for _ in 0..name.len() {
+                                chars.next();
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Bare unquoted word — consume until whitespace.
+        let mut token = String::new();
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() {
+                break;
+            }
+            token.push(ch);
+            chars.next();
+        }
+        out.push_str(&token);
+    }
+    out
+}
+
 /// Parse `\unset name`.
 fn parse_unset(input: &str) -> ParsedMeta {
     let Some(rest) = input.strip_prefix("unset") else {

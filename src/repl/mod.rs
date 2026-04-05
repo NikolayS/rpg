@@ -2022,8 +2022,22 @@ pub(crate) async fn exec_lines(
                 }
             }
             let mut remaining_meta: Option<String> = Some(interpolated.clone());
+            // For \set we track whether this is the first iteration so we can
+            // use the raw (non-interpolated) line for token-level variable
+            // substitution, matching psql's behaviour (see parse_set_with_vars).
+            let mut set_first_iter = true;
             while let Some(ref meta_input) = remaining_meta.clone() {
-            let mut parsed = crate::metacmd::parse(meta_input);
+            let mut parsed = if set_first_iter
+                && meta_input.trim_start().starts_with("\\set")
+            {
+                let raw_cmd = line
+                    .trim()
+                    .trim_start_matches('\\');
+                crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
+            } else {
+                crate::metacmd::parse(meta_input)
+            };
+            set_first_iter = false;
             parsed.echo_hidden = settings.echo_hidden;
             remaining_meta = parsed.continuation.take();
             // Intercept `\copy ... from stdin` when running from a script:
@@ -2254,7 +2268,12 @@ pub(crate) async fn exec_lines(
                     buf.push_str(sql_part.trim_end());
                 }
                 let interpolated_meta = settings.vars.interpolate(meta_part);
-                let mut parsed = crate::metacmd::parse(&interpolated_meta);
+                let mut parsed = if interpolated_meta.trim_start().starts_with("\\set") {
+                    let raw_cmd = meta_part.trim().trim_start_matches('\\');
+                    crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
+                } else {
+                    crate::metacmd::parse(&interpolated_meta)
+                };
                 parsed.echo_hidden = settings.echo_hidden;
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
@@ -4631,19 +4650,22 @@ async fn dispatch_meta(
         MetaCmd::LoImport(ref filename, ref comment) => {
             let filename = filename.clone();
             let comment = comment.clone();
-            crate::large_object::lo_import(client, &filename, &comment).await;
+            let quiet = settings.quiet;
+            // psql always sets LASTOID: the OID on success, 0 on failure.
+            let oid = crate::large_object::lo_import(client, &filename, &comment, quiet).await;
+            settings.vars.set("LASTOID", &oid.unwrap_or(0).to_string());
         }
         MetaCmd::LoExport(ref loid, ref filename) => {
             let loid = loid.clone();
             let filename = filename.clone();
-            crate::large_object::lo_export(client, &loid, &filename).await;
+            crate::large_object::lo_export(client, &loid, &filename, settings.quiet).await;
         }
         MetaCmd::LoList => {
             crate::large_object::lo_list(client, parsed.plus).await;
         }
         MetaCmd::LoUnlink(ref loid) => {
             let loid = loid.clone();
-            crate::large_object::lo_unlink(client, &loid).await;
+            crate::large_object::lo_unlink(client, &loid, settings.quiet).await;
         }
         // History (#history).
         MetaCmd::History(ref arg) => {
@@ -6031,7 +6053,12 @@ async fn handle_backslash_dumb(
     tx: &mut TxState,
 ) -> HandleLineResult {
     let interpolated = settings.vars.interpolate(input);
-    let mut parsed = crate::metacmd::parse(&interpolated);
+    let mut parsed = if interpolated.trim_start().starts_with("\\set") {
+        let raw_cmd = input.trim().trim_start_matches('\\');
+        crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
+    } else {
+        crate::metacmd::parse(&interpolated)
+    };
     parsed.echo_hidden = settings.echo_hidden;
     match dispatch_meta(parsed, client, params, settings, tx).await {
         MetaResult::Quit => HandleLineResult::Quit,
@@ -6359,7 +6386,14 @@ async fn handle_line(
         // Record the command in stmt_buf so the caller adds it to readline history.
         stmt_buf.clear();
         stmt_buf.push_str(line);
-        let mut parsed = crate::metacmd::parse(&interpolated);
+        // For \set, use token-level variable substitution with the raw line
+        // so that :varname values containing spaces are not re-tokenised.
+        let mut parsed = if interpolated.trim_start().starts_with("\\set") {
+            let raw_cmd = line.trim().trim_start_matches('\\');
+            crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
+        } else {
+            crate::metacmd::parse(&interpolated)
+        };
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
@@ -6596,7 +6630,12 @@ async fn handle_line(
         stmt_buf.push_str(meta_part);
         // Dispatch the backslash command (interpolate variables first).
         let interpolated_meta = settings.vars.interpolate(meta_part);
-        let mut parsed = crate::metacmd::parse(&interpolated_meta);
+        let mut parsed = if interpolated_meta.trim_start().starts_with("\\set") {
+            let raw_cmd = meta_part.trim().trim_start_matches('\\');
+            crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
+        } else {
+            crate::metacmd::parse(&interpolated_meta)
+        };
         parsed.echo_hidden = settings.echo_hidden;
         return match dispatch_meta(parsed, client, params, settings, tx).await {
             MetaResult::Quit => HandleLineResult::Quit,
