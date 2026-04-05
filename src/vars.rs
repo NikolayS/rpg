@@ -37,6 +37,7 @@ impl Variables {
         vars.insert("ECHO_HIDDEN".to_owned(), "off".to_owned());
         vars.insert("HISTSIZE".to_owned(), "500".to_owned());
         vars.insert("IGNOREEOF".to_owned(), "0".to_owned());
+        vars.insert("ON_ERROR_ROLLBACK".to_owned(), "off".to_owned());
         vars.insert("ON_ERROR_STOP".to_owned(), "off".to_owned());
         vars.insert("PROMPT1".to_owned(), "%/%R%x%# ".to_owned());
         vars.insert("PROMPT2".to_owned(), "%/%R%x%# ".to_owned());

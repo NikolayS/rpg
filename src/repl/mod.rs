@@ -3129,10 +3129,22 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         maybe_page(settings, &out);
         return;
     }
+
+    // psql rejects variable names containing '/' or other invalid characters.
+    if name.contains('/') || name.contains(' ') || name.contains('\t') {
+        eprintln!("error: invalid variable name: \"{name}\"");
+        return;
+    }
+
     if value.is_empty() {
         // Synthetic settings: show current state rather than the vars store.
         if name == "EXPLAIN" {
             println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+            return;
+        }
+        // ON_ERROR_ROLLBACK with no value is a special toggle: sets to "on".
+        if name == "ON_ERROR_ROLLBACK" {
+            settings.vars.set(name, "on");
             return;
         }
         // Display one variable.
@@ -3142,6 +3154,27 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         }
         return;
     }
+    // Validate special built-in variables before storing.
+    if name == "AUTOCOMMIT" {
+        if !matches!(value, "on" | "off" | "true" | "false" | "1" | "0") {
+            eprintln!("error: unrecognized value \"{value}\" for \"AUTOCOMMIT\": Boolean expected");
+            return;
+        }
+    }
+    if name == "FETCH_COUNT" {
+        if value.parse::<u32>().is_err() {
+            eprintln!("error: invalid value \"{value}\" for \"FETCH_COUNT\": integer expected");
+            return;
+        }
+    }
+    if name == "ON_ERROR_ROLLBACK" {
+        if !value.is_empty() && !matches!(value, "on" | "off" | "interactive") {
+            eprintln!("error: unrecognized value \"{value}\" for \"ON_ERROR_ROLLBACK\"");
+            eprintln!("Available values are: on, off, interactive.");
+            return;
+        }
+    }
+
     settings.vars.set(name, value);
     // Mirror DEBUG on/off into the debug flag and the global log level.
     if name == "DEBUG" {
@@ -3312,6 +3345,11 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
 
 /// Apply an `\unset` command.
 fn apply_unset(settings: &mut ReplSettings, name: &str) {
+    // ON_ERROR_ROLLBACK cannot be truly unset; \unset resets it to "off".
+    if name == "ON_ERROR_ROLLBACK" {
+        settings.vars.set(name, "off");
+        return;
+    }
     if settings.vars.unset(name) {
         // Mirror ECHO_HIDDEN.
         if name == "ECHO_HIDDEN" {
