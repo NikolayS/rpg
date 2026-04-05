@@ -4493,6 +4493,8 @@ async fn dispatch_meta(
                     | MetaCmd::ListOperators
                     | MetaCmd::ListUserMappings
                     | MetaCmd::ListExtStatistics
+                    | MetaCmd::ListPublications
+                    | MetaCmd::ListSubscriptions
             ) =>
         {
             crate::describe::execute(

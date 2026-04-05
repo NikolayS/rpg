@@ -82,6 +82,10 @@ pub enum MetaCmd {
     ListOperators,
     /// `\dX [pattern]` — list extended statistics.
     ListExtStatistics,
+    /// `\dRp [pattern]` — list publications.
+    ListPublications,
+    /// `\dRs [pattern]` — list subscriptions.
+    ListSubscriptions,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -428,6 +432,8 @@ impl MetaCmd {
             Self::ListEventTriggers => "\\dy",
             Self::ListOperators => "\\do",
             Self::ListExtStatistics => "\\dX",
+            Self::ListPublications => "\\dRp",
+            Self::ListSubscriptions => "\\dRs",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -1878,6 +1884,8 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     // 3-character sub-commands (must come before 2-char variants)
     ("dba", MetaCmd::Dba),
     ("des", MetaCmd::ListForeignServers),
+    ("dRp", MetaCmd::ListPublications),
+    ("dRs", MetaCmd::ListSubscriptions),
     ("dew", MetaCmd::ListFdws),
     ("det", MetaCmd::ListForeignTablesViaFdw),
     ("deu", MetaCmd::ListUserMappings),

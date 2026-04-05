@@ -64,6 +64,8 @@ pub async fn execute(
         MetaCmd::ListEventTriggers => list_event_triggers(client, meta, settings).await,
         MetaCmd::ListOperators => list_operators(client, meta, settings).await,
         MetaCmd::ListExtStatistics => list_ext_statistics(client, meta, settings).await,
+        MetaCmd::ListPublications => list_publications(client, meta, settings).await,
+        MetaCmd::ListSubscriptions => list_subscriptions(client, meta, settings).await,
         // Non-describe commands should never reach this function.
         _ => false,
     }
@@ -2245,6 +2247,335 @@ order by 1, 2"
 }
 
 // ---------------------------------------------------------------------------
+// \dRp — list publications
+// ---------------------------------------------------------------------------
+
+/// List publications.
+///
+/// Matches psql's `\dRp [pattern]` output: Name, Owner, All tables, Inserts,
+/// Updates, Deletes, Truncates, Via root.
+///
+/// With `+` and a pattern, per-publication detail is shown: after the main
+/// attribute table, "Tables:" and "Tables from schemas:" subsections are
+/// printed.
+async fn list_publications(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "p.pubname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    if meta.plus && meta.pattern.is_some() {
+        // Verbose per-publication view: show attributes then tables/schemas.
+        return list_publications_verbose(client, meta, &where_clause, settings).await;
+    }
+
+    let sql = format!(
+        "select
+    p.pubname as \"Name\",
+    pg_catalog.pg_get_userbyid(p.pubowner) as \"Owner\",
+    p.puballtables as \"All tables\",
+    p.pubinsert as \"Inserts\",
+    p.pubupdate as \"Updates\",
+    p.pubdelete as \"Deletes\",
+    p.pubtruncate as \"Truncates\",
+    p.pubviaroot as \"Via root\"
+from pg_catalog.pg_publication as p
+{where_clause}
+order by 1"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of publications"),
+        settings,
+    )
+    .await
+}
+
+/// Verbose per-publication detail shown when `\dRp+ pattern` matches.
+///
+/// For each matching publication: print its attribute table, then list the
+/// tables and schemas it covers.
+async fn list_publications_verbose(
+    client: &Client,
+    meta: &ParsedMeta,
+    where_clause: &str,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    use std::fmt::Write as FmtWrite;
+    use tokio_postgres::SimpleQueryMessage;
+
+    // Fetch all matching publications.
+    let pubs_sql = format!(
+        "select
+    p.oid,
+    p.pubname,
+    pg_catalog.pg_get_userbyid(p.pubowner) as owner,
+    p.puballtables,
+    p.pubinsert,
+    p.pubupdate,
+    p.pubdelete,
+    p.pubtruncate,
+    p.pubviaroot
+from pg_catalog.pg_publication as p
+{where_clause}
+order by 1"
+    );
+
+    if meta.echo_hidden {
+        eprintln!("/******** QUERY *********/\n{pubs_sql}\n/************************/");
+    }
+
+    let pub_rows: Vec<(String, String, String, String, String, String, String, String, String)> =
+        match client.simple_query(&pubs_sql).await {
+            Ok(msgs) => msgs
+                .into_iter()
+                .filter_map(|m| {
+                    if let SimpleQueryMessage::Row(row) = m {
+                        Some((
+                            row.get(0).unwrap_or("").to_owned(), // oid
+                            row.get(1).unwrap_or("").to_owned(), // pubname
+                            row.get(2).unwrap_or("").to_owned(), // owner
+                            row.get(3).unwrap_or("").to_owned(), // puballtables
+                            row.get(4).unwrap_or("").to_owned(), // pubinsert
+                            row.get(5).unwrap_or("").to_owned(), // pubupdate
+                            row.get(6).unwrap_or("").to_owned(), // pubdelete
+                            row.get(7).unwrap_or("").to_owned(), // pubtruncate
+                            row.get(8).unwrap_or("").to_owned(), // pubviaroot
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Err(e) => {
+                crate::output::eprint_db_error(&e, Some(&pubs_sql), false, false, false);
+                return false;
+            }
+        };
+
+    let mut full_output = String::new();
+
+    for (oid, pubname, owner, puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, pubviaroot) in
+        &pub_rows
+    {
+        // Build the attribute rows for this publication.
+        let col_names: Vec<String> = vec![
+            "Owner".to_owned(),
+            "All tables".to_owned(),
+            "Inserts".to_owned(),
+            "Updates".to_owned(),
+            "Deletes".to_owned(),
+            "Truncates".to_owned(),
+            "Via root".to_owned(),
+        ];
+        let data_rows: Vec<Vec<String>> = vec![vec![
+            owner.clone(),
+            puballtables.clone(),
+            pubinsert.clone(),
+            pubupdate.clone(),
+            pubdelete.clone(),
+            pubtruncate.clone(),
+            pubviaroot.clone(),
+        ]];
+        // Fetch tables covered by this publication.
+        // Returns (table_name, col_list, where_clause) for each table.
+        let tables_sql = format!(
+            "select
+    n.nspname || '.' || c.relname as table_name,
+    case
+        when pr.prattrs is not null
+        then ' (' || (
+            select string_agg(a.attname, ', ' order by ka.ord)
+            from unnest(pr.prattrs::int2[]) with ordinality as ka(num, ord)
+            join pg_catalog.pg_attribute as a
+                on a.attrelid = pr.prrelid and a.attnum = ka.num
+        ) || ')'
+        else ''
+    end as col_list,
+    case
+        when pr.prqual is not null
+        then ' WHERE ' || pg_catalog.pg_get_expr(pr.prqual, pr.prrelid)
+        else ''
+    end as where_clause
+from pg_catalog.pg_publication_rel as pr
+join pg_catalog.pg_class as c on c.oid = pr.prrelid
+join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where pr.prpubid = {oid}
+order by 1"
+        );
+        if meta.echo_hidden {
+            eprintln!("/******** QUERY *********/\n{tables_sql}\n/************************/");
+        }
+        let tbl_rows: Vec<(String, String, String)> =
+            if let Ok(msgs) = client.simple_query(&tables_sql).await {
+                msgs.into_iter()
+                    .filter_map(|m| {
+                        if let SimpleQueryMessage::Row(row) = m {
+                            Some((
+                                row.get(0).unwrap_or("").to_owned(),
+                                row.get(1).unwrap_or("").to_owned(),
+                                row.get(2).unwrap_or("").to_owned(),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        // Fetch schemas covered by this publication.
+        let schemas_sql = format!(
+            "select
+    '\"' || n.nspname || '\"' as schema_name
+from pg_catalog.pg_publication_namespace as pn
+join pg_catalog.pg_namespace as n on n.oid = pn.pnnspid
+where pn.pnpubid = {oid}
+order by 1"
+        );
+        if meta.echo_hidden {
+            eprintln!("/******** QUERY *********/\n{schemas_sql}\n/************************/");
+        }
+        let schema_names: Vec<String> =
+            if let Ok(msgs) = client.simple_query(&schemas_sql).await {
+                msgs.into_iter()
+                    .filter_map(|m| {
+                        if let SimpleQueryMessage::Row(row) = m {
+                            Some(row.get(0).unwrap_or("").to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        // Write the publication header table.
+        let title = format!("Publication {pubname}");
+        let table_text = format_table_inner(&col_names, &data_rows, Some(&title), false);
+        let _ = write!(full_output, "{table_text}");
+        // Print (1 row) only when there are no Tables or Tables from schemas sections.
+        if tbl_rows.is_empty() && schema_names.is_empty() {
+            let _ = writeln!(full_output, "(1 row)");
+        }
+
+        if !tbl_rows.is_empty() {
+            let _ = writeln!(full_output, "Tables:");
+            for (tname, col_list, where_clause) in &tbl_rows {
+                let _ = writeln!(full_output, "    \"{tname}\"{col_list}{where_clause}");
+            }
+        }
+        if !schema_names.is_empty() {
+            let _ = writeln!(full_output, "Tables from schemas:");
+            for s in &schema_names {
+                let _ = writeln!(full_output, "    {s}");
+            }
+        }
+        // Trailing blank line after each publication block (matches psql).
+        full_output.push('\n');
+    }
+
+    if !full_output.is_empty() {
+        maybe_page(settings, &full_output);
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// \dRs — list subscriptions
+// ---------------------------------------------------------------------------
+
+/// List subscriptions.
+///
+/// Matches psql's `\dRs [pattern]` output: Name, Owner, Enabled, Publication.
+/// With `+`: adds Binary, Streaming, Two-phase commit, Disable on error,
+/// Origin, Password required, Run as owner?, Synchronous commit, Conninfo,
+/// Skip LSN.
+///
+/// Requires superuser or pg_monitor membership to query pg_subscription.
+async fn list_subscriptions(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "s.subname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    s.subname as \"Name\",
+    pg_catalog.pg_get_userbyid(s.subowner) as \"Owner\",
+    s.subenabled as \"Enabled\",
+    s.subpublications as \"Publication\",
+    s.subbinary as \"Binary\",
+    case s.substream
+        when 'f' then 'off'
+        when 't' then 'on'
+        when 'p' then 'parallel'
+        else s.substream::text
+    end as \"Streaming\",
+    case s.subtwophasestate
+        when 'd' then 'd'
+        when 'p' then 'p'
+        when 'e' then 'e'
+        else s.subtwophasestate::text
+    end as \"Two-phase commit\",
+    s.subdisableonerr as \"Disable on error\",
+    s.suborigin as \"Origin\",
+    s.subpasswordrequired as \"Password required\",
+    s.subrunasowner as \"Run as owner?\",
+    s.subsynccommit as \"Synchronous commit\",
+    s.subconninfo as \"Conninfo\",
+    s.subskiplsn as \"Skip LSN\"
+from pg_catalog.pg_subscription as s
+{where_clause}
+order by 1"
+        )
+    } else {
+        format!(
+            "select
+    s.subname as \"Name\",
+    pg_catalog.pg_get_userbyid(s.subowner) as \"Owner\",
+    s.subenabled as \"Enabled\",
+    s.subpublications as \"Publication\"
+from pg_catalog.pg_subscription as s
+{where_clause}
+order by 1"
+        )
+    };
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of subscriptions"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // \d [table] — describe a specific table, or list all relations
 // ---------------------------------------------------------------------------
 
@@ -3921,17 +4252,32 @@ limit 1"
         }
     }
     // Publications — tables can belong to logical replication publications.
-    // psql \d+ shows a "Publications:" section listing them.
-    if meta.plus && matches!(relkind_char, 'r' | 'p') {
+    // psql shows a "Publications:" section for both \d and \d+.
+    if matches!(relkind_char, 'r' | 'p') {
         let pub_sql = format!(
-            "select p.pubname
+            "select p.pubname,
+    case
+        when pr.prattrs is not null
+        then ' (' || (
+            select string_agg(a.attname, ', ' order by ka.ord)
+            from unnest(pr.prattrs::int2[]) with ordinality as ka(num, ord)
+            join pg_catalog.pg_attribute as a
+                on a.attrelid = pr.prrelid and a.attnum = ka.num
+        ) || ')'
+        else ''
+    end as col_list,
+    case
+        when pr.prqual is not null
+        then ' WHERE ' || pg_catalog.pg_get_expr(pr.prqual, pr.prrelid)
+        else ''
+    end as where_clause
 from pg_catalog.pg_publication as p
 join pg_catalog.pg_publication_rel as pr on pr.prpubid = p.oid
 join pg_catalog.pg_class as c on c.oid = pr.prrelid
 left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
 where {name_cond}
 union
-select p.pubname
+select p.pubname, '' as col_list, '' as where_clause
 from pg_catalog.pg_publication as p
 join pg_catalog.pg_class as c
     on c.relnamespace = any(
@@ -3941,25 +4287,27 @@ left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
 where p.puballtables = false
     and {name_cond}
 union
-select p.pubname
+select p.pubname, '' as col_list, '' as where_clause
 from pg_catalog.pg_publication as p
 where p.puballtables = true
 order by 1"
         );
         if let Ok(msgs) = client.simple_query(&pub_sql).await {
             use tokio_postgres::SimpleQueryMessage;
-            let mut pubs: Vec<String> = Vec::new();
+            let mut pubs: Vec<(String, String, String)> = Vec::new();
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
                     if let Some(name) = row.get(0) {
-                        pubs.push(name.to_owned());
+                        let col_list = row.get(1).unwrap_or("").to_owned();
+                        let where_clause = row.get(2).unwrap_or("").to_owned();
+                        pubs.push((name.to_owned(), col_list, where_clause));
                     }
                 }
             }
             if !pubs.is_empty() {
                 println!("Publications:");
-                for p in &pubs {
-                    println!("    \"{p}\"");
+                for (p, col_list, where_clause) in &pubs {
+                    println!("    \"{p}\"{col_list}{where_clause}");
                 }
             }
         }
