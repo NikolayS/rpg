@@ -2643,12 +2643,6 @@ pub(crate) async fn exec_lines(
                                         settings.terse_errors,
                                         settings.sqlstate_errors,
                                     );
-                                    // copy_in may leave the connection in an
-                                    // inconsistent state when the server rejects
-                                    // the COPY before entering copy mode. This is
-                                    // a known tokio-postgres limitation. Skip this
-                                    // COPY entirely and continue — connection
-                                    // recovery is handled by the next query.
                                     exit_code = 1;
                                     if settings.single_transaction {
                                         should_break = true;

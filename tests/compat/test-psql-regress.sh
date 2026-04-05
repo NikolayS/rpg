@@ -313,6 +313,17 @@ compare_test() {
 
   local psql_out rpg_out
   psql_out=$(run_psql "${sql_file}" 2>/dev/null || true)
+
+  # Some tests modify cluster-wide objects (e.g. tablespaces, roles) that
+  # are shared across all databases.  Re-run test_setup.sql for the rpg
+  # database after psql has finished so that any cluster-wide state that
+  # psql dropped or renamed is restored before rpg runs.
+  if [[ -f "${REGRESS_SQL_DIR}/test_setup.sql" ]]; then
+    PAGER=cat psql --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+      -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${RPG_DBNAME}" \
+      -f "${REGRESS_SQL_DIR}/test_setup.sql" > /dev/null 2>&1 || true
+  fi
+
   rpg_out=$(run_rpg  "${sql_file}" 2>/dev/null || true)
 
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
