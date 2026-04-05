@@ -190,11 +190,11 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         OutputFormat::Markdown => format_markdown(out, rs, cfg),
     }
 
-    // psql prints a blank line after each result set (the trailing newline
-    // after `(N rows)` plus one more).  In unaligned tuples-only mode psql
-    // omits the trailing blank line; in aligned tuples-only mode it keeps it.
+    // psql prints a blank line after aligned result sets (trailing newline
+    // after `(N rows)` plus one more blank line).  Unaligned and CSV modes
+    // omit this extra blank line entirely.
     let is_unaligned = matches!(cfg.format, OutputFormat::Unaligned | OutputFormat::Csv);
-    if !cfg.tuples_only || !is_unaligned {
+    if !is_unaligned {
         out.push('\n');
     }
 }

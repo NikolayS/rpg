@@ -3077,11 +3077,35 @@ order by 1"
     );
 
     // 4. Foreign keys (outgoing)
+    // For partition-inherited FKs (conparentid != 0), psql shows the PARENT
+    // constraint with format: TABLE "parent_table" CONSTRAINT "parent_name" def
     let fk_sql = format!(
         "select
-    conname,
-    pg_catalog.pg_get_constraintdef(oid, true) as condef
+    root.parent_table,
+    coalesce(root.conname, co.conname) as conname,
+    pg_catalog.pg_get_constraintdef(
+        coalesce(root.oid, co.oid), true) as condef
 from pg_catalog.pg_constraint as co
+left join lateral (
+    with recursive rc as (
+        select c2.oid, c2.conrelid, c2.conname, c2.conparentid
+        from pg_catalog.pg_constraint as c2
+        where c2.oid = co.conparentid
+        union all
+        select c3.oid, c3.conrelid, c3.conname, c3.conparentid
+        from pg_catalog.pg_constraint as c3
+        join rc on c3.oid = rc.conparentid
+        where rc.conparentid <> 0
+    )
+    select
+        oid,
+        conrelid as root_relid,
+        conrelid::pg_catalog.regclass::text as parent_table,
+        conname
+    from rc
+    where conparentid = 0
+    limit 1
+) as root on co.conparentid <> 0
 where co.contype = 'f'
     and co.conrelid = (
         select c.oid
@@ -3091,11 +3115,15 @@ where co.contype = 'f'
         where {name_cond}
         limit 1
     )
-order by 1"
+    and (co.conparentid = 0
+         or root.root_relid <> co.conrelid)
+order by conname"
     );
 
     // 5. Referenced by (incoming FKs) — psql format:
     //    TABLE "orders" CONSTRAINT "orders_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    // Exclude partition-cloned constraints (conparentid != 0) so we only
+    // show top-level FK constraints, matching psql behavior for partitioned tables.
     let ref_sql = format!(
         "select
     conrelid::pg_catalog.regclass::text as from_table,
@@ -3103,6 +3131,7 @@ order by 1"
     pg_catalog.pg_get_constraintdef(oid, true) as condef
 from pg_catalog.pg_constraint as co
 where co.contype = 'f'
+    and co.conparentid = 0
     and co.confrelid = (
         select c.oid
         from pg_catalog.pg_class as c
@@ -3377,18 +3406,23 @@ where {name_cond} limit 1"
     }
     if let Ok(messages) = client.simple_query(&fk_sql).await {
         use tokio_postgres::SimpleQueryMessage;
-        let mut lines: Vec<(String, String)> = Vec::new();
+        let mut lines: Vec<(Option<String>, String, String)> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
-                let name = row.get(0).unwrap_or("").to_owned();
-                let def = row.get(1).unwrap_or("").to_owned();
-                lines.push((name, def));
+                let parent_table = row.get(0).map(|s| s.to_owned());
+                let name = row.get(1).unwrap_or("").to_owned();
+                let def = row.get(2).unwrap_or("").to_owned();
+                lines.push((parent_table, name, def));
             }
         }
         if !lines.is_empty() {
             println!("Foreign-key constraints:");
-            for (name, def) in &lines {
-                println!("    \"{name}\" {def}");
+            for (parent_table, name, def) in &lines {
+                if let Some(pt) = parent_table {
+                    println!("    TABLE \"{pt}\" CONSTRAINT \"{name}\" {def}");
+                } else {
+                    println!("    \"{name}\" {def}");
+                }
             }
         }
     }

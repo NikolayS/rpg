@@ -2025,7 +2025,23 @@ fn parse_modifiers_and_pattern(rest: &str) -> (bool, bool, Option<String>) {
     }
 
     let after_modifiers = &rest[end..];
-    let pattern_str = after_modifiers.trim();
+    let trimmed = after_modifiers.trim();
+    // Strip at "\" boundary: "\" preceded by whitespace starts a new metacommand.
+    // e.g. `\d fkpart0.fk_part_1    \\ -- comment` → pattern is `fkpart0.fk_part_1`.
+    let trimmed = {
+        let bytes = trimmed.as_bytes();
+        let mut cut = trimmed.len();
+        for i in 1..bytes.len() {
+            if bytes[i] == b'\\' && bytes[i - 1].is_ascii_whitespace() {
+                cut = i - 1;
+                break;
+            }
+        }
+        &trimmed[..cut]
+    };
+    // Strip trailing semicolons: psql treats `;` as a command terminator
+    // even in metacommand arguments, so `\d foo;` is the same as `\d foo`.
+    let pattern_str = trimmed.trim_end_matches(';').trim_end();
     let pattern = if pattern_str.is_empty() {
         None
     } else {

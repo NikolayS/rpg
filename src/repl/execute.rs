@@ -1944,7 +1944,11 @@ pub(super) async fn execute_gset(
             }
 
             match rows.len() {
-                0 => eprintln!("\\gset: query returned no rows"),
+                0 => {
+                    if !settings.quiet {
+                        eprintln!("\\gset: query returned no rows");
+                    }
+                }
                 1 => {
                     tx.update_from_sql(sql_to_send);
                     // Store last query for \watch compatibility.

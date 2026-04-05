@@ -2165,7 +2165,21 @@ pub(crate) async fn exec_lines(
             } // end while remaining_meta
         } else if settings.cond.is_active() {
             // Check for inline backslash command (e.g. `select 1 \gset`).
-            if let Some(pos) = find_inline_backslash(&line) {
+            // Pass the current buffer's open dollar-tag so that a closing `$$`
+            // at the start of the line (e.g. `$$ AS qry \gset`) is handled
+            // correctly — the `$$` closes the existing quote, leaving `\gset`
+            // outside the string.
+            if let Some(pos) = find_inline_backslash_ctx(&line, get_open_dollar_tag(&buf)) {
+                // -a / --echo-all: echo the line (including the inline metacommand)
+                // before processing it, matching psql's echo-first-then-execute order.
+                if settings.echo_all && !line.trim().is_empty() {
+                    let echo_line = line.trim_end();
+                    if let Some(ref mut w) = settings.output_target {
+                        let _ = writeln!(w, "{echo_line}");
+                    } else {
+                        println!("{echo_line}");
+                    }
+                }
                 let sql_part = &line[..pos];
                 let meta_part = line[pos..].trim();
                 if !sql_part.trim().is_empty() {
@@ -2348,6 +2362,12 @@ pub(crate) async fn exec_lines(
                                         settings.terse_errors,
                                         settings.sqlstate_errors,
                                     );
+                                    // copy_in may leave the connection in an
+                                    // inconsistent state when the server rejects
+                                    // the COPY before entering copy mode. This is
+                                    // a known tokio-postgres limitation. Skip this
+                                    // COPY entirely and continue — connection
+                                    // recovery is handled by the next query.
                                     exit_code = 1;
                                     if settings.single_transaction {
                                         should_break = true;
@@ -5604,14 +5624,94 @@ async fn run_dumb_loop(
 /// backslash command.  The scan respects single-quoted strings, dollar-quoted
 /// strings, double-quoted identifiers, line comments (`--`), and block
 /// comments (`/* … */`).
+/// Return the open dollar-quote tag from the buffer, if any.
+/// Used to initialise `find_inline_backslash` with the correct context
+/// when the current line may close an already-open dollar quote.
+fn get_open_dollar_tag(buf: &str) -> Option<String> {
+    let mut in_single = false;
+    let mut block_comment_depth: u32 = 0;
+    let mut dollar_tag: Option<String> = None;
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if block_comment_depth > 0 {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth -= 1;
+                i += 2;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            while i < len && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'\'' { in_single = true; i += 1; continue; }
+        if bytes[i] == b'$' {
+            let rest = &buf[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    dollar_tag
+}
+
 fn find_inline_backslash(line: &str) -> Option<usize> {
+    find_inline_backslash_ctx(line, None)
+}
+
+fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> Option<usize> {
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     let mut in_single = false;
     let mut in_double = false;
     let mut block_comment_depth: u32 = 0;
-    let mut dollar_tag: Option<String> = None;
+    let mut dollar_tag: Option<String> = initial_dollar_tag;
 
     while i < len {
         // Dollar-quoted string
