@@ -2168,7 +2168,14 @@ pub(crate) async fn exec_lines(
                 MetaResult::ExecuteBuffer => {
                     // The buffer lines were already echoed individually above;
                     // disable echo_all so execute_query doesn't echo again.
-                    let sql = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                    let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                    // Fall back to the previous query when the buffer is empty
+                    // (e.g. standalone \g after a query already executed with \g).
+                    let sql = if stripped.is_empty() {
+                        prev_buf.trim().to_owned()
+                    } else {
+                        stripped
+                    };
                     buf.clear();
                     if !sql.is_empty() {
                         let saved_echo = settings.echo_all;
@@ -2188,7 +2195,14 @@ pub(crate) async fn exec_lines(
                     }
                 }
                 MetaResult::ExecuteBufferExpanded => {
-                    let sql = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                    let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                    // Fall back to the previous query when the buffer is empty
+                    // (e.g. standalone \gx after a query already executed).
+                    let sql = if stripped.is_empty() {
+                        prev_buf.trim().to_owned()
+                    } else {
+                        stripped
+                    };
                     buf.clear();
                     if !sql.is_empty() {
                         let saved_echo = settings.echo_all;
@@ -2381,10 +2395,16 @@ pub(crate) async fn exec_lines(
                 let result = dispatch_meta(parsed, client, params, settings, tx).await;
                 match result {
                     MetaResult::ExecuteBuffer => {
-                        let sql =
+                        let stripped =
                             crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        let sql = if stripped.is_empty() {
+                            prev_buf.trim().to_owned()
+                        } else {
+                            stripped
+                        };
                         buf.clear();
                         if !sql.is_empty() {
+                            prev_buf = sql.clone();
                             let saved_echo = settings.echo_all;
                             settings.echo_all = false;
                             let ok = if let Some(bp) = settings.pending_bind_params.take() {
@@ -2402,10 +2422,16 @@ pub(crate) async fn exec_lines(
                         }
                     }
                     MetaResult::ExecuteBufferExpanded => {
-                        let sql =
+                        let stripped =
                             crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        let sql = if stripped.is_empty() {
+                            prev_buf.trim().to_owned()
+                        } else {
+                            stripped
+                        };
                         buf.clear();
                         if !sql.is_empty() {
+                            prev_buf = sql.clone();
                             let saved_echo = settings.echo_all;
                             let saved_expanded = settings.expanded;
                             settings.echo_all = false;
