@@ -1997,29 +1997,40 @@ pub(super) async fn execute_crosstabview(
     let result = match client.simple_query(sql_to_send).await {
         Ok(messages) => {
             let mut col_names: Vec<String> = Vec::new();
+            let mut col_oids: Vec<u32> = Vec::new();
             let mut rows: Vec<Vec<String>> = Vec::new();
 
+            let null_str = settings.pset.null_display.clone();
             for msg in messages {
-                if let SimpleQueryMessage::Row(row) = msg {
-                    if col_names.is_empty() {
-                        col_names = (0..row.len())
-                            .map(|i| {
-                                row.columns()
-                                    .get(i)
-                                    .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
-                            })
-                            .collect();
+                match msg {
+                    SimpleQueryMessage::RowDescription(cols) => {
+                        if col_names.is_empty() {
+                            col_names = cols.iter().map(|c| c.name().to_owned()).collect();
+                            col_oids = cols.iter().map(|c| c.type_oid()).collect();
+                        }
                     }
-                    let vals: Vec<String> = (0..row.len())
-                        .map(|i| row.get(i).unwrap_or("").to_owned())
-                        .collect();
-                    rows.push(vals);
+                    SimpleQueryMessage::Row(row) => {
+                        if col_names.is_empty() {
+                            col_names = (0..row.len())
+                                .map(|i| {
+                                    row.columns()
+                                        .get(i)
+                                        .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                                })
+                                .collect();
+                        }
+                        let vals: Vec<String> = (0..row.len())
+                            .map(|i| row.get(i).unwrap_or(null_str.as_str()).to_owned())
+                            .collect();
+                        rows.push(vals);
+                    }
+                    _ => {}
                 }
             }
 
             tx.update_from_sql(sql_to_send);
             settings.last_query = Some(buf.to_owned());
-            Some((col_names, rows))
+            Some((col_names, col_oids, rows))
         }
         Err(e) => {
             crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
@@ -2028,7 +2039,7 @@ pub(super) async fn execute_crosstabview(
         }
     };
 
-    let Some((col_names, rows)) = result else {
+    let Some((col_names, col_oids, rows)) = result else {
         return;
     };
 
@@ -2036,14 +2047,50 @@ pub(super) async fn execute_crosstabview(
     let args = crate::crosstab::parse_args(raw_args);
     match crate::crosstab::pivot(&col_names, &rows, &args) {
         Ok((pivot_headers, pivot_rows)) => {
+            // Determine column alignment: right-align numeric columns.
+            let row_right_align = {
+                let idx_v = args.col_v.as_ref().map_or(0, |s| {
+                    s.resolve(&col_names).unwrap_or(0)
+                });
+                col_oids.get(idx_v).copied().map_or(false, is_numeric_oid)
+            };
+            let data_right_align = {
+                let idx_d = args.col_d.as_ref().map_or(2, |s| {
+                    s.resolve(&col_names).unwrap_or(2)
+                });
+                col_oids.get(idx_d).copied().map_or(false, is_numeric_oid)
+            };
             let mut out = String::new();
-            crate::crosstab::format_pivot(&mut out, &pivot_headers, &pivot_rows);
+            crate::crosstab::format_pivot(
+                &mut out,
+                &pivot_headers,
+                &pivot_rows,
+                row_right_align,
+                data_right_align,
+            );
             let _ = io::stdout().write_all(out.as_bytes());
         }
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("error: {e}");
         }
     }
+}
+
+/// Return true for PostgreSQL OIDs that represent numeric types
+/// (which should be right-aligned in table output).
+fn is_numeric_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        20   // int8 / bigint
+        | 21 // int2 / smallint
+        | 23 // int4 / integer
+        | 26 // oid
+        | 700 // float4 / real
+        | 701 // float8 / double precision
+        | 790 // money
+        | 1700 // numeric / decimal
+        | 2278 // void (rare)
+    )
 }
 
 // ---------------------------------------------------------------------------

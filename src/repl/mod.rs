@@ -2123,7 +2123,16 @@ pub(crate) async fn exec_lines(
                     describe_buffer(client, buf.trim(), settings.verbose_errors).await;
                 }
                 MetaResult::CrosstabViewBuffer(args) => {
-                    let sql = buf.trim().to_owned();
+                    // Like \gexec, fall back to prev_buf when current buf has no
+                    // actual SQL (e.g. after SELECT;  \crosstabview, where buf may
+                    // contain only comment lines from the preceding gap).
+                    let effective =
+                        crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                    let sql = if effective.is_empty() {
+                        prev_buf.trim().to_owned()
+                    } else {
+                        effective
+                    };
                     buf.clear();
                     if !sql.is_empty() {
                         execute_crosstabview(client, &sql, &args, settings, tx).await;
