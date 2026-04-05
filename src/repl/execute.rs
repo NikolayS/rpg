@@ -412,7 +412,11 @@ pub async fn execute_query(
     // VACUUM, etc.), execute each statement individually.  PostgreSQL wraps
     // multi-statement simple-query strings in an implicit transaction, which
     // would otherwise cause "cannot run inside a transaction block" errors.
-    if needs_split_execution(interpolated.as_str()) {
+    //
+    // When `exec_verbatim` is set (e.g. for \; combined batches), skip this
+    // guard so the batch is sent as a single Query, preserving PostgreSQL's
+    // implicit-transaction semantics (matching psql behaviour).
+    if !settings.exec_verbatim && needs_split_execution(interpolated.as_str()) {
         let stmts = crate::query::split_statements(interpolated.as_str());
         let mut all_ok = true;
         for stmt in stmts {
@@ -659,6 +663,15 @@ pub async fn execute_query(
             // lines after error messages.
             settings.last_stmt_produced_rows = false;
             tx.on_error();
+
+            // For multi-statement batches, PostgreSQL processes ALL statements
+            // in simple-query mode even after an error (subsequent ones fail
+            // with "current transaction is aborted").  If the batch ends with
+            // COMMIT / ROLLBACK / END / ABORT, the server rolled back and
+            // returned to Idle — mirror that here so rpg's state stays in sync.
+            if let Some(last) = crate::query::split_statements(&interpolated).last() {
+                tx.apply_terminal(last);
+            }
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
@@ -1199,9 +1212,21 @@ pub(super) async fn execute_piped(
     }
 }
 
+/// Return the first keyword of `sql` in uppercase, ignoring leading whitespace.
+///
+/// Used by multiple helpers that need to classify SQL statements by their
+/// opening keyword without allocating a full uppercase copy of the input.
+fn first_keyword_upper(sql: &str) -> String {
+    sql.trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_uppercase()
+}
+
 /// Return `true` if `sql` is an EXPLAIN statement (any variant).
 fn is_explain_statement(sql: &str) -> bool {
-    sql.trim_start().to_uppercase().starts_with("EXPLAIN")
+    first_keyword_upper(sql) == "EXPLAIN"
 }
 
 /// Strip psql's aligned table formatting from EXPLAIN output.
@@ -1978,8 +2003,11 @@ pub(super) async fn execute_gset(
                     let row = &rows[0];
                     for (col, val) in col_names.iter().zip(row.iter()) {
                         let var_name = format!("{prefix}{col}");
-                        let var_value = val.as_deref().unwrap_or("");
-                        settings.vars.set(&var_name, var_value);
+                        match val {
+                            Some(v) => settings.vars.set(&var_name, v),
+                            // NULL result → unset the variable (psql behaviour).
+                            None => { settings.vars.unset(&var_name); }
+                        }
                     }
                 }
                 n => eprintln!("\\gset: more than one row returned ({n} rows)"),

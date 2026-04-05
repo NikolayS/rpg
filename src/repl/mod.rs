@@ -95,9 +95,29 @@ impl TxState {
     /// transaction management by the server). Proper server-side tracking
     /// via `ReadyForQuery` transaction status byte is future work.
     pub fn update_from_sql(&mut self, sql: &str) {
-        // Grab the first keyword(s) from the (possibly multi-statement) input.
-        // Strip trailing punctuation (e.g. `;`) from each token so that
-        // `"begin;"` is treated the same as `"begin"`.
+        // Process every semicolon-separated statement in the batch so that
+        // multi-statement input like "BEGIN; ...; COMMIT;" correctly ends in
+        // the Idle state.  For single statements this is equivalent to only
+        // inspecting the first keyword.
+        //
+        // NOTE: Client-side SQL inspection is inherently limited — it cannot
+        // handle all edge cases (e.g. statements inside PL/pgSQL, implicit
+        // transaction management by the server). Proper server-side tracking
+        // via `ReadyForQuery` transaction status byte is future work.
+        let stmts = crate::query::split_statements(sql);
+        let stmts_to_scan: &[String] = if stmts.is_empty() {
+            // Fall back to scanning the whole input as a single statement.
+            return self.update_from_sql_single(sql);
+        } else {
+            &stmts
+        };
+        for stmt in stmts_to_scan {
+            self.update_from_sql_single(stmt);
+        }
+    }
+
+    /// Apply transaction-state logic for a single (already split) statement.
+    pub(super) fn update_from_sql_single(&mut self, sql: &str) {
         let upper = sql.trim().to_uppercase();
         let words: Vec<&str> = upper
             .split_whitespace()
@@ -116,6 +136,23 @@ impl TxState {
             if second != "TO" {
                 *self = Self::Idle;
             }
+        }
+    }
+
+    /// If `sql` is a transaction-terminating statement (COMMIT, END, ROLLBACK,
+    /// or ABORT — but not ROLLBACK TO), transition to `Idle`.
+    ///
+    /// Used in error paths where BEGIN/START must not be applied: only the
+    /// commit/rollback keywords should override the current state.
+    pub(super) fn apply_terminal(&mut self, sql: &str) {
+        let upper = sql.trim().to_uppercase();
+        let mut words = upper.split_whitespace();
+        let first = words.next().unwrap_or("");
+        let second = words.next().unwrap_or("");
+        if matches!(first, "COMMIT" | "END")
+            || (matches!(first, "ROLLBACK" | "ABORT") && second != "TO")
+        {
+            *self = Self::Idle;
         }
     }
 
@@ -1161,6 +1198,14 @@ pub struct ReplSettings {
     pub single_line: bool,
     /// Wrap `-f` file execution in `BEGIN` / `COMMIT` (`-1`).
     pub single_transaction: bool,
+    /// When `true`, `execute_query` sends the SQL verbatim as a single
+    /// `simple_query` call without the `needs_split_execution` guard.
+    ///
+    /// Used for `\;`-combined multi-statement queries: psql sends them as
+    /// a single Query message (preserving PostgreSQL's implicit-transaction
+    /// semantics), so rpg must do the same.  The caller sets this to `true`
+    /// before calling `execute_query` and restores it to `false` afterwards.
+    pub exec_verbatim: bool,
     /// Echo all input to stdout before execution (`-a` / `--echo-all`).
     ///
     /// Mirrors psql's `-a` flag: every SQL statement and meta-command is
@@ -1566,6 +1611,7 @@ impl Default for ReplSettings {
             single_step: false,
             single_line: false,
             single_transaction: false,
+            exec_verbatim: false,
             quiet: false,
             is_interactive: false,
             debug: false,
@@ -2403,8 +2449,6 @@ pub(crate) async fn exec_lines(
                 }
             } else {
                 // Split on \; separators (psql multi-command separator).
-                // Each segment before a \; is sent immediately as a complete
-                // statement; the last segment is processed normally.
                 // Use the raw (untrimmed, interpolated) form to preserve indentation.
                 let segments = split_on_backslash_semicolon(&interpolated_raw);
                 let num_segments = segments.len();
@@ -2423,6 +2467,73 @@ pub(crate) async fn exec_lines(
                         } else {
                             println!("{raw_line}");
                         }
+                    }
+                }
+
+                // When \; separators are present, psql sends ALL segments as a
+                // single multi-statement query string.  This preserves PostgreSQL's
+                // implicit-transaction semantics: if any statement in the batch
+                // fails, the entire implicit transaction is rolled back.
+                //
+                // Exception: fall back to segment-by-segment execution when any
+                // segment contains a COPY statement (which needs special protocol
+                // handling that cannot be part of a multi-statement simple_query).
+                if has_separator {
+                    let any_copy = segments.iter().any(|s| {
+                        let t = s.trim().to_uppercase();
+                        t.starts_with("COPY")
+                    });
+                    if !any_copy {
+                        // Build combined SQL: prepend existing buf if non-empty
+                        // and contains actual SQL (not just comments/whitespace).
+                        // Comments-only in buf (e.g. from a preceding comment line
+                        // that was accumulated) would be swallowed by
+                        // strip_leading_preamble, wiping the whole combined SQL.
+                        let mut combined = String::new();
+                        if !buf.is_empty() {
+                            let stripped_buf = crate::query::strip_leading_preamble(buf.trim());
+                            if !stripped_buf.is_empty() {
+                                combined.push_str(stripped_buf.trim_end());
+                                if !combined.ends_with(';') {
+                                    combined.push(';');
+                                }
+                            }
+                            buf.clear();
+                        }
+                        for seg in &segments {
+                            let s = seg.trim();
+                            if s.is_empty() {
+                                continue;
+                            }
+                            if !combined.is_empty() {
+                                combined.push(' ');
+                            }
+                            combined.push_str(s);
+                            if !combined.ends_with(';') {
+                                combined.push(';');
+                            }
+                        }
+                        let sql = crate::query::strip_leading_preamble(combined.trim());
+                        if !sql.is_empty() {
+                            prev_buf = sql.to_owned();
+                            settings.last_stmt_produced_rows = false;
+                            let saved_echo_all = settings.echo_all;
+                            settings.echo_all = false;
+                            // Send the combined batch verbatim (no split-execution
+                            // guard) to match psql's single-Query semantics.
+                            settings.exec_verbatim = true;
+                            let ok = execute_query(client, sql, settings, tx).await;
+                            settings.exec_verbatim = false;
+                            settings.echo_all = saved_echo_all;
+                            if !ok {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    break 'lines;
+                                }
+                            }
+                        }
+                        // All segments handled — skip the 'segs loop below.
+                        continue 'lines;
                     }
                 }
 
@@ -2474,6 +2585,9 @@ pub(crate) async fn exec_lines(
                             let sql_owned = sql_to_exec.to_owned();
                             buf.clear();
                             let ok = execute_inline_copy_to(client, &sql_owned, settings).await;
+                            // COPY TO does not produce a result-set table — psql
+                            // does not echo blank lines following COPY output.
+                            settings.last_stmt_produced_rows = false;
                             if !ok {
                                 exit_code = 1;
                                 if has_separator || settings.single_transaction {
