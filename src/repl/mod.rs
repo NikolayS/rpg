@@ -1719,6 +1719,15 @@ pub async fn exec_file(
     settings: &mut ReplSettings,
     params: &ConnParams,
 ) -> i32 {
+    // Set psql-compatible built-in connection variables so scripts can use
+    // :'DBNAME', :'USER', etc. (same as run_repl does for interactive mode).
+    settings.vars.set("DBNAME", &params.dbname);
+    settings.vars.set("USER", &params.user);
+    if !params.host.is_empty() {
+        settings.vars.set("HOST", &params.host);
+    }
+    settings.vars.set("PORT", &params.port.to_string());
+
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -1775,6 +1784,14 @@ pub async fn exec_file(
 
 /// Execute SQL lines from stdin (non-interactive piped input).
 pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &ConnParams) -> i32 {
+    // Set psql-compatible built-in connection variables (same as exec_file).
+    settings.vars.set("DBNAME", &params.dbname);
+    settings.vars.set("USER", &params.user);
+    if !params.host.is_empty() {
+        settings.vars.set("HOST", &params.host);
+    }
+    settings.vars.set("PORT", &params.port.to_string());
+
     let stdin = io::stdin();
     let lines = stdin.lock().lines().map_while(|l| match l {
         Ok(line) => Some(line),

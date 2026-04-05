@@ -1326,7 +1326,7 @@ async fn list_domains(
         from pg_catalog.pg_constraint as r
         where t.oid = r.contypid
           and r.contype = 'c'
-        order by r.conname
+        order by r.oid
     ), ' ') as \"Check\",
     case when pg_catalog.array_length(t.typacl, 1) = 0
          then '(none)'
@@ -1361,7 +1361,7 @@ order by 1, 2"
         from pg_catalog.pg_constraint as r
         where t.oid = r.contypid
           and r.contype = 'c'
-        order by r.conname
+        order by r.oid
     ), ' ') as \"Check\"
 from pg_catalog.pg_type as t
 left join pg_catalog.pg_namespace as n
@@ -2861,17 +2861,20 @@ where {name_cond}"
         )
         .await;
 
-        // Check if this sequence is owned by an identity column.
+        // Check if this sequence is owned by a column (identity or SERIAL/OWNED BY).
+        // deptype = 'i' → identity column ("Sequence for identity column:")
+        // deptype = 'a' → automatic/SERIAL ("Owned by:")
         // Use schema-qualified table name explicitly (regclass omits
         // schema when it's in search_path, but psql always shows it).
-        let ident_sql = format!(
-            "select n_ref.nspname || '.' || c_ref.relname || '.' || a.attname
+        let owned_sql = format!(
+            "select n_ref.nspname || '.' || c_ref.relname || '.' || a.attname,
+       d.deptype
 from pg_catalog.pg_class as c
 left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
 join pg_catalog.pg_depend as d
     on d.objid = c.oid
     and d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass
-    and d.deptype = 'i'
+    and d.deptype in ('i', 'a')
     and d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
 join pg_catalog.pg_class as c_ref on c_ref.oid = d.refobjid
 join pg_catalog.pg_namespace as n_ref on n_ref.oid = c_ref.relnamespace
@@ -2881,13 +2884,18 @@ join pg_catalog.pg_attribute as a
 where c.relkind = 'S'
   and {name_cond}"
         );
-        if let Ok(msgs) = client.simple_query(&ident_sql).await {
+        if let Ok(msgs) = client.simple_query(&owned_sql).await {
             use tokio_postgres::SimpleQueryMessage;
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
                     if let Some(col_ref) = row.get(0) {
                         if !col_ref.is_empty() {
-                            println!("Sequence for identity column: {col_ref}");
+                            let deptype = row.get(1).unwrap_or("");
+                            if deptype == "a" {
+                                println!("Owned by: {col_ref}");
+                            } else {
+                                println!("Sequence for identity column: {col_ref}");
+                            }
                         }
                     }
                     break;
@@ -3644,19 +3652,29 @@ order by 1"
         if !lines.is_empty() {
             println!("Rules:");
             for (name, def) in &lines {
-                println!("    {name} AS");
-                // Print the rule definition body (skip "CREATE RULE name AS\n" prefix)
-                // Preserve original indentation from pg_get_ruledef
-                let body = if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
-                    rest.strip_prefix('\n').unwrap_or(rest)
-                } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
-                    // Skip "name AS\n" prefix
-                    rest.splitn(2, '\n').nth(1).unwrap_or("")
+                // psql formats rules differently for views vs tables/other:
+                // - view rules: strip "CREATE RULE " and prepend 1 space
+                // - table rules: print "    {name} AS\n{body}" with 4-space indent
+                if relkind_char == 'v' {
+                    let display = def
+                        .strip_prefix("CREATE RULE ")
+                        .map(|rest| format!(" {rest}"))
+                        .unwrap_or_else(|| format!(" {def}"));
+                    println!("{display}");
                 } else {
-                    def.as_str()
-                };
-                for line in body.lines() {
-                    println!("{line}");
+                    // Table (and other) rules: show name with 4-space indent,
+                    // then the body lines after the "AS\n" separator.
+                    println!("    {name} AS");
+                    let body = if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
+                        rest.strip_prefix('\n').unwrap_or(rest)
+                    } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
+                        rest.splitn(2, '\n').nth(1).unwrap_or("")
+                    } else {
+                        def.as_str()
+                    };
+                    for line in body.lines() {
+                        println!("{line}");
+                    }
                 }
             }
         }
@@ -4791,7 +4809,7 @@ order by 1";
         from pg_catalog.pg_constraint as r
         where t.oid = r.contypid
           and r.contype = 'c'
-        order by r.conname
+        order by r.oid
     ), ' ') as \"Check\"
 from pg_catalog.pg_type as t
 left join pg_catalog.pg_namespace as n
@@ -4868,7 +4886,7 @@ order by 1, 2"
         from pg_catalog.pg_constraint as r
         where t.oid = r.contypid
           and r.contype = 'c'
-        order by r.conname
+        order by r.oid
     ), ' ') as \"Check\",
     case when pg_catalog.array_length(t.typacl, 1) = 0
          then '(none)'
