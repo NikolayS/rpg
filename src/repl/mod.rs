@@ -1848,6 +1848,10 @@ async fn execute_inline_copy_to(
                 } else {
                     use std::io::Write as _;
                     let _ = std::io::stdout().write_all(&bytes);
+                    // Flush stdout so that async NOTICE messages (written to
+                    // stderr) interleave correctly with copy data when 2>&1
+                    // is used, matching psql's output ordering.
+                    let _ = std::io::stdout().flush();
                 }
             }
             Err(e) => {

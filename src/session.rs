@@ -236,7 +236,9 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
     }
 
     if !found {
-        eprintln!("ERROR:  view {name} does not exist");
+        // Match psql error format: `error: ERROR:  relation "X" does not exist`
+        // (the "error: " prefix appears in psql's script-file error output).
+        eprintln!("error: ERROR:  relation \"{name}\" does not exist");
     }
 }
 

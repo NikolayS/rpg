@@ -3734,34 +3734,6 @@ order by 1"
     }
 
 
-    // Typed table — show "Typed table of type: typename" when reloftype != 0.
-    // psql places this after indexes/constraints but before Inherits.
-    if matches!(relkind_char, 'r') {
-        let typed_sql = format!(
-            "select case when pg_catalog.pg_type_is_visible(t.oid) then t.typname
-         else nt.nspname || '.' || t.typname end as type_name
-from pg_catalog.pg_class as c
-join pg_catalog.pg_type as t on t.oid = c.reloftype
-join pg_catalog.pg_namespace as nt on nt.oid = t.typnamespace
-left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-where c.reloftype != 0
-    and {name_cond}
-limit 1"
-        );
-        if let Ok(msgs) = client.simple_query(&typed_sql).await {
-            use tokio_postgres::SimpleQueryMessage;
-            for msg in msgs {
-                if let SimpleQueryMessage::Row(row) = msg {
-                    let tname = row.get(0).unwrap_or("");
-                    if !tname.is_empty() {
-                        println!("Typed table of type: {tname}");
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
     // Inherits — show parent table(s) for non-partition inheritance.
     let inherits_sql = format!(
         "select case when pg_catalog.pg_table_is_visible(c2.oid)
@@ -3860,6 +3832,35 @@ order by 1"
             }
         }
     }
+
+    // Typed table — show "Typed table of type: typename" when reloftype != 0.
+    // psql places this AFTER child tables but BEFORE partition info.
+    if matches!(relkind_char, 'r') {
+        let typed_sql = format!(
+            "select case when pg_catalog.pg_type_is_visible(t.oid) then t.typname
+         else nt.nspname || '.' || t.typname end as type_name
+from pg_catalog.pg_class as c
+join pg_catalog.pg_type as t on t.oid = c.reloftype
+join pg_catalog.pg_namespace as nt on nt.oid = t.typnamespace
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where c.reloftype != 0
+    and {name_cond}
+limit 1"
+        );
+        if let Ok(msgs) = client.simple_query(&typed_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let tname = row.get(0).unwrap_or("");
+                    if !tname.is_empty() {
+                        println!("Typed table of type: {tname}");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     // View definition for materialized views — shown AFTER indexes (psql ordering).
     if meta.plus && relkind_char == 'm' {
         let viewdef_sql = format!(
@@ -3885,6 +3886,51 @@ limit 1"
             }
         }
     }
+    // Publications — tables can belong to logical replication publications.
+    // psql \d+ shows a "Publications:" section listing them.
+    if meta.plus && matches!(relkind_char, 'r' | 'p') {
+        let pub_sql = format!(
+            "select p.pubname
+from pg_catalog.pg_publication as p
+join pg_catalog.pg_publication_rel as pr on pr.prpubid = p.oid
+join pg_catalog.pg_class as c on c.oid = pr.prrelid
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+union
+select p.pubname
+from pg_catalog.pg_publication as p
+join pg_catalog.pg_class as c
+    on c.relnamespace = any(
+        select pn.pnnspid from pg_catalog.pg_publication_namespace as pn
+        where pn.pnpubid = p.oid)
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where p.puballtables = false
+    and {name_cond}
+union
+select p.pubname
+from pg_catalog.pg_publication as p
+where p.puballtables = true
+order by 1"
+        );
+        if let Ok(msgs) = client.simple_query(&pub_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut pubs: Vec<String> = Vec::new();
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    if let Some(name) = row.get(0) {
+                        pubs.push(name.to_owned());
+                    }
+                }
+            }
+            if !pubs.is_empty() {
+                println!("Publications:");
+                for p in &pubs {
+                    println!("    \"{p}\"");
+                }
+            }
+        }
+    }
+
     // Access method — shown by psql \d+ for tables and materialized views.
     if meta.plus {
         let am_sql = format!(

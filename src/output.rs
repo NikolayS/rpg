@@ -638,6 +638,7 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .unwrap_or(0);
 
     // Widest data row: `key_padded + " | " + value` = max_name_width + 3 + value_width.
+    // For multiline values, use the widest line.
     // The expanded header must be padded to this width to match psql behaviour.
     let max_data_width = rows
         .iter()
@@ -646,7 +647,12 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
                 let val_len = row
                     .get(i)
                     .and_then(|v| v.as_deref())
-                    .map_or(0, display_width);
+                    .map_or(0, |v| {
+                        v.lines()
+                            .map(display_width)
+                            .max()
+                            .unwrap_or(0)
+                    });
                 max_name_width + 3 + val_len
             })
         })
@@ -667,11 +673,41 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
 
             let name_width = display_width(&col.name);
             let padding = max_name_width.saturating_sub(name_width);
-            let _ = write!(out, "{}", col.name);
-            for _ in 0..padding {
-                out.push(' ');
+
+            // Handle multiline values: psql prints each embedded newline as
+            // a `+` continuation marker followed by a new ` key_pad | rest` line.
+            let value_lines: Vec<&str> = val.split('\n').collect();
+            let line_count = value_lines.len();
+            for (li, line) in value_lines.iter().enumerate() {
+                if li == 0 {
+                    let _ = write!(out, "{}", col.name);
+                    for _ in 0..padding {
+                        out.push(' ');
+                    }
+                } else {
+                    // Continuation: align with the key column (spaces) then ` | `
+                    for _ in 0..max_name_width {
+                        out.push(' ');
+                    }
+                }
+                let is_last_line = li == line_count - 1;
+                // If this is not the last segment, pad to max_data_width and
+                // mark with `+` for psql compat.
+                if !is_last_line {
+                    let prefix_w = max_name_width + 3; // "name | " width
+                    let line_w = display_width(line);
+                    let used = prefix_w + line_w;
+                    let pad = max_data_width.saturating_sub(used);
+                    let _ = write!(out, " | {line}");
+                    for _ in 0..pad {
+                        out.push(' ');
+                    }
+                    out.push('+');
+                    out.push('\n');
+                } else {
+                    let _ = writeln!(out, " | {line}");
+                }
             }
-            let _ = writeln!(out, " | {val}");
         }
     }
 }
