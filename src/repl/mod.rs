@@ -447,6 +447,7 @@ pub fn build_prompt_from_settings(
 /// - Parenthesis depth does not affect statement completion.
 pub fn is_complete(buf: &str) -> bool {
     let mut in_single = false;
+    let mut in_double = false; // double-quoted identifier: "foo's bar"
     let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
     // Tracks nesting depth of BEGIN ATOMIC … END blocks (SQL/PSM function
@@ -504,6 +505,21 @@ pub fn is_complete(buf: &str) -> bool {
             continue;
         }
 
+        if in_double {
+            if bytes[i] == b'"' {
+                // Escaped double-quote "" inside identifier?
+                if i + 1 < len && bytes[i + 1] == b'"' {
+                    i += 2;
+                } else {
+                    in_double = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
         // Not in any quoted context.
 
         // Line comment: skip to end of line
@@ -524,6 +540,13 @@ pub fn is_complete(buf: &str) -> bool {
         // Single-quote start
         if bytes[i] == b'\'' {
             in_single = true;
+            i += 1;
+            continue;
+        }
+
+        // Double-quote start (identifier)
+        if bytes[i] == b'"' {
+            in_double = true;
             i += 1;
             continue;
         }
@@ -2053,6 +2076,27 @@ pub(crate) async fn exec_lines(
                         }
                     }
                 }
+                MetaResult::ExecuteBufferExpanded => {
+                    let sql = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                    buf.clear();
+                    if !sql.is_empty() {
+                        let saved_echo = settings.echo_all;
+                        let saved_expanded = settings.expanded;
+                        settings.echo_all = false;
+                        settings.expanded = ExpandedMode::On;
+                        settings.pset.expanded = ExpandedMode::On;
+                        let ok = execute_query(client, &sql, settings, tx).await;
+                        settings.echo_all = saved_echo;
+                        settings.expanded = saved_expanded;
+                        settings.pset.expanded = saved_expanded;
+                        if !ok {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
+                            }
+                        }
+                    }
+                }
                 MetaResult::GExecBuffer => {
                     // psql keeps the query buffer after auto-execution so
                     // \gexec can reuse it; fall back to prev_buf if buf is empty.
@@ -2212,6 +2256,22 @@ pub(crate) async fn exec_lines(
                                     break 'lines;
                                 }
                             }
+                        }
+                    }
+                    MetaResult::ExecuteBufferExpanded => {
+                        let sql =
+                            crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        buf.clear();
+                        if !sql.is_empty() {
+                            let saved_echo = settings.echo_all;
+                            let saved_expanded = settings.expanded;
+                            settings.echo_all = false;
+                            settings.expanded = ExpandedMode::On;
+                            settings.pset.expanded = ExpandedMode::On;
+                            execute_query(client, &sql, settings, tx).await;
+                            settings.echo_all = saved_echo;
+                            settings.expanded = saved_expanded;
+                            settings.pset.expanded = saved_expanded;
                         }
                     }
                     MetaResult::GSet(prefix) => {

@@ -188,7 +188,9 @@ normalize() {
     -e '/^CONTEXT:  /d' \
     -e '/^SQL function "[^"]*" statement /d' \
     -e '/^PL\/pgSQL function "[^"]*" /d' \
-    -e '/^parallel worker$/d' | \
+    -e '/^parallel worker$/d' \
+    -e '/enumtypid/s/=([0-9][0-9]*/=(OID/g' \
+    -e 's/for operator [0-9][0-9]*/for operator OID/g' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
