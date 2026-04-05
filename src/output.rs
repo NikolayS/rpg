@@ -880,8 +880,11 @@ pub fn format_pg_error(
             }
 
             // CONTEXT line (e.g. PL/pgSQL call stack).
-            if let Some(ctx) = db_err.where_() {
-                let _ = writeln!(out, "CONTEXT:  {ctx}");
+            // psql only shows this in verbose mode; suppress in default/terse.
+            if cfg.verbose_errors {
+                if let Some(ctx) = db_err.where_() {
+                    let _ = writeln!(out, "CONTEXT:  {ctx}");
+                }
             }
 
             // Internal query + position (shown after CONTEXT in psql).
