@@ -614,6 +614,25 @@ pub async fn execute_query(
                         if result_set_index == 0 {
                             settings.last_row_count = Some(n);
                         }
+                        // Signal to exec_lines that a result set was produced
+                        // (used to decide whether to echo following blank lines).
+                        // psql echoes blank lines ONLY after pure SELECT-like
+                        // statements in aligned format. DML+RETURNING statements
+                        // (INSERT/UPDATE/DELETE) also produce rows but psql does
+                        // NOT echo blanks after them (they emit a separate command
+                        // tag and format_rowset_pset already appends a blank).
+                        // Unaligned and tuples-only modes are excluded too.
+                        use crate::output::OutputFormat;
+                        if is_select
+                            && !settings.pset.tuples_only
+                            && matches!(
+                                settings.pset.format,
+                                OutputFormat::Aligned | OutputFormat::Wrapped
+                            )
+                            && is_pure_select(sql_to_send)
+                        {
+                            settings.last_stmt_produced_rows = true;
+                        }
 
                         result_set_index += 1;
                         col_names.clear();
@@ -636,6 +655,9 @@ pub async fn execute_query(
                 eprintln!("{sql_to_send}");
             }
             crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            // A failed query doesn't produce rows; psql does not echo blank
+            // lines after error messages.
+            settings.last_stmt_produced_rows = false;
             tx.on_error();
 
             // Capture context for /fix.
@@ -1962,9 +1984,13 @@ pub(super) async fn execute_gset(
                 }
                 n => eprintln!("\\gset: more than one row returned ({n} rows)"),
             }
+            // \gset stores results in variables, not displayed — psql does
+            // not echo blank lines following \gset.
+            settings.last_stmt_produced_rows = false;
         }
         Err(e) => {
             crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            settings.last_stmt_produced_rows = false;
             tx.on_error();
         }
     }
@@ -2068,7 +2094,13 @@ pub(super) async fn execute_crosstabview(
                 row_right_align,
                 data_right_align,
             );
+            // psql always outputs a blank line after the crosstabview
+            // result table in echo-all (-a) mode.
+            out.push('\n');
             let _ = io::stdout().write_all(out.as_bytes());
+            // Do NOT set last_stmt_produced_rows: the trailing blank line
+            // was already output above, so blank lines that follow in the
+            // input file should NOT be echoed a second time.
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -2078,6 +2110,24 @@ pub(super) async fn execute_crosstabview(
 
 /// Return true for PostgreSQL OIDs that represent numeric types
 /// (which should be right-aligned in table output).
+/// Returns true if `sql` is a pure SELECT-like statement (SELECT, WITH, VALUES,
+/// TABLE, FETCH, EXPLAIN SELECT, etc.) — i.e. not DML+RETURNING (INSERT/UPDATE/
+/// DELETE). psql echoes blank lines after pure SELECT results but not after DML.
+fn is_pure_select(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    // Skip leading comments (-- and /* */).
+    let upper = upper.trim_start();
+    // Find first non-comment, non-whitespace token.
+    let first_word = upper
+        .split_whitespace()
+        .find(|w| !w.starts_with("--"))
+        .unwrap_or("");
+    matches!(
+        first_word,
+        "SELECT" | "WITH" | "VALUES" | "TABLE" | "FETCH" | "EXPLAIN"
+    )
+}
+
 fn is_numeric_oid(oid: u32) -> bool {
     matches!(
         oid,

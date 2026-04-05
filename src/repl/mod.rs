@@ -1335,6 +1335,12 @@ pub struct ReplSettings {
     /// `CommandComplete` message; `None` when no query has completed yet
     /// or the query produced no `CommandComplete` (e.g. error).
     pub last_row_count: Option<u64>,
+    /// Set to `true` after a statement produces a result set (rows); reset to
+    /// `false` before each new statement execution.  Used by the blank-line
+    /// echo logic in `exec_lines`: psql echoes blank input lines that follow
+    /// row-producing statements but not those that follow DDL/DML without
+    /// RETURNING.
+    pub last_stmt_produced_rows: bool,
     /// Contents of `POSTGRES.md` found alongside `.rpg.toml`, if any.
     ///
     /// When present, this text is injected into the AI system prompt for
@@ -1599,6 +1605,7 @@ impl Default for ReplSettings {
             audit_dbname: String::new(),
             audit_user: String::new(),
             last_row_count: None,
+            last_stmt_produced_rows: false,
             project_context: None,
             ai_context_files: Vec::new(),
             statusline: None,
@@ -2107,6 +2114,7 @@ pub(crate) async fn exec_lines(
                     };
                     buf.clear();
                     if !sql.is_empty() {
+                        settings.last_stmt_produced_rows = false;
                         execute_gexec(client, &sql, settings, tx).await;
                     }
                 }
@@ -2209,7 +2217,11 @@ pub(crate) async fn exec_lines(
                     settings.cond.reset();
                     break 'lines;
                 }
-                _ => {}
+                _ => {
+                    // Simple metacommands (e.g. \x, \pset, \timing) don't produce
+                    // rows, so psql does not echo a following blank line.
+                    settings.last_stmt_produced_rows = false;
+                }
             }
             // Stop the script loop when `\prompt` detected Ctrl+C.
             if settings.prompt_interrupted {
@@ -2342,11 +2354,17 @@ pub(crate) async fn exec_lines(
                     let force_execute = seg_idx < num_segments - 1;
 
                         // -a / --echo-all: for lines without \;, echo each segment.
-                    // psql echoes the original (pre-interpolation) line to show
-                    // :varname references unexpanded, and echoes blank lines inside
-                    // string literals but skips them between statements.
+                    // psql echoes non-empty input lines and also blank lines that
+                    // follow row-producing statements (SELECT, \crosstabview, etc.)
+                    // — psql skips blank lines after DDL/DML that produce no rows.
+                    let is_blank = segment.trim().is_empty() && !segment.is_empty().then_some(false).unwrap_or(false);
+                    let is_blank = segment.trim().is_empty();
+                    let should_echo_blank = is_blank
+                        && settings.last_stmt_produced_rows
+                        && buf.trim().is_empty()
+                        && !is_inside_string_literal(&buf);
                     if settings.echo_all && !has_separator
-                        && (!segment.trim().is_empty() || is_inside_string_literal(&buf))
+                        && (!is_blank || should_echo_blank || is_inside_string_literal(&buf))
                     {
                         // Echo original raw line (trim trailing only) on first segment,
                         // subsequent segments (shouldn't happen for !has_separator) also raw.
@@ -2355,6 +2373,10 @@ pub(crate) async fn exec_lines(
                             let _ = writeln!(w, "{echo_line}");
                         } else {
                             println!("{echo_line}");
+                        }
+                        // A blank line "consumes" the produced-rows flag.
+                        if is_blank {
+                            settings.last_stmt_produced_rows = false;
                         }
                     }
 
@@ -2512,6 +2534,8 @@ pub(crate) async fn exec_lines(
                         if !sql_to_exec.is_empty() {
                             // Remember last-executed query so \gexec/\g can reuse it.
                             prev_buf = sql_to_exec.to_owned();
+                            // Reset: will be set to true if execution produces rows.
+                            settings.last_stmt_produced_rows = false;
                             // Disable per-statement echo in execute_query to avoid
                             // double-echoing when echo_all is active (lines already echoed above).
                             let saved_echo_all = settings.echo_all;
