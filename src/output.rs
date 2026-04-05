@@ -8,11 +8,23 @@
 //! - Timing footer (`Time: X.XXX ms`)
 
 use std::fmt::Write as FmtWrite;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult};
+
+/// Global terse-errors flag, mirroring `\set VERBOSITY terse`.
+/// Set by the REPL when VERBOSITY changes; read by the notice handler
+/// in the connection task (which has no access to `Settings`).
+static TERSE_NOTICES: AtomicBool = AtomicBool::new(false);
+
+/// Update the global terse-notice flag.  Call this whenever
+/// `settings.terse_errors` changes.
+pub fn set_terse_notices(terse: bool) {
+    TERSE_NOTICES.store(terse, Ordering::Relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // ExpandedMode (shared between output, repl, and metacmd)
@@ -59,6 +71,12 @@ pub struct OutputConfig {
     /// Show verbose error detail including SQLSTATE.
     /// psql does not show SQLSTATE by default; set this for `\set VERBOSITY verbose`.
     pub verbose_errors: bool,
+    /// Suppress DETAIL/HINT lines in errors.
+    /// Set when `\set VERBOSITY terse` is active.
+    pub terse_errors: bool,
+    /// Show only the SQLSTATE code as the error message.
+    /// Set when `\set VERBOSITY sqlstate` is active.
+    pub sqlstate_errors: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,10 +190,13 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         OutputFormat::Markdown => format_markdown(out, rs, cfg),
     }
 
-    // psql always prints a blank line after each result set (the trailing
-    // newline after `(N rows)` plus one more).  Add it here so all formats
-    // get consistent behaviour regardless of whether a footer is shown.
-    out.push('\n');
+    // psql prints a blank line after aligned result sets (trailing newline
+    // after `(N rows)` plus one more blank line).  Unaligned and CSV modes
+    // omit this extra blank line entirely.
+    let is_unaligned = matches!(cfg.format, OutputFormat::Unaligned | OutputFormat::Csv);
+    if !is_unaligned {
+        out.push('\n');
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,8 +329,9 @@ fn column_widths_with_null(
             if i >= widths.len() {
                 break;
             }
-            let cell_str = cell.as_deref().unwrap_or(null_str);
-            let w = display_width(cell_str);
+            let raw = cell.as_deref().unwrap_or(null_str);
+            let escaped = psql_escape_cell(raw);
+            let w = cell_display_width(&escaped);
             if w > widths[i] {
                 widths[i] = w;
             }
@@ -339,8 +361,8 @@ fn column_widths(
 ///   ` |` suffix.
 ///
 /// `value_fn` maps `(column_meta, column_index) → String`.
-/// `is_header` – when true, text columns are center-aligned (matching psql).
-/// Numeric columns are always right-aligned (both header and data rows).
+/// `is_header` – when true, all headers are center-aligned (psql centers
+/// numeric headers too; only data rows are right-aligned for numeric columns).
 fn write_aligned_row_border<F>(
     out: &mut String,
     cols: &[ColumnMeta],
@@ -351,45 +373,37 @@ fn write_aligned_row_border<F>(
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
-    for (i, col) in cols.iter().enumerate() {
-        let val = value_fn(col, i);
-        let w = widths[i];
-        let val_width = display_width(&val);
-        let padding = w.saturating_sub(val_width);
+    if is_header {
+        // Headers are always single-line: center-align, no escaping needed.
+        for (i, col) in cols.iter().enumerate() {
+            let val = value_fn(col, i);
+            let w = widths[i];
+            let val_width = display_width(&val);
+            let padding = w.saturating_sub(val_width);
 
-        match border {
-            0 => {
-                // border 0: no outer margins, columns separated by two spaces.
-                if i > 0 {
-                    out.push_str("  ");
+            match border {
+                0 => {
+                    if i > 0 {
+                        out.push_str("  ");
+                    }
+                }
+                2 => {
+                    if i == 0 {
+                        out.push_str("| ");
+                    } else {
+                        out.push_str(" | ");
+                    }
+                }
+                _ => {
+                    if i == 0 {
+                        out.push(' ');
+                    } else {
+                        out.push_str(" | ");
+                    }
                 }
             }
-            2 => {
-                // border 2: leading `| ` then ` | ` between columns.
-                if i == 0 {
-                    out.push_str("| ");
-                } else {
-                    out.push_str(" | ");
-                }
-            }
-            _ => {
-                // border 1 (default): leading space, ` | ` between columns.
-                if i == 0 {
-                    out.push(' ');
-                } else {
-                    out.push_str(" | ");
-                }
-            }
-        }
 
-        if col.is_numeric {
-            // Right-align numeric columns (both headers and data).
-            for _ in 0..padding {
-                out.push(' ');
-            }
-            out.push_str(&val);
-        } else if is_header {
-            // Center-align text headers (psql behaviour).
+            // Center-align all column headers (psql behaviour).
             let left_pad = padding / 2;
             let right_pad = padding - left_pad;
             for _ in 0..left_pad {
@@ -399,36 +413,118 @@ fn write_aligned_row_border<F>(
             for _ in 0..right_pad {
                 out.push(' ');
             }
-        } else {
-            // Left-align text data.
-            out.push_str(&val);
-            for _ in 0..padding {
-                out.push(' ');
-            }
         }
+        match border {
+            0 => {}
+            2 => out.push_str(" |"),
+            _ => out.push(' '),
+        }
+        out.push('\n');
+        return;
     }
 
-    match border {
-        0 => {
-            // border 0: no trailing margin.
+    // Data rows: escape control characters and handle multi-line cells.
+    //
+    // psql converts non-printable control characters (0x01–0x1F except LF/TAB,
+    // plus 0x7F) to visible escape sequences like `\x01`.  It also renders
+    // cells that contain embedded LF characters as multiple physical lines,
+    // appending a `+` continuation marker after each non-final physical line.
+    let escaped: Vec<String> = (0..cols.len())
+        .map(|i| psql_escape_cell(&value_fn(&cols[i], i)))
+        .collect();
+
+    // Split each cell into physical lines and determine how many physical rows
+    // this logical row requires.
+    let split_lines: Vec<Vec<&str>> = escaped.iter().map(|v| v.split('\n').collect()).collect();
+    let max_physical_lines = split_lines.iter().map(|v| v.len()).max().unwrap_or(1);
+
+    for phys_row in 0..max_physical_lines {
+        let is_last_phys = phys_row == max_physical_lines - 1;
+
+        // Per-column continuation flag: true when this column has more content
+        // on the next physical row.  Used to place the `+` marker correctly.
+        let col_continues: Vec<bool> = (0..cols.len())
+            .map(|i| phys_row < split_lines[i].len().saturating_sub(1))
+            .collect();
+
+        for (i, col) in cols.iter().enumerate() {
+            let line = split_lines[i].get(phys_row).copied().unwrap_or("");
+            let w = widths[i];
+
+            // Column prefix separator.  In border-1, if the PREVIOUS column
+            // has continuation on this physical row, its trailing-space slot
+            // becomes `+` — so use `+| ` instead of the normal ` | `.
+            match border {
+                0 => {
+                    if i > 0 {
+                        out.push_str("  ");
+                    }
+                }
+                2 => {
+                    if i == 0 {
+                        out.push_str("| ");
+                    } else {
+                        out.push_str(" | ");
+                    }
+                }
+                _ => {
+                    if i == 0 {
+                        out.push(' ');
+                    } else if !is_last_phys && col_continues[i - 1] {
+                        // Previous column has continuation: `+| ` instead of ` | `.
+                        out.push_str("+| ");
+                    } else {
+                        out.push_str(" | ");
+                    }
+                }
+            }
+
+            // Expand tabs in cell content before rendering (psql expands tabs
+            // from position 0 of each cell line, independent of the cell's
+            // column position in the output line).
+            let expanded_line = expand_cell_tabs(line);
+            let line_width = display_width(&expanded_line);
+            let padding = w.saturating_sub(line_width);
+
+            if col.is_numeric {
+                // Right-align numeric data.
+                for _ in 0..padding {
+                    out.push(' ');
+                }
+                out.push_str(&expanded_line);
+            } else {
+                // Left-align text data.
+                out.push_str(&expanded_line);
+                for _ in 0..padding {
+                    out.push(' ');
+                }
+            }
         }
-        2 => {
-            // border 2: ` |` suffix.
-            out.push_str(" |");
+
+        // Row suffix.  For border-1, if the LAST column has continuation on
+        // this physical row the trailing space becomes `+`.
+        match border {
+            0 => {}
+            2 => out.push_str(" |"),
+            _ => {
+                let last_continues = col_continues.last().copied().unwrap_or(false);
+                if !is_last_phys && last_continues {
+                    out.push('+');
+                } else {
+                    out.push(' ');
+                }
+            }
         }
-        _ => {
-            // border 1: trailing space.
-            out.push(' ');
-        }
+        out.push('\n');
     }
-    out.push('\n');
 }
 
 /// Write one row of the aligned table (header or data).
 ///
 /// `value_fn` maps `(column_meta, column_index) → String`.
-/// `is_header` – when true, text columns are center-aligned (matching psql).
-/// Numeric columns are always right-aligned (both header and data rows).
+/// `is_header` – when true, all column headers are center-aligned (matching
+/// psql: numeric headers are centered, not right-aligned; only data rows are
+/// right-aligned).
 fn write_aligned_row<F>(
     out: &mut String,
     cols: &[ColumnMeta],
@@ -542,6 +638,7 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .unwrap_or(0);
 
     // Widest data row: `key_padded + " | " + value` = max_name_width + 3 + value_width.
+    // For multiline values, use the widest line.
     // The expanded header must be padded to this width to match psql behaviour.
     let max_data_width = rows
         .iter()
@@ -550,7 +647,12 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
                 let val_len = row
                     .get(i)
                     .and_then(|v| v.as_deref())
-                    .map_or(0, display_width);
+                    .map_or(0, |v| {
+                        v.lines()
+                            .map(display_width)
+                            .max()
+                            .unwrap_or(0)
+                    });
                 max_name_width + 3 + val_len
             })
         })
@@ -558,9 +660,9 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .unwrap_or(max_name_width + 3);
 
     for (rec_idx, row) in rows.iter().enumerate() {
-        // Record header: `-[ RECORD N ]---` — suppressed in tuples-only mode.
+        // Record header: `-[ RECORD N ]--+---` — suppressed in tuples-only mode.
         if !cfg.tuples_only {
-            write_expanded_header(out, rec_idx + 1, max_data_width);
+            write_expanded_header(out, rec_idx + 1, max_data_width, max_name_width);
         }
 
         for (i, col) in cols.iter().enumerate() {
@@ -571,26 +673,84 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
 
             let name_width = display_width(&col.name);
             let padding = max_name_width.saturating_sub(name_width);
-            let _ = write!(out, "{}", col.name);
-            for _ in 0..padding {
-                out.push(' ');
+
+            // Handle multiline values: psql prints each embedded newline as
+            // a `+` continuation marker followed by a new ` key_pad | rest` line.
+            let value_lines: Vec<&str> = val.split('\n').collect();
+            let line_count = value_lines.len();
+            for (li, line) in value_lines.iter().enumerate() {
+                if li == 0 {
+                    let _ = write!(out, "{}", col.name);
+                    for _ in 0..padding {
+                        out.push(' ');
+                    }
+                } else {
+                    // Continuation: align with the key column (spaces) then ` | `
+                    for _ in 0..max_name_width {
+                        out.push(' ');
+                    }
+                }
+                let is_last_line = li == line_count - 1;
+                // If this is not the last segment, pad to max_data_width and
+                // mark with `+` for psql compat.
+                if !is_last_line {
+                    let prefix_w = max_name_width + 3; // "name | " width
+                    let line_w = display_width(line);
+                    let used = prefix_w + line_w;
+                    let pad = max_data_width.saturating_sub(used);
+                    let _ = write!(out, " | {line}");
+                    for _ in 0..pad {
+                        out.push(' ');
+                    }
+                    out.push('+');
+                    out.push('\n');
+                } else {
+                    let _ = writeln!(out, " | {line}");
+                }
             }
-            let _ = writeln!(out, " | {val}");
         }
     }
 }
 
-/// Write the `-[ RECORD N ]---` header line for expanded output.
+/// Write the `-[ RECORD N ]-...-` header line for expanded output.
 ///
 /// `max_data_width` is the width of the widest data row
-/// (`key_padded + " | " + value`). The header is padded with `-` to match
-/// that width, replicating psql behaviour.
-fn write_expanded_header(out: &mut String, record_num: usize, max_data_width: usize) {
+/// (`key_padded + " | " + value`). `max_name_width` is the widest field name.
+///
+/// psql places a `+` at the `|` position when the field-name column is wide
+/// enough that the `|` position falls at or after the end of the prefix.
+/// When the prefix is wider than the `|` position, only dashes are used.
+fn write_expanded_header(
+    out: &mut String,
+    record_num: usize,
+    max_data_width: usize,
+    max_name_width: usize,
+) {
     let prefix = format!("-[ RECORD {record_num} ]");
-    let dashes_needed = max_data_width.saturating_sub(prefix.len());
+    let prefix_len = prefix.len();
+
+    // The `|` in data rows is at column position max_name_width + 1 (0-indexed).
+    // Only place `+` there if the prefix doesn't already extend past it.
+    let pipe_pos = max_name_width + 1;
     let _ = write!(out, "{prefix}");
-    for _ in 0..dashes_needed {
-        out.push('-');
+
+    if pipe_pos >= prefix_len {
+        // Fill dashes up to the pipe position, then `+`, then remaining dashes.
+        let dashes_before = pipe_pos - prefix_len;
+        let dashes_after = max_data_width.saturating_sub(prefix_len + dashes_before + 1);
+        for _ in 0..dashes_before {
+            out.push('-');
+        }
+        out.push('+');
+        for _ in 0..dashes_after {
+            out.push('-');
+        }
+    } else {
+        // Prefix already extends past the field-name column: just pad with dashes.
+        let dashes_needed = max_data_width.saturating_sub(prefix_len);
+        for _ in 0..dashes_needed {
+            out.push('-');
+        }
     }
     out.push('\n');
 }
@@ -670,30 +830,72 @@ pub fn format_pg_error(
     let mut out = String::new();
 
     if let Some(db_err) = err.as_db_error() {
-        // Severity line — color the severity keyword.
         let colored = color_severity(db_err.severity());
-        let _ = writeln!(out, "{}:  {}", colored, db_err.message());
 
-        // Position marker.
-        if let Some(pos) = db_err.position() {
-            if let Some(sql) = original_sql {
-                write_error_position(&mut out, sql, pos);
+        if cfg.sqlstate_errors {
+            // sqlstate mode: show only the SQLSTATE code as the message.
+            let _ = writeln!(out, "{}:  {}", colored, db_err.code().code());
+        } else {
+            // Severity line — color the severity keyword.
+            let _ = writeln!(out, "{}:  {}", colored, db_err.message());
+
+            // Original position marker (shown right after severity in psql).
+            if let Some(pos) = db_err.position() {
+                if let tokio_postgres::error::ErrorPosition::Original(_) = pos {
+                    if let Some(sql) = original_sql {
+                        write_error_position(&mut out, sql, pos);
+                    }
+                }
             }
-        }
 
-        // DETAIL line.
-        if let Some(detail) = db_err.detail() {
-            let _ = writeln!(out, "DETAIL:  {detail}");
-        }
+            // DETAIL and HINT are suppressed in terse mode.
+            if !cfg.terse_errors {
+                if let Some(detail) = db_err.detail() {
+                    // psql suppresses "N objects in database X" summary lines
+                    // that PostgreSQL appends to DROP ROLE DETAIL messages.
+                    let filtered: Vec<&str> = detail
+                        .lines()
+                        .filter(|line| {
+                            let t = line.trim();
+                            // Keep line unless it looks like "N object(s) in database NAME"
+                            match t.split_once(' ') {
+                                Some((num, rest))
+                                    if num.chars().all(|c| c.is_ascii_digit())
+                                        && (rest.starts_with("object in database ")
+                                            || rest.starts_with("objects in database ")) =>
+                                {
+                                    false
+                                }
+                                _ => true,
+                            }
+                        })
+                        .collect();
+                    if !filtered.is_empty() {
+                        let _ = writeln!(out, "DETAIL:  {}", filtered.join("\n"));
+                    }
+                }
+                if let Some(hint) = db_err.hint() {
+                    let _ = writeln!(out, "HINT:  {hint}");
+                }
+            }
 
-        // HINT line.
-        if let Some(hint) = db_err.hint() {
-            let _ = writeln!(out, "HINT:  {hint}");
-        }
+            // CONTEXT line (e.g. PL/pgSQL call stack).
+            if let Some(ctx) = db_err.where_() {
+                let _ = writeln!(out, "CONTEXT:  {ctx}");
+            }
 
-        // SQLSTATE: only shown in verbose mode (psql default: hidden).
-        if cfg.verbose_errors {
-            let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+            // Internal query + position (shown after CONTEXT in psql).
+            if let Some(pos) = db_err.position() {
+                if let tokio_postgres::error::ErrorPosition::Internal { query, .. } = pos {
+                    let _ = writeln!(out, "QUERY:  {query}");
+                    write_error_position(&mut out, query, pos);
+                }
+            }
+
+            // SQLSTATE: only shown in verbose mode (psql default: hidden).
+            if cfg.verbose_errors {
+                let _ = writeln!(out, "SQLSTATE:  {}", db_err.code().code());
+            }
         }
     } else {
         // Non-server error (I/O, protocol, …).
@@ -710,9 +912,11 @@ pub fn format_pg_error(
 /// not need the string representation.  `sql` is the original query text
 /// (used to render the position marker); pass `None` when unavailable.
 /// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
-pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool) {
+pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool, terse: bool, sqlstate: bool) {
     let cfg = OutputConfig {
         verbose_errors: verbose,
+        terse_errors: terse,
+        sqlstate_errors: sqlstate,
         ..OutputConfig::default()
     };
     let msg = format_pg_error(err, sql, &cfg);
@@ -728,11 +932,14 @@ pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: 
 pub fn format_pg_notice(notice: &tokio_postgres::error::DbError) -> String {
     let colored = color_severity(notice.severity());
     let mut out = format!("{colored}:  {}\n", notice.message());
-    if let Some(detail) = notice.detail() {
-        let _ = writeln!(out, "DETAIL:  {detail}");
-    }
-    if let Some(hint) = notice.hint() {
-        let _ = writeln!(out, "HINT:  {hint}");
+    let terse = TERSE_NOTICES.load(Ordering::Relaxed);
+    if !terse {
+        if let Some(detail) = notice.detail() {
+            let _ = writeln!(out, "DETAIL:  {detail}");
+        }
+        if let Some(hint) = notice.hint() {
+            let _ = writeln!(out, "HINT:  {hint}");
+        }
     }
     out
 }
@@ -788,27 +995,156 @@ pub fn format_duration(d: Duration) -> String {
 // Unicode-aware display width
 // ---------------------------------------------------------------------------
 
-/// Returns the terminal display width of a string, handling multi-byte and
-/// double-width Unicode characters (CJK, emoji, …).
-pub fn display_width(s: &str) -> usize {
-    // Strip ANSI CSI escape sequences (ESC [ ... final-byte) before measuring
-    // so that colour codes embedded in cell values don't inflate the width.
-    let mut visible = String::with_capacity(s.len());
+/// Escape non-printable characters in a cell value the same way psql does.
+///
+/// psql converts non-printable ASCII control characters to visible escape
+/// sequences when rendering table cells:
+/// - LF (0x0A): kept as `\n` (creates a multi-line cell)
+/// - TAB (0x09): kept as `\t` (expand converts to spaces)
+/// - CR (0x0D): converted to literal `\r`
+/// - DEL (0x7F) and other control chars (0x01–0x08, 0x0B–0x0C, 0x0E–0x1F):
+///   converted to `\xNN` (two uppercase hex digits)
+///
+/// Printable ASCII, non-ASCII Unicode, and NULL-replacement strings pass
+/// through unchanged.
+fn psql_escape_cell(s: &str) -> String {
+    // Fast path: if no control chars are present return the string as-is.
+    // ESC (0x1B) is excluded here; it is handled specially below (ANSI codes
+    // must pass through intact).
+    let needs_escape = s.chars().any(|c| {
+        matches!(c, '\x01'..='\x08' | '\x0b'..='\x0c' | '\x0e'..='\x1a' | '\x1c'..='\x1f' | '\x0d' | '\x7f')
+    });
+    if !needs_escape {
+        return s.to_owned();
+    }
+
+    let mut out = String::with_capacity(s.len() + 16);
     let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next(); // consume '['
-                          // Consume until the CSI final byte (0x40–0x7E).
-            for c in chars.by_ref() {
-                if ('\x40'..='\x7e').contains(&c) {
-                    break;
+    while let Some(c) = chars.next() {
+        match c {
+            // ANSI CSI escape sequence: ESC [ ... final-byte — pass through
+            // intact so that null-highlighting codes are not corrupted.
+            '\x1b' if chars.peek() == Some(&'[') => {
+                out.push('\x1b');
+                out.push('[');
+                chars.next(); // consume '['
+                for inner in chars.by_ref() {
+                    out.push(inner);
+                    if ('\x40'..='\x7e').contains(&inner) {
+                        break; // CSI final byte consumed
+                    }
                 }
             }
-        } else {
-            visible.push(ch);
+            '\n' | '\t' => out.push(c),
+            '\r' => out.push_str("\\r"),
+            '\x7f' => out.push_str("\\x7F"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\x{:02X}", c as u32));
+            }
+            c => out.push(c),
         }
     }
-    UnicodeWidthStr::width(visible.as_str())
+    out
+}
+
+/// Returns the max per-line display width of a (possibly multi-line)
+/// already-escaped cell string.
+///
+/// For cells that span multiple physical lines (containing embedded LF), the
+/// column width is the widest individual line — matching psql which renders
+/// each line separately and appends a `+` continuation marker.
+fn cell_display_width(escaped: &str) -> usize {
+    escaped
+        .split('\n')
+        .map(|line| display_width(line))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Expand tab characters in a cell content line to spaces, using 8-space
+/// tab stops measured from the start of the cell content (column 0).
+///
+/// This matches psql's behaviour: tabs in cell values are expanded before
+/// adding the leading space, so the expansion is independent of the cell's
+/// position in the output line.
+fn expand_cell_tabs(s: &str) -> String {
+    if !s.contains('\t') {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut col: usize = 0;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let next_stop = (col / 8 + 1) * 8;
+            for _ in col..next_stop {
+                out.push(' ');
+            }
+            col = next_stop;
+        } else {
+            out.push(ch);
+            col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    out
+}
+
+/// Like `display_width`, but treats the string as starting at `start_col`
+/// for the purpose of tab-stop expansion.  Returns the number of display
+/// columns consumed by the string (not counting `start_col` itself).
+fn display_width_at_col(s: &str, start_col: usize) -> usize {
+    let mut col = start_col;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            '\t' => {
+                col = (col / 8 + 1) * 8;
+            }
+            c => {
+                col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            }
+        }
+    }
+    col - start_col
+}
+
+/// Returns the terminal display width of a string, handling multi-byte and
+/// double-width Unicode characters (CJK, emoji, …).
+///
+/// Tab characters (`\t`) are expanded to the next 8-space tab stop, matching
+/// psql's column-width calculation behaviour.
+pub fn display_width(s: &str) -> usize {
+    // Walk through characters, skipping ANSI CSI sequences and expanding tabs.
+    let mut width: usize = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next(); // consume '['
+                // Consume until the CSI final byte (0x40–0x7E).
+                for c in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            '\t' => {
+                // Advance to the next 8-space tab stop.
+                width = (width / 8 + 1) * 8;
+            }
+            c => {
+                width += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            }
+        }
+    }
+    width
 }
 
 // ---------------------------------------------------------------------------

@@ -44,6 +44,9 @@ pub enum CopySource {
     File(String),
     /// Standard input (reads until `\.` on a line by itself).
     Stdin,
+    /// Pre-collected inline data (used when `from stdin` runs inside a script
+    /// file, where the data lines were already read from the line iterator).
+    InlineData(Vec<u8>),
     /// Standard output.
     Stdout,
     /// A shell command whose stdout (FROM) or stdin (TO) is used.
@@ -271,13 +274,34 @@ fn parse_copy_options(
 // Executor
 // ---------------------------------------------------------------------------
 
+/// Format a `tokio_postgres` error in psql's standard style:
+/// `ERROR:  message\nDETAIL:  ...\nHINT:  ...`
+fn format_pg_error_psql(e: &tokio_postgres::Error) -> String {
+    if let Some(db) = e.as_db_error() {
+        let mut msg = format!("ERROR:  {}", db.message());
+        if let Some(d) = db.detail() {
+            msg.push_str(&format!("\nDETAIL:  {d}"));
+        }
+        if let Some(h) = db.hint() {
+            msg.push_str(&format!("\nHINT:  {h}"));
+        }
+        msg
+    } else {
+        format!("\\copy: {e}")
+    }
+}
+
 /// Execute a parsed `\copy` specification against the given client.
 ///
 /// Prints `COPY N` on success (where N is the number of rows transferred).
 /// Returns an error string on failure.
-pub async fn execute_copy(client: &tokio_postgres::Client, spec: &CopySpec) -> Result<(), String> {
+pub async fn execute_copy(
+    client: &tokio_postgres::Client,
+    spec: &CopySpec,
+    quiet: bool,
+) -> Result<(), String> {
     match spec.direction {
-        CopyDirection::From => execute_copy_from(client, spec).await,
+        CopyDirection::From => execute_copy_from(client, spec, quiet).await,
         CopyDirection::To => execute_copy_to(client, spec).await,
     }
 }
@@ -355,7 +379,11 @@ fn append_options(sql: &mut String, spec: &CopySpec) {
 }
 
 /// Execute `COPY FROM STDIN` — stream local file data to the server.
-async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> Result<(), String> {
+async fn execute_copy_from(
+    client: &tokio_postgres::Client,
+    spec: &CopySpec,
+    quiet: bool,
+) -> Result<(), String> {
     use futures::SinkExt;
 
     let sql = build_copy_from_sql(spec);
@@ -366,6 +394,7 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
             std::fs::read(path).map_err(|e| format!("\\copy: could not read file '{path}': {e}"))?
         }
         CopySource::Stdin => read_stdin_until_terminator()?,
+        CopySource::InlineData(bytes) => bytes.clone(),
         CopySource::Stdout => {
             // Validated earlier; this branch is unreachable in practice.
             return Err("\\copy: STDOUT is not valid for FROM direction".to_owned());
@@ -376,7 +405,7 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
     let sink = client
         .copy_in(&sql)
         .await
-        .map_err(|e| format!("\\copy: {e}"))?;
+        .map_err(|e| format_pg_error_psql(&e))?;
 
     // CopyInSink is !Unpin; we must pin it on the stack before using SinkExt.
     tokio::pin!(sink);
@@ -388,7 +417,9 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
     // finish() flushes, sends CopyDone, and returns the number of rows copied.
     let rows = sink.finish().await.map_err(|e| format!("\\copy: {e}"))?;
 
-    println!("COPY {rows}");
+    if !quiet {
+        println!("COPY {rows}");
+    }
     Ok(())
 }
 
@@ -401,7 +432,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
     let stream = client
         .copy_out(&sql)
         .await
-        .map_err(|e| format!("\\copy: {e}"))?;
+        .map_err(|e| format_pg_error_psql(&e))?;
 
     // CopyOutStream is !Unpin; pin it before using StreamExt.
     tokio::pin!(stream);
@@ -423,17 +454,15 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
         CopySource::Stdout => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            let mut row_count = 0u64;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
-                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
                 out.write_all(&chunk)
                     .map_err(|e| format!("\\copy: write error: {e}"))?;
             }
-            println!("COPY {row_count}");
+            // psql does not print "COPY N" when copying to stdout.
         }
-        CopySource::Stdin => {
-            // Validated earlier; this branch is unreachable in practice.
+        CopySource::Stdin | CopySource::InlineData(_) => {
+            // Validated earlier; these branches are unreachable for TO.
             return Err("\\copy: STDIN is not valid for TO direction".to_owned());
         }
         CopySource::Program(cmd) => {
