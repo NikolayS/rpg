@@ -1778,14 +1778,34 @@ pub async fn exec_file(
         tx.update_from_sql("begin");
     }
 
-    let mut exit_code = exec_lines(
-        client,
-        content.lines().map(str::to_owned),
-        settings,
-        params,
-        &mut tx,
-    )
-    .await;
+    // Loop to handle \c reconnections in file mode.  When exec_lines
+    // encounters \c it returns early with the new client; we continue
+    // processing remaining lines with the new connection.
+    let mut lines_iter: Box<dyn Iterator<Item = String>> =
+        Box::new(content.lines().map(str::to_owned).collect::<Vec<_>>().into_iter());
+    let mut active_client: &Client = client;
+    let mut active_params: ConnParams = params.clone();
+    let mut reconnected_client: Option<Box<Client>> = None;
+    let mut exit_code: i32;
+
+    loop {
+        let (code, maybe_new_client) = exec_lines(
+            active_client,
+            lines_iter.as_mut(),
+            settings,
+            &mut active_params,
+            &mut tx,
+        )
+        .await;
+        exit_code = code;
+
+        if let Some(new_client) = maybe_new_client {
+            reconnected_client = Some(new_client);
+            active_client = reconnected_client.as_deref().unwrap();
+        } else {
+            break;
+        }
+    }
 
     if settings.cond.depth() > 0 {
         eprintln!(
@@ -1795,16 +1815,17 @@ pub async fn exec_file(
     }
 
     // -1 / --single-transaction: commit on success, rollback on failure.
+    // Use the currently active client for the commit/rollback.
     if settings.single_transaction {
         if exit_code == 0 {
-            if let Err(e) = client.simple_query("commit").await {
+            if let Err(e) = active_client.simple_query("commit").await {
                 eprintln!("rpg: could not commit transaction: {e}");
                 exit_code = 1;
             } else {
                 tx.update_from_sql("commit");
             }
         } else {
-            let _ = client.simple_query("rollback").await;
+            let _ = active_client.simple_query("rollback").await;
             tx.update_from_sql("rollback");
         }
     }
@@ -1823,15 +1844,38 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     settings.vars.set("PORT", &params.port.to_string());
 
     let stdin = io::stdin();
-    let lines = stdin.lock().lines().map_while(|l| match l {
+    let lines: Vec<String> = stdin.lock().lines().map_while(|l| match l {
         Ok(line) => Some(line),
         Err(e) => {
             eprintln!("rpg: read error: {e}");
             None
         }
-    });
+    }).collect();
+    let mut lines_iter: Box<dyn Iterator<Item = String>> = Box::new(lines.into_iter());
     let mut tx = TxState::default();
-    let exit_code = exec_lines(client, lines, settings, params, &mut tx).await;
+    let mut active_client: &Client = client;
+    let mut active_params: ConnParams = params.clone();
+    let mut reconnected_client: Option<Box<Client>> = None;
+    let mut exit_code: i32;
+
+    loop {
+        let (code, maybe_new_client) = exec_lines(
+            active_client,
+            lines_iter.as_mut(),
+            settings,
+            &mut active_params,
+            &mut tx,
+        )
+        .await;
+        exit_code = code;
+
+        if let Some(new_client) = maybe_new_client {
+            reconnected_client = Some(new_client);
+            active_client = reconnected_client.as_deref().unwrap();
+        } else {
+            break;
+        }
+    }
 
     if settings.cond.depth() > 0 {
         eprintln!(
@@ -1987,11 +2031,11 @@ async fn execute_inline_copy_from(
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn exec_lines(
     client: &Client,
-    lines: impl Iterator<Item = String>,
+    lines: &mut dyn Iterator<Item = String>,
     settings: &mut ReplSettings,
-    params: &ConnParams,
+    params: &mut ConnParams,
     tx: &mut TxState,
-) -> i32 {
+) -> (i32, Option<Box<Client>>) {
     let mut buf = String::new();
     // psql keeps the last-executed query in the buffer so that \gexec/\g/\gset
     // can reuse it even after the buffer was cleared by auto-execution on `;`.
@@ -2230,6 +2274,19 @@ pub(crate) async fn exec_lines(
                     // when \\quit is used to exit early from within an \\if.
                     settings.cond.reset();
                     break 'lines;
+                }
+                MetaResult::Reconnected(new_client, new_params) => {
+                    // Update connection variables for the new connection.
+                    settings.vars.set("USER", &new_params.user);
+                    settings.vars.set("DBNAME", &new_params.dbname);
+                    if !new_params.host.is_empty() {
+                        settings.vars.set("HOST", &new_params.host);
+                    }
+                    settings.vars.set("PORT", &new_params.port.to_string());
+                    *params = *new_params;
+                    // Return early; caller will re-invoke with the new client
+                    // to process any remaining lines from the iterator.
+                    return (exit_code, Some(new_client));
                 }
                 _ => {
                     // Simple metacommands (e.g. \x, \pset, \timing) don't produce
@@ -2588,6 +2645,13 @@ pub(crate) async fn exec_lines(
             if !raw.is_empty() {
                 println!("{raw}");
             }
+        } else if settings.echo_all && !settings.cond.is_active() {
+            // Suppressed (inactive) conditional branch: in psql -a mode ALL input
+            // lines are echoed regardless of whether they are in an active branch.
+            let raw = line.trim_end();
+            if !raw.is_empty() {
+                println!("{raw}");
+            }
         }
     }
 
@@ -2600,7 +2664,7 @@ pub(crate) async fn exec_lines(
         exit_code = 1;
     }
 
-    exit_code
+    (exit_code, None)
 }
 
 // ---------------------------------------------------------------------------

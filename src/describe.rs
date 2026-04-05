@@ -286,7 +286,8 @@ fn format_table_inner(
                     | "primary" | "references" | "options" | "fdw options"
                     | "cycles?" | "comment" | "inherits" | "tablespace"
                     | "child tables" | "partition of" | "partition constraint"
-                    | "replica identity" | "access method"
+                    | "replica identity" | "access method" | "version"
+                    | "foreign-data wrapper"
             ) {
                 return false;
             }
@@ -1753,6 +1754,27 @@ order by 1, 2"
 ///
 /// Matches psql's `\des [pattern]` output: Name, Owner, Foreign-data wrapper.
 /// With `+`: also shows Type, Version, FDW options, Description.
+/// SQL expression to format a text[] of `key=value` options as psql's `(key 'val', ...)`.
+/// Keys that contain spaces or special chars are double-quoted (matching psql).
+/// Pass the column name as the argument (e.g. `s.srvoptions`).
+fn fdw_options_sql(col: &str) -> String {
+    format!(
+        "case
+        when {col} is null or {col} = '{{}}' then ''
+        else '(' || (
+            select string_agg(
+                pg_catalog.quote_ident(split_part(e, '=', 1))
+                || ' ''' ||
+                replace(substring(e from position('=' in e)+1), '''', '''''') ||
+                '''',
+                ', '
+            )
+            from unnest({col}) as t(e)
+        ) || ')'
+    end"
+    )
+}
+
 async fn list_foreign_servers(
     client: &Client,
     meta: &ParsedMeta,
@@ -1766,15 +1788,17 @@ async fn list_foreign_servers(
         format!("where {name_filter}")
     };
 
+    let fdw_opts = fdw_options_sql("s.srvoptions");
     let sql = if meta.plus {
         format!(
             "select
     s.srvname as \"Name\",
     pg_catalog.pg_get_userbyid(s.srvowner) as \"Owner\",
     f.fdwname as \"Foreign-data wrapper\",
+    pg_catalog.array_to_string(s.srvacl, E'\\n') as \"Access privileges\",
     s.srvtype as \"Type\",
     s.srvversion as \"Version\",
-    s.srvoptions as \"FDW options\",
+    {fdw_opts} as \"FDW options\",
     pg_catalog.obj_description(s.oid, 'pg_foreign_server') as \"Description\"
 from pg_catalog.pg_foreign_server as s
 join pg_catalog.pg_foreign_data_wrapper as f
@@ -1827,6 +1851,7 @@ async fn list_fdws(
         format!("where {name_filter}")
     };
 
+    let fdw_opts = fdw_options_sql("fdwoptions");
     let sql = if meta.plus {
         format!(
             "select
@@ -1834,7 +1859,8 @@ async fn list_fdws(
     pg_catalog.pg_get_userbyid(fdwowner) as \"Owner\",
     fdwhandler::regproc as \"Handler\",
     fdwvalidator::regproc as \"Validator\",
-    fdwoptions as \"FDW options\",
+    pg_catalog.array_to_string(fdwacl, E'\\n') as \"Access privileges\",
+    {fdw_opts} as \"FDW options\",
     pg_catalog.obj_description(oid, 'pg_foreign_data_wrapper') as \"Description\"
 from pg_catalog.pg_foreign_data_wrapper
 {where_clause}
@@ -1903,13 +1929,14 @@ async fn list_foreign_tables_via_fdw(
         format!("and {}", where_parts.join("\n    and "))
     };
 
+    let ft_opts = fdw_options_sql("t.ftoptions");
     let sql = if meta.plus {
         format!(
             "select
     n.nspname as \"Schema\",
     c.relname as \"Table\",
     s.srvname as \"Server\",
-    t.ftoptions as \"FDW options\",
+    {ft_opts} as \"FDW options\",
     pg_catalog.obj_description(c.oid, 'pg_class') as \"Description\"
 from pg_catalog.pg_foreign_table as t
 join pg_catalog.pg_class as c
@@ -1972,12 +1999,13 @@ async fn list_user_mappings(
         format!("where {name_filter}")
     };
 
+    let um_opts = fdw_options_sql("um.umoptions");
     let sql = if meta.plus {
         format!(
             "select
     um.srvname as \"Server\",
     um.usename as \"User name\",
-    um.umoptions as \"FDW options\"
+    {um_opts} as \"FDW options\"
 from pg_catalog.pg_user_mappings as um
 {where_clause}
 order by 1, 2"
@@ -2912,17 +2940,12 @@ where a.attnum > 0
     and {name_cond}
 order by a.attnum"
     );
-    // Placeholder: will be resolved after fetching relkind below.
-    // For non-plus mode, always use the 5-column variant.
-    let cols_sql_base = if meta.plus {
-        // Will be replaced based on relkind below
-        cols_sql_table_plus.clone()
-    } else {
-        format!(
-            "select
-    a.attname as \"Column\",
-    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
-    coalesce(
+    // Foreign table variants: always include FDW options, never include Compression.
+    // \d  (non-plus): Column, Type, Collation, Nullable, Default, FDW options
+    // \d+ (plus):     Column, Type, Collation, Nullable, Default, FDW options,
+    //                 Storage, Stats target, Description
+    let fdw_col_opts = fdw_options_sql("a.attfdwoptions");
+    let collation_subq = "coalesce(
         (select c2.collname
          from pg_catalog.pg_collation as c2
          join pg_catalog.pg_namespace as nc
@@ -2934,10 +2957,9 @@ order by a.attnum"
                where t.oid = a.atttypid
            )),
         ''
-    ) as \"Collation\",
-    case when a.attnotnull then 'not null' else '' end as \"Nullable\",
-    {default_expr} as \"Default\"
-from pg_catalog.pg_attribute as a
+    )";
+    let from_clause = format!(
+        "from pg_catalog.pg_attribute as a
 join pg_catalog.pg_class as c
     on c.oid = a.attrelid
 left join pg_catalog.pg_namespace as n
@@ -2948,6 +2970,51 @@ where a.attnum > 0
     and not a.attisdropped
     and {name_cond}
 order by a.attnum"
+    );
+    let cols_sql_foreign_base = format!(
+        "select
+    a.attname as \"Column\",
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
+    {collation_subq} as \"Collation\",
+    case when a.attnotnull then 'not null' else '' end as \"Nullable\",
+    {default_expr} as \"Default\",
+    {fdw_col_opts} as \"FDW options\"
+{from_clause}"
+    );
+    let cols_sql_foreign_plus = format!(
+        "select
+    a.attname as \"Column\",
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
+    {collation_subq} as \"Collation\",
+    case when a.attnotnull then 'not null' else '' end as \"Nullable\",
+    {default_expr} as \"Default\",
+    {fdw_col_opts} as \"FDW options\",
+    case a.attstorage
+        when 'p' then 'plain'
+        when 'e' then 'external'
+        when 'x' then 'extended'
+        when 'm' then 'main'
+        else a.attstorage::text
+    end as \"Storage\",
+    case when a.attstattarget = -1 then '' else a.attstattarget::text end as \"Stats target\",
+    coalesce(pg_catalog.col_description(a.attrelid, a.attnum), '') as \"Description\"
+{from_clause}"
+    );
+
+    // Placeholder: will be resolved after fetching relkind below.
+    // For non-plus mode, always use the 5-column variant.
+    let cols_sql_base = if meta.plus {
+        // Will be replaced based on relkind below
+        cols_sql_table_plus.clone()
+    } else {
+        format!(
+            "select
+    a.attname as \"Column\",
+    pg_catalog.format_type(a.atttypid, a.atttypmod) as \"Type\",
+    {collation_subq} as \"Collation\",
+    case when a.attnotnull then 'not null' else '' end as \"Nullable\",
+    {default_expr} as \"Default\"
+{from_clause}"
         )
     };
 
@@ -3238,10 +3305,16 @@ where c.relkind = 'S'
     }
 
     // Choose columns query based on relkind and plus mode.
-    // Tables and foreign tables get Compression + Stats target in \d+ mode;
-    // views, sequences, composite types do not.
-    // Materialized views also get Compression + Stats target in \d+ mode (same as tables).
-    let cols_sql = if meta.plus && matches!(relkind_char, 'r' | 'p' | 'f' | 'm') {
+    // Foreign tables: always show FDW options, never show Compression.
+    // Regular/partitioned tables and matviews: show Compression + Stats target in \d+ mode.
+    // Views, sequences, composite types: show Storage+Description in \d+ mode only.
+    let cols_sql = if relkind_char == 'f' {
+        if meta.plus {
+            cols_sql_foreign_plus
+        } else {
+            cols_sql_foreign_base
+        }
+    } else if meta.plus && matches!(relkind_char, 'r' | 'p' | 'm') {
         cols_sql_table_plus
     } else if meta.plus {
         cols_sql_view_plus
@@ -3856,18 +3929,24 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
             );
             if let Ok(pmsgs) = client.simple_query(&parts_list_sql).await {
                 use tokio_postgres::SimpleQueryMessage;
-                let mut parts: Vec<(String, String, bool)> = Vec::new();
+                let mut parts: Vec<(String, String, String)> = Vec::new();
                 for pmsg in pmsgs {
                     if let SimpleQueryMessage::Row(prow) = pmsg {
                         let pname = prow.get(0).unwrap_or("").to_owned();
                         let pbound = prow.get(1).unwrap_or("").to_owned();
-                        let pkind = prow.get(2).unwrap_or("") == "p";
+                        let pkind = prow.get(2).unwrap_or("").to_owned();
                         parts.push((pname, pbound, pkind));
                     }
                 }
                 if !parts.is_empty() {
-                    println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, is_p))| {
-                        let suffix = if *is_p { ", PARTITIONED" } else { "" };
+                    println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, pkind))| {
+                        let suffix = if pkind == "p" {
+                            ", PARTITIONED"
+                        } else if pkind == "f" {
+                            ", FOREIGN"
+                        } else {
+                            ""
+                        };
                         if i == 0 {
                             format!("{pn} {pb}{suffix}")
                         } else {
@@ -3967,6 +4046,37 @@ order by nsp, s.stxname"
                         String::new()
                     };
                     println!("    \"{nsp}.{name}\"{kinds_str} ON {cols} FROM {tbl}{target_str}");
+                }
+            }
+        }
+    }
+
+    // Foreign table footer: "Server: srvname" and optionally "FDW options: (...)"
+    // Placed after all constraints/policies but before Triggers/Rules/Inherits.
+    if relkind_char == 'f' {
+        let srv_opts_sql_expr = fdw_options_sql("ft.ftoptions");
+        let ft_footer_sql = format!(
+            "select s.srvname, {srv_opts_sql_expr} as ftoptions
+from pg_catalog.pg_foreign_table as ft
+join pg_catalog.pg_foreign_server as s on s.oid = ft.ftserver
+join pg_catalog.pg_class as c on c.oid = ft.ftrelid
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+limit 1"
+        );
+        if let Ok(msgs) = client.simple_query(&ft_footer_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let srvname = row.get(0).unwrap_or("");
+                    let ftoptions = row.get(1).unwrap_or("");
+                    if !srvname.is_empty() {
+                        println!("Server: {srvname}");
+                    }
+                    if !ftoptions.is_empty() {
+                        println!("FDW options: {ftoptions}");
+                    }
+                    break;
                 }
             }
         }
@@ -4146,11 +4256,12 @@ order by i.inhseqno"
 
     // Child tables — shown for regular tables that have children (non-partition).
     // In \d mode: shows "Number of child tables: N (Use \d+ to list them.)"
-    // In \d+ mode: shows each child table name.
+    // In \d+ mode: shows each child table name, with ", FOREIGN" suffix for foreign tables.
     let child_sql = format!(
         "select case when pg_catalog.pg_table_is_visible(c2.oid)
          then c2.relname
-         else n2.nspname || '.' || c2.relname end as child_name
+         else n2.nspname || '.' || c2.relname end as child_name,
+         c2.relkind::text as child_relkind
 from pg_catalog.pg_inherits as i
 join pg_catalog.pg_class as c2 on c2.oid = i.inhrelid
 join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
@@ -4161,15 +4272,20 @@ where not c2.relispartition
     where {name_cond} limit 1)
 order by 1"
     );
-    if matches!(relkind_char, 'r') {
+    if matches!(relkind_char, 'r' | 'f') {
         if let Ok(messages) = client.simple_query(&child_sql).await {
             use tokio_postgres::SimpleQueryMessage;
             let mut children: Vec<String> = Vec::new();
             for msg in messages {
                 if let SimpleQueryMessage::Row(row) = msg {
                     let child = row.get(0).unwrap_or("").to_owned();
+                    let relkind = row.get(1).unwrap_or("");
                     if !child.is_empty() {
-                        children.push(child);
+                        if relkind == "f" {
+                            children.push(format!("{child}, FOREIGN"));
+                        } else {
+                            children.push(child);
+                        }
                     }
                 }
             }
