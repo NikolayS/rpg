@@ -1849,30 +1849,23 @@ pub(super) async fn execute_gexec(
         }
     };
 
-    // Execute each cell value as a SQL statement.
+    // Execute each cell value as a SQL statement, showing results.
     for cell_sql in cell_sqls {
-        match client.simple_query(&cell_sql).await {
-            Ok(messages) => {
-                for msg in messages {
-                    if let SimpleQueryMessage::CommandComplete(n) = msg {
-                        // Extract the command tag from the completion count.
-                        // tokio-postgres 0.7 CommandComplete carries only the
-                        // row count as u64; derive the tag by inspecting the
-                        // first keyword of the cell SQL.
-                        // Only print tag when echo is on (psql suppresses with ECHO=none).
-                        if settings.echo_all && !settings.quiet {
-                            let tag = command_tag_for(&cell_sql, n);
-                            println!("{tag}");
-                        }
-                    }
-                }
-                tx.update_from_sql(&cell_sql);
-            }
-            Err(e) => {
-                crate::output::eprint_db_error(&e, Some(&cell_sql), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
-                tx.on_error();
+        // psql echoes each \gexec-generated SQL statement in echo-all mode
+        // (regardless of the quiet flag — matches psql -a behavior).
+        if settings.echo_all {
+            if let Some(ref mut w) = settings.output_target {
+                let _ = writeln!(w, "{cell_sql}");
+            } else {
+                println!("{cell_sql}");
             }
         }
+        // Use execute_query so SELECT/EXPLAIN results are rendered correctly.
+        // Disable echo_all to avoid re-echoing (we already echoed above).
+        let saved_echo = settings.echo_all;
+        settings.echo_all = false;
+        execute_query(client, &cell_sql, settings, tx).await;
+        settings.echo_all = saved_echo;
     }
 }
 

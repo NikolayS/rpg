@@ -191,9 +191,10 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 
     // psql prints a blank line after each result set (the trailing newline
-    // after `(N rows)` plus one more).  In tuples-only mode there is no row
-    // count footer, and psql omits the trailing blank line entirely.
-    if !cfg.tuples_only {
+    // after `(N rows)` plus one more).  In unaligned tuples-only mode psql
+    // omits the trailing blank line; in aligned tuples-only mode it keeps it.
+    let is_unaligned = matches!(cfg.format, OutputFormat::Unaligned | OutputFormat::Csv);
+    if !cfg.tuples_only || !is_unaligned {
         out.push('\n');
     }
 }
@@ -653,9 +654,9 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
         .unwrap_or(max_name_width + 3);
 
     for (rec_idx, row) in rows.iter().enumerate() {
-        // Record header: `-[ RECORD N ]---` — suppressed in tuples-only mode.
+        // Record header: `-[ RECORD N ]--+---` — suppressed in tuples-only mode.
         if !cfg.tuples_only {
-            write_expanded_header(out, rec_idx + 1, max_data_width);
+            write_expanded_header(out, rec_idx + 1, max_data_width, max_name_width);
         }
 
         for (i, col) in cols.iter().enumerate() {
@@ -675,17 +676,45 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
     }
 }
 
-/// Write the `-[ RECORD N ]---` header line for expanded output.
+/// Write the `-[ RECORD N ]-...-` header line for expanded output.
 ///
 /// `max_data_width` is the width of the widest data row
-/// (`key_padded + " | " + value`). The header is padded with `-` to match
-/// that width, replicating psql behaviour.
-fn write_expanded_header(out: &mut String, record_num: usize, max_data_width: usize) {
+/// (`key_padded + " | " + value`). `max_name_width` is the widest field name.
+///
+/// psql places a `+` at the `|` position when the field-name column is wide
+/// enough that the `|` position falls at or after the end of the prefix.
+/// When the prefix is wider than the `|` position, only dashes are used.
+fn write_expanded_header(
+    out: &mut String,
+    record_num: usize,
+    max_data_width: usize,
+    max_name_width: usize,
+) {
     let prefix = format!("-[ RECORD {record_num} ]");
-    let dashes_needed = max_data_width.saturating_sub(prefix.len());
+    let prefix_len = prefix.len();
+
+    // The `|` in data rows is at column position max_name_width + 1 (0-indexed).
+    // Only place `+` there if the prefix doesn't already extend past it.
+    let pipe_pos = max_name_width + 1;
     let _ = write!(out, "{prefix}");
-    for _ in 0..dashes_needed {
-        out.push('-');
+
+    if pipe_pos >= prefix_len {
+        // Fill dashes up to the pipe position, then `+`, then remaining dashes.
+        let dashes_before = pipe_pos - prefix_len;
+        let dashes_after = max_data_width.saturating_sub(prefix_len + dashes_before + 1);
+        for _ in 0..dashes_before {
+            out.push('-');
+        }
+        out.push('+');
+        for _ in 0..dashes_after {
+            out.push('-');
+        }
+    } else {
+        // Prefix already extends past the field-name column: just pad with dashes.
+        let dashes_needed = max_data_width.saturating_sub(prefix_len);
+        for _ in 0..dashes_needed {
+            out.push('-');
+        }
     }
     out.push('\n');
 }

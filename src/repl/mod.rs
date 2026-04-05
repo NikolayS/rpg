@@ -1942,6 +1942,9 @@ pub(crate) async fn exec_lines(
     tx: &mut TxState,
 ) -> i32 {
     let mut buf = String::new();
+    // psql keeps the last-executed query in the buffer so that \gexec/\g/\gset
+    // can reuse it even after the buffer was cleared by auto-execution on `;`.
+    let mut prev_buf = String::new();
     let mut exit_code = 0i32;
     let mut lines = lines;
 
@@ -2030,7 +2033,13 @@ pub(crate) async fn exec_lines(
                     }
                 }
                 MetaResult::GExecBuffer => {
-                    let sql = buf.trim().to_owned();
+                    // psql keeps the query buffer after auto-execution so
+                    // \gexec can reuse it; fall back to prev_buf if buf is empty.
+                    let sql = if buf.trim().is_empty() {
+                        prev_buf.trim().to_owned()
+                    } else {
+                        buf.trim().to_owned()
+                    };
                     buf.clear();
                     if !sql.is_empty() {
                         execute_gexec(client, &sql, settings, tx).await;
@@ -2379,6 +2388,8 @@ pub(crate) async fn exec_lines(
                         }
 
                         if !sql_to_exec.is_empty() {
+                            // Remember last-executed query so \gexec/\g can reuse it.
+                            prev_buf = sql_to_exec.to_owned();
                             // Disable per-statement echo in execute_query to avoid
                             // double-echoing when echo_all is active (lines already echoed above).
                             let saved_echo_all = settings.echo_all;
