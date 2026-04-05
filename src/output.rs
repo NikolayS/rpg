@@ -815,7 +815,28 @@ pub fn format_pg_error(
             // DETAIL and HINT are suppressed in terse mode.
             if !cfg.terse_errors {
                 if let Some(detail) = db_err.detail() {
-                    let _ = writeln!(out, "DETAIL:  {detail}");
+                    // psql suppresses "N objects in database X" summary lines
+                    // that PostgreSQL appends to DROP ROLE DETAIL messages.
+                    let filtered: Vec<&str> = detail
+                        .lines()
+                        .filter(|line| {
+                            let t = line.trim();
+                            // Keep line unless it looks like "N object(s) in database NAME"
+                            match t.split_once(' ') {
+                                Some((num, rest))
+                                    if num.chars().all(|c| c.is_ascii_digit())
+                                        && (rest.starts_with("object in database ")
+                                            || rest.starts_with("objects in database ")) =>
+                                {
+                                    false
+                                }
+                                _ => true,
+                            }
+                        })
+                        .collect();
+                    if !filtered.is_empty() {
+                        let _ = writeln!(out, "DETAIL:  {}", filtered.join("\n"));
+                    }
                 }
                 if let Some(hint) = db_err.hint() {
                     let _ = writeln!(out, "HINT:  {hint}");

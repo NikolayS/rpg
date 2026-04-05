@@ -1182,9 +1182,9 @@ async fn list_types(
         "n.nspname not in ('pg_catalog', 'information_schema', 'pg_toast')".to_owned()
     };
 
-    // Show only composite, domain, enum, and range types; exclude array types
-    // (names starting with _) and table-backed composite types.
-    let base_filter = "t.typtype in ('c', 'd', 'e', 'r') and t.typname !~ '^_'\
+    // Show composite, domain, enum, range, and multirange types; exclude array
+    // types (names starting with _) and table-backed composite types.
+    let base_filter = "t.typtype in ('c', 'd', 'e', 'm', 'r') and t.typname !~ '^_'\
         \n    and (t.typrelid = 0 or (select c.relkind = 'c' from pg_catalog.pg_class as c where c.oid = t.typrelid))";
 
     let where_parts: Vec<&str> = [
@@ -3412,6 +3412,59 @@ where {name_cond} limit 1"
             println!("Referenced by:");
             for (from_table, name, def) in &lines {
                 println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
+            }
+        }
+    }
+
+    // Row Security Policies — shown before Partitions (psql ordering).
+    if matches!(relkind_char, 'r' | 'p' | 'f' | 'v') {
+        let pol_sql = format!(
+            "select pol.polname,
+       pol.polpermissive,
+       case when pol.polroles = '{{0}}' then null
+            else (
+                select string_agg(rolname, ', ' order by rolname)
+                from pg_catalog.pg_roles
+                where oid = any(pol.polroles)
+            )
+       end as polroles,
+       pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) as polqual,
+       pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid) as polwithcheck
+from pg_catalog.pg_policy as pol
+join pg_catalog.pg_class as c on c.oid = pol.polrelid
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+order by pol.polname"
+        );
+        if let Ok(msgs) = client.simple_query(&pol_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut policies: Vec<(String, bool, Option<String>, Option<String>, Option<String>)> = Vec::new();
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let name = row.get(0).unwrap_or("").to_owned();
+                    let permissive = row.get(1).map(|s| s == "t").unwrap_or(true);
+                    let roles = row.get(2).map(str::to_owned);
+                    let qual = row.get(3).map(str::to_owned);
+                    let withcheck = row.get(4).map(str::to_owned);
+                    policies.push((name, permissive, roles, qual, withcheck));
+                }
+            }
+            if !policies.is_empty() {
+                println!("Policies:");
+                for (name, permissive, roles, qual, withcheck) in &policies {
+                    // psql format: `    POLICY "name" [AS RESTRICTIVE]`
+                    let restrictive = if *permissive { "" } else { " AS RESTRICTIVE" };
+                    println!("    POLICY \"{name}\"{restrictive}");
+                    if let Some(r) = roles {
+                        println!("      TO {r}");
+                    }
+                    if let Some(q) = qual {
+                        println!("      USING ({q})");
+                    }
+                    if let Some(w) = withcheck {
+                        println!("      WITH CHECK ({w})");
+                    }
+                }
             }
         }
     }

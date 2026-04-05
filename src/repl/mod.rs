@@ -2133,6 +2133,18 @@ pub(crate) async fn exec_lines(
                         );
                     }
                 }
+                MetaResult::ClearBuffer => {
+                    // \r — reset/clear the query buffer (psql behaviour in -f mode).
+                    buf.clear();
+                }
+                MetaResult::PrintBuffer => {
+                    // \p — print the current query buffer to stdout.
+                    if buf.is_empty() {
+                        println!("Query buffer is empty.");
+                    } else {
+                        println!("{buf}");
+                    }
+                }
                 MetaResult::Quit => {
                     // Reset cond depth so callers don't emit a spurious
                     // "unterminated \\if block" warning — psql does not warn

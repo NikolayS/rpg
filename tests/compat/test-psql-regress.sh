@@ -67,9 +67,21 @@ _drop_test_dbs() {
 # Recreate isolated test databases before every test by cloning the
 # template (fast — no SQL re-execution needed).
 _reset_test_dbs() {
+  # Drop test databases first so that roles have no remaining dependencies.
   _psql_admin \
     -c "DROP DATABASE IF EXISTS ${PSQL_DBNAME};" \
     -c "DROP DATABASE IF EXISTS ${RPG_DBNAME};"
+  # Drop any cluster-wide regress_* roles left behind by a failed test.
+  # Must happen after database drop so the roles have no object owners.
+  PAGER=cat psql \
+    --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+    -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+    -c "do \$\$ declare r record; begin
+          for r in select rolname from pg_roles
+                   where rolname like 'regress_%' loop
+            execute format('drop role if exists %I', r.rolname);
+          end loop; end \$\$;" \
+    > /dev/null 2>&1 || true
   PAGER=cat psql \
     --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
     -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
