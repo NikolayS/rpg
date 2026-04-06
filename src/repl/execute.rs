@@ -2229,8 +2229,9 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
             if bytes[i] == b'\n' {
                 in_line_comment = false;
             }
-            out.push(bytes[i] as char);
-            i += 1;
+            let ch = sql[i..].chars().next().expect("valid utf8");
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
 
@@ -2254,8 +2255,9 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
                 out.push('/');
                 i += 2;
             } else {
-                out.push(bytes[i] as char);
-                i += 1;
+                let ch = sql[i..].chars().next().expect("valid utf8");
+                out.push(ch);
+                i += ch.len_utf8();
             }
             continue;
         }
@@ -2342,8 +2344,9 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
             }
         }
 
-        out.push(bytes[i] as char);
-        i += 1;
+        let ch = sql[i..].chars().next().expect("valid utf8");
+        out.push(ch);
+        i += ch.len_utf8();
     }
 
     out

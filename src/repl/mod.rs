@@ -3734,8 +3734,9 @@ fn parse_inline_pset_opts(s: &str) -> Vec<(String, Option<String>)> {
                             break;
                         }
                     } else {
-                        val.push(bytes[bi] as char);
-                        bi += 1;
+                        let ch = rest[bi..].chars().next().expect("valid utf8");
+                        val.push(ch);
+                        bi += ch.len_utf8();
                     }
                 }
                 rest = &rest[end_pos..];
