@@ -18,9 +18,9 @@ The `psql-regress` CI job runs PostgreSQL's own regression test suite (unmodifie
 2. Both outputs are normalized (strip timing lines, ANSI codes, trailing whitespace)
 3. Outputs are diff'd — **PASS only if identical**
 
-Test files are fetched at CI runtime from [`NikolayS/postgres`](https://github.com/NikolayS/postgres) (a mirror of the official postgres repo), pinned to commit `3d10ece` (2026-04-06). They are **not stored in this repo** — the runner script is at [`tests/compat/test-psql-regress.sh`](../tests/compat/test-psql-regress.sh).
+Test files are fetched at CI runtime from [`postgres/postgres`](https://github.com/postgres/postgres) (the official PostgreSQL repo), pinned to commit `3d10ece` (2026-04-06). They are **not stored in this repo** — the runner script is at [`tests/compat/test-psql-regress.sh`](../tests/compat/test-psql-regress.sh).
 
-CI server: `postgres:16`. CI test files: PG19dev master.
+CI server: `postgres:18`. CI test files: PG19dev master.
 
 ---
 
