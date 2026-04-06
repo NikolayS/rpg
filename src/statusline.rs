@@ -24,13 +24,6 @@ use crate::repl::{AutoExplain, ExecMode, InputMode, TxState};
 pub struct StatusLine {
     /// Whether the status bar is enabled.
     pub enabled: bool,
-    /// Whether to use DECSTBM (scroll-region) to anchor the status bar.
-    ///
-    /// Set to `false` on terminals (e.g. macOS Terminal.app) where DECSTBM
-    /// interacts badly with stdout output, causing query results to be
-    /// invisible.  On those terminals the status bar is rendered using only
-    /// cursor-save/restore (`\x1b[s` / `\x1b[u`) without any scroll region.
-    use_decstbm: bool,
     /// Cached terminal width (columns).
     term_cols: u16,
     /// Cached terminal height (rows).  The status bar occupies this row.
@@ -58,29 +51,10 @@ impl StatusLine {
     ///
     /// The bar is enabled by default only when stderr is a terminal.
     /// Pass `enabled = false` for non-interactive / piped sessions.
-    ///
-    /// Reads `$TERM_PROGRAM` from the environment to detect terminals that
-    /// misbehave with DECSTBM (e.g. macOS Terminal.app).
     pub fn new(enabled: bool) -> Self {
-        let term_program = std::env::var("TERM_PROGRAM").ok();
-        Self::new_with_term_program(enabled, term_program.as_deref())
-    }
-
-    /// Create a `StatusLine` with an explicit `TERM_PROGRAM` value.
-    ///
-    /// Used in unit tests to simulate specific terminal environments without
-    /// touching the real environment.
-    pub fn new_with_term_program(enabled: bool, term_program: Option<&str>) -> Self {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        // macOS Terminal.app (TERM_PROGRAM=Apple_Terminal) does not handle
-        // DECSTBM correctly alongside normal stdout output: query results
-        // become invisible while the scroll region is active.  On that
-        // terminal we skip DECSTBM entirely and rely solely on
-        // cursor-save/restore to position the status bar row.
-        let use_decstbm = term_program != Some("Apple_Terminal");
         Self {
             enabled,
-            use_decstbm,
             term_cols: cols,
             term_rows: rows,
             conn_label: String::new(),
@@ -166,36 +140,16 @@ impl StatusLine {
         self.render();
     }
 
-    /// Return the ANSI escape sequence to install the scroll region, or an
-    /// empty string when DECSTBM is disabled (e.g. Apple Terminal).
-    ///
-    /// Extracted so that unit tests can assert on the sequence without
-    /// touching a real terminal.
-    pub fn setup_scroll_region_sequence(&self) -> String {
-        if !self.use_decstbm {
-            return String::new();
-        }
-        let last = self.term_rows;
-        // Set scroll region to rows 1 .. (last-1), leaving the final row free.
-        // ANSI: ESC [ top ; bottom r   (1-based)
-        format!("\x1b[1;{}r", last.saturating_sub(1))
-    }
-
     /// Install the terminal scroll region, reserving the last row for the
     /// status bar.  Call once at REPL startup.
-    ///
-    /// On Apple Terminal (`TERM_PROGRAM=Apple_Terminal`) this is a no-op:
-    /// DECSTBM on that terminal causes stdout query output to become invisible.
-    /// The status bar still renders correctly via cursor-save/restore alone.
     pub fn setup_scroll_region(&self) {
         if !self.enabled {
             return;
         }
-        let seq = self.setup_scroll_region_sequence();
-        if seq.is_empty() {
-            return;
-        }
-        let _ = write!(io::stderr(), "{seq}");
+        let last = self.term_rows;
+        // Set scroll region to rows 1 .. (last-1), leaving the final row free.
+        // ANSI: ESC [ top ; bottom r   (1-based)
+        let _ = write!(io::stderr(), "\x1b[1;{}r", last.saturating_sub(1));
         let _ = io::stderr().flush();
     }
 
@@ -590,70 +544,5 @@ mod tests {
         let mut sl = make_sl();
         sl.set_connection("db.example.com", 5433, "prod");
         assert_eq!(sl.conn_label, "db.example.com:5433/prod");
-    }
-
-    // -----------------------------------------------------------------------
-    // Apple Terminal / DECSTBM compatibility (issue #782)
-    // -----------------------------------------------------------------------
-
-    /// On Apple Terminal, `use_decstbm` must default to false so that
-    /// `setup_scroll_region()` does NOT emit the DECSTBM escape.
-    #[test]
-    fn apple_terminal_disables_decstbm() {
-        // Simulate Apple_Terminal detection by constructing via
-        // `StatusLine::new_with_term_program`.
-        let sl = StatusLine::new_with_term_program(true, Some("Apple_Terminal"));
-        assert!(
-            !sl.use_decstbm,
-            "Apple_Terminal must disable DECSTBM (use_decstbm=false)"
-        );
-    }
-
-    /// On iTerm2, DECSTBM should remain enabled.
-    #[test]
-    fn iterm2_keeps_decstbm() {
-        let sl = StatusLine::new_with_term_program(true, Some("iTerm.app"));
-        assert!(
-            sl.use_decstbm,
-            "iTerm.app must keep DECSTBM enabled (use_decstbm=true)"
-        );
-    }
-
-    /// When `TERM_PROGRAM` is unset, DECSTBM should remain enabled (safe default).
-    #[test]
-    fn no_term_program_keeps_decstbm() {
-        let sl = StatusLine::new_with_term_program(true, None);
-        assert!(
-            sl.use_decstbm,
-            "unset `TERM_PROGRAM` must keep DECSTBM enabled"
-        );
-    }
-
-    /// `setup_scroll_region_sequence` returns an empty string on Apple Terminal
-    /// so that no DECSTBM escape is ever written.
-    #[test]
-    fn apple_terminal_setup_scroll_region_sequence_is_empty() {
-        let sl = StatusLine::new_with_term_program(true, Some("Apple_Terminal"));
-        let seq = sl.setup_scroll_region_sequence();
-        assert!(
-            seq.is_empty(),
-            "Apple_Terminal: setup_scroll_region_sequence must be empty, got {seq:?}"
-        );
-    }
-
-    /// On a normal terminal the setup sequence must contain DECSTBM (`\x1b[`).
-    #[test]
-    fn normal_terminal_setup_scroll_region_sequence_contains_decstbm() {
-        let sl = StatusLine::new_with_term_program(true, None);
-        let seq = sl.setup_scroll_region_sequence();
-        assert!(
-            seq.contains("\x1b["),
-            "normal terminal: setup_scroll_region_sequence must contain ESC[, got {seq:?}"
-        );
-        // Must contain the DECSTBM terminator 'r'.
-        assert!(
-            seq.contains('r'),
-            "normal terminal: sequence must end with 'r' (DECSTBM), got {seq:?}"
-        );
     }
 }

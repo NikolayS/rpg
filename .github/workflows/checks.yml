@@ -138,6 +138,85 @@ jobs:
       - name: Run compatibility tests
         run: bash tests/compat/test-compat.sh target/release/rpg
 
+  psql-regress:
+    name: PostgreSQL Regress Tests
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 5s
+        ports:
+          - 5432:5432
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Checkout PostgreSQL regression test files (sparse)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: NikolayS/postgres
+          sparse-checkout: |
+            src/test/regress/sql
+            src/test/regress/expected
+            src/test/regress/parallel_schedule
+          sparse-checkout-cone-mode: false
+          path: pg-src
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: psql-regress-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            psql-regress-${{ runner.os }}-cargo-
+
+      - name: Build rpg
+        run: cargo build --release
+
+      - name: Run PostgreSQL regression tests
+        env:
+          KEEP_RESULTS: "1"
+          RESULTS_DIR: /tmp/rpg-regress
+          # Skip tests with known PG16/PG18 incompatibilities in the test files:
+          #   psql         - uses \parse/\bind_named (PG17+ metacommands)
+          #   transactions - PG18-specific transaction behavior
+          #   copydml      - COPY DML count output format changed in PG18
+          #   misc_functions - pg_replication_origin leftover state
+          #   tablespace   - tablespace state isolation issue
+          #   domain       - constraint ordering differs between PG16/PG18
+          REGRESS_SKIP: "psql transactions copydml misc_functions tablespace domain"
+        run: |
+          bash tests/compat/test-psql-regress.sh \
+            target/release/rpg \
+            pg-src
+
+      - name: Upload regression diff artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: regress-diffs
+          path: /tmp/rpg-regress/
+          retention-days: 7
+
   connection-tests:
     name: Connection Tests
     runs-on: ubuntu-latest
