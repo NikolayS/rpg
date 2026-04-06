@@ -356,7 +356,7 @@ fn format_table_inner(
             }
             let mut has_value = false;
             let all_numeric = rows.iter().all(|row| {
-                let val = row.get(col_idx).map(String::as_str).unwrap_or("");
+                let val = row.get(col_idx).map_or("", String::as_str);
                 if val.is_empty() {
                     return true;
                 }
@@ -543,8 +543,8 @@ fn system_schema_filter(system: bool) -> &'static str {
 /// the generic "List of relations".
 fn relation_title(relkinds: &[&str]) -> &'static str {
     match relkinds {
-        ["r", "p"] | ["r"] | ["p"] => "List of tables",
-        ["i"] | ["I"] | ["i", "I"] => "List of indexes",
+        ["r", "p"] | ["r" | "p"] => "List of tables",
+        ["i" | "I"] | ["i", "I"] => "List of indexes",
         ["v"] => "List of views",
         ["S"] => "List of sequences",
         ["m"] => "List of materialized views",
@@ -2293,10 +2293,10 @@ async fn list_ext_statistics(
     // schema qualifier is present in the pattern, matching psql behaviour.
     // When a schema qualifier is given, the name_filter already constrains the
     // schema column so we skip the visibility filter (also matching psql).
-    let visibility_filter = if !name_filter.contains("n.nspname") {
-        "pg_catalog.pg_statistics_obj_is_visible(s.oid)"
-    } else {
+    let visibility_filter = if name_filter.contains("n.nspname") {
         ""
+    } else {
+        "pg_catalog.pg_statistics_obj_is_visible(s.oid)"
     };
 
     let where_parts: Vec<&str> = [
@@ -2627,7 +2627,7 @@ order by 1"
 /// Origin, Password required, Run as owner?, Synchronous commit, Conninfo,
 /// Skip LSN.
 ///
-/// Requires superuser or pg_monitor membership to query pg_subscription.
+/// Requires superuser or `pg_monitor` membership to query `pg_subscription`.
 async fn list_subscriptions(
     client: &Client,
     meta: &ParsedMeta,
@@ -3287,10 +3287,10 @@ where c.oid = (
                 if let SimpleQueryMessage::Row(row) = msg {
                     let am = row.get(0).unwrap_or("");
                     let tname = row.get(1).unwrap_or("");
-                    let is_primary = row.get(2).map(|v| v == "t").unwrap_or(false);
-                    let is_unique = row.get(3).map(|v| v == "t").unwrap_or(false);
+                    let is_primary = row.get(2).is_some_and(|v| v == "t");
+                    let is_unique = row.get(3).is_some_and(|v| v == "t");
                     let pred = row.get(4).unwrap_or("");
-                    let nulls_not_distinct = row.get(5).map(|v| v == "t").unwrap_or(false);
+                    let nulls_not_distinct = row.get(5).is_some_and(|v| v == "t");
                     let reloptions = row.get(6).unwrap_or("");
                     let idx_tablespace = row.get(7).unwrap_or("");
                     let mut parts = Vec::new();
@@ -3305,9 +3305,12 @@ where c.oid = (
                     }
                     parts.push(am.to_owned());
                     let mut footer = parts.join(", ");
-                    footer.push_str(&format!(", for table \"{tname}\""));
+                    footer.push_str(", for table \"");
+                    footer.push_str(tname);
+                    footer.push('"');
                     if !pred.is_empty() {
-                        footer.push_str(&format!(" where {pred}"));
+                        footer.push_str(" where ");
+                        footer.push_str(pred);
                     }
                     println!("{footer}");
                     // Options (reloptions) — shown when present, e.g. "Options: fastupdate=on"
@@ -3750,10 +3753,14 @@ limit 1"
             use tokio_postgres::SimpleQueryMessage;
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
-                    rk = row.get(0).unwrap_or("").to_owned();
-                    pb = row.get(1).unwrap_or("").to_owned();
-                    pk = row.get(2).unwrap_or("").to_owned();
-                    pn = row.get(3).unwrap_or("").to_owned();
+                    rk.clear();
+                    rk.push_str(row.get(0).unwrap_or(""));
+                    pb.clear();
+                    pb.push_str(row.get(1).unwrap_or(""));
+                    pk.clear();
+                    pk.push_str(row.get(2).unwrap_or(""));
+                    pn.clear();
+                    pn.push_str(row.get(3).unwrap_or(""));
                     break;
                 }
             }
@@ -3835,9 +3842,9 @@ where {name_cond} limit 1"
                 // col 10 = indnullsnotdistinct: NULLS NOT DISTINCT for unique indexes (PG15+)
                 let nulls_not_distinct = row.get(10).unwrap_or("f") == "t";
                 // col 11 = condeferrable: true when the backing constraint is deferrable
-                let is_deferrable = row.get(11).map(|v| v == "t").unwrap_or(false);
+                let is_deferrable = row.get(11).is_some_and(|v| v == "t");
                 // col 12 = indisreplident: true when this index is the replica identity index
-                let is_replident = row.get(12).map(|v| v == "t").unwrap_or(false);
+                let is_replident = row.get(12).is_some_and(|v| v == "t");
                 // col 13 = idx_tablespace: non-empty when index is in non-default tablespace
                 let idx_tablespace = row.get(13).unwrap_or("").to_owned();
                 index_rows.push((
@@ -3887,7 +3894,8 @@ where {name_cond} limit 1"
                         let mut expr = String::new();
                         for def_msg in def_msgs {
                             if let SimpleQueryMessage::Row(def_row) = def_msg {
-                                expr = def_row.get(0).unwrap_or("").to_owned();
+                                expr.clear();
+                                expr.push_str(def_row.get(0).unwrap_or(""));
                                 break;
                             }
                         }
@@ -4022,7 +4030,7 @@ where {name_cond} limit 1"
         let mut lines: Vec<(Option<String>, String, String)> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
-                let parent_table = row.get(0).map(|s| s.to_owned());
+                let parent_table = row.get(0).map(std::borrow::ToOwned::to_owned);
                 let name = row.get(1).unwrap_or("").to_owned();
                 let def = row.get(2).unwrap_or("").to_owned();
                 lines.push((parent_table, name, def));
@@ -4090,7 +4098,7 @@ order by pol.polname"
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
                     let name = row.get(0).unwrap_or("").to_owned();
-                    let permissive = row.get(1).map(|s| s == "t").unwrap_or(true);
+                    let permissive = row.get(1).is_none_or(|s| s == "t");
                     let roles = row.get(2).map(str::to_owned);
                     let qual = row.get(3).map(str::to_owned);
                     let withcheck = row.get(4).map(str::to_owned);
@@ -4153,9 +4161,9 @@ order by nsp, s.stxname"
                     let nsp = row.get(0).unwrap_or("").to_owned();
                     let name = row.get(1).unwrap_or("").to_owned();
                     let cols = row.get(2).unwrap_or("").to_owned();
-                    let has_nd = row.get(3).map(|v| v == "t").unwrap_or(false);
-                    let has_dep = row.get(4).map(|v| v == "t").unwrap_or(false);
-                    let has_mcv = row.get(5).map(|v| v == "t").unwrap_or(false);
+                    let has_nd = row.get(3).is_some_and(|v| v == "t");
+                    let has_dep = row.get(4).is_some_and(|v| v == "t");
+                    let has_mcv = row.get(5).is_some_and(|v| v == "t");
                     let tbl = row.get(6).unwrap_or("").to_owned();
                     let stxtgt = row.get(7).unwrap_or("-1").to_owned();
                     stat_rows.push((nsp, name, cols, has_nd, has_dep, has_mcv, tbl, stxtgt));
@@ -4183,10 +4191,10 @@ order by nsp, s.stxname"
                         String::new()
                     };
                     // stxstattarget suffix: shown when != -1
-                    let target_str = if stxtgt != "-1" {
-                        format!("; STATISTICS {stxtgt}")
-                    } else {
+                    let target_str = if stxtgt == "-1" {
                         String::new()
+                    } else {
+                        format!("; STATISTICS {stxtgt}")
                     };
                     println!("    \"{nsp}.{name}\"{kinds_str} ON {cols} FROM {tbl}{target_str}");
                 }
@@ -4235,7 +4243,7 @@ order by a.attnum"
                     } else {
                         String::new()
                     };
-                    let not_valid = if !validated { " NOT VALID" } else { "" };
+                    let not_valid = if validated { "" } else { " NOT VALID" };
                     lines.push(format!(
                         "    \"{conname}\" NOT NULL \"{attname}\"{modifier}{not_valid}"
                     ));
@@ -4281,7 +4289,9 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
                         parts.push((pname, pbound, pkind));
                     }
                 }
-                if !parts.is_empty() {
+                if parts.is_empty() {
+                    println!("Number of partitions: 0");
+                } else {
                     println!(
                         "Partitions: {}",
                         parts
@@ -4304,8 +4314,6 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
                             .collect::<Vec<_>>()
                             .join(",\n")
                     );
-                } else {
-                    println!("Number of partitions: 0");
                 }
             }
         } else {
@@ -4416,10 +4424,10 @@ order by 1"
                     tgdef_full.clone()
                 };
                 // For inherited triggers (from partitioned parent), append ", ON TABLE parent"
-                let suffix = if !parent_table.is_empty() {
-                    format!(", ON TABLE {parent_table}")
-                } else {
+                let suffix = if parent_table.is_empty() {
                     String::new()
+                } else {
+                    format!(", ON TABLE {parent_table}")
                 };
                 let entry = format!("    {tgname} {body}{suffix}");
                 match tgenabled {
@@ -4475,8 +4483,7 @@ order by 1"
                 if relkind_char == 'v' {
                     let display = def
                         .strip_prefix("CREATE RULE ")
-                        .map(|rest| format!(" {rest}"))
-                        .unwrap_or_else(|| format!(" {def}"));
+                        .map_or_else(|| format!(" {def}"), |rest| format!(" {rest}"));
                     println!("{display}");
                 } else {
                     // Table (and other) rules: show name with 4-space indent,
@@ -4486,7 +4493,7 @@ order by 1"
                         if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
                             rest.strip_prefix('\n').unwrap_or(rest)
                         } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
-                            rest.splitn(2, '\n').nth(1).unwrap_or("")
+                            rest.split_once('\n').map_or("", |x| x.1)
                         } else {
                             def.as_str()
                         };
@@ -4536,7 +4543,7 @@ order by i.inhseqno"
                 let indent = " ".repeat(prefix.len());
                 print!("{}{}", prefix, parents[0]);
                 for p in &parents[1..] {
-                    print!(",\n{}{}", indent, p);
+                    print!(",\n{indent}{p}");
                 }
                 println!();
             }
@@ -4588,7 +4595,7 @@ order by 1"
                         let indent = " ".repeat(prefix.len());
                         print!("{}{}", prefix, children[0]);
                         for c in &children[1..] {
-                            print!(",\n{}{}", indent, c);
+                            print!(",\n{indent}{c}");
                         }
                         println!();
                     }
@@ -4730,9 +4737,8 @@ where {name_cond} limit 1"
             use tokio_postgres::SimpleQueryMessage;
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
-                    match row.get(0).unwrap_or("") {
-                        "f" => println!("Replica Identity: FULL"),
-                        _ => {}
+                    if row.get(0).unwrap_or("") == "f" {
+                        println!("Replica Identity: FULL");
                     }
                     break;
                 }

@@ -105,7 +105,7 @@ pub enum OutputFormat {
     LatexLongtable,
     /// Troff-ms table format.
     TroffMs,
-    /// AsciiDoc table format.
+    /// `AsciiDoc` table format.
     Asciidoc,
 }
 
@@ -157,7 +157,7 @@ pub struct PsetConfig {
     pub fieldsep_zero: bool,
     /// Use zero byte as record separator for unaligned output.
     pub recordsep_zero: bool,
-    /// xheader_width: "full", "column", or N (default: "full").
+    /// `xheader_width`: "full", "column", or N (default: "full").
     pub xheader_width: String,
 }
 
@@ -437,7 +437,11 @@ fn write_aligned_row_border<F>(
             .iter()
             .map(|v| v.split('\n').collect())
             .collect();
-        let max_header_lines = header_name_lines.iter().map(|v| v.len()).max().unwrap_or(1);
+        let max_header_lines = header_name_lines
+            .iter()
+            .map(std::vec::Vec::len)
+            .max()
+            .unwrap_or(1);
 
         // Format:
         //   border=0: col0_centered marker col1_centered marker ... lastcol_centered ['+' if more]
@@ -525,7 +529,11 @@ fn write_aligned_row_border<F>(
     // Split each cell into physical lines and determine how many physical rows
     // this logical row requires.
     let split_lines: Vec<Vec<&str>> = escaped.iter().map(|v| v.split('\n').collect()).collect();
-    let max_physical_lines = split_lines.iter().map(|v| v.len()).max().unwrap_or(1);
+    let max_physical_lines = split_lines
+        .iter()
+        .map(std::vec::Vec::len)
+        .max()
+        .unwrap_or(1);
 
     for phys_row in 0..max_physical_lines {
         let is_last_phys = phys_row == max_physical_lines - 1;
@@ -711,7 +719,7 @@ fn write_row_count(out: &mut String, n: usize) {
 // Expanded output formatter
 // ---------------------------------------------------------------------------
 
-/// Format expanded output using full PsetConfig (supports border=0/1/2 and wrapping).
+/// Format expanded output using full `PsetConfig` (supports border=0/1/2 and wrapping).
 fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;
@@ -974,8 +982,7 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             } else {
                 val_lines
                     .iter()
-                    .enumerate()
-                    .map(|(_i, l)| WrapLine {
+                    .map(|l| WrapLine {
                         text: l.to_string(),
                         is_physical_cont: false,
                         is_last_of_segment: true,
@@ -1000,8 +1007,8 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                     None
                 };
                 let val_text = wl.map_or("", |w| w.text.as_str());
-                let is_physical_cont = wl.map_or(false, |w| w.is_physical_cont);
-                let is_last_of_segment = wl.map_or(true, |w| w.is_last_of_segment);
+                let is_physical_cont = wl.is_some_and(|w| w.is_physical_cont);
+                let is_last_of_segment = wl.is_none_or(|w| w.is_last_of_segment);
                 let is_last_val = li + 1 == n_val_lines;
 
                 let name_w = display_width(name_line);
@@ -1092,9 +1099,7 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                                 out.push(' ');
                             }
                             out.push(' ');
-                            let sep = if is_physical_cont {
-                                ';'
-                            } else if val_text.is_empty() {
+                            let sep = if is_physical_cont || val_text.is_empty() {
                                 ';'
                             } else if li == 0 {
                                 '|'
@@ -1148,15 +1153,14 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                                 out.push(' ');
                             }
                             out.push(' ');
-                            let sep = if is_physical_cont {
-                                ';'
-                            } else if val_text.is_empty() && li < n_name_lines {
-                                ';'
-                            } else if li == 0 {
-                                '|'
-                            } else {
-                                ':'
-                            };
+                            let sep =
+                                if is_physical_cont || (val_text.is_empty() && li < n_name_lines) {
+                                    ';'
+                                } else if li == 0 {
+                                    '|'
+                                } else {
+                                    ':'
+                                };
                             out.push(sep);
                             out.push(' ');
                             out.push_str(val_text);
@@ -1293,7 +1297,9 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
                 let is_last_line = li == line_count - 1;
                 // If this is not the last segment, pad to max_data_width and
                 // mark with `+` for psql compat.
-                if !is_last_line {
+                if is_last_line {
+                    let _ = writeln!(out, " | {line}");
+                } else {
                     let prefix_w = max_name_width + 3; // "name | " width
                     let line_w = display_width(line);
                     let used = prefix_w + line_w;
@@ -1304,8 +1310,6 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
                     }
                     out.push('+');
                     out.push('\n');
-                } else {
-                    let _ = writeln!(out, " | {line}");
                 }
             }
         }
@@ -1458,16 +1462,13 @@ pub fn format_pg_error(
                         .filter(|line| {
                             let t = line.trim();
                             // Keep line unless it looks like "N object(s) in database NAME"
-                            match t.split_once(' ') {
+                            !matches!(
+                                t.split_once(' '),
                                 Some((num, rest))
                                     if num.chars().all(|c| c.is_ascii_digit())
                                         && (rest.starts_with("object in database ")
-                                            || rest.starts_with("objects in database ")) =>
-                                {
-                                    false
-                                }
-                                _ => true,
-                            }
+                                            || rest.starts_with("objects in database "))
+                            )
                         })
                         .collect();
                     if !filtered.is_empty() {
@@ -1648,7 +1649,8 @@ fn psql_escape_cell(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\x7f' => out.push_str("\\x7F"),
             c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\x{:02X}", c as u32));
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\x{:02X}", c as u32);
             }
             c => out.push(c),
         }
@@ -1663,11 +1665,7 @@ fn psql_escape_cell(s: &str) -> String {
 /// column width is the widest individual line — matching psql which renders
 /// each line separately and appends a `+` continuation marker.
 fn cell_display_width(escaped: &str) -> usize {
-    escaped
-        .split('\n')
-        .map(|line| display_width(line))
-        .max()
-        .unwrap_or(0)
+    escaped.split('\n').map(display_width).max().unwrap_or(0)
 }
 
 /// Expand tab characters in a cell content line to spaces, using 8-space
@@ -2298,12 +2296,12 @@ pub fn format_latex(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
     out.push_str("\\end{tabular}\n");
 
-    if !cfg.tuples_only {
+    if cfg.tuples_only {
+        out.push_str("\n\\noindent\n");
+    } else {
         let n = rows.len();
         let label = if n == 1 { "row" } else { "rows" };
         let _ = writeln!(out, "\n\\noindent ({n} {label}) \\\\");
-    } else {
-        out.push_str("\n\\noindent\n");
     }
 }
 
@@ -2475,12 +2473,12 @@ fn format_troff_ms_expanded(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 }
 
-/// Escape a string for AsciiDoc table output.
+/// Escape a string for `AsciiDoc` table output.
 fn asciidoc_escape(s: &str) -> String {
     s.replace('|', "\\|")
 }
 
-/// Render a [`RowSet`] in AsciiDoc table format.
+/// Render a [`RowSet`] in `AsciiDoc` table format.
 pub fn format_asciidoc(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;
@@ -2505,7 +2503,7 @@ pub fn format_asciidoc(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         .iter()
         .map(|c| {
             let align = if c.is_numeric { ">l" } else { "<l" };
-            format!("{align}")
+            align.to_string()
         })
         .collect();
     let _ = writeln!(
@@ -2544,7 +2542,7 @@ pub fn format_asciidoc(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 }
 
-/// Render a [`RowSet`] in AsciiDoc expanded format.
+/// Render a [`RowSet`] in `AsciiDoc` expanded format.
 fn format_asciidoc_expanded(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;

@@ -528,7 +528,7 @@ pub fn parse(input: &str) -> ParsedMeta {
     // Matches `\\` possibly followed by more metacommands.  Everything
     // after the `\\` (and leading whitespace) is returned as continuation.
     if trimmed.starts_with("\\\\") {
-        let after = trimmed[2..].trim_start();
+        let after = trimmed.strip_prefix("\\\\").unwrap_or("").trim_start();
         let mut m = ParsedMeta::simple(MetaCmd::NoOp);
         m.continuation = if after.is_empty() {
             None
@@ -858,7 +858,7 @@ fn split_params_set(s: &str, vars: &crate::vars::Variables) -> String {
                         if let Some(val) = vars.get(&name) {
                             // SQL single-quote escape
                             out.push('\'');
-                            out.push_str(&val.replace("'", "''"));
+                            out.push_str(&val.replace('\'', "''"));
                             out.push('\'');
                             chars = peek_chars; // advance past consumed chars
                             continue;
@@ -880,7 +880,7 @@ fn split_params_set(s: &str, vars: &crate::vars::Variables) -> String {
                     if found_close && !name.is_empty() {
                         if let Some(val) = vars.get(&name) {
                             out.push('"');
-                            out.push_str(&val.replace("\"", "\"\""));
+                            out.push_str(&val.replace('"', "\"\""));
                             out.push('"');
                             chars = peek_chars;
                             continue;
@@ -1922,7 +1922,7 @@ fn split_params_with_continuation(s: &str) -> (Vec<String>, Option<String>) {
         if c == '\\' {
             let rest = &s[i..];
             let next = rest.chars().nth(1);
-            if next.map_or(false, |nc| nc.is_alphabetic()) {
+            if next.is_some_and(char::is_alphabetic) {
                 return (result, Some(rest.to_owned()));
             }
         }
@@ -2211,7 +2211,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
             };
             // Handle inline pset opts: `\gx (key=val ...)`
             if let MetaCmd::GoExecuteExpanded(ref arg) = m.cmd {
-                if arg.as_deref().map_or(false, |a| a.starts_with('(')) {
+                if arg.as_deref().is_some_and(|a| a.starts_with('(')) {
                     // Leave as-is; GoExecute dispatch handles pset parsing.
                 }
             }

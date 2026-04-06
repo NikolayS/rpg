@@ -36,7 +36,7 @@ pub enum ColSpec {
 
 impl ColSpec {
     /// Parse an unquoted token: numeric → Index, otherwise → Name (already
-    /// lowercased by tokenize_args).
+    /// lowercased by `tokenize_args`).
     fn from_str(s: &str) -> Self {
         if let Ok(n) = s.parse::<usize>() {
             if n >= 1 {
@@ -328,7 +328,7 @@ pub fn pivot(
 /// `pivot_headers` is the first row (column names).
 /// `pivot_rows` is the data rows.
 /// `row_right_align` — when true, the row-label column (column 0) is
-/// right-aligned (used when col_v has a numeric PostgreSQL type).
+/// right-aligned (used when `col_v` has a numeric `PostgreSQL` type).
 /// `data_right_align` — when true, data cells (columns 1+) are right-aligned
 /// (used for numeric data columns, matching psql behaviour).
 ///
@@ -468,8 +468,8 @@ fn build_row(cells: &[String], widths: &[usize]) -> String {
 /// trailing whitespace stripped.
 ///
 /// `row_right_align` controls alignment of column 0 (row-label); it is true
-/// when col_v has a numeric PostgreSQL type.  `data_right_align` controls
-/// alignment of columns 1+ (data cells); it is true when col_d is numeric.
+/// when `col_v` has a numeric `PostgreSQL` type.  `data_right_align` controls
+/// alignment of columns 1+ (data cells); it is true when `col_d` is numeric.
 fn render_multiline_row(
     out: &mut String,
     cells: &[String],
@@ -485,7 +485,7 @@ fn render_multiline_row(
         .map(|c| c.split('\n').collect())
         .collect();
 
-    let max_lines = cell_lines.iter().map(|l| l.len()).max().unwrap_or(1);
+    let max_lines = cell_lines.iter().map(std::vec::Vec::len).max().unwrap_or(1);
 
     for vrow in 0..max_lines {
         let mut line = String::new();

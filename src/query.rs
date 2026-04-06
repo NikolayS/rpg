@@ -116,12 +116,12 @@ fn parse_rows_affected(tag: &str) -> u64 {
 // Reconstruct command tag from SQL + row count
 // ---------------------------------------------------------------------------
 
-/// Reconstruct the full PostgreSQL command tag from the SQL statement and row count.
+/// Reconstruct the full `PostgreSQL` command tag from the SQL statement and row count.
 ///
 /// `tokio-postgres 0.7` exposes only the numeric row count from `CommandComplete`;
 /// the full tag string (e.g. `"INSERT 0 3"`, `"CREATE TABLE"`) is discarded by the
 /// library before it reaches our code.  We recover it by inspecting the first
-/// keyword(s) of the SQL statement and applying the same rules that PostgreSQL
+/// keyword(s) of the SQL statement and applying the same rules that `PostgreSQL`
 /// uses to form the tag (defined in `src/include/tcop/cmdtaglist.h`).
 ///
 /// Tags that carry a row count (per `rowcount = true` in cmdtaglist.h):
@@ -144,7 +144,7 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
     let upper: String = sql
         .split_whitespace()
         .take(6)
-        .map(|w| w.to_ascii_uppercase())
+        .map(str::to_ascii_uppercase)
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -182,162 +182,162 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
             "TEMP" | "TEMPORARY" => {
                 // CREATE [TEMP|TEMPORARY] [UNLOGGED] TABLE ...
                 match w2 {
-                    "UNLOGGED" => format!("CREATE TABLE"),
-                    "TABLE" => format!("CREATE TABLE"),
+                    "UNLOGGED" => "CREATE TABLE".to_string(),
+                    "TABLE" => "CREATE TABLE".to_string(),
                     _ => format!("CREATE {w2}"),
                 }
             }
-            "UNLOGGED" => format!("CREATE TABLE"),
-            "UNIQUE" | "CONCURRENTLY" => format!("CREATE INDEX"),
-            "MATERIALIZED" => format!("CREATE MATERIALIZED VIEW"),
+            "UNLOGGED" => "CREATE TABLE".to_string(),
+            "UNIQUE" | "CONCURRENTLY" => "CREATE INDEX".to_string(),
+            "MATERIALIZED" => "CREATE MATERIALIZED VIEW".to_string(),
             "FOREIGN" => match w2 {
-                "TABLE" => format!("CREATE FOREIGN TABLE"),
-                "DATA" => format!("CREATE FOREIGN DATA WRAPPER"),
+                "TABLE" => "CREATE FOREIGN TABLE".to_string(),
+                "DATA" => "CREATE FOREIGN DATA WRAPPER".to_string(),
                 _ => format!("CREATE FOREIGN {w2}"),
             },
             "TEXT" => format!("CREATE TEXT SEARCH {w3}"),
             "OPERATOR" => match w2 {
-                "CLASS" => format!("CREATE OPERATOR CLASS"),
-                "FAMILY" => format!("CREATE OPERATOR FAMILY"),
-                _ => format!("CREATE OPERATOR"),
+                "CLASS" => "CREATE OPERATOR CLASS".to_string(),
+                "FAMILY" => "CREATE OPERATOR FAMILY".to_string(),
+                _ => "CREATE OPERATOR".to_string(),
             },
-            "USER" => format!("CREATE USER MAPPING"),
-            "ACCESS" => format!("CREATE ACCESS METHOD"),
-            "DEFAULT" => format!("CREATE CONSTRAINT"),
-            "EVENT" => format!("CREATE EVENT TRIGGER"),
-            "" => format!("CREATE"),
+            "USER" => "CREATE USER MAPPING".to_string(),
+            "ACCESS" => "CREATE ACCESS METHOD".to_string(),
+            "DEFAULT" => "CREATE CONSTRAINT".to_string(),
+            "EVENT" => "CREATE EVENT TRIGGER".to_string(),
+            "" => "CREATE".to_string(),
             _ => format!("CREATE {w1}"),
         },
 
         // --- DROP variants ---
         "DROP" => match w1 {
-            "MATERIALIZED" => format!("DROP MATERIALIZED VIEW"),
+            "MATERIALIZED" => "DROP MATERIALIZED VIEW".to_string(),
             "FOREIGN" => match w2 {
-                "TABLE" => format!("DROP FOREIGN TABLE"),
-                "DATA" => format!("DROP FOREIGN DATA WRAPPER"),
+                "TABLE" => "DROP FOREIGN TABLE".to_string(),
+                "DATA" => "DROP FOREIGN DATA WRAPPER".to_string(),
                 _ => format!("DROP FOREIGN {w2}"),
             },
             "TEXT" => format!("DROP TEXT SEARCH {w3}"),
             "OPERATOR" => match w2 {
-                "CLASS" => format!("DROP OPERATOR CLASS"),
-                "FAMILY" => format!("DROP OPERATOR FAMILY"),
-                _ => format!("DROP OPERATOR"),
+                "CLASS" => "DROP OPERATOR CLASS".to_string(),
+                "FAMILY" => "DROP OPERATOR FAMILY".to_string(),
+                _ => "DROP OPERATOR".to_string(),
             },
-            "USER" => format!("DROP USER MAPPING"),
-            "ACCESS" => format!("DROP ACCESS METHOD"),
-            "EVENT" => format!("DROP EVENT TRIGGER"),
-            "OWNED" => format!("DROP OWNED"),
-            "" => format!("DROP"),
+            "USER" => "DROP USER MAPPING".to_string(),
+            "ACCESS" => "DROP ACCESS METHOD".to_string(),
+            "EVENT" => "DROP EVENT TRIGGER".to_string(),
+            "OWNED" => "DROP OWNED".to_string(),
+            "" => "DROP".to_string(),
             _ => format!("DROP {w1}"),
         },
 
         // --- ALTER variants ---
         "ALTER" => match w1 {
-            "DEFAULT" => format!("ALTER DEFAULT PRIVILEGES"),
+            "DEFAULT" => "ALTER DEFAULT PRIVILEGES".to_string(),
             "TEXT" => format!("ALTER TEXT SEARCH {w3}"),
             "FOREIGN" => match w2 {
-                "TABLE" => format!("ALTER FOREIGN TABLE"),
-                "DATA" => format!("ALTER FOREIGN DATA WRAPPER"),
+                "TABLE" => "ALTER FOREIGN TABLE".to_string(),
+                "DATA" => "ALTER FOREIGN DATA WRAPPER".to_string(),
                 _ => format!("ALTER FOREIGN {w2}"),
             },
-            "MATERIALIZED" => format!("ALTER MATERIALIZED VIEW"),
+            "MATERIALIZED" => "ALTER MATERIALIZED VIEW".to_string(),
             "OPERATOR" => match w2 {
-                "CLASS" => format!("ALTER OPERATOR CLASS"),
-                "FAMILY" => format!("ALTER OPERATOR FAMILY"),
-                _ => format!("ALTER OPERATOR"),
+                "CLASS" => "ALTER OPERATOR CLASS".to_string(),
+                "FAMILY" => "ALTER OPERATOR FAMILY".to_string(),
+                _ => "ALTER OPERATOR".to_string(),
             },
             "USER" => match w2 {
-                "MAPPING" => format!("ALTER USER MAPPING"),
-                _ => format!("ALTER ROLE"), // ALTER USER → ALTER ROLE tag
+                "MAPPING" => "ALTER USER MAPPING".to_string(),
+                _ => "ALTER ROLE".to_string(), // ALTER USER → ALTER ROLE tag
             },
-            "ACCESS" => format!("ALTER ACCESS METHOD"),
-            "" => format!("ALTER"),
+            "ACCESS" => "ALTER ACCESS METHOD".to_string(),
+            "" => "ALTER".to_string(),
             _ => format!("ALTER {w1}"),
         },
 
         // --- Transaction control ---
-        "BEGIN" | "START" => format!("BEGIN"),
+        "BEGIN" | "START" => "BEGIN".to_string(),
         "COMMIT" | "END" => match w1 {
-            "PREPARED" => format!("COMMIT PREPARED"),
-            _ => format!("COMMIT"),
+            "PREPARED" => "COMMIT PREPARED".to_string(),
+            _ => "COMMIT".to_string(),
         },
         "ROLLBACK" => match w1 {
-            "PREPARED" => format!("ROLLBACK PREPARED"),
-            _ => format!("ROLLBACK"),
+            "PREPARED" => "ROLLBACK PREPARED".to_string(),
+            _ => "ROLLBACK".to_string(),
         },
-        "SAVEPOINT" => format!("SAVEPOINT"),
-        "RELEASE" => format!("RELEASE"),
+        "SAVEPOINT" => "SAVEPOINT".to_string(),
+        "RELEASE" => "RELEASE".to_string(),
 
         // --- Cursor commands ---
-        "DECLARE" => format!("DECLARE CURSOR"),
+        "DECLARE" => "DECLARE CURSOR".to_string(),
         "CLOSE" => match w1 {
-            "ALL" => format!("CLOSE CURSOR ALL"),
-            _ => format!("CLOSE CURSOR"),
+            "ALL" => "CLOSE CURSOR ALL".to_string(),
+            _ => "CLOSE CURSOR".to_string(),
         },
 
         // --- Prepare / execute ---
-        "PREPARE" => format!("PREPARE"),
-        "EXECUTE" => format!("EXECUTE"),
+        "PREPARE" => "PREPARE".to_string(),
+        "EXECUTE" => "EXECUTE".to_string(),
         "DEALLOCATE" => match w1 {
-            "ALL" => format!("DEALLOCATE ALL"),
-            _ => format!("DEALLOCATE"),
+            "ALL" => "DEALLOCATE ALL".to_string(),
+            _ => "DEALLOCATE".to_string(),
         },
 
         // --- DISCARD ---
         "DISCARD" => match w1 {
-            "ALL" => format!("DISCARD ALL"),
-            "PLANS" => format!("DISCARD PLANS"),
-            "SEQUENCES" => format!("DISCARD SEQUENCES"),
-            "TEMP" | "TEMPORARY" => format!("DISCARD TEMP"),
-            _ => format!("DISCARD"),
+            "ALL" => "DISCARD ALL".to_string(),
+            "PLANS" => "DISCARD PLANS".to_string(),
+            "SEQUENCES" => "DISCARD SEQUENCES".to_string(),
+            "TEMP" | "TEMPORARY" => "DISCARD TEMP".to_string(),
+            _ => "DISCARD".to_string(),
         },
 
         // --- GRANT / REVOKE ---
         "GRANT" => match w1 {
-            "ROLE" => format!("GRANT ROLE"),
-            _ => format!("GRANT"),
+            "ROLE" => "GRANT ROLE".to_string(),
+            _ => "GRANT".to_string(),
         },
         "REVOKE" => match w1 {
-            "ROLE" => format!("REVOKE ROLE"),
-            _ => format!("REVOKE"),
+            "ROLE" => "REVOKE ROLE".to_string(),
+            _ => "REVOKE".to_string(),
         },
 
         // --- SET / RESET / SHOW ---
         "SET" => match w1 {
-            "CONSTRAINTS" => format!("SET CONSTRAINTS"),
-            _ => format!("SET"),
+            "CONSTRAINTS" => "SET CONSTRAINTS".to_string(),
+            _ => "SET".to_string(),
         },
-        "RESET" => format!("RESET"),
-        "SHOW" => format!("SHOW"),
+        "RESET" => "RESET".to_string(),
+        "SHOW" => "SHOW".to_string(),
 
         // --- TRUNCATE ---
-        "TRUNCATE" => format!("TRUNCATE TABLE"),
+        "TRUNCATE" => "TRUNCATE TABLE".to_string(),
 
         // --- Maintenance ---
-        "VACUUM" => format!("VACUUM"),
-        "ANALYZE" | "ANALYSE" => format!("ANALYZE"),
-        "CLUSTER" => format!("CLUSTER"),
-        "REINDEX" => format!("REINDEX"),
-        "CHECKPOINT" => format!("CHECKPOINT"),
+        "VACUUM" => "VACUUM".to_string(),
+        "ANALYZE" | "ANALYSE" => "ANALYZE".to_string(),
+        "CLUSTER" => "CLUSTER".to_string(),
+        "REINDEX" => "REINDEX".to_string(),
+        "CHECKPOINT" => "CHECKPOINT".to_string(),
 
         // --- LOCK ---
-        "LOCK" => format!("LOCK TABLE"),
+        "LOCK" => "LOCK TABLE".to_string(),
 
         // --- Async messaging ---
-        "LISTEN" => format!("LISTEN"),
-        "UNLISTEN" => format!("UNLISTEN"),
-        "NOTIFY" => format!("NOTIFY"),
+        "LISTEN" => "LISTEN".to_string(),
+        "UNLISTEN" => "UNLISTEN".to_string(),
+        "NOTIFY" => "NOTIFY".to_string(),
 
         // --- Misc ---
-        "LOAD" => format!("LOAD"),
-        "CALL" => format!("CALL"),
-        "DO" => format!("DO"),
-        "COMMENT" => format!("COMMENT"),
-        "SECURITY" => format!("SECURITY LABEL"),
-        "REASSIGN" => format!("REASSIGN OWNED"),
-        "IMPORT" => format!("IMPORT FOREIGN SCHEMA"),
-        "REFRESH" => format!("REFRESH MATERIALIZED VIEW"),
-        "EXPLAIN" => format!("EXPLAIN"),
+        "LOAD" => "LOAD".to_string(),
+        "CALL" => "CALL".to_string(),
+        "DO" => "DO".to_string(),
+        "COMMENT" => "COMMENT".to_string(),
+        "SECURITY" => "SECURITY LABEL".to_string(),
+        "REASSIGN" => "REASSIGN OWNED".to_string(),
+        "IMPORT" => "IMPORT FOREIGN SCHEMA".to_string(),
+        "REFRESH" => "REFRESH MATERIALIZED VIEW".to_string(),
+        "EXPLAIN" => "EXPLAIN".to_string(),
 
         // --- Fallback: return the first word ---
         other => other.to_string(),
@@ -348,7 +348,7 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
 /// to find the first meaningful keyword in a SQL statement.
 /// Strip leading blank lines and line/block comments from a SQL string.
 ///
-/// PostgreSQL counts lines from the start of the query string it receives.
+/// `PostgreSQL` counts lines from the start of the query string it receives.
 /// psql strips these leading decorations before sending so that LINE N in
 /// error messages is relative to the first real SQL token (LINE 1 for a
 /// single-statement query).  rpg must do the same to match psql output.

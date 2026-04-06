@@ -379,7 +379,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         .map(|row| {
             (0..ncols)
                 .map(|i| {
-                    let v = row.get(i).map(String::as_str).unwrap_or("");
+                    let v = row.get(i).map_or("", String::as_str);
                     v.split('\n').collect::<Vec<_>>()
                 })
                 .collect()
@@ -401,8 +401,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     // Total visible table width (matches the separator line length).
     // Each col contributes `width+2` chars (1 leading space + content + 1 trailing
     // space or `+`), and columns are joined by `|` (ncols-1 separators).
-    let table_width =
-        widths.iter().map(|w| w + 2).sum::<usize>() + if ncols > 1 { ncols - 1 } else { 0 };
+    let table_width = widths.iter().map(|w| w + 2).sum::<usize>() + ncols.saturating_sub(1);
 
     if let Some(t) = title {
         let tlen = t.len();
@@ -436,13 +435,15 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
             let is_last = col_idx + 1 == cells.len();
             if cont {
                 // " text_padded+" then "|" (no space — `+` is the trailing char)
-                s.push_str(&format!(" {text:<w$}+"));
+                use std::fmt::Write as _;
+                let _ = write!(s, " {text:<w$}+");
                 if !is_last {
                     s.push('|');
                 }
             } else {
                 // " text_padded" then " |" (trailing space + pipe separator)
-                s.push_str(&format!(" {text:<w$}"));
+                use std::fmt::Write as _;
+                let _ = write!(s, " {text:<w$}");
                 if !is_last {
                     s.push_str(" |");
                 }
@@ -463,7 +464,8 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         for (col_idx, name) in col_names.iter().enumerate() {
             let w = widths[col_idx];
             let is_last = col_idx + 1 == ncols;
-            s.push_str(&format!(" {}", center(name, w)));
+            s.push(' ');
+            s.push_str(&center(name, w));
             if !is_last {
                 s.push_str(" |");
             }
@@ -484,7 +486,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     // Data rows, handling multiline cells.
     for srow in &split_rows {
         // Number of printed lines for this logical row.
-        let max_lines = srow.iter().map(|c| c.len()).max().unwrap_or(1);
+        let max_lines = srow.iter().map(std::vec::Vec::len).max().unwrap_or(1);
         for line_idx in 0..max_lines {
             let cells: Vec<(&str, usize, bool)> = srow
                 .iter()
@@ -516,13 +518,12 @@ fn read_file(path: &str) -> Result<Vec<u8>, String> {
             // SAFETY: strerror_r is always safe with a valid error code.
             let mut buf = [0u8; 256];
             unsafe {
-                libc::strerror_r(code, buf.as_mut_ptr() as *mut libc::c_char, buf.len());
+                libc::strerror_r(code, buf.as_mut_ptr().cast::<libc::c_char>(), buf.len());
             }
             let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             std::str::from_utf8(&buf[..end])
                 .ok()
-                .map(str::to_owned)
-                .unwrap_or_else(|| e.to_string())
+                .map_or_else(|| e.to_string(), str::to_owned)
         } else {
             e.to_string()
         };

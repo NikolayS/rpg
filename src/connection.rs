@@ -2420,7 +2420,8 @@ pub async fn connect(
                         let ipv4 = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str())
                             .ok()
                             .and_then(|mut it| {
-                                it.find(|a| a.is_ipv4()).map(|a| a.ip().to_string())
+                                it.find(std::net::SocketAddr::is_ipv4)
+                                    .map(|a| a.ip().to_string())
                             });
 
                         if let Some(ip4) = ipv4 {

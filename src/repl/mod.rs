@@ -630,7 +630,7 @@ pub fn is_complete(buf: &str) -> bool {
                         && rest
                             .as_bytes()
                             .get(6)
-                            .map_or(true, |&b| !b.is_ascii_alphanumeric())
+                            .is_none_or(|&b| !b.is_ascii_alphanumeric())
                     {
                         begin_atomic_depth += 1;
                     }
@@ -643,10 +643,10 @@ pub fn is_complete(buf: &str) -> bool {
                     //      whose END is always part of a larger expression.
                     let rest_after_end = buf[i..].trim_start();
                     let line_before = &buf[..kw_start];
-                    let at_line_start = line_before
-                        .rfind('\n')
-                        .map(|nl| buf[nl + 1..kw_start].chars().all(char::is_whitespace))
-                        .unwrap_or_else(|| buf[..kw_start].chars().all(char::is_whitespace));
+                    let at_line_start = line_before.rfind('\n').map_or_else(
+                        || buf[..kw_start].chars().all(char::is_whitespace),
+                        |nl| buf[nl + 1..kw_start].chars().all(char::is_whitespace),
+                    );
                     if rest_after_end.starts_with(';') && at_line_start {
                         begin_atomic_depth -= 1;
                     }
@@ -1203,7 +1203,7 @@ pub struct ReplSettings {
     /// `simple_query` call without the `needs_split_execution` guard.
     ///
     /// Used for `\;`-combined multi-statement queries: psql sends them as
-    /// a single Query message (preserving PostgreSQL's implicit-transaction
+    /// a single Query message (preserving `PostgreSQL`'s implicit-transaction
     /// semantics), so rpg must do the same.  The caller sets this to `true`
     /// before calling `execute_query` and restores it to `false` afterwards.
     pub exec_verbatim: bool,
@@ -1482,6 +1482,7 @@ pub struct ReplSettings {
     pub initial_input: Option<String>,
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for ReplSettings {
     #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2038,7 +2039,7 @@ fn is_copy_from_stdin(sql: &str) -> bool {
 /// Execute an inline `COPY … FROM STDIN` block where the data rows have
 /// already been collected from the script source.
 ///
-/// Sends the copy data via the PostgreSQL copy-in protocol and prints the
+/// Sends the copy data via the `PostgreSQL` copy-in protocol and prints the
 /// `COPY N` command tag on success, or an error message on failure.
 ///
 /// Returns `true` on success, `false` on error.
@@ -2129,8 +2130,6 @@ pub(crate) async fn exec_lines(
     // can reuse it even after the buffer was cleared by auto-execution on `;`.
     let mut prev_buf = String::new();
     let mut exit_code = 0i32;
-    let lines = lines;
-
     'lines: while let Some(line) = lines.next() {
         // `quit` / `exit` bare words work in all modes (psql behaviour).
         if is_quit_exit(line.trim(), buf.is_empty()) {
@@ -2177,7 +2176,7 @@ pub(crate) async fn exec_lines(
                             && spec.source == crate::copy::CopySource::Stdin
                         {
                             let mut inline: Vec<u8> = Vec::new();
-                            while let Some(dl) = lines.next() {
+                            for dl in &mut *lines {
                                 if dl.trim() == "\\." {
                                     break;
                                 }
@@ -2222,7 +2221,9 @@ pub(crate) async fn exec_lines(
                             let saved_echo = settings.echo_all;
                             settings.echo_all = false;
                             // Apply any inline pset options (e.g. \g (format=csv)).
-                            let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                            let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                None
+                            } else {
                                 let saved = settings.pset.clone();
                                 let opts = std::mem::take(&mut settings.pending_pset_opts);
                                 let saved_quiet = settings.quiet;
@@ -2232,8 +2233,6 @@ pub(crate) async fn exec_lines(
                                 }
                                 settings.quiet = saved_quiet;
                                 Some(saved)
-                            } else {
-                                None
                             };
                             let ok = if let Some(bp) = settings.pending_bind_params.take() {
                                 execute_query_extended(client, &sql, &bp, settings, tx).await
@@ -2269,7 +2268,9 @@ pub(crate) async fn exec_lines(
                             settings.expanded = ExpandedMode::On;
                             settings.pset.expanded = ExpandedMode::On;
                             // Apply any inline pset options (e.g. \gx (title='foo')).
-                            let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                            let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                None
+                            } else {
                                 let saved = settings.pset.clone();
                                 let opts = std::mem::take(&mut settings.pending_pset_opts);
                                 let saved_quiet = settings.quiet;
@@ -2279,8 +2280,6 @@ pub(crate) async fn exec_lines(
                                 }
                                 settings.quiet = saved_quiet;
                                 Some(saved)
-                            } else {
-                                None
                             };
                             let ok = execute_query(client, &sql, settings, tx).await;
                             if let Some(saved) = saved_pset {
@@ -2509,7 +2508,9 @@ pub(crate) async fn exec_lines(
                                 prev_buf = sql.clone();
                                 let saved_echo = settings.echo_all;
                                 settings.echo_all = false;
-                                let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                                let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                    None
+                                } else {
                                     let saved = settings.pset.clone();
                                     let opts = std::mem::take(&mut settings.pending_pset_opts);
                                     let saved_quiet = settings.quiet;
@@ -2519,8 +2520,6 @@ pub(crate) async fn exec_lines(
                                     }
                                     settings.quiet = saved_quiet;
                                     Some(saved)
-                                } else {
-                                    None
                                 };
                                 let ok = if let Some(bp) = settings.pending_bind_params.take() {
                                     execute_query_extended(client, &sql, &bp, settings, tx).await
@@ -2555,7 +2554,9 @@ pub(crate) async fn exec_lines(
                                 settings.echo_all = false;
                                 settings.expanded = ExpandedMode::On;
                                 settings.pset.expanded = ExpandedMode::On;
-                                let saved_pset = if !settings.pending_pset_opts.is_empty() {
+                                let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                    None
+                                } else {
                                     let saved = settings.pset.clone();
                                     let opts = std::mem::take(&mut settings.pending_pset_opts);
                                     let saved_quiet = settings.quiet;
@@ -2565,8 +2566,6 @@ pub(crate) async fn exec_lines(
                                     }
                                     settings.quiet = saved_quiet;
                                     Some(saved)
-                                } else {
-                                    None
                                 };
                                 execute_query(client, &sql, settings, tx).await;
                                 if let Some(saved) = saved_pset {
@@ -2827,7 +2826,7 @@ pub(crate) async fn exec_lines(
                                     // data lines.  psql does NOT echo them even
                                     // with --echo-all.
                                     let mut copy_data = Vec::<String>::new();
-                                    while let Some(dl) = lines.next() {
+                                    for dl in &mut *lines {
                                         if dl.trim() == "\\." {
                                             break;
                                         }
@@ -3329,24 +3328,21 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         return;
     }
     // Validate special built-in variables before storing.
-    if name == "AUTOCOMMIT" {
-        if !matches!(value, "on" | "off" | "true" | "false" | "1" | "0") {
-            eprintln!("error: unrecognized value \"{value}\" for \"AUTOCOMMIT\": Boolean expected");
-            return;
-        }
+    if name == "AUTOCOMMIT" && !matches!(value, "on" | "off" | "true" | "false" | "1" | "0") {
+        eprintln!("error: unrecognized value \"{value}\" for \"AUTOCOMMIT\": Boolean expected");
+        return;
     }
-    if name == "FETCH_COUNT" {
-        if value.parse::<u32>().is_err() {
-            eprintln!("error: invalid value \"{value}\" for \"FETCH_COUNT\": integer expected");
-            return;
-        }
+    if name == "FETCH_COUNT" && value.parse::<u32>().is_err() {
+        eprintln!("error: invalid value \"{value}\" for \"FETCH_COUNT\": integer expected");
+        return;
     }
-    if name == "ON_ERROR_ROLLBACK" {
-        if !value.is_empty() && !matches!(value, "on" | "off" | "interactive") {
-            eprintln!("error: unrecognized value \"{value}\" for \"ON_ERROR_ROLLBACK\"");
-            eprintln!("Available values are: on, off, interactive.");
-            return;
-        }
+    if name == "ON_ERROR_ROLLBACK"
+        && !value.is_empty()
+        && !matches!(value, "on" | "off" | "interactive")
+    {
+        eprintln!("error: unrecognized value \"{value}\" for \"ON_ERROR_ROLLBACK\"");
+        eprintln!("Available values are: on, off, interactive.");
+        return;
     }
 
     settings.vars.set(name, value);
@@ -3917,7 +3913,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             let ls = value.unwrap_or("ascii");
             match ls {
                 "ascii" | "old-ascii" | "unicode" => {
-                    settings.pset.linestyle = ls.to_owned();
+                    ls.clone_into(&mut settings.pset.linestyle);
                     if !quiet {
                         println!("Line style is {ls}.");
                     }
@@ -3953,21 +3949,21 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         }
         "unicode_border_linestyle" => {
             let ls = value.unwrap_or("single");
-            settings.pset.unicode_border_linestyle = ls.to_owned();
+            ls.clone_into(&mut settings.pset.unicode_border_linestyle);
             if !quiet {
                 println!("Unicode border line style is \"{ls}\".");
             }
         }
         "unicode_column_linestyle" => {
             let ls = value.unwrap_or("single");
-            settings.pset.unicode_column_linestyle = ls.to_owned();
+            ls.clone_into(&mut settings.pset.unicode_column_linestyle);
             if !quiet {
                 println!("Unicode column line style is \"{ls}\".");
             }
         }
         "unicode_header_linestyle" => {
             let ls = value.unwrap_or("single");
-            settings.pset.unicode_header_linestyle = ls.to_owned();
+            ls.clone_into(&mut settings.pset.unicode_header_linestyle);
             if !quiet {
                 println!("Unicode header line style is \"{ls}\".");
             }
@@ -3995,7 +3991,9 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             }
         }
         "xheader_width" => {
-            settings.pset.xheader_width = value.unwrap_or("full").to_owned();
+            value
+                .unwrap_or("full")
+                .clone_into(&mut settings.pset.xheader_width);
             if !quiet {
                 println!(
                     "Expanded header width is \"{}\".",
@@ -4766,22 +4764,19 @@ async fn dispatch_meta(
             if expr.trim().is_empty() {
                 eprintln!("\\if: missing expression");
                 settings.cond.push_if(false);
+            } else if let Some(condition) = eval_bool_strict(expr) {
+                settings.cond.push_if(condition);
             } else {
-                match eval_bool_strict(expr) {
-                    Some(condition) => settings.cond.push_if(condition),
-                    None => {
-                        // Only emit the error when we are in an active context
-                        // (outer block is executing).  psql is silent about
-                        // errors inside already-suppressed blocks.
-                        if settings.cond.is_active() {
-                            eprintln!(
-                                "error: unrecognized value \"{expr}\" for \
-                                 \"\\if expression\": Boolean expected"
-                            );
-                        }
-                        settings.cond.push_if_error();
-                    }
+                // Only emit the error when we are in an active context
+                // (outer block is executing).  psql is silent about
+                // errors inside already-suppressed blocks.
+                if settings.cond.is_active() {
+                    eprintln!(
+                        "error: unrecognized value \"{expr}\" for \
+                         \"\\if expression\": Boolean expected"
+                    );
                 }
+                settings.cond.push_if_error();
             }
             return MetaResult::Continue;
         }

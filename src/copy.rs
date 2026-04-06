@@ -74,7 +74,7 @@ pub struct CopySpec {
     pub delimiter: Option<char>,
     pub header: bool,
     pub null_string: Option<String>,
-    /// Pass-through options not explicitly handled by rpg (e.g. FORCE_QUOTE,
+    /// Pass-through options not explicitly handled by rpg (e.g. `FORCE_QUOTE`,
     /// QUOTE, ESCAPE).  Each entry is a ready-to-embed SQL fragment such as
     /// `"FORCE_QUOTE *"` or `"QUOTE ''''"`; they are appended verbatim inside
     /// the `WITH (…)` clause.
@@ -269,7 +269,7 @@ fn parse_copy_options(
             // it as the option's argument.
             _ => {
                 let mut frag = opt;
-                let next_is_val = opt_iter.peek().map_or(false, |t| {
+                let next_is_val = opt_iter.peek().is_some_and(|t| {
                     t.starts_with('\'')
                         || t.to_uppercase().starts_with("E'")
                         || t.starts_with('(')
@@ -311,10 +311,12 @@ fn format_pg_error_psql(e: &tokio_postgres::Error) -> String {
     if let Some(db) = e.as_db_error() {
         let mut msg = format!("ERROR:  {}", db.message());
         if let Some(d) = db.detail() {
-            msg.push_str(&format!("\nDETAIL:  {d}"));
+            msg.push_str("\nDETAIL:  ");
+            msg.push_str(d);
         }
         if let Some(h) = db.hint() {
-            msg.push_str(&format!("\nHINT:  {h}"));
+            msg.push_str("\nHINT:  ");
+            msg.push_str(h);
         }
         msg
     } else {

@@ -12,8 +12,8 @@ use super::*;
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
 
-/// PostgreSQL built-in numeric type OIDs (typcategory = 'N' in pg_type).
-/// These are the fixed OIDs assigned to numeric base types in the PostgreSQL
+/// `PostgreSQL` built-in numeric type OIDs (typcategory = 'N' in `pg_type`).
+/// These are the fixed OIDs assigned to numeric base types in the `PostgreSQL`
 /// source; they never change across versions.
 const NUMERIC_TYPE_OIDS: &[u32] = &[
     20,   // int8
@@ -25,7 +25,7 @@ const NUMERIC_TYPE_OIDS: &[u32] = &[
     1700, // numeric
 ];
 
-/// PostgreSQL built-in string/text type OIDs that must never be right-aligned,
+/// `PostgreSQL` built-in string/text type OIDs that must never be right-aligned,
 /// even when their values happen to look numeric (e.g. text column with "31").
 const TEXT_TYPE_OIDS: &[u32] = &[
     16,   // bool
@@ -54,7 +54,7 @@ fn row_cell_to_string(row: &tokio_postgres::Row, i: usize) -> Option<String> {
         return v;
     }
     // Try common numeric types.
-    let oid = row.columns().get(i).map(|c| c.type_().oid()).unwrap_or(0);
+    let oid = row.columns().get(i).map_or(0, |c| c.type_().oid());
     match oid {
         20 => {
             return row
@@ -103,7 +103,7 @@ fn row_cell_to_string(row: &tokio_postgres::Row, i: usize) -> Option<String> {
     None
 }
 
-/// Classify a column as numeric based on its PostgreSQL type OID.
+/// Classify a column as numeric based on its `PostgreSQL` type OID.
 ///
 /// Returns `Some(true)` for built-in numeric types, `Some(false)` for
 /// string/text types and user-defined types (OID ≥ 16384), and `None`
@@ -290,7 +290,7 @@ fn infer_numeric_column(
     let only_zero_or_null = rows.iter().all(|row| {
         matches!(
             row.get(col_idx).and_then(|v| v.as_deref()),
-            None | Some("") | Some("0") | Some("-0")
+            None | Some("" | "0" | "-0")
         )
     });
     if only_zero_or_null {
@@ -324,7 +324,7 @@ fn infer_numeric_column(
                         && v.bytes().filter(|&b| b == b'-').count() == 1
                         && v.chars()
                             .next()
-                            .map_or(false, |c| c.is_ascii_digit() || c == '-')
+                            .is_some_and(|c| c.is_ascii_digit() || c == '-')
                         && v.chars().any(|c| c.is_ascii_digit())
                         && v.parse::<f64>().is_err())
             })
@@ -381,7 +381,7 @@ pub(super) fn print_result_set_pset(
         let is_show = sql
             .trim_start()
             .get(..4)
-            .map_or(false, |p| p.eq_ignore_ascii_case("show"));
+            .is_some_and(|p| p.eq_ignore_ascii_case("show"));
         let columns: Vec<ColumnMeta> = col_names
             .iter()
             .enumerate()
@@ -414,10 +414,9 @@ pub(super) fn print_result_set_pset(
         if !quiet {
             let tag = crate::query::reconstruct_command_tag(sql, rows_affected);
             if !tag.is_empty()
-                && tag
-                    .split_once(' ')
-                    .map(|(verb, _)| matches!(verb, "INSERT" | "UPDATE" | "DELETE" | "MERGE"))
-                    .unwrap_or(false)
+                && tag.split_once(' ').is_some_and(|(verb, _)| {
+                    matches!(verb, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
+                })
             {
                 let _ = writeln!(writer, "{tag}");
             }
@@ -597,7 +596,10 @@ pub async fn execute_query(
                         is_select = true;
                         if col_names.is_empty() {
                             col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                            col_oids = cols.iter().map(|c| c.type_oid()).collect();
+                            col_oids = cols
+                                .iter()
+                                .map(tokio_postgres::SimpleColumn::type_oid)
+                                .collect();
                         }
                     }
                     SimpleQueryMessage::Row(row) => {
@@ -611,7 +613,11 @@ pub async fn execute_query(
                                 })
                                 .collect();
                             col_oids = (0..row.len())
-                                .map(|i| row.columns().get(i).map_or(0, |c| c.type_oid()))
+                                .map(|i| {
+                                    row.columns()
+                                        .get(i)
+                                        .map_or(0, tokio_postgres::SimpleColumn::type_oid)
+                                })
                                 .collect();
                         }
                         let vals: Vec<Option<String>> = (0..row.len())
@@ -1340,11 +1346,7 @@ pub(super) async fn execute_piped(
 /// Used by multiple helpers that need to classify SQL statements by their
 /// opening keyword without allocating a full uppercase copy of the input.
 fn first_keyword_upper(sql: &str) -> String {
-    sql.trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_uppercase()
+    sql.split_whitespace().next().unwrap_or("").to_uppercase()
 }
 
 /// Return `true` if `sql` is an EXPLAIN statement (any variant).
@@ -1776,7 +1778,7 @@ pub(super) fn is_no_tx_statement(sql: &str) -> bool {
 /// them is a no-transaction statement (see [`is_no_tx_statement`]).
 ///
 /// In that case `execute_query` must split the batch and send each statement
-/// individually so that PostgreSQL's implicit-transaction wrapping of
+/// individually so that `PostgreSQL`'s implicit-transaction wrapping of
 /// multi-statement simple-query strings does not cause
 /// `ERROR: … cannot run inside a transaction block`.
 pub(super) fn needs_split_execution(sql: &str) -> bool {
@@ -2283,12 +2285,12 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
             // Find closing $.
             if let Some(end) = rest[1..].find('$') {
                 let tag = &rest[..end + 2]; // includes both $
-                let inner = &rest[1..end + 1];
+                let inner = &rest[1..=end];
                 let is_valid_tag = inner.is_empty()
                     || (inner
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_alphabetic() || c == '_')
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
                         && inner.chars().all(|c| c.is_alphanumeric() || c == '_'));
                 if is_valid_tag {
                     if let Some(ref open_tag) = in_dollar.clone() {
@@ -2427,7 +2429,10 @@ pub(super) async fn execute_crosstabview(
                     SimpleQueryMessage::RowDescription(cols) => {
                         if col_names.is_empty() {
                             col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                            col_oids = cols.iter().map(|c| c.type_oid()).collect();
+                            col_oids = cols
+                                .iter()
+                                .map(tokio_postgres::SimpleColumn::type_oid)
+                                .collect();
                         }
                     }
                     SimpleQueryMessage::Row(row) => {
@@ -2480,14 +2485,14 @@ pub(super) async fn execute_crosstabview(
                     .col_v
                     .as_ref()
                     .map_or(0, |s| s.resolve(&col_names).unwrap_or(0));
-                col_oids.get(idx_v).copied().map_or(false, is_numeric_oid)
+                col_oids.get(idx_v).copied().is_some_and(is_numeric_oid)
             };
             let data_right_align = {
                 let idx_d = args
                     .col_d
                     .as_ref()
                     .map_or(2, |s| s.resolve(&col_names).unwrap_or(2));
-                col_oids.get(idx_d).copied().map_or(false, is_numeric_oid)
+                col_oids.get(idx_d).copied().is_some_and(is_numeric_oid)
             };
             let mut out = String::new();
             crate::crosstab::format_pivot(
@@ -2511,7 +2516,7 @@ pub(super) async fn execute_crosstabview(
     }
 }
 
-/// Return true for PostgreSQL OIDs that represent numeric types
+/// Return true for `PostgreSQL` OIDs that represent numeric types
 /// (which should be right-aligned in table output).
 /// Returns true if `sql` is a pure SELECT-like statement (SELECT, WITH, VALUES,
 /// TABLE, FETCH, EXPLAIN SELECT, etc.) — i.e. not DML+RETURNING (INSERT/UPDATE/
