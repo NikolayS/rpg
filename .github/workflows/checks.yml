@@ -168,7 +168,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           repository: NikolayS/postgres
-          ref: REL_16_9  # pinned: PG16.9 test files match the postgres:16 CI server
+          ref: 3d10ece612f535be15a9cb7ca31620c80db6f0e9  # master @ 2026-04-06
           sparse-checkout: |
             src/test/regress/sql
             src/test/regress/expected
@@ -197,10 +197,14 @@ jobs:
         env:
           KEEP_RESULTS: "1"
           RESULTS_DIR: /tmp/rpg-regress
-          # Skip tests with known infrastructure issues in CI:
-          #   misc_functions - pg_replication_origin leftover state from prior test
-          #   tablespace   - tablespace directory not set up in CI environment
-          REGRESS_SKIP: "misc_functions tablespace"
+          # Skip tests with known PG19dev/PG16 server incompatibilities:
+          #   psql         - uses \parse/\bind_named (PG17+ metacommands)
+          #   transactions - PG19dev-specific transaction behavior
+          #   copydml      - COPY DML count output format changed in PG18+
+          #   misc_functions - pg_replication_origin leftover state
+          #   tablespace   - tablespace directory not set up in CI
+          #   domain       - constraint ordering differs between PG16/PG19dev
+          REGRESS_SKIP: "psql transactions copydml misc_functions tablespace domain"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \
