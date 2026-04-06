@@ -1163,7 +1163,9 @@ fn split_schema_name(name: &str) -> (Option<String>, String) {
 /// (every 8 columns), which is what psql produces.
 fn print_with_optional_line_numbers(text: &str, plus: bool) {
     if !plus {
-        println!("{text}");
+        // pg_get_functiondef already ends with a newline; use print! to
+        // avoid a spurious extra blank line (println! would add another \n).
+        print!("{text}");
         return;
     }
 

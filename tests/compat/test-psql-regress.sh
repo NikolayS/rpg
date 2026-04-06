@@ -184,6 +184,10 @@ normalize() {
     -e '/^\[auto-explain:/d' \
     -e 's/^psql:[^:]*:[0-9][0-9]*: //' \
     -e 's/^rpg:[^:]*:[0-9][0-9]*: //' \
+    -e 's/^psql: error: //' \
+    -e 's/^rpg: \(connection to server\)/\1/' \
+    -e 's/" ([^)]*), port/", port/g' \
+    -e 's/FATAL:  /FATAL: /g' \
     -e '/^rpg [0-9][0-9]*\./d' \
     -e '/^You are now connected to database /d' \
     -e '/^LINE [0-9][0-9]*: /d' \
@@ -203,8 +207,22 @@ normalize() {
     -e 's/for operator [0-9][0-9]*/for operator OID/g' \
     -e 's/ Query Identifier: [-0-9][0-9]*/ Query Identifier: 0000000000000000000/g' | \
   awk '
+    BEGIN { after_qp = 0 }
     /^$/ { blank++; next }
-    { if (blank > 0) { print ""; blank = 0 } print }
+    {
+      if (blank > 0) { print ""; blank = 0 }
+      if (after_qp) {
+        # Normalize EXPLAIN separator width (varies by query identifier length).
+        gsub(/-+/, "----------")
+        after_qp = 0
+      }
+      if (/^ *QUERY PLAN *$/) {
+        # Normalize EXPLAIN header whitespace.
+        gsub(/^ +| +$/, "")
+        after_qp = 1
+      }
+      print
+    }
   '
 }
 

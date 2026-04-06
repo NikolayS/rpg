@@ -511,12 +511,19 @@ fn system_schema_filter(system: bool) -> &'static str {
 
 /// Return the result-set title for a given set of relkinds.
 ///
-/// psql always uses "List of relations" as the heading for `\dt`, `\di`,
-/// `\dv`, `\ds`, `\dm` and their `+` variants, regardless of the relkind
-/// filter.  We match that behaviour exactly so golden-file compatibility
-/// tests pass.
-fn relation_title(_relkinds: &[&str]) -> &'static str {
-    "List of relations"
+/// psql uses type-specific headings: "List of tables" for \dt, "List of
+/// indexes" for \di, etc.  Only the unfiltered \d (all relkinds) uses
+/// the generic "List of relations".
+fn relation_title(relkinds: &[&str]) -> &'static str {
+    match relkinds {
+        ["r", "p"] | ["r"] | ["p"] => "List of tables",
+        ["i"] | ["I"] | ["i", "I"] => "List of indexes",
+        ["v"] => "List of views",
+        ["S"] => "List of sequences",
+        ["m"] => "List of materialized views",
+        ["f"] => "List of foreign tables",
+        _ => "List of relations",
+    }
 }
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
