@@ -2407,42 +2407,8 @@ pub async fn connect(
             let (client, tls_info) = match result {
                 Ok(pair) => pair,
                 Err(e) => {
-                    // When the kernel does not support IPv6 (EAFNOSUPPORT /
-                    // os error 97) tokio may fail without falling back to the
-                    // IPv4 address that the same hostname also resolves to.
-                    // Retry with an explicit IPv4 address so that connecting
-                    // to "localhost" works even when IPv6 is not available.
-                    if is_af_not_supported_err(&e)
-                        && !host.starts_with('/')
-                        && !is_numeric_addr(host)
-                    {
-                        let addr_str = format!("{host}:{port}");
-                        let ipv4 = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str())
-                            .ok()
-                            .and_then(|mut it| {
-                                it.find(std::net::SocketAddr::is_ipv4)
-                                    .map(|a| a.ip().to_string())
-                            });
-
-                        if let Some(ip4) = ipv4 {
-                            let mut pg4 = pg_config.clone();
-                            pg4.host(&ip4);
-                            params.host = ip4;
-                            match connect_one(&pg4, &params).await {
-                                Ok(pair) => pair,
-                                Err(e2) => {
-                                    last_err = Some(e2);
-                                    continue;
-                                }
-                            }
-                        } else {
-                            last_err = Some(e);
-                            continue;
-                        }
-                    } else {
-                        last_err = Some(e);
-                        continue;
-                    }
+                    last_err = Some(e);
+                    continue;
                 }
             };
 
@@ -2731,19 +2697,6 @@ async fn connect_tls_with_config(
     });
 
     Ok((client, info))
-}
-
-/// Returns `true` if `e` is an "address family not supported" OS error
-/// (EAFNOSUPPORT / errno 97).  This happens when the kernel has IPv6
-/// disabled and tokio resolves a hostname to an IPv6 address first.
-fn is_af_not_supported_err(e: &ConnectionError) -> bool {
-    match e {
-        ConnectionError::ConnectionFailed { reason, .. } => {
-            let r = reason.to_lowercase();
-            r.contains("address family not supported") || r.contains("os error 97")
-        }
-        _ => false,
-    }
 }
 
 /// Returns `true` if `e` represents a connection timeout.

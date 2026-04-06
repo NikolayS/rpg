@@ -34,10 +34,6 @@ mod output;
 #[path = "../src/highlight.rs"]
 mod highlight;
 
-// vars.rs is needed by metacmd.rs (crate::vars::Variables).
-#[path = "../src/vars.rs"]
-mod vars;
-
 // ---------------------------------------------------------------------------
 // Shared test data
 // ---------------------------------------------------------------------------

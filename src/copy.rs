@@ -44,9 +44,6 @@ pub enum CopySource {
     File(String),
     /// Standard input (reads until `\.` on a line by itself).
     Stdin,
-    /// Pre-collected inline data (used when `from stdin` runs inside a script
-    /// file, where the data lines were already read from the line iterator).
-    InlineData(Vec<u8>),
     /// Standard output.
     Stdout,
     /// A shell command whose stdout (FROM) or stdin (TO) is used.
@@ -74,11 +71,6 @@ pub struct CopySpec {
     pub delimiter: Option<char>,
     pub header: bool,
     pub null_string: Option<String>,
-    /// Pass-through options not explicitly handled by rpg (e.g. `FORCE_QUOTE`,
-    /// QUOTE, ESCAPE).  Each entry is a ready-to-embed SQL fragment such as
-    /// `"FORCE_QUOTE *"` or `"QUOTE ''''"`; they are appended verbatim inside
-    /// the `WITH (…)` clause.
-    pub extra_options: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,9 +162,9 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
     }
 
     // -----------------------------------------------------------------------
-    // Step 4 — options (CSV, TEXT, DELIMITER 'x', HEADER, NULL 'str', …)
+    // Step 4 — options (CSV, TEXT, DELIMITER 'x', HEADER, NULL 'str')
     // -----------------------------------------------------------------------
-    let (format, delimiter, header, null_string, extra_options) = parse_copy_options(&mut tokens)?;
+    let (format, delimiter, header, null_string) = parse_copy_options(&mut tokens)?;
 
     Ok(CopySpec {
         direction,
@@ -182,28 +174,25 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
         delimiter,
         header,
         null_string,
-        extra_options,
     })
 }
 
 /// Parse the options portion of a `\copy` command (everything after the
 /// file/stdin/stdout token).
 ///
-/// Accepts three forms:
-/// - flat: `CSV HEADER`
-/// - parenthesised with WITH: `WITH (FORMAT csv, HEADER)`
-/// - parenthesised without WITH: `(FORMAT csv, HEADER)` (psql compat)
+/// Accepts both the flat form (`CSV HEADER`) and the `WITH (FORMAT csv,
+/// HEADER)` parenthesised form used by psql.
 fn parse_copy_options(
     tokens: &mut Tokenizer<'_>,
-) -> Result<(CopyFormat, Option<char>, bool, Option<String>, Vec<String>), String> {
+) -> Result<(CopyFormat, Option<char>, bool, Option<String>), String> {
     let mut format = CopyFormat::default();
     let mut delimiter: Option<char> = None;
     let mut header = false;
     let mut null_string: Option<String> = None;
-    let mut extra_options: Vec<String> = Vec::new();
 
-    // Collect the remaining option tokens into a Vec so we can handle all
-    // forms uniformly.
+    // psql supports both `CSV HEADER` (flat) and `WITH (FORMAT csv, HEADER)`
+    // (parenthesised) option syntax.  Collect the remaining option tokens
+    // into a Vec so we can handle both forms uniformly.
     let option_list: Vec<String> = if tokens
         .peek()
         .is_some_and(|t| t.eq_ignore_ascii_case("WITH"))
@@ -212,11 +201,17 @@ fn parse_copy_options(
         let paren_tok = tokens
             .next()
             .ok_or_else(|| "\\copy: WITH requires a parenthesised option list".to_owned())?;
-        paren_options_to_tokens(&paren_tok)?
-    } else if tokens.peek().is_some_and(|t| t.starts_with('(')) {
-        // Bare parenthesised options without WITH: (FORMAT csv, FORCE_QUOTE *, …)
-        let paren_tok = tokens.next().unwrap();
-        paren_options_to_tokens(&paren_tok)?
+        // paren_tok should be "(FORMAT csv, HEADER, …)"; strip the outer parens
+        // and re-tokenise the contents.  Replace only *unquoted* commas with
+        // spaces so that quoted values like DELIMITER ',' are preserved.
+        let inner_raw = paren_tok
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .ok_or_else(|| "\\copy: WITH requires a parenthesised option list".to_owned())?
+            .trim()
+            .to_owned();
+        let inner = replace_unquoted_commas(&inner_raw);
+        Tokenizer::new(&inner).collect_tokens()
     } else {
         let mut list = Vec::new();
         while let Some(tok) = tokens.next() {
@@ -225,7 +220,7 @@ fn parse_copy_options(
         list
     };
 
-    let mut opt_iter = option_list.into_iter().peekable();
+    let mut opt_iter = option_list.into_iter();
     while let Some(opt) = opt_iter.next() {
         match opt.to_uppercase().as_str() {
             "TEXT" => format = CopyFormat::Text,
@@ -263,78 +258,26 @@ fn parse_copy_options(
                     .to_owned();
                 null_string = Some(s);
             }
-            // Pass unrecognised options (FORCE_QUOTE, QUOTE, ESCAPE, …) through
-            // to the server unchanged.  If the next token looks like a value
-            // (quoted string, escape-string, parenthesised list, or `*`) consume
-            // it as the option's argument.
-            _ => {
-                let mut frag = opt;
-                let next_is_val = opt_iter.peek().is_some_and(|t| {
-                    t.starts_with('\'')
-                        || t.to_uppercase().starts_with("E'")
-                        || t.starts_with('(')
-                        || t == "*"
-                });
-                if next_is_val {
-                    let val = opt_iter.next().unwrap();
-                    frag.push(' ');
-                    frag.push_str(&val);
-                }
-                extra_options.push(frag);
+            unknown => {
+                return Err(format!("\\copy: unknown option '{unknown}'"));
             }
         }
     }
 
-    Ok((format, delimiter, header, null_string, extra_options))
-}
-
-/// Strip outer parentheses from a `(…)` token, replace unquoted commas with
-/// spaces, then re-tokenise the inner content.
-fn paren_options_to_tokens(paren_tok: &str) -> Result<Vec<String>, String> {
-    let inner_raw = paren_tok
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .ok_or_else(|| "\\copy: malformed parenthesised option list".to_owned())?
-        .trim()
-        .to_owned();
-    let inner = replace_unquoted_commas(&inner_raw);
-    Ok(Tokenizer::new(&inner).collect_tokens())
+    Ok((format, delimiter, header, null_string))
 }
 
 // ---------------------------------------------------------------------------
 // Executor
 // ---------------------------------------------------------------------------
 
-/// Format a `tokio_postgres` error in psql's standard style:
-/// `ERROR:  message\nDETAIL:  ...\nHINT:  ...`
-fn format_pg_error_psql(e: &tokio_postgres::Error) -> String {
-    if let Some(db) = e.as_db_error() {
-        let mut msg = format!("ERROR:  {}", db.message());
-        if let Some(d) = db.detail() {
-            msg.push_str("\nDETAIL:  ");
-            msg.push_str(d);
-        }
-        if let Some(h) = db.hint() {
-            msg.push_str("\nHINT:  ");
-            msg.push_str(h);
-        }
-        msg
-    } else {
-        format!("\\copy: {e}")
-    }
-}
-
 /// Execute a parsed `\copy` specification against the given client.
 ///
 /// Prints `COPY N` on success (where N is the number of rows transferred).
 /// Returns an error string on failure.
-pub async fn execute_copy(
-    client: &tokio_postgres::Client,
-    spec: &CopySpec,
-    quiet: bool,
-) -> Result<(), String> {
+pub async fn execute_copy(client: &tokio_postgres::Client, spec: &CopySpec) -> Result<(), String> {
     match spec.direction {
-        CopyDirection::From => execute_copy_from(client, spec, quiet).await,
+        CopyDirection::From => execute_copy_from(client, spec).await,
         CopyDirection::To => execute_copy_to(client, spec).await,
     }
 }
@@ -404,11 +347,6 @@ fn append_options(sql: &mut String, spec: &CopySpec) {
         opts.push(format!("null '{escaped}'"));
     }
 
-    // Pass-through options (FORCE_QUOTE, QUOTE, ESCAPE, …) go in verbatim.
-    for opt in &spec.extra_options {
-        opts.push(opt.clone());
-    }
-
     if !opts.is_empty() {
         sql.push_str(" with (");
         sql.push_str(&opts.join(", "));
@@ -417,11 +355,7 @@ fn append_options(sql: &mut String, spec: &CopySpec) {
 }
 
 /// Execute `COPY FROM STDIN` — stream local file data to the server.
-async fn execute_copy_from(
-    client: &tokio_postgres::Client,
-    spec: &CopySpec,
-    quiet: bool,
-) -> Result<(), String> {
+async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> Result<(), String> {
     use futures::SinkExt;
 
     let sql = build_copy_from_sql(spec);
@@ -432,7 +366,6 @@ async fn execute_copy_from(
             std::fs::read(path).map_err(|e| format!("\\copy: could not read file '{path}': {e}"))?
         }
         CopySource::Stdin => read_stdin_until_terminator()?,
-        CopySource::InlineData(bytes) => bytes.clone(),
         CopySource::Stdout => {
             // Validated earlier; this branch is unreachable in practice.
             return Err("\\copy: STDOUT is not valid for FROM direction".to_owned());
@@ -443,7 +376,7 @@ async fn execute_copy_from(
     let sink = client
         .copy_in(&sql)
         .await
-        .map_err(|e| format_pg_error_psql(&e))?;
+        .map_err(|e| format!("\\copy: {e}"))?;
 
     // CopyInSink is !Unpin; we must pin it on the stack before using SinkExt.
     tokio::pin!(sink);
@@ -455,9 +388,7 @@ async fn execute_copy_from(
     // finish() flushes, sends CopyDone, and returns the number of rows copied.
     let rows = sink.finish().await.map_err(|e| format!("\\copy: {e}"))?;
 
-    if !quiet {
-        println!("COPY {rows}");
-    }
+    println!("COPY {rows}");
     Ok(())
 }
 
@@ -470,7 +401,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
     let stream = client
         .copy_out(&sql)
         .await
-        .map_err(|e| format_pg_error_psql(&e))?;
+        .map_err(|e| format!("\\copy: {e}"))?;
 
     // CopyOutStream is !Unpin; pin it before using StreamExt.
     tokio::pin!(stream);
@@ -492,15 +423,17 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
         CopySource::Stdout => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
+            let mut row_count = 0u64;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
+                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
                 out.write_all(&chunk)
                     .map_err(|e| format!("\\copy: write error: {e}"))?;
             }
-            // psql does not print "COPY N" when copying to stdout.
+            println!("COPY {row_count}");
         }
-        CopySource::Stdin | CopySource::InlineData(_) => {
-            // Validated earlier; these branches are unreachable for TO.
+        CopySource::Stdin => {
+            // Validated earlier; this branch is unreachable in practice.
             return Err("\\copy: STDIN is not valid for TO direction".to_owned());
         }
         CopySource::Program(cmd) => {
@@ -948,7 +881,6 @@ mod tests {
             delimiter: None,
             header: false,
             null_string: None,
-            extra_options: vec![],
         };
         assert_eq!(build_copy_from_sql(&spec), "copy t from stdin");
     }
@@ -966,7 +898,6 @@ mod tests {
             delimiter: None,
             header: true,
             null_string: None,
-            extra_options: vec![],
         };
         assert_eq!(
             build_copy_to_sql(&spec),
@@ -984,7 +915,6 @@ mod tests {
             delimiter: None,
             header: false,
             null_string: None,
-            extra_options: vec![],
         };
         assert_eq!(build_copy_to_sql(&spec), "copy (select 1) to stdout");
     }
@@ -1002,7 +932,6 @@ mod tests {
             delimiter: None,
             header: false,
             null_string: None,
-            extra_options: vec![],
         };
         assert_eq!(build_copy_from_sql(&spec), "copy t (a, b) from stdin");
     }
@@ -1020,7 +949,6 @@ mod tests {
             delimiter: Some(';'),
             header: true,
             null_string: Some("\\N".to_owned()),
-            extra_options: vec![],
         };
         assert_eq!(
             build_copy_to_sql(&spec),
@@ -1176,65 +1104,10 @@ mod tests {
             delimiter: None,
             header: false,
             null_string: Some("it's".to_owned()),
-            extra_options: vec![],
         };
         assert_eq!(
             build_copy_from_sql(&spec),
             "copy t from stdin with (null 'it''s')"
-        );
-    }
-
-    // --- extra_options (FORCE_QUOTE, QUOTE, ESCAPE) pass-through -----------
-
-    #[test]
-    fn test_parse_bare_paren_format_csv() {
-        let spec = parse_copy_args("y TO stdout (FORMAT CSV)").unwrap();
-        assert_eq!(spec.format, CopyFormat::Csv);
-        assert!(spec.extra_options.is_empty());
-    }
-
-    #[test]
-    fn test_parse_bare_paren_with_quote_and_delimiter() {
-        let spec = parse_copy_args("y TO stdout (FORMAT CSV, QUOTE '''', DELIMITER '|')").unwrap();
-        assert_eq!(spec.format, CopyFormat::Csv);
-        assert_eq!(spec.delimiter, Some('|'));
-        assert_eq!(spec.extra_options, vec!["QUOTE ''''".to_owned()]);
-    }
-
-    #[test]
-    fn test_parse_bare_paren_force_quote_star() {
-        let spec = parse_copy_args("y TO stdout (FORMAT CSV, FORCE_QUOTE *)").unwrap();
-        assert_eq!(spec.format, CopyFormat::Csv);
-        assert_eq!(spec.extra_options, vec!["FORCE_QUOTE *".to_owned()]);
-    }
-
-    #[test]
-    fn test_parse_bare_paren_force_quote_columns() {
-        let spec = parse_copy_args("y TO stdout (FORMAT CSV, FORCE_QUOTE (col2), ESCAPE E'\\\\')")
-            .unwrap();
-        assert_eq!(spec.format, CopyFormat::Csv);
-        assert_eq!(spec.extra_options[0], "FORCE_QUOTE (col2)");
-        assert_eq!(spec.extra_options[1], "ESCAPE E'\\\\'");
-    }
-
-    #[test]
-    fn test_build_sql_with_extra_options() {
-        let spec = CopySpec {
-            direction: CopyDirection::To,
-            target: CopyTarget::Table {
-                name: "y".to_owned(),
-                columns: vec![],
-            },
-            source: CopySource::Stdout,
-            format: CopyFormat::Csv,
-            delimiter: None,
-            header: false,
-            null_string: None,
-            extra_options: vec!["FORCE_QUOTE *".to_owned()],
-        };
-        assert_eq!(
-            build_copy_to_sql(&spec),
-            "copy y to stdout with (format csv, FORCE_QUOTE *)"
         );
     }
 }

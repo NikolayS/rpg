@@ -65,39 +65,14 @@ pub fn include_file<'a>(
         settings.current_file = Some(path.to_owned());
 
         let start_depth = settings.cond.depth();
-
-        // Loop to handle \c reconnections within the included file.
-        let mut lines_iter: Box<dyn Iterator<Item = String>> = Box::new(
-            content
-                .lines()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-                .into_iter(),
-        );
-        let mut active_client: &Client = client;
-        let mut active_params: ConnParams = params.clone();
-        #[allow(unused_assignments)]
-        let mut reconnected_client: Option<Box<Client>> = None;
-        let mut exit_code: i32;
-
-        loop {
-            let (code, maybe_new_client) = crate::repl::exec_lines(
-                active_client,
-                lines_iter.as_mut(),
-                settings,
-                &mut active_params,
-                tx,
-            )
-            .await;
-            exit_code = code;
-
-            if let Some(new_client) = maybe_new_client {
-                reconnected_client = Some(new_client);
-                active_client = reconnected_client.as_deref().unwrap();
-            } else {
-                break;
-            }
-        }
+        let exit_code = crate::repl::exec_lines(
+            client,
+            content.lines().map(str::to_owned),
+            settings,
+            params,
+            tx,
+        )
+        .await;
 
         // Restore the previous current_file so callers see the right value
         // after this include returns.
@@ -160,17 +135,7 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
                 .create(true)
                 .truncate(true)
                 .open(p)
-                .map_err(|e| {
-                    // Match psql error format: "error: <path>: <strerror>"
-                    // Strip the " (os error N)" suffix that Rust appends.
-                    let msg = e.to_string();
-                    let msg = if let Some(pos) = msg.rfind(" (os error ") {
-                        &msg[..pos]
-                    } else {
-                        &msg
-                    };
-                    format!("error: {p}: {msg}")
-                })?;
+                .map_err(|e| format!("\\o: could not open \"{p}\": {e}"))?;
             // Wrap in BufWriter so that large result sets are written in
             // batches rather than one syscall per write_all call.
             Ok(Some(Box::new(std::io::BufWriter::new(file))))

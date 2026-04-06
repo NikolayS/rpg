@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "rpg"
-version = "0.10.2"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4143,6 +4143,8 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcea47c8f71744367793f16c2db1f11cb859d28f436bdb4ca9193eb1f787ee42"
 dependencies = [
  "async-trait",
  "byteorder",

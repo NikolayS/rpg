@@ -263,15 +263,6 @@ struct Cli {
     #[arg(short = '0', long = "record-separator-zero")]
     record_separator_zero: bool,
 
-    /// Echo all input to stdout (psql -a compatibility).
-    ///
-    /// Each SQL statement and meta-command is written to stdout before it is
-    /// executed.  This is identical to psql's `-a` / `--echo-all` flag and is
-    /// required to match the output format produced by `pg_regress` (which
-    /// invokes psql with `-a -q`).
-    #[arg(short = 'a', long = "echo-all")]
-    echo_all: bool,
-
     /// Echo queries that rpg generates internally.
     #[arg(short = 'E', long = "echo-hidden")]
     echo_hidden: bool,
@@ -568,7 +559,6 @@ fn build_settings(
         vars,
         output_target,
         log_file,
-        echo_all: cli.echo_all,
         echo_queries: cli.echo_queries,
         echo_errors: cli.echo_errors,
         single_step: cli.single_step,

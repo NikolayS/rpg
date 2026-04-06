@@ -80,12 +80,6 @@ pub enum MetaCmd {
     ListEventTriggers,
     /// `\do [pattern]` — list operators.
     ListOperators,
-    /// `\dX [pattern]` — list extended statistics.
-    ListExtStatistics,
-    /// `\dRp [pattern]` — list publications.
-    ListPublications,
-    /// `\dRs [pattern]` — list subscriptions.
-    ListSubscriptions,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -104,10 +98,6 @@ pub enum MetaCmd {
     /// the name is given (displays the variable); `("", "")` when bare (lists
     /// all variables).
     Set(String, String),
-    /// `\getenv varname ENVVAR` — set psql variable from environment variable.
-    ///
-    /// Payload: `(var_name, env_var_name)`.
-    GetEnv(String, String),
     /// `\unset name` — unset a variable.
     Unset(String),
     /// `\prompt [text] name` — prompt the user for input and store in a variable.
@@ -395,13 +385,6 @@ pub enum MetaCmd {
     /// argument string (filename or pattern).
     History(Option<String>),
 
-    // -- Null command -----------------------------------------------------
-    /// `\\` — null command / inline separator (no-op in psql).
-    ///
-    /// In psql, `\\` on an inline command chain acts as a separator with no
-    /// side effects.  Any following `\cmd` text is set as `continuation`.
-    NoOp,
-
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
@@ -438,9 +421,6 @@ impl MetaCmd {
             Self::ListUserMappings => "\\deu",
             Self::ListEventTriggers => "\\dy",
             Self::ListOperators => "\\do",
-            Self::ListExtStatistics => "\\dX",
-            Self::ListPublications => "\\dRp",
-            Self::ListSubscriptions => "\\dRs",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -487,15 +467,6 @@ pub struct ParsedMeta {
     /// Set by the caller from [`crate::repl::ReplSettings::echo_hidden`] at
     /// dispatch time; the parser always initialises this to `false`.
     pub echo_hidden: bool,
-    /// Optional prokind filter for `\df` variants:
-    /// `'f'` = normal functions (`\dfn`), `'p'` = procedures (`\dfp`),
-    /// `'a'` = aggregates (`\dfa`), `'w'` = window functions (`\dfw`).
-    /// `None` means show all kinds (`\df`).
-    pub kind_filter: Option<char>,
-    /// When multiple backslash commands are concatenated on one line (e.g.
-    /// `\a\t`), this holds the remaining text (starting with `\`) after the
-    /// current command was consumed.  The caller must parse and dispatch it.
-    pub continuation: Option<String>,
 }
 
 impl ParsedMeta {
@@ -507,8 +478,6 @@ impl ParsedMeta {
             system: false,
             pattern: None,
             echo_hidden: false,
-            kind_filter: None,
-            continuation: None,
         }
     }
 }
@@ -522,23 +491,7 @@ impl ParsedMeta {
 /// `input` may or may not include the leading `\`.  Surrounding whitespace is
 /// trimmed before parsing.
 pub fn parse(input: &str) -> ParsedMeta {
-    let trimmed = input.trim();
-
-    // `\\` — null command / inline separator.
-    // Matches `\\` possibly followed by more metacommands.  Everything
-    // after the `\\` (and leading whitespace) is returned as continuation.
-    if trimmed.starts_with("\\\\") {
-        let after = trimmed.strip_prefix("\\\\").unwrap_or("").trim_start();
-        let mut m = ParsedMeta::simple(MetaCmd::NoOp);
-        m.continuation = if after.is_empty() {
-            None
-        } else {
-            Some(after.to_owned())
-        };
-        return m;
-    }
-
-    let input = trimmed.trim_start_matches('\\');
+    let input = input.trim().trim_start_matches('\\');
 
     if input.is_empty() {
         return ParsedMeta::simple(MetaCmd::Unknown(String::new()));
@@ -567,8 +520,6 @@ pub fn parse(input: &str) -> ParsedMeta {
                             Some(text.to_owned())
                         },
                         echo_hidden: false,
-                        kind_filter: None,
-                        continuation: None,
                     };
                 }
             }
@@ -600,7 +551,6 @@ pub fn parse(input: &str) -> ParsedMeta {
         Some('m') => parse_m_family(input),
         Some('y') => parse_y_family(input),
         Some('!') => parse_shell(input),
-        Some('z') => parse_z(input),
         _ => ParsedMeta::simple(MetaCmd::Unknown(input.to_owned())),
     }
 }
@@ -620,23 +570,9 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
     // `input` has had the leading `\` stripped already.
     // Accept `token` optionally followed by whitespace (any trailing arg is
     // ignored for these commands, matching psql behaviour).
-    // Also accept another `\` immediately — e.g. `\a\t` on one line means two
-    // commands (`\a` then `\t`); the remainder is stored in `continuation`.
     let rest = input.strip_prefix(token).unwrap_or("");
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
         ParsedMeta::simple(cmd)
-    } else if rest.starts_with('\\') {
-        // Another backslash command follows immediately — current command is
-        // complete; store the rest for the caller to dispatch.
-        ParsedMeta {
-            cmd,
-            plus: false,
-            system: false,
-            pattern: None,
-            echo_hidden: false,
-            kind_filter: None,
-            continuation: Some(rest.to_owned()),
-        }
     } else {
         ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
     }
@@ -729,213 +665,12 @@ fn parse_set(input: &str) -> ParsedMeta {
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("").to_owned();
     let raw_value = parts.next().map_or("", str::trim);
-    // In psql, `\\` on a meta-command line acts as a command separator.
-    // Stop collecting value tokens when we encounter `\\`.
     let value = if raw_value.is_empty() {
         String::new()
     } else {
-        split_params(raw_value)
-            .into_iter()
-            .take_while(|t| t != "\\\\")
-            .collect::<Vec<_>>()
-            .concat()
+        split_params(raw_value).concat()
     };
     ParsedMeta::simple(MetaCmd::Set(name, value))
-}
-
-/// Parse `\set name value…` with **token-level** variable substitution.
-///
-/// Unlike the normal `parse_set` (which receives a line already interpolated
-/// by `Vars::interpolate`), this variant receives the **raw** command text and
-/// substitutes `:varname` / `:'varname'` / `:"varname"` references atomically
-/// — treating each substituted value as a single, indivisible token.
-///
-/// This matches psql semantics: in `\set dobody :dobody 'more text'`, the
-/// current value of `dobody` (which may contain spaces) is concatenated with
-/// `'more text'` intact, without the spaces causing re-tokenisation.
-///
-/// `raw_input` must be the full raw metacommand text **after** the leading `\`
-/// (i.e. it starts with `"set"`).
-pub fn parse_set_with_vars(raw_input: &str, vars: &crate::vars::Variables) -> ParsedMeta {
-    let Some(rest) = raw_input.strip_prefix("set") else {
-        return ParsedMeta::simple(MetaCmd::Unknown(raw_input.to_owned()));
-    };
-    let rest = rest.trim();
-    if rest.is_empty() {
-        return ParsedMeta::simple(MetaCmd::Set(String::new(), String::new()));
-    }
-    let mut parts = rest.splitn(2, char::is_whitespace);
-    let name = parts.next().unwrap_or("").to_owned();
-    let raw_value = parts.next().map_or("", str::trim);
-    let value = if raw_value.is_empty() {
-        String::new()
-    } else {
-        split_params_set(raw_value, vars)
-    };
-    ParsedMeta::simple(MetaCmd::Set(name, value))
-}
-
-/// Tokenise a `\set` value string with **token-level** variable substitution.
-///
-/// Tokens:
-/// - Single-quoted `'...'`: strip quotes, preserve interior spaces.
-/// - `:'name'`: substitute variable as a SQL single-quoted string (like
-///   `Vars::interpolate` does for the `:'name'` form).
-/// - `:"name"`: substitute variable as a double-quoted identifier.
-/// - `:name`: substitute variable value **atomically** (spaces preserved).
-/// - Bare unquoted word (up to next space): used verbatim.
-/// - `\\`: command-separator stop signal — collect no more tokens.
-///
-/// All tokens are concatenated without separating spaces (psql behaviour).
-fn split_params_set(s: &str, vars: &crate::vars::Variables) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(&c) = chars.peek() {
-        // Skip whitespace between tokens.
-        if c.is_whitespace() {
-            chars.next();
-            continue;
-        }
-
-        // Command separator `\\` — stop.
-        if c == '\\' {
-            let saved: Vec<char> = chars.clone().take(2).collect();
-            if saved.len() == 2 && saved[1] == '\\' {
-                break;
-            }
-        }
-
-        // Single-quoted token: `'...'`
-        if c == '\'' {
-            chars.next(); // consume opening quote
-            let mut token = String::new();
-            loop {
-                match chars.next() {
-                    None => break,
-                    Some('\'') => {
-                        if chars.peek() == Some(&'\'') {
-                            chars.next();
-                            token.push('\'');
-                        } else {
-                            break;
-                        }
-                    }
-                    Some('\\') => {
-                        if chars.peek() == Some(&'\'') {
-                            chars.next();
-                            token.push('\'');
-                        } else {
-                            token.push('\\');
-                        }
-                    }
-                    Some(ch) => token.push(ch),
-                }
-            }
-            out.push_str(&token);
-            continue;
-        }
-
-        // Variable reference starting with `:`
-        if c == ':' {
-            // Peek ahead to see which form.
-            let mut peek_chars = chars.clone();
-            peek_chars.next(); // consume ':'
-            if let Some(&next) = peek_chars.peek() {
-                // `:'name'` — single-quoted literal substitution
-                if next == '\'' {
-                    peek_chars.next();
-                    let mut name = String::new();
-                    let mut found_close = false;
-                    for ch in peek_chars.by_ref() {
-                        if ch == '\'' {
-                            found_close = true;
-                            break;
-                        }
-                        name.push(ch);
-                    }
-                    if found_close && !name.is_empty() {
-                        if let Some(val) = vars.get(&name) {
-                            // SQL single-quote escape
-                            out.push('\'');
-                            out.push_str(&val.replace('\'', "''"));
-                            out.push('\'');
-                            chars = peek_chars; // advance past consumed chars
-                            continue;
-                        }
-                    }
-                }
-                // `:"name"` — double-quoted identifier substitution
-                else if next == '"' {
-                    peek_chars.next();
-                    let mut name = String::new();
-                    let mut found_close = false;
-                    for ch in peek_chars.by_ref() {
-                        if ch == '"' {
-                            found_close = true;
-                            break;
-                        }
-                        name.push(ch);
-                    }
-                    if found_close && !name.is_empty() {
-                        if let Some(val) = vars.get(&name) {
-                            out.push('"');
-                            out.push_str(&val.replace('"', "\"\""));
-                            out.push('"');
-                            chars = peek_chars;
-                            continue;
-                        }
-                    }
-                }
-                // `::` — Postgres cast operator, pass through verbatim
-                else if next == ':' {
-                    out.push(':');
-                    out.push(':');
-                    chars.next();
-                    chars.next();
-                    continue;
-                }
-                // `:name` — bare variable (substituted atomically)
-                else if next.is_alphabetic() || next == '_' {
-                    let mut name = String::new();
-                    let mut inner = peek_chars.clone();
-                    while let Some(&ch) = inner.peek() {
-                        if ch.is_alphanumeric() || ch == '_' {
-                            name.push(ch);
-                            inner.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if !name.is_empty() {
-                        if let Some(val) = vars.get(&name) {
-                            // Substitute the ENTIRE value as one token (no
-                            // re-tokenisation even if the value contains spaces).
-                            out.push_str(val);
-                            // Advance `chars` past `:` + the identifier chars.
-                            chars.next(); // consume `:`
-                            for _ in 0..name.len() {
-                                chars.next();
-                            }
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Bare unquoted word — consume until whitespace.
-        let mut token = String::new();
-        while let Some(&ch) = chars.peek() {
-            if ch.is_whitespace() {
-                break;
-            }
-            token.push(ch);
-            chars.next();
-        }
-        out.push_str(&token);
-    }
-    out
 }
 
 /// Parse `\unset name`.
@@ -1080,21 +815,6 @@ fn parse_m_family(input: &str) -> ParsedMeta {
 ///
 /// Note: `\dy` starts with `d`, so it is handled in `parse_d_family` via the
 /// `D_SUBCMDS` table.  This function handles remaining `y`-prefixed commands.
-/// Parse `\z [pattern]` — alias for `\dp` (list access privileges).
-fn parse_z(input: &str) -> ParsedMeta {
-    let rest = input.strip_prefix('z').unwrap_or("");
-    let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
-    ParsedMeta {
-        cmd: MetaCmd::ListPrivileges,
-        plus,
-        system,
-        pattern,
-        echo_hidden: false,
-        kind_filter: None,
-        continuation: None,
-    }
-}
-
 fn parse_y_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("yolo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
@@ -1196,8 +916,6 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     system: false,
                     pattern: None,
                     echo_hidden: false,
-                    kind_filter: None,
-                    continuation: None,
                 };
             }
         }
@@ -1225,10 +943,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
     // `\copy args` — client-side COPY.  Must be checked before bare `\c`.
     if let Some(rest) = input.strip_prefix("copy") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            // Strip trailing semicolon (psql treats ';' as command terminator,
-            // not part of the args — prevents "stdout;" being parsed as filename).
-            let args = rest.trim().trim_end_matches(';').trim_end();
-            return ParsedMeta::simple(MetaCmd::Copy(args.to_owned()));
+            return ParsedMeta::simple(MetaCmd::Copy(rest.trim().to_owned()));
         }
     }
     // `\close_prepared stmt_name` — deallocate a named prepared statement.
@@ -1255,8 +970,6 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     Some(dir.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1274,8 +987,6 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     Some(pattern.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1302,8 +1013,6 @@ fn parse_h(input: &str) -> ParsedMeta {
             Some(pattern_str.to_owned())
         },
         echo_hidden: false,
-        kind_filter: None,
-        continuation: None,
     }
 }
 
@@ -1319,8 +1028,6 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             system: false,
             pattern,
             echo_hidden: false,
-            kind_filter: None,
-            continuation: None,
         };
     }
     if let Some(rest) = input.strip_prefix("sf") {
@@ -1331,8 +1038,6 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             system: false,
             pattern,
             echo_hidden: false,
-            kind_filter: None,
-            continuation: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1377,8 +1082,6 @@ fn parse_l(input: &str) -> ParsedMeta {
         system,
         pattern,
         echo_hidden: false,
-        kind_filter: None,
-        continuation: None,
     }
 }
 
@@ -1414,17 +1117,10 @@ fn parse_lo_family(input: &str) -> ParsedMeta {
         }
     }
 
-    // `\lo_list` / `\lo_list+`
+    // `\lo_list`
     if let Some(rest) = input.strip_prefix("list") {
-        let (plus, rest) = if let Some(r) = rest.strip_prefix('+') {
-            (true, r)
-        } else {
-            (false, rest)
-        };
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let mut m = ParsedMeta::simple(MetaCmd::LoList);
-            m.plus = plus;
-            return m;
+            return ParsedMeta::simple(MetaCmd::LoList);
         }
     }
 
@@ -1513,8 +1209,6 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(enc.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1522,40 +1216,18 @@ fn parse_e_family(input: &str) -> ParsedMeta {
     // `\echo [text]` — must come before bare `\e`.
     if let Some(rest) = input.strip_prefix("echo") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let raw = rest.trim();
-            // Stop at the next `\<alpha>` continuation command.
-            let (tokens, cont) = split_params_with_continuation(raw);
-            let text = tokens.join(" ");
-            let mut m = ParsedMeta {
+            let text = rest.trim();
+            return ParsedMeta {
                 cmd: MetaCmd::Echo,
                 plus: false,
                 system: false,
-                pattern: if text.is_empty() { None } else { Some(text) },
-                echo_hidden: false,
-                kind_filter: None,
-                continuation: cont,
-            };
-            // Restore single-quoted text that was split — actually, for \echo
-            // we want the raw text between cmd boundaries, not tokenized.
-            // Re-derive the echo text as the raw text before the continuation.
-            if let Some(ref cont_str) = m.continuation {
-                // Find where the continuation starts in `raw`.
-                if let Some(cont_pos) = raw.find(cont_str.as_str()) {
-                    let echo_text = raw[..cont_pos].trim_end();
-                    m.pattern = if echo_text.is_empty() {
-                        None
-                    } else {
-                        Some(echo_text.to_owned())
-                    };
-                }
-            } else {
-                m.pattern = if raw.is_empty() {
+                pattern: if text.is_empty() {
                     None
                 } else {
-                    Some(raw.to_owned())
-                };
-            }
-            return m;
+                    Some(text.to_owned())
+                },
+                echo_hidden: false,
+            };
         }
     }
 
@@ -1588,8 +1260,6 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     Some(arg.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1626,8 +1296,6 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1644,8 +1312,6 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1669,8 +1335,6 @@ fn parse_o(input: &str) -> ParsedMeta {
                 Some(path.to_owned())
             },
             echo_hidden: false,
-            kind_filter: None,
-            continuation: None,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1713,8 +1377,6 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(arg.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1732,8 +1394,6 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(text.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1750,8 +1410,6 @@ fn parse_w(input: &str) -> ParsedMeta {
                     Some(path.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1775,8 +1433,6 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                     Some(user.to_owned())
                 },
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -1833,8 +1489,6 @@ fn parse_shell(input: &str) -> ParsedMeta {
             Some(cmd.to_owned())
         },
         echo_hidden: false,
-        kind_filter: None,
-        continuation: None,
     }
 }
 
@@ -1904,71 +1558,6 @@ pub(crate) fn split_params(s: &str) -> Vec<String> {
     result
 }
 
-/// Like `split_params` but stops parsing when it encounters `\<alpha>` outside
-/// of a quoted string (which starts a new metacommand).
-///
-/// Returns `(params, continuation)` where `continuation` is the remaining
-/// text starting with the next `\cmd`, if any.
-fn split_params_with_continuation(s: &str) -> (Vec<String>, Option<String>) {
-    let mut result = Vec::new();
-    let mut chars = s.char_indices().peekable();
-
-    while let Some(&(i, c)) = chars.peek() {
-        if c.is_whitespace() {
-            chars.next();
-            continue;
-        }
-        // Detect start of next metacommand: `\` followed by alphabetic char.
-        if c == '\\' {
-            let rest = &s[i..];
-            let next = rest.chars().nth(1);
-            if next.is_some_and(char::is_alphabetic) {
-                return (result, Some(rest.to_owned()));
-            }
-        }
-        if c == '\'' {
-            // Quoted token.
-            chars.next();
-            let mut token = String::new();
-            loop {
-                match chars.next() {
-                    None => break,
-                    Some((_, '\'')) => {
-                        if chars.peek().map(|&(_, nc)| nc) == Some('\'') {
-                            chars.next();
-                            token.push('\'');
-                        } else {
-                            break;
-                        }
-                    }
-                    Some((_, '\\')) => {
-                        if chars.peek().map(|&(_, nc)| nc) == Some('\'') {
-                            chars.next();
-                            token.push('\'');
-                        } else {
-                            token.push('\\');
-                        }
-                    }
-                    Some((_, ch)) => token.push(ch),
-                }
-            }
-            result.push(token);
-        } else {
-            // Unquoted token: consume until whitespace or `\cmd`.
-            let mut token = String::new();
-            while let Some(&(_, ch)) = chars.peek() {
-                if ch.is_whitespace() {
-                    break;
-                }
-                token.push(ch);
-                chars.next();
-            }
-            result.push(token);
-        }
-    }
-    (result, None)
-}
-
 /// Parse `\bind`, `\bind_named`, and `\close_prepared`.
 ///
 /// Disambiguation order (longest match first):
@@ -1982,39 +1571,22 @@ fn parse_b_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("bind_named") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let rest = rest.trim();
-            // Find the statement name (first token).
-            let name_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-            let name = rest[..name_end].to_owned();
-            let params_str = rest[name_end..].trim();
-            let (params, cont) = split_params_with_continuation(params_str);
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or("").to_owned();
+            let params_str = parts.next().unwrap_or("").trim();
+            let params = split_params(params_str);
             if name.is_empty() {
                 return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
             }
-            return ParsedMeta {
-                cmd: MetaCmd::BindNamed(name, params),
-                plus: false,
-                system: false,
-                pattern: None,
-                echo_hidden: false,
-                kind_filter: None,
-                continuation: cont,
-            };
+            return ParsedMeta::simple(MetaCmd::BindNamed(name, params));
         }
     }
 
     // `\bind [params...]`
     if let Some(rest) = input.strip_prefix("bind") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let (params, cont) = split_params_with_continuation(rest.trim());
-            return ParsedMeta {
-                cmd: MetaCmd::Bind(params),
-                plus: false,
-                system: false,
-                pattern: None,
-                echo_hidden: false,
-                kind_filter: None,
-                continuation: cont,
-            };
+            let params = split_params(rest.trim());
+            return ParsedMeta::simple(MetaCmd::Bind(params));
         }
     }
 
@@ -2118,43 +1690,15 @@ fn parse_g_family(input: &str) -> ParsedMeta {
         }
     }
 
-    // `\getenv varname ENVVAR` — read an OS environment variable into a psql variable.
-    if let Some(rest) = input.strip_prefix("getenv") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let args: Vec<&str> = rest.split_whitespace().collect();
-            let var_name = args.first().map(|s| (*s).to_owned()).unwrap_or_default();
-            let env_name = args.get(1).map(|s| (*s).to_owned()).unwrap_or_default();
-            return ParsedMeta::simple(MetaCmd::GetEnv(var_name, env_name));
-        }
-    }
-
     // `\gset [prefix]` — store each column of the single result row as a variable.
     if let Some(rest) = input.strip_prefix("gset") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let trimmed = rest.trim();
-            // Prefix is the first whitespace-delimited token, but stop before
-            // any `\<alpha>` continuation command.
-            let (prefix_str, cont) = if trimmed.is_empty() {
-                ("", None)
-            } else if let Some(ws_pos) = trimmed.find(char::is_whitespace) {
-                let tok = &trimmed[..ws_pos];
-                let after = trimmed[ws_pos..].trim_start();
-                if after.starts_with('\\') {
-                    (tok, Some(after.to_owned()))
-                } else {
-                    // Multiple space-separated tokens after gset: only first is prefix
-                    (tok, None)
-                }
-            } else {
-                (trimmed, None)
-            };
-            let mut m = ParsedMeta::simple(MetaCmd::GSet(if prefix_str.is_empty() {
+            let prefix = rest.trim();
+            return ParsedMeta::simple(MetaCmd::GSet(if prefix.is_empty() {
                 None
             } else {
-                Some(prefix_str.to_owned())
+                Some(prefix.to_owned())
             }));
-            m.continuation = cont;
-            return m;
         }
     }
 
@@ -2170,96 +1714,35 @@ fn parse_g_family(input: &str) -> ParsedMeta {
     // `\gx [file]` — expanded execute; must be checked before bare `\g`.
     if let Some(rest) = input.strip_prefix("gx") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let raw_arg = rest.trim();
-            // Stop at the next `\<alpha>` continuation command.
-            let (file_arg, cont) = if raw_arg.starts_with('\\') {
-                // Argument IS a continuation command — no file arg.
-                (None, Some(raw_arg.to_owned()))
-            } else if let Some(ws) = raw_arg.find(char::is_whitespace) {
-                let first = &raw_arg[..ws];
-                let after = raw_arg[ws..].trim_start();
-                if after.starts_with('\\') {
-                    (Some(first.to_owned()), Some(after.to_owned()))
+            let arg = rest.trim();
+            return ParsedMeta {
+                cmd: MetaCmd::GoExecuteExpanded(if arg.is_empty() {
+                    None
                 } else {
-                    (
-                        if raw_arg.is_empty() {
-                            None
-                        } else {
-                            Some(raw_arg.to_owned())
-                        },
-                        None,
-                    )
-                }
-            } else {
-                (
-                    if raw_arg.is_empty() {
-                        None
-                    } else {
-                        Some(raw_arg.to_owned())
-                    },
-                    None,
-                )
-            };
-            let m = ParsedMeta {
-                cmd: MetaCmd::GoExecuteExpanded(file_arg),
+                    Some(arg.to_owned())
+                }),
                 plus: false,
                 system: false,
                 pattern: None,
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: cont,
             };
-            // Handle inline pset opts: `\gx (key=val ...)`
-            if let MetaCmd::GoExecuteExpanded(ref arg) = m.cmd {
-                if arg.as_deref().is_some_and(|a| a.starts_with('(')) {
-                    // Leave as-is; GoExecute dispatch handles pset parsing.
-                }
-            }
-            return m;
         }
     }
 
     // `\g [file||cmd]`
     if let Some(rest) = input.strip_prefix('g') {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let raw_arg = rest.trim();
-            // Stop at the next `\<alpha>` continuation command.
-            let (file_arg, cont) = if raw_arg.starts_with('\\') {
-                // Argument IS a continuation command — no file arg.
-                (None, Some(raw_arg.to_owned()))
-            } else if let Some(ws) = raw_arg.find(char::is_whitespace) {
-                let first = &raw_arg[..ws];
-                let after = raw_arg[ws..].trim_start();
-                if after.starts_with('\\') {
-                    (Some(first.to_owned()), Some(after.to_owned()))
-                } else {
-                    (
-                        if raw_arg.is_empty() {
-                            None
-                        } else {
-                            Some(raw_arg.to_owned())
-                        },
-                        None,
-                    )
-                }
-            } else {
-                (
-                    if raw_arg.is_empty() {
-                        None
-                    } else {
-                        Some(raw_arg.to_owned())
-                    },
-                    None,
-                )
-            };
+            let arg = rest.trim();
             return ParsedMeta {
-                cmd: MetaCmd::GoExecute(file_arg),
+                cmd: MetaCmd::GoExecute(if arg.is_empty() {
+                    None
+                } else {
+                    Some(arg.to_owned())
+                }),
                 plus: false,
                 system: false,
                 pattern: None,
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: cont,
             };
         }
     }
@@ -2279,8 +1762,6 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     // 3-character sub-commands (must come before 2-char variants)
     ("dba", MetaCmd::Dba),
     ("des", MetaCmd::ListForeignServers),
-    ("dRp", MetaCmd::ListPublications),
-    ("dRs", MetaCmd::ListSubscriptions),
     ("dew", MetaCmd::ListFdws),
     ("det", MetaCmd::ListForeignTablesViaFdw),
     ("deu", MetaCmd::ListUserMappings),
@@ -2300,10 +1781,8 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("du", MetaCmd::ListRoles),
     ("dg", MetaCmd::ListRoles),
     ("dp", MetaCmd::ListPrivileges),
-    ("z", MetaCmd::ListPrivileges),
     ("db", MetaCmd::ListTablespaces),
     ("dx", MetaCmd::ListExtensions),
-    ("dX", MetaCmd::ListExtStatistics),
     ("dd", MetaCmd::ListComments),
     ("dc", MetaCmd::ListConversions),
     ("dy", MetaCmd::ListEventTriggers),
@@ -2320,56 +1799,6 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
 fn parse_d_family(input: &str) -> ParsedMeta {
     // `input` has already had the leading `\` stripped.
 
-    // `\dG` is a PG18 property graph command not yet implemented.
-    // Return unknown so we emit the correct "invalid command \dG" error,
-    // matching the behaviour of psql versions that pre-date PG18.
-    if input.starts_with("dG") {
-        return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
-    }
-
-    // \dfn / \dfp / \dfa / \dfw — psql function-kind filter variants.
-    // Check before the generic D_SUBCMDS loop so the longer prefix wins.
-    if let Some(rest) = input.strip_prefix("df") {
-        // The next char (if present) may be a kind qualifier: n, p, a, w.
-        // Anything else falls through to the normal \df handling below.
-        let (kind_char, rest2) = match rest.chars().next() {
-            Some(k @ ('n' | 'p' | 'a' | 'w')) => (Some(k), &rest[1..]),
-            _ => (None, rest),
-        };
-        if kind_char.is_some()
-            || rest2.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S')
-            || rest2.is_empty()
-        {
-            let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
-            return ParsedMeta {
-                cmd: MetaCmd::ListFunctions,
-                plus,
-                system,
-                pattern,
-                echo_hidden: false,
-                kind_filter: kind_char,
-                continuation: None,
-            };
-        }
-    }
-
-    // \da [pattern] — shorthand for \dfa (list aggregate functions).
-    if let Some(rest) = input.strip_prefix("da") {
-        if rest.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S') || rest.is_empty()
-        {
-            let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
-            return ParsedMeta {
-                cmd: MetaCmd::ListFunctions,
-                plus,
-                system,
-                pattern,
-                echo_hidden: false,
-                kind_filter: Some('a'),
-                continuation: None,
-            };
-        }
-    }
-
     // Try each sub-command prefix (they all include the leading `d`).
     // `D_SUBCMDS` is ordered longest-first so greedy matching is correct.
     for (prefix, cmd) in D_SUBCMDS {
@@ -2382,8 +1811,6 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 system,
                 pattern,
                 echo_hidden: false,
-                kind_filter: None,
-                continuation: None,
             };
         }
     }
@@ -2397,8 +1824,6 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         system,
         pattern,
         echo_hidden: false,
-        kind_filter: None,
-        continuation: None,
     }
 }
 
@@ -2430,23 +1855,7 @@ fn parse_modifiers_and_pattern(rest: &str) -> (bool, bool, Option<String>) {
     }
 
     let after_modifiers = &rest[end..];
-    let trimmed = after_modifiers.trim();
-    // Strip at "\" boundary: "\" preceded by whitespace starts a new metacommand.
-    // e.g. `\d fkpart0.fk_part_1    \\ -- comment` → pattern is `fkpart0.fk_part_1`.
-    let trimmed = {
-        let bytes = trimmed.as_bytes();
-        let mut cut = trimmed.len();
-        for i in 1..bytes.len() {
-            if bytes[i] == b'\\' && bytes[i - 1].is_ascii_whitespace() {
-                cut = i - 1;
-                break;
-            }
-        }
-        &trimmed[..cut]
-    };
-    // Strip trailing semicolons: psql treats `;` as a command terminator
-    // even in metacommand arguments, so `\d foo;` is the same as `\d foo`.
-    let pattern_str = trimmed.trim_end_matches(';').trim_end();
+    let pattern_str = after_modifiers.trim();
     let pattern = if pattern_str.is_empty() {
         None
     } else {

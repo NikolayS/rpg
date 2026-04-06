@@ -623,8 +623,6 @@ pub(super) async fn dispatch_ai_command(
             system: false,
             pattern: None,
             echo_hidden: false,
-            kind_filter: None,
-            continuation: None,
         };
         dispatch_io(&parsed, client, params, settings, tx).await;
 
@@ -1919,13 +1917,7 @@ pub(super) async fn handle_ai_explain(
     let raw_messages = match messages_result {
         Ok(msgs) => msgs,
         Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                Some(&target_query),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, Some(&target_query), settings.verbose_errors);
             return;
         }
     };
@@ -2104,13 +2096,7 @@ pub(super) async fn handle_ai_optimize(
     let raw_messages = match client.simple_query(&explain_sql).await {
         Ok(msgs) => msgs,
         Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                Some(&target_query),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, Some(&target_query), settings.verbose_errors);
             return;
         }
     };
