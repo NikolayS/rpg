@@ -4,7 +4,7 @@
 
 ## TL;DR
 
-237 of 245 PostgreSQL regression tests pass against rpg (PG19dev test suite, PG16 server). The 8 that don't are **not rpg bugs** — 6 are server-version mismatches between the PG19dev test files and the PG16 CI server; 2 require C extensions or special infrastructure unavailable in CI.
+**96.7% of PostgreSQL's own regression tests pass** (237/245; the 8 that don't are server-version mismatches or require C extensions, not rpg limitations).
 
 For everyday use — queries, `\d` commands, scripts, `\copy`, REPL — rpg is a safe drop-in. A handful of advanced scripting features (see Known Gaps below) are not yet implemented.
 
