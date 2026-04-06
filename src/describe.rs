@@ -538,19 +538,11 @@ fn system_schema_filter(system: bool) -> &'static str {
 
 /// Return the result-set title for a given set of relkinds.
 ///
-/// psql uses type-specific headings: "List of tables" for \dt, "List of
-/// indexes" for \di, etc.  Only the unfiltered \d (all relkinds) uses
-/// the generic "List of relations".
-fn relation_title(relkinds: &[&str]) -> &'static str {
-    match relkinds {
-        ["r", "p"] | ["r" | "p"] => "List of tables",
-        ["i" | "I"] | ["i", "I"] => "List of indexes",
-        ["v"] => "List of views",
-        ["S"] => "List of sequences",
-        ["m"] => "List of materialized views",
-        ["f"] => "List of foreign tables",
-        _ => "List of relations",
-    }
+/// psql always uses "List of relations" as the heading for all \d
+/// type-filtered commands (\dt, \di, \dv, \ds, \dm, \df, etc.).
+/// This matches psql's listTables() which hard-codes "List of relations".
+fn relation_title(_relkinds: &[&str]) -> &'static str {
+    "List of relations"
 }
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
@@ -4888,50 +4880,17 @@ mod tests {
     // relation_title — type-specific headings to match psql
     // -----------------------------------------------------------------------
 
-    /// psql uses type-specific headings: "List of tables" for \dt, etc.
-    /// Verify that `relation_title()` returns the correct heading for each
-    /// relkind combination.
+    /// psql always uses "List of relations" for all \d type-filtered commands.
+    /// Verify `relation_title()` returns "List of relations" for all inputs.
     #[test]
-    fn relation_title_tables() {
-        assert_eq!(relation_title(&["r", "p"]), "List of tables");
-        assert_eq!(relation_title(&["r"]), "List of tables");
-        assert_eq!(relation_title(&["p"]), "List of tables");
-    }
-
-    #[test]
-    fn relation_title_indexes() {
-        assert_eq!(relation_title(&["i"]), "List of indexes");
-        assert_eq!(relation_title(&["I"]), "List of indexes");
-        assert_eq!(relation_title(&["i", "I"]), "List of indexes");
-    }
-
-    #[test]
-    fn relation_title_sequences() {
-        assert_eq!(relation_title(&["S"]), "List of sequences");
-    }
-
-    #[test]
-    fn relation_title_views() {
-        assert_eq!(relation_title(&["v"]), "List of views");
-    }
-
-    #[test]
-    fn relation_title_matviews() {
-        assert_eq!(relation_title(&["m"]), "List of materialized views");
-    }
-
-    #[test]
-    fn relation_title_foreign_tables() {
-        assert_eq!(relation_title(&["f"]), "List of foreign tables");
-    }
-
-    #[test]
-    fn relation_title_generic() {
-        assert_eq!(
-            relation_title(&["r", "p", "v", "m"]),
-            "List of relations",
-            "mixed relkinds should show 'List of relations'"
-        );
+    fn relation_title_always_relations() {
+        assert_eq!(relation_title(&["r", "p"]), "List of relations");
+        assert_eq!(relation_title(&["i"]), "List of relations");
+        assert_eq!(relation_title(&["v"]), "List of relations");
+        assert_eq!(relation_title(&["S"]), "List of relations");
+        assert_eq!(relation_title(&["m"]), "List of relations");
+        assert_eq!(relation_title(&["f"]), "List of relations");
+        assert_eq!(relation_title(&["r", "p", "v", "m"]), "List of relations");
     }
 
     // -----------------------------------------------------------------------
