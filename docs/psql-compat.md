@@ -53,9 +53,47 @@ These are features psql has that rpg does not yet implement:
 | `\copy` with all option variants | Medium | Core works; some edge-case options (e.g. `FORCE_QUOTE`, `ESCAPE`) now pass through |
 | Readline history across sessions | Low | In-session history works |
 
-**Not a gap — intentional differences:**
-- `/` commands (`/ask`, `/dba`, `/explain`, etc.) are rpg extensions with no psql equivalent
-- `\dba`, `\sql`, `\plan` etc. are deprecated aliases that print a hint and still work
+---
+
+## What rpg has that psql doesn't
+
+This is the other side of the compatibility story — rpg is a superset in these areas:
+
+### AI assistant (slash commands)
+
+| Command | What it does |
+|---------|-------------|
+| `/ask <question>` | Ask a question about the database or query in natural language |
+| `/explain` | Explain the last query result or error |
+| `/fix` | Suggest a fix for the last error |
+| `/optimize` | Suggest query optimizations |
+
+### Built-in DBA diagnostics (`/dba`)
+
+| Command | What it does |
+|---------|-------------|
+| `/dba bloat` | Table and index bloat analysis |
+| `/dba vacuum` | VACUUM and autovacuum status |
+| `/dba index` | Index health, unused indexes, missing indexes |
+| `/dba wait` | Active wait events |
+| `/dba locks` | Lock contention |
+| `/dba cache` | Buffer cache hit rates |
+| `/ash` | Active Session History (pg_stat_activity snapshots) |
+
+### Enhanced REPL experience
+
+| Feature | Description |
+|---------|-------------|
+| Status line | Live connection info, query timer, transaction state in the terminal status bar |
+| `/session` | Session-level settings and diagnostics |
+| `/refresh` | Auto-refresh a query on an interval (like `watch` but SQL-aware) |
+| `/ns` | Namespace/schema switcher |
+| SSH tunnel | Built-in `--ssh-tunnel` flag — no separate tunnel process needed |
+| Multi-host failover | Automatic failover across a comma-separated host list |
+
+### Command namespace
+
+rpg uses `/` for all its own commands and `\` exclusively for psql-compatible metacommands. This makes it unambiguous which commands are standard and which are extensions. `\dba`, `\sql`, `\plan` etc. are deprecated aliases that still work but print a migration hint.
 
 ---
 
