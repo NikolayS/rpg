@@ -938,15 +938,13 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
             let name_lines: Vec<&str> = col.name.split('\n').collect();
             let val_lines: Vec<&str> = val_raw.split('\n').collect();
-            let n_segments = val_lines.len();
 
             // Build wrapped_val with physical-line tracking.
             let wrapped_val: Vec<WrapLine> = if wrap_w > 0 {
                 let mut wl = Vec::new();
-                for (seg_idx, vl) in val_lines.iter().enumerate() {
+                for vl in &val_lines {
                     let chars: Vec<char> = vl.chars().collect();
                     let total = chars.len();
-                    let is_last_seg = seg_idx + 1 == n_segments;
                     if total == 0 {
                         wl.push(WrapLine {
                             text: String::new(),
@@ -973,9 +971,7 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                                 break;
                             }
                         }
-                        // If exactly fits with no continuation needed, mark last chunk
-                        // is_last_of_segment = true (already set above via is_last_chunk).
-                        let _ = is_last_seg; // used below via wl index
+                        // is_last_of_segment is set via is_last_chunk above.
                     }
                 }
                 wl

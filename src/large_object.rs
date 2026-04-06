@@ -453,12 +453,6 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     };
 
     // Header row (centered headers, matching psql).
-    let header_cells: Vec<(&str, usize, bool)> = col_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name.as_str(), widths[i], false))
-        .collect();
-    // For centered headers, build manually.
     let header_line: String = {
         let mut s = String::new();
         for (col_idx, name) in col_names.iter().enumerate() {
@@ -472,7 +466,6 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         }
         s
     };
-    let _ = header_cells; // suppress unused warning
     println!("{header_line}");
 
     // Separator.

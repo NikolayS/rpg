@@ -2134,14 +2134,12 @@ pub(super) async fn execute_gset(
                     // Store last query for \watch compatibility.
                     settings.last_query = Some(buf.to_owned());
                     let row = &rows[0];
-                    let mut had_error = false;
                     for (col, val) in col_names.iter().zip(row.iter()) {
                         let var_name = format!("{prefix}{col}");
                         // Validate that the resulting variable name is legal
                         // (no spaces, slashes, etc.).
                         if !crate::vars::is_valid_variable_name(&var_name) {
                             eprintln!("error: invalid variable name: \"{var_name}\"");
-                            had_error = true;
                             continue;
                         }
                         // Warn about specially treated variables that psql
@@ -2161,7 +2159,6 @@ pub(super) async fn execute_gset(
                             }
                         }
                     }
-                    let _ = had_error;
                 }
                 _ => eprintln!("error: more than one row returned for \\gset"),
             }

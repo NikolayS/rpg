@@ -85,19 +85,13 @@ struct CondBlock {
 #[derive(Debug, Default)]
 pub struct ConditionalState {
     stack: Vec<CondBlock>,
-    /// Number of currently-open blocks that were opened with an invalid
-    /// boolean expression (error-conditional mode).
-    error_depth: usize,
 }
 
 impl ConditionalState {
     /// Create a new, empty (unconstrained) state.
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self {
-            stack: Vec::new(),
-            error_depth: 0,
-        }
+        Self { stack: Vec::new() }
     }
 
     /// Return `true` when every open block is currently active.
@@ -119,7 +113,6 @@ impl ConditionalState {
     /// emit "unterminated \\if" warnings when the script exits via `\quit`.
     pub fn reset(&mut self) {
         self.stack.clear();
-        self.error_depth = 0;
     }
 
     /// Return `true` when at least one currently-open block was opened with
@@ -128,7 +121,7 @@ impl ConditionalState {
     /// In this mode the REPL echoes (but does not execute) SQL lines inside
     /// the suppressed block, matching psql's `-a` behaviour.
     pub fn is_error_conditional(&self) -> bool {
-        self.error_depth > 0
+        self.stack.iter().any(|b| b.error)
     }
 
     /// Process `\if <condition>`.
@@ -161,9 +154,6 @@ impl ConditionalState {
             seen_else: false,
             error: outer_active, // only track error when outer is active
         });
-        if outer_active {
-            self.error_depth += 1;
-        }
     }
 
     /// Process `\elif <condition>`.
@@ -229,14 +219,10 @@ impl ConditionalState {
     /// # Errors
     /// Returns an error string when no `\if` is open.
     pub fn pop_endif(&mut self) -> Result<(), String> {
-        match self.stack.pop() {
-            Some(block) => {
-                if block.error {
-                    self.error_depth = self.error_depth.saturating_sub(1);
-                }
-                Ok(())
-            }
-            None => Err("\\endif without \\if".to_owned()),
+        if self.stack.pop().is_some() {
+            Ok(())
+        } else {
+            Err("\\endif without \\if".to_owned())
         }
     }
 }

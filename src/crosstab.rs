@@ -46,11 +46,6 @@ impl ColSpec {
         Self::Name(s.to_owned())
     }
 
-    /// Parse a quoted token: always a Name, never an Index (even if numeric).
-    fn from_quoted(s: &str) -> Self {
-        Self::Name(s.to_owned())
-    }
-
     /// Resolve to a zero-based column index given the header list.
     ///
     /// The stored index is 1-based; this converts to zero-based internally.
@@ -161,7 +156,7 @@ pub fn parse_args(raw: &str) -> CrosstabArgs {
 
     let make_spec = |(tok, quoted): (String, bool)| {
         if quoted {
-            ColSpec::from_quoted(&tok)
+            ColSpec::Name(tok)
         } else {
             ColSpec::from_str(&tok)
         }
