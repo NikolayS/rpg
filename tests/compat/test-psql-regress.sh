@@ -355,6 +355,21 @@ compare_test() {
     -c "CREATE TABLESPACE regress_tblspace LOCATION ''" \
     > /dev/null 2>&1 || true
 
+  # Some tests create cluster-wide roles and leave them behind
+  # (e.g. graph_table_rls.sql says "leave objects behind for pg_upgrade tests").
+  # Drop PSQL_DBNAME first (removes role dependencies), then drop regress_*
+  # roles so that rpg starts with the same preconditions as psql did.
+  _psql_admin -c "DROP DATABASE IF EXISTS ${PSQL_DBNAME};" > /dev/null 2>&1 || true
+  PAGER=cat psql \
+    --no-psqlrc -X -q -v ON_ERROR_STOP=0 \
+    -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+    -c "do \$\$ declare r record; begin
+          for r in select rolname from pg_roles
+                   where rolname like 'regress_%' loop
+            execute format('drop role if exists %I', r.rolname);
+          end loop; end \$\$;" \
+    > /dev/null 2>&1 || true
+
   rpg_out=$(run_rpg  "${sql_file}" 2>/dev/null || true)
 
   if [[ "${psql_out}" == "${rpg_out}" ]]; then
