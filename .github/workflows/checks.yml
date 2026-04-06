@@ -168,7 +168,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           repository: postgres/postgres
-          ref: 3d10ece612f535be15a9cb7ca31620c80db6f0e9  # master @ 2026-04-06
+          ref: af04b04f2f7a54ba4a4418a814f57b27d8e0d10c  # REL_18_STABLE @ 2026-04-06
           sparse-checkout: |
             src/test/regress/sql
             src/test/regress/expected
