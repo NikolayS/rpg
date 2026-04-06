@@ -188,15 +188,11 @@ fn build_name_clause(pattern: &str, column: &str) -> String {
         return String::new();
     }
 
-    // psql lowercases unquoted identifier patterns before matching,
-    // because catalog names are stored lowercase (unless double-quoted).
-    let lower = pattern.to_lowercase();
-
     if has_wildcards(pattern) {
-        let like_val = to_like(&lower);
+        let like_val = to_like(pattern);
         format!("{column} LIKE '{like_val}' ESCAPE '\\'")
     } else {
-        let escaped = sql_escape(&lower);
+        let escaped = sql_escape(pattern);
         format!("{column} = '{escaped}'")
     }
 }

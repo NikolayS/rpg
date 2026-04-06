@@ -12,353 +12,23 @@ use super::*;
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
 
-/// `PostgreSQL` built-in numeric type OIDs (typcategory = 'N' in `pg_type`).
-/// These are the fixed OIDs assigned to numeric base types in the `PostgreSQL`
-/// source; they never change across versions.
-const NUMERIC_TYPE_OIDS: &[u32] = &[
-    20,   // int8
-    21,   // int2
-    23,   // int4
-    700,  // float4
-    701,  // float8
-    790,  // money
-    1700, // numeric
-];
-
-/// `PostgreSQL` built-in string/text type OIDs that must never be right-aligned,
-/// even when their values happen to look numeric (e.g. text column with "31").
-const TEXT_TYPE_OIDS: &[u32] = &[
-    16,   // bool
-    17,   // bytea
-    18,   // char (single-byte internal type)
-    19,   // name (63-byte identifier)
-    25,   // text
-    114,  // json
-    142,  // xml
-    194,  // pg_node_tree
-    1042, // bpchar (char(n))
-    1043, // varchar
-    1560, // bit (fixed-length bit string, e.g. "1010")
-    1562, // varbit (variable-length bit string)
-    3802, // jsonb
-    4072, // jsonpath (path expressions like "0.0" look numeric)
-];
-
-/// Convert a cell from a tokio-postgres `Row` to an `Option<String>`.
-///
-/// Extended query results are typed, so we try String first (for text/varchar
-/// columns), then common numeric/bool types, falling back to None for NULLs.
-fn row_cell_to_string(row: &tokio_postgres::Row, i: usize) -> Option<String> {
-    // Attempt to read as Option<String> — works for text, varchar, name, etc.
-    if let Ok(v) = row.try_get::<_, Option<String>>(i) {
-        return v;
-    }
-    // Try common numeric types.
-    let oid = row.columns().get(i).map_or(0, |c| c.type_().oid());
-    match oid {
-        20 => {
-            return row
-                .try_get::<_, Option<i64>>(i)
-                .ok()
-                .flatten()
-                .map(|v| v.to_string())
-        }
-        21 => {
-            return row
-                .try_get::<_, Option<i16>>(i)
-                .ok()
-                .flatten()
-                .map(|v| v.to_string())
-        }
-        23 => {
-            return row
-                .try_get::<_, Option<i32>>(i)
-                .ok()
-                .flatten()
-                .map(|v| v.to_string())
-        }
-        700 => {
-            return row
-                .try_get::<_, Option<f32>>(i)
-                .ok()
-                .flatten()
-                .map(|v| v.to_string())
-        }
-        701 => {
-            return row
-                .try_get::<_, Option<f64>>(i)
-                .ok()
-                .flatten()
-                .map(|v| v.to_string())
-        }
-        16 => {
-            return row
-                .try_get::<_, Option<bool>>(i)
-                .ok()
-                .flatten()
-                .map(|v: bool| if v { "t".to_owned() } else { "f".to_owned() })
-        }
-        _ => {}
-    }
-    None
-}
-
-/// Classify a column as numeric based on its `PostgreSQL` type OID.
-///
-/// Returns `Some(true)` for built-in numeric types, `Some(false)` for
-/// string/text types and user-defined types (OID ≥ 16384), and `None`
-/// for other built-in types (e.g. xid, cid, regtype) that should fall
-/// through to the value heuristic.
-fn classify_numeric_by_oid(oid: u32) -> Option<bool> {
-    if oid == 0 {
-        return None; // OID unknown — use value heuristic
-    }
-    if NUMERIC_TYPE_OIDS.contains(&oid) {
-        return Some(true);
-    }
-    if TEXT_TYPE_OIDS.contains(&oid) {
-        return Some(false); // string type — never right-align
-    }
-    if oid >= 16384 {
-        return Some(false); // user-defined type
-    }
-    // Other built-in types (xid, cid, regtype, etc.): fall through to value
-    // heuristic for correct alignment.
-    None
-}
-
-/// Infer whether a result-set column should be right-aligned (numeric).
-///
-/// Returns `true` when every non-NULL, non-empty cell parses as `f64` AND
-/// at least one cell has a value, subject to the following exclusions:
-///
-/// - Column name ends with `_code` (e.g. `sql_error_code`) — these are
-///   code/identifier columns that happen to contain digit strings such as
-///   SQLSTATE codes (`22003`, `42601`), not numeric quantities.
-/// - Value starts with `+` — indicates `to_char()`-formatted text output
-///   (e.g. `+456`); raw integer/float columns never emit a leading `+`.
-///
-/// When `type_oid` is non-zero it is consulted first; user-defined types
-/// (OID ≥ 16384) are always treated as non-numeric.  Built-in numeric types
-/// (int2/int4/int8/float4/float8/numeric/money) are always numeric.
-/// For all other non-zero OIDs the value heuristic is applied.
-fn infer_numeric_column(
-    col_idx: usize,
-    name: &str,
-    rows: &[Vec<Option<String>>],
-    type_oid: u32,
-) -> bool {
-    // OID-based classification takes priority when available.
-    if let Some(is_num) = classify_numeric_by_oid(type_oid) {
-        return is_num;
-    }
-    // Column-name heuristics: certain names always indicate text, not numbers.
-    let name_lc = name.to_lowercase();
-    // Names ending with _code → identifier/code columns (e.g. sql_error_code).
-    if name_lc.ends_with("_code") {
-        return false;
-    }
-    // Common text-returning functions: unaliased calls produce column names
-    // matching the function name. These never hold numeric data.
-    if matches!(
-        name_lc.as_str(),
-        "to_char"
-            | "substring"
-            | "substr"
-            | "concat"
-            | "concat_ws"
-            | "format"
-            | "initcap"
-            | "trim"
-            | "ltrim"
-            | "rtrim"
-            | "replace"
-            | "regexp_replace"
-            | "regexp_substr"
-            | "regexp_match"
-            | "translate"
-            | "overlay"
-            | "lpad"
-            | "rpad"
-            | "repeat"
-            | "reverse"
-            | "left"
-            | "right"
-            | "md5"
-            | "encode"
-            | "decode"
-            | "quote_ident"
-            | "quote_literal"
-            | "quote_nullable"
-            | "to_hex"
-            | "chr"
-            // PostgreSQL type names used as column labels for casts like
-            // '1'::json.  These are always text-typed and must be
-            // left-aligned regardless of value contents.
-            | "json"
-            | "jsonb"
-            | "xml"
-            | "text"
-            | "varchar"
-            | "bytea"
-            | "name"
-            | "regtype"
-            | "regclass"
-            | "regproc"
-            | "regprocedure"
-            | "regoper"
-            | "regoperator"
-            | "regconfig"
-            | "regdictionary"
-            // System catalog columns with non-numeric types that can hold
-            // numeric-looking values.
-            // oidvector columns (space-separated OIDs): left-aligned in psql.
-            | "proargtypes"
-            | "indclass"
-            | "indkey"
-            | "indoption"
-            | "proargmodes"
-            | "proallargtypes"
-    ) {
-        return false;
-    }
-
-    let mut has_value = false;
-    let all_parseable = rows.iter().all(|row| {
-        match row.get(col_idx).and_then(|v| v.as_deref()) {
-            None | Some("") => true,
-            Some(val) => {
-                has_value = true;
-                // Leading '+' or a zero followed by another digit (e.g.
-                // '0000000000000456', '010101') indicates to_char()-formatted
-                // or bit-string output, not raw numeric data.
-                if val.starts_with('+') {
-                    return false;
-                }
-                if val.len() > 1
-                    && val.starts_with('0')
-                    && val.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
-                {
-                    return false;
-                }
-                // PostgreSQL numeric NaN: always "NaN" (exactly).
-                // Rust's f64 parser does not accept "NaN" on all platforms,
-                // so check explicitly before falling through to parse::<f64>.
-                if val == "NaN" {
-                    return true;
-                }
-                // PostgreSQL money format: '$N.NN' or '-$N.NN'.
-                // Strip the currency prefix before testing parseability.
-                let numeric_part = if let Some(rest) = val.strip_prefix("$") {
-                    rest
-                } else if let Some(rest) = val.strip_prefix("-$") {
-                    rest
-                } else {
-                    val
-                };
-                // Also accept "Infinity"/"-Infinity" (capital I) which
-                // PostgreSQL uses for numeric/float types.
-                if numeric_part == "Infinity" || numeric_part == "-Infinity" {
-                    return true;
-                }
-                numeric_part.parse::<f64>().is_ok()
-            }
-        }
-    });
-    if !(all_parseable && has_value) {
-        return false;
-    }
-
-    // Infinity guard: lowercase "infinity"/"−infinity" appears in timestamp
-    // columns (left-aligned in psql) but NOT in numeric/float columns (which
-    // always use capital "Infinity"/"-Infinity").  Only suppress numeric
-    // inference for the lowercase variant; capital-I Infinity is unambiguous.
-    let all_lowercase_infinity =
-        rows.iter()
-            .all(|row| match row.get(col_idx).and_then(|v| v.as_deref()) {
-                None | Some("") => true,
-                Some(v) => v == "infinity" || v == "-infinity",
-            });
-    if all_lowercase_infinity {
-        return false;
-    }
-
-    // Cross-column interval guard: if this column's values are all "0"/"-0"/NULL
-    // (ambiguous zero), check whether any sibling column has interval-like values
-    // (e.g. "1-2", "1 2:03:04").  If so, treat this column as non-numeric to
-    // match psql's type-OID-based left-alignment for interval zero.
-    let only_zero_or_null = rows.iter().all(|row| {
-        matches!(
-            row.get(col_idx).and_then(|v| v.as_deref()),
-            None | Some("" | "0" | "-0")
-        )
-    });
-    if only_zero_or_null {
-        let has_interval_sibling = rows.iter().any(|row| {
-            row.iter().enumerate().any(|(idx, cell)| {
-                if idx == col_idx {
-                    return false;
-                }
-                let v = match cell.as_deref() {
-                    Some(s) if !s.is_empty() => s,
-                    _ => return false,
-                };
-                // Interval patterns: "N-M" (year-month), "N H:MM:SS" (day-time),
-                // or a time-like value containing ':' but NOT a timestamp.
-                //
-                // Timestamps look like "1997-02-11 01:32:01+00" — they start
-                // with a 4-digit year followed by '-'.  Pure interval time
-                // components look like "02:03:04" or "1 02:03:04" (integer +
-                // space + time).  We distinguish by checking whether the first
-                // non-space token before any ':' looks like a date (4-digit
-                // year) or a small integer (interval).
-                //
-                // Dates like "2005-07-21" have exactly 2 hyphens; year-month
-                // intervals like "1-2" have exactly 1 hyphen.  Filter out dates
-                // by requiring only one hyphen in the N-M check.
-                let looks_like_timestamp = v.len() > 10
-                    && v.as_bytes().get(4) == Some(&b'-')
-                    && v[..4].bytes().all(|b| b.is_ascii_digit());
-                (v.contains(':') && !looks_like_timestamp)
-                    || (v.len() >= 3
-                        && v.bytes().filter(|&b| b == b'-').count() == 1
-                        && v.chars()
-                            .next()
-                            .is_some_and(|c| c.is_ascii_digit() || c == '-')
-                        && v.chars().any(|c| c.is_ascii_digit())
-                        && v.parse::<f64>().is_err())
-            })
-        });
-        if has_interval_sibling {
-            return false;
-        }
-    }
-
-    true
-}
-
 /// Print a single result set using the active [`PsetConfig`].
 ///
 /// `col_names` and `rows` describe the result set. `is_select` indicates
 /// whether this was a SELECT-like statement (i.e. we received a
 /// `RowDescription` message, even if zero rows followed). `rows_affected`
-/// carries the `CommandComplete` count. `sql` is the original SQL statement,
-/// used to reconstruct the full psql-style command tag (e.g. `"INSERT 0 1"`).
-/// `is_first` is `false` when this is a subsequent result set in a
-/// multi-statement query, in which case a blank separator line is printed
-/// before the table (matching psql behaviour).
+/// carries the `CommandComplete` count. `is_first` is `false` when this is
+/// a subsequent result set in a multi-statement query, in which case a blank
+/// separator line is printed before the table (matching psql behaviour).
 /// `writer` is the output destination (stdout or a redirected file).
 pub(super) fn print_result_set_pset(
     writer: &mut dyn io::Write,
     col_names: &[String],
-    col_oids: &[u32],
     rows: &[Vec<Option<String>>],
     is_select: bool,
     rows_affected: u64,
-    sql: &str,
     is_first: bool,
     pset: &crate::output::PsetConfig,
-    quiet: bool,
 ) {
     use crate::output::format_rowset_pset;
     use crate::query::{ColumnMeta, RowSet};
@@ -375,25 +45,24 @@ pub(super) fn print_result_set_pset(
         // `SELECT FROM t WHERE ...`.  These are valid PostgreSQL queries that
         // return rows with no columns.  We must still render the row-count
         // footer (e.g. `(1 row)`) to match psql behaviour.
-        //
-        // SHOW commands return a single text column regardless of value content.
-        // psql left-aligns SHOW output because the underlying type is always text.
-        let is_show = sql
-            .trim_start()
-            .get(..4)
-            .is_some_and(|p| p.eq_ignore_ascii_case("show"));
         let columns: Vec<ColumnMeta> = col_names
             .iter()
             .enumerate()
-            .map(|(col_idx, n)| ColumnMeta {
-                name: n.clone(),
-                is_numeric: !is_show
-                    && infer_numeric_column(
-                        col_idx,
-                        n,
-                        rows,
-                        col_oids.get(col_idx).copied().unwrap_or(0),
-                    ),
+            .map(|(col_idx, n)| {
+                let mut has_value = false;
+                let is_numeric = rows.iter().all(|row| {
+                    match row.get(col_idx).and_then(|v| v.as_deref()) {
+                        None | Some("") => true, // NULL or empty: skip, don't disqualify
+                        Some(val) => {
+                            has_value = true;
+                            val.parse::<f64>().is_ok()
+                        }
+                    }
+                }) && has_value;
+                ColumnMeta {
+                    name: n.clone(),
+                    is_numeric,
+                }
             })
             .collect();
 
@@ -408,30 +77,13 @@ pub(super) fn print_result_set_pset(
         // matches psql's consistent blank line after every result set.
         // No extra separator is needed before subsequent results.
         let _ = writer.write_all(out.as_bytes());
-
-        // DML with RETURNING also emits a command tag in psql (e.g. INSERT 0 1).
-        // Detect INSERT/UPDATE/DELETE/MERGE that produced a RowDescription.
-        if !quiet {
-            let tag = crate::query::reconstruct_command_tag(sql, rows_affected);
-            if !tag.is_empty()
-                && tag.split_once(' ').is_some_and(|(verb, _)| {
-                    matches!(verb, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
-                })
-            {
-                let _ = writeln!(writer, "{tag}");
-            }
-        }
-    } else if !quiet {
-        // Non-SELECT statement: show the psql-style command tag.
-        // tokio-postgres 0.7 only exposes the numeric count from
-        // CommandComplete; reconstruct the full tag from the SQL.
-        // Suppressed in quiet mode (-q), matching psql behaviour.
-        let tag = crate::query::reconstruct_command_tag(sql, rows_affected);
-        if !tag.is_empty() {
+    } else if !is_select {
+        // Non-SELECT statement: show rows affected if > 0.
+        if rows_affected > 0 {
             if !is_first {
                 let _ = writeln!(writer);
             }
-            let _ = writeln!(writer, "{tag}");
+            let _ = writeln!(writer, "{rows_affected}");
         }
     }
 }
@@ -472,11 +124,7 @@ pub async fn execute_query(
     // VACUUM, etc.), execute each statement individually.  PostgreSQL wraps
     // multi-statement simple-query strings in an implicit transaction, which
     // would otherwise cause "cannot run inside a transaction block" errors.
-    //
-    // When `exec_verbatim` is set (e.g. for \; combined batches), skip this
-    // guard so the batch is sent as a single Query, preserving PostgreSQL's
-    // implicit-transaction semantics (matching psql behaviour).
-    if !settings.exec_verbatim && needs_split_execution(interpolated.as_str()) {
+    if needs_split_execution(interpolated.as_str()) {
         let stmts = crate::query::split_statements(interpolated.as_str());
         let mut all_ok = true;
         for stmt in stmts {
@@ -539,17 +187,6 @@ pub async fn execute_query(
         }
     }
 
-    // -a / --echo-all: print every statement to stdout before executing.
-    // This matches psql's `-a` flag and is required to reproduce the output
-    // format of pg_regress (which runs `psql -a -q`).
-    if settings.echo_all {
-        if let Some(ref mut w) = settings.output_target {
-            let _ = writeln!(w, "{sql_to_send}");
-        } else {
-            println!("{sql_to_send}");
-        }
-    }
-
     // -e / --echo-queries: print query to stderr before executing.
     if settings.echo_queries {
         eprintln!("{sql_to_send}");
@@ -579,7 +216,6 @@ pub async fn execute_query(
         Ok(messages) => {
             use tokio_postgres::SimpleQueryMessage;
             let mut col_names: Vec<String> = Vec::new();
-            let mut col_oids: Vec<u32> = Vec::new();
             let mut rows: Vec<Vec<Option<String>>> = Vec::new();
             // `is_select` is set to true when we receive a RowDescription
             // message (or any Row message).  This distinguishes an empty
@@ -596,10 +232,6 @@ pub async fn execute_query(
                         is_select = true;
                         if col_names.is_empty() {
                             col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                            col_oids = cols
-                                .iter()
-                                .map(tokio_postgres::SimpleColumn::type_oid)
-                                .collect();
                         }
                     }
                     SimpleQueryMessage::Row(row) => {
@@ -610,13 +242,6 @@ pub async fn execute_query(
                                     row.columns()
                                         .get(i)
                                         .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
-                                })
-                                .collect();
-                            col_oids = (0..row.len())
-                                .map(|i| {
-                                    row.columns()
-                                        .get(i)
-                                        .map_or(0, tokio_postgres::SimpleColumn::type_oid)
                                 })
                                 .collect();
                         }
@@ -659,14 +284,11 @@ pub async fn execute_query(
                         print_result_set_pset(
                             &mut out_buf,
                             &col_names,
-                            &col_oids,
                             &rows,
                             is_select,
                             n,
-                            sql_to_send,
                             result_set_index == 0,
                             &settings.pset,
-                            settings.quiet,
                         );
 
                         // Mirror output to log file if active.
@@ -685,29 +307,9 @@ pub async fn execute_query(
                         if result_set_index == 0 {
                             settings.last_row_count = Some(n);
                         }
-                        // Signal to exec_lines that a result set was produced
-                        // (used to decide whether to echo following blank lines).
-                        // psql echoes blank lines ONLY after pure SELECT-like
-                        // statements in aligned format. DML+RETURNING statements
-                        // (INSERT/UPDATE/DELETE) also produce rows but psql does
-                        // NOT echo blanks after them (they emit a separate command
-                        // tag and format_rowset_pset already appends a blank).
-                        // Unaligned and tuples-only modes are excluded too.
-                        use crate::output::OutputFormat;
-                        if is_select
-                            && !settings.pset.tuples_only
-                            && matches!(
-                                settings.pset.format,
-                                OutputFormat::Aligned | OutputFormat::Wrapped
-                            )
-                            && is_pure_select(sql_to_send)
-                        {
-                            settings.last_stmt_produced_rows = true;
-                        }
 
                         result_set_index += 1;
                         col_names.clear();
-                        col_oids.clear();
                         rows.clear();
                         is_select = false;
                     }
@@ -725,74 +327,8 @@ pub async fn execute_query(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(
-                &e,
-                Some(sql_to_send),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
-            // A failed query doesn't produce rows; psql does not echo blank
-            // lines after error messages.
-            settings.last_stmt_produced_rows = false;
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
-
-            // For multi-statement batches, PostgreSQL processes ALL statements
-            // in simple-query mode even after an error (subsequent ones fail
-            // with "current transaction is aborted").  If the batch ends with
-            // COMMIT / ROLLBACK / END / ABORT, the server rolled back and
-            // returned to Idle — mirror that here so rpg's state stays in sync.
-            {
-                let stmts = crate::query::split_statements(&interpolated);
-                if let Some(last) = stmts.last() {
-                    tx.apply_terminal(last);
-                }
-
-                // In multi-statement batches, COMMIT/ROLLBACK inside the batch
-                // cannot roll back a failed transaction — they also fail with
-                // "transaction aborted".  psql avoids this by sending statements
-                // individually.  We attempt to replicate psql's per-statement
-                // semantics by re-sending recovery statements after a failure.
-                if stmts.len() > 1 {
-                    let first_upper = stmts[0].trim().to_uppercase();
-                    let first_word = first_upper.split_whitespace().next().unwrap_or("");
-                    let last_stmt = stmts.last().unwrap().trim();
-                    let last_upper = last_stmt.to_uppercase();
-                    let mut last_words = last_upper.split_whitespace();
-                    let last_first = last_words.next().unwrap_or("");
-                    let last_second = last_words.next().unwrap_or("");
-
-                    if matches!(first_word, "BEGIN" | "START") {
-                        // The batch opened a transaction that failed midway.
-                        // COMMIT/ROLLBACK inside the batch also failed, so the
-                        // connection is left in E state.  Send a standalone
-                        // ROLLBACK to restore to Idle, matching psql semantics.
-                        //
-                        // Exception: if the batch ends with COMMIT/ROLLBACK AND
-                        // CHAIN, an earlier COMMIT/ROLLBACK already closed the
-                        // original transaction.  The server is already Idle, so
-                        // sending ROLLBACK would produce a spurious "no transaction
-                        // in progress" warning.
-                        let ends_with_and_chain = last_upper.contains("AND CHAIN");
-                        if !ends_with_and_chain {
-                            let _ = client.simple_query("ROLLBACK").await;
-                            *tx = crate::repl::TxState::Idle;
-                        }
-                    } else if matches!(last_first, "ROLLBACK" | "ABORT")
-                        && last_second == "TO"
-                        && *tx == crate::repl::TxState::Failed
-                    {
-                        // Batch ends with ROLLBACK TO <savepoint>: the DELETE/etc.
-                        // failed in the middle, leaving the batch's ROLLBACK TO
-                        // unable to execute.  Re-send it standalone so the
-                        // savepoint can actually be rolled back, matching psql's
-                        // per-statement execution where this succeeds.
-                        if client.simple_query(last_stmt).await.is_ok() {
-                            *tx = crate::repl::TxState::InTransaction;
-                        }
-                    }
-                }
-            }
 
             // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
@@ -803,13 +339,8 @@ pub async fn execute_query(
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
                 error_message: error_message.clone(),
-                sqlstate: sqlstate.clone(),
+                sqlstate,
             });
-            // Update psql-compatible error variables for use in subsequent commands.
-            settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
-            settings
-                .vars
-                .set("LAST_ERROR_SQLSTATE", sqlstate.as_deref().unwrap_or(""));
 
             // Inline error suggestion: if AI is configured and
             // auto_explain_errors is on, show a brief LLM hint.
@@ -947,20 +478,14 @@ pub async fn execute_query_extended(
         None
     };
 
-    // Prepare the statement so that the server can describe its columns.
+    // Prepare the statement so we can execute with typed parameters.
     let stmt = match client.prepare(sql_to_send).await {
         Ok(s) => s,
         Err(e) => {
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(
-                &e,
-                Some(sql_to_send),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
@@ -989,65 +514,76 @@ pub async fn execute_query_extended(
         }
     };
 
-    // Get column metadata from the prepared statement for display.
-    let col_names: Vec<String> = stmt.columns().iter().map(|c| c.name().to_owned()).collect();
-    let col_oids: Vec<u32> = stmt.columns().iter().map(|c| c.type_().oid()).collect();
+    // Build the parameter list as &str references (text format).
+    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let dyn_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
+        .iter()
+        .map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
 
-    // Substitute $N parameters directly into the SQL and execute via
-    // simple_query.  This matches psql's text-parameter semantics: each
-    // bound value is treated as a text literal that the server coerces
-    // to the expected type (e.g. "2" → int via `$1::int`).
-    let parameterised_sql = substitute_bind_params(sql_to_send, params);
-
-    let success = match client.simple_query(&parameterised_sql).await {
-        Ok(messages) => {
+    let success = match client.query(&stmt, dyn_params.as_slice()).await {
+        Ok(rows) => {
+            // Print results using the same pset formatting as simple_query.
             use crate::output::format_rowset_pset;
             use crate::query::{ColumnMeta, RowSet};
-            use tokio_postgres::SimpleQueryMessage;
 
-            let mut row_data: Vec<Vec<Option<String>>> = Vec::new();
-            for msg in messages {
-                if let SimpleQueryMessage::Row(row) = msg {
-                    let vals: Vec<Option<String>> = (0..row.len())
-                        .map(|i| row.get(i).map(str::to_owned))
-                        .collect();
-                    row_data.push(vals);
-                }
-            }
+            if !rows.is_empty() || !stmt.columns().is_empty() {
+                let col_names: Vec<String> =
+                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
-            if !col_names.is_empty() || !row_data.is_empty() {
+                let row_data: Vec<Vec<Option<String>>> = rows
+                    .iter()
+                    .map(|row| {
+                        (0..col_names.len())
+                            .map(|i| row.try_get::<_, Option<String>>(i).unwrap_or(None))
+                            .collect()
+                    })
+                    .collect();
+
                 let columns: Vec<ColumnMeta> = col_names
                     .iter()
                     .enumerate()
-                    .map(|(col_idx, n)| ColumnMeta {
-                        name: n.clone(),
-                        is_numeric: infer_numeric_column(
-                            col_idx,
-                            n,
-                            &row_data,
-                            col_oids.get(col_idx).copied().unwrap_or(0),
-                        ),
+                    .map(|(col_idx, n)| {
+                        let mut has_value = false;
+                        let is_numeric = row_data.iter().all(|r| {
+                            match r.get(col_idx).and_then(|v| v.as_deref()) {
+                                None | Some("") => true,
+                                Some(val) => {
+                                    has_value = true;
+                                    val.parse::<f64>().is_ok()
+                                }
+                            }
+                        }) && has_value;
+                        ColumnMeta {
+                            name: n.clone(),
+                            is_numeric,
+                        }
                     })
                     .collect();
-                let row_count = row_data.len();
+
                 let rs = RowSet {
                     columns,
                     rows: row_data,
                 };
+
                 let mut out = String::new();
                 format_rowset_pset(&mut out, &rs, &settings.pset);
+
                 let out_bytes = out.as_bytes();
-                settings.last_row_count = Some(row_count as u64);
-                settings.last_stmt_produced_rows = true;
+
                 if let Some(ref mut lf) = settings.log_file {
                     let _ = lf.write_all(out_bytes);
                 }
+
                 if let Some(ref mut w) = settings.output_target {
                     let _ = w.write_all(out_bytes);
                 } else {
                     let _ = io::stdout().write_all(out_bytes);
                 }
             }
+
+            // Store row count for audit log entry.
+            settings.last_row_count = Some(rows.len() as u64);
 
             tx.update_from_sql(sql_to_send);
             true
@@ -1056,15 +592,10 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(
-                &e,
-                Some(sql_to_send),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
 
+            // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
             let error_message = e
@@ -1175,13 +706,11 @@ pub(super) async fn execute_named_stmt(
                 let col_names: Vec<String> =
                     stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
-                let col_oids: Vec<u32> = stmt.columns().iter().map(|c| c.type_().oid()).collect();
-
                 let row_data: Vec<Vec<Option<String>>> = rows
                     .iter()
                     .map(|row| {
                         (0..col_names.len())
-                            .map(|i| row_cell_to_string(row, i))
+                            .map(|i| row.try_get::<_, Option<String>>(i).unwrap_or(None))
                             .collect()
                     })
                     .collect();
@@ -1189,14 +718,21 @@ pub(super) async fn execute_named_stmt(
                 let columns: Vec<ColumnMeta> = col_names
                     .iter()
                     .enumerate()
-                    .map(|(col_idx, n)| ColumnMeta {
-                        name: n.clone(),
-                        is_numeric: infer_numeric_column(
-                            col_idx,
-                            n,
-                            &row_data,
-                            col_oids.get(col_idx).copied().unwrap_or(0),
-                        ),
+                    .map(|(col_idx, n)| {
+                        let mut has_value = false;
+                        let is_numeric = row_data.iter().all(|r| {
+                            match r.get(col_idx).and_then(|v| v.as_deref()) {
+                                None | Some("") => true,
+                                Some(val) => {
+                                    has_value = true;
+                                    val.parse::<f64>().is_ok()
+                                }
+                            }
+                        }) && has_value;
+                        ColumnMeta {
+                            name: n.clone(),
+                            is_numeric,
+                        }
                     })
                     .collect();
 
@@ -1221,13 +757,7 @@ pub(super) async fn execute_named_stmt(
             true
         }
         Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                None,
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, None, settings.verbose_errors);
             tx.on_error();
             false
         }
@@ -1341,17 +871,9 @@ pub(super) async fn execute_piped(
     }
 }
 
-/// Return the first keyword of `sql` in uppercase, ignoring leading whitespace.
-///
-/// Used by multiple helpers that need to classify SQL statements by their
-/// opening keyword without allocating a full uppercase copy of the input.
-fn first_keyword_upper(sql: &str) -> String {
-    sql.split_whitespace().next().unwrap_or("").to_uppercase()
-}
-
 /// Return `true` if `sql` is an EXPLAIN statement (any variant).
 fn is_explain_statement(sql: &str) -> bool {
-    first_keyword_upper(sql) == "EXPLAIN"
+    sql.trim_start().to_uppercase().starts_with("EXPLAIN")
 }
 
 /// Strip psql's aligned table formatting from EXPLAIN output.
@@ -2015,35 +1537,33 @@ pub(super) async fn execute_gexec(
             cells
         }
         Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                Some(sql_to_send),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
             return;
         }
     };
 
-    // Execute each cell value as a SQL statement, showing results.
+    // Execute each cell value as a SQL statement.
     for cell_sql in cell_sqls {
-        // psql echoes each \gexec-generated SQL statement in echo-all mode
-        // (regardless of the quiet flag — matches psql -a behavior).
-        if settings.echo_all {
-            if let Some(ref mut w) = settings.output_target {
-                let _ = writeln!(w, "{cell_sql}");
-            } else {
-                println!("{cell_sql}");
+        match client.simple_query(&cell_sql).await {
+            Ok(messages) => {
+                for msg in messages {
+                    if let SimpleQueryMessage::CommandComplete(n) = msg {
+                        // Extract the command tag from the completion count.
+                        // tokio-postgres 0.7 CommandComplete carries only the
+                        // row count as u64; derive the tag by inspecting the
+                        // first keyword of the cell SQL.
+                        let tag = command_tag_for(&cell_sql, n);
+                        println!("{tag}");
+                    }
+                }
+                tx.update_from_sql(&cell_sql);
+            }
+            Err(e) => {
+                crate::output::eprint_db_error(&e, Some(&cell_sql), settings.verbose_errors);
+                tx.on_error();
             }
         }
-        // Use execute_query so SELECT/EXPLAIN results are rendered correctly.
-        // Disable echo_all to avoid re-echoing (we already echoed above).
-        let saved_echo = settings.echo_all;
-        settings.echo_all = false;
-        execute_query(client, &cell_sql, settings, tx).await;
-        settings.echo_all = saved_echo;
     }
 }
 
@@ -2053,7 +1573,6 @@ pub(super) async fn execute_gexec(
 /// For most DDL statements the tag is just the uppercased verb + noun
 /// (e.g. `"CREATE TABLE"`).  For INSERT/UPDATE/DELETE/SELECT we append the
 /// row count.
-#[allow(dead_code)]
 pub(super) fn command_tag_for(sql: &str, n: u64) -> String {
     let upper = sql.trim().to_uppercase();
     let words: Vec<&str> = upper.split_whitespace().take(2).collect();
@@ -2123,277 +1642,26 @@ pub(super) async fn execute_gset(
             }
 
             match rows.len() {
-                0 => {
-                    // Always print this error (not suppressed by \quiet).
-                    eprintln!("error: no rows returned for \\gset");
-                }
+                0 => eprintln!("\\gset: query returned no rows"),
                 1 => {
                     tx.update_from_sql(sql_to_send);
-                    // Update ROW_COUNT to reflect the 1-row result.
-                    settings.vars.set("ROW_COUNT", "1");
                     // Store last query for \watch compatibility.
                     settings.last_query = Some(buf.to_owned());
                     let row = &rows[0];
-                    let mut had_error = false;
                     for (col, val) in col_names.iter().zip(row.iter()) {
                         let var_name = format!("{prefix}{col}");
-                        // Validate that the resulting variable name is legal
-                        // (no spaces, slashes, etc.).
-                        if !crate::vars::is_valid_variable_name(&var_name) {
-                            eprintln!("error: invalid variable name: \"{var_name}\"");
-                            had_error = true;
-                            continue;
-                        }
-                        // Warn about specially treated variables that psql
-                        // ignores when set via \gset.
-                        if is_specially_treated_gset_var(&var_name) {
-                            eprintln!(
-                                "warning: attempt to \\gset into specially treated \
-                                 variable \"{var_name}\" ignored"
-                            );
-                            continue;
-                        }
-                        match val {
-                            Some(v) => settings.vars.set(&var_name, v),
-                            // NULL result → unset the variable (psql behaviour).
-                            None => {
-                                settings.vars.unset(&var_name);
-                            }
-                        }
+                        let var_value = val.as_deref().unwrap_or("");
+                        settings.vars.set(&var_name, var_value);
                     }
-                    let _ = had_error;
                 }
-                _ => eprintln!("error: more than one row returned for \\gset"),
+                n => eprintln!("\\gset: more than one row returned ({n} rows)"),
             }
-            // \gset stores results in variables, not displayed — psql does
-            // not echo blank lines following \gset.
-            settings.last_stmt_produced_rows = false;
         }
         Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                Some(sql_to_send),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
-            settings.last_stmt_produced_rows = false;
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// \bind parameter substitution
-// ---------------------------------------------------------------------------
-
-/// Substitute `$N` positional parameters in `sql` with their quoted literal
-/// values from `params`, producing a plain SQL string safe for `simple_query`.
-///
-/// Each parameter value is wrapped in dollar-quoting (`$param_N$...$param_N$`)
-/// so that any embedded single quotes or backslashes are handled correctly.
-/// If the parameter appears to be NULL (the value is literally `\N` per psql
-/// convention), it is substituted as the SQL keyword `NULL`.
-fn substitute_bind_params(sql: &str, params: &[String]) -> String {
-    if params.is_empty() {
-        return sql.to_owned();
-    }
-
-    let mut out =
-        String::with_capacity(sql.len() + params.iter().map(|p| p.len() + 20).sum::<usize>());
-    let bytes = sql.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_dollar: Option<String> = None;
-    let mut in_line_comment = false;
-    let mut in_block_comment: u32 = 0;
-
-    while i < len {
-        // Track line comments.
-        if !in_single
-            && in_dollar.is_none()
-            && in_block_comment == 0
-            && !in_line_comment
-            && i + 1 < len
-            && bytes[i] == b'-'
-            && bytes[i + 1] == b'-'
-        {
-            in_line_comment = true;
-            out.push('-');
-            out.push('-');
-            i += 2;
-            continue;
-        }
-        if in_line_comment {
-            if bytes[i] == b'\n' {
-                in_line_comment = false;
-            }
-            let ch = sql[i..].chars().next().expect("valid utf8");
-            out.push(ch);
-            i += ch.len_utf8();
-            continue;
-        }
-
-        // Track block comments.
-        if !in_single
-            && in_dollar.is_none()
-            && i + 1 < len
-            && bytes[i] == b'/'
-            && bytes[i + 1] == b'*'
-        {
-            in_block_comment += 1;
-            out.push('/');
-            out.push('*');
-            i += 2;
-            continue;
-        }
-        if in_block_comment > 0 {
-            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                in_block_comment -= 1;
-                out.push('*');
-                out.push('/');
-                i += 2;
-            } else {
-                let ch = sql[i..].chars().next().expect("valid utf8");
-                out.push(ch);
-                i += ch.len_utf8();
-            }
-            continue;
-        }
-
-        // Track single-quoted strings.
-        if bytes[i] == b'\'' {
-            if in_single {
-                // Check for escaped quote.
-                if i + 1 < len && bytes[i + 1] == b'\'' {
-                    out.push('\'');
-                    out.push('\'');
-                    i += 2;
-                    continue;
-                }
-                in_single = false;
-            } else if in_dollar.is_none() {
-                in_single = true;
-            }
-            out.push('\'');
-            i += 1;
-            continue;
-        }
-
-        // Track dollar-quoted strings.
-        if bytes[i] == b'$' && !in_single {
-            let rest = &sql[i..];
-            // Find closing $.
-            if let Some(end) = rest[1..].find('$') {
-                let tag = &rest[..end + 2]; // includes both $
-                let inner = &rest[1..=end];
-                let is_valid_tag = inner.is_empty()
-                    || (inner
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphabetic() || c == '_')
-                        && inner.chars().all(|c| c.is_alphanumeric() || c == '_'));
-                if is_valid_tag {
-                    if let Some(ref open_tag) = in_dollar.clone() {
-                        if tag == open_tag {
-                            in_dollar = None;
-                            out.push_str(tag);
-                            i += tag.len();
-                            continue;
-                        }
-                    } else {
-                        in_dollar = Some(tag.to_owned());
-                        out.push_str(tag);
-                        i += tag.len();
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Substitute $N when outside strings/comments.
-        if bytes[i] == b'$'
-            && !in_single
-            && in_dollar.is_none()
-            && !in_line_comment
-            && in_block_comment == 0
-        {
-            // Parse the number after $.
-            let start = i + 1;
-            let mut end = start;
-            while end < len && bytes[end].is_ascii_digit() {
-                end += 1;
-            }
-            if end > start {
-                let num_str = &sql[start..end];
-                if let Ok(n) = num_str.parse::<usize>() {
-                    if n >= 1 {
-                        if let Some(val) = params.get(n - 1) {
-                            // Use dollar-quoting to safely embed the value.
-                            // Pick a tag that doesn't appear in the value.
-                            let tag = find_dollar_quote_tag(val);
-                            out.push_str(&tag);
-                            out.push_str(val);
-                            out.push_str(&tag);
-                            i = end;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        let ch = sql[i..].chars().next().expect("valid utf8");
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-
-    out
-}
-
-/// Find a dollar-quoting tag that does not appear inside `val`.
-fn find_dollar_quote_tag(val: &str) -> String {
-    let base = "$param$";
-    if !val.contains(base) {
-        return base.to_owned();
-    }
-    for n in 0..100 {
-        let tag = format!("$param{n}$");
-        if !val.contains(&tag) {
-            return tag;
-        }
-    }
-    "$p$".to_owned()
-}
-
-// ---------------------------------------------------------------------------
-// \gset helpers
-// ---------------------------------------------------------------------------
-
-/// Variables that psql treats specially and ignores when set via `\gset`.
-///
-/// These are read-only or specially handled internal variables.  When a
-/// `\gset` prefix+column would produce one of these names, psql prints a
-/// warning and skips the assignment.
-fn is_specially_treated_gset_var(name: &str) -> bool {
-    matches!(
-        name,
-        "IGNOREEOF"
-            | "DBNAME"
-            | "USER"
-            | "PORT"
-            | "HOST"
-            | "ENCODING"
-            | "HISTFILE"
-            | "HISTSIZE"
-            | "LASTOID"
-            | "PROMPT1"
-            | "PROMPT2"
-            | "PROMPT3"
-            | "VERBOSITY"
-            | "SHOW_CONTEXT"
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2423,58 +1691,38 @@ pub(super) async fn execute_crosstabview(
     let result = match client.simple_query(sql_to_send).await {
         Ok(messages) => {
             let mut col_names: Vec<String> = Vec::new();
-            let mut col_oids: Vec<u32> = Vec::new();
             let mut rows: Vec<Vec<String>> = Vec::new();
 
-            let null_str = settings.pset.null_display.clone();
             for msg in messages {
-                match msg {
-                    SimpleQueryMessage::RowDescription(cols) => {
-                        if col_names.is_empty() {
-                            col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                            col_oids = cols
-                                .iter()
-                                .map(tokio_postgres::SimpleColumn::type_oid)
-                                .collect();
-                        }
-                    }
-                    SimpleQueryMessage::Row(row) => {
-                        if col_names.is_empty() {
-                            col_names = (0..row.len())
-                                .map(|i| {
-                                    row.columns()
-                                        .get(i)
-                                        .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
-                                })
-                                .collect();
-                        }
-                        let vals: Vec<String> = (0..row.len())
-                            .map(|i| row.get(i).unwrap_or(null_str.as_str()).to_owned())
+                if let SimpleQueryMessage::Row(row) = msg {
+                    if col_names.is_empty() {
+                        col_names = (0..row.len())
+                            .map(|i| {
+                                row.columns()
+                                    .get(i)
+                                    .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                            })
                             .collect();
-                        rows.push(vals);
                     }
-                    _ => {}
+                    let vals: Vec<String> = (0..row.len())
+                        .map(|i| row.get(i).unwrap_or("").to_owned())
+                        .collect();
+                    rows.push(vals);
                 }
             }
 
             tx.update_from_sql(sql_to_send);
             settings.last_query = Some(buf.to_owned());
-            Some((col_names, col_oids, rows))
+            Some((col_names, rows))
         }
         Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                Some(sql_to_send),
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
+            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors);
             tx.on_error();
             None
         }
     };
 
-    let Some((col_names, col_oids, rows)) = result else {
+    let Some((col_names, rows)) = result else {
         return;
     };
 
@@ -2482,76 +1730,14 @@ pub(super) async fn execute_crosstabview(
     let args = crate::crosstab::parse_args(raw_args);
     match crate::crosstab::pivot(&col_names, &rows, &args) {
         Ok((pivot_headers, pivot_rows)) => {
-            // Determine column alignment: right-align numeric columns.
-            let row_right_align = {
-                let idx_v = args
-                    .col_v
-                    .as_ref()
-                    .map_or(0, |s| s.resolve(&col_names).unwrap_or(0));
-                col_oids.get(idx_v).copied().is_some_and(is_numeric_oid)
-            };
-            let data_right_align = {
-                let idx_d = args
-                    .col_d
-                    .as_ref()
-                    .map_or(2, |s| s.resolve(&col_names).unwrap_or(2));
-                col_oids.get(idx_d).copied().is_some_and(is_numeric_oid)
-            };
             let mut out = String::new();
-            crate::crosstab::format_pivot(
-                &mut out,
-                &pivot_headers,
-                &pivot_rows,
-                row_right_align,
-                data_right_align,
-            );
-            // psql always outputs a blank line after the crosstabview
-            // result table in echo-all (-a) mode.
-            out.push('\n');
+            crate::crosstab::format_pivot(&mut out, &pivot_headers, &pivot_rows);
             let _ = io::stdout().write_all(out.as_bytes());
-            // Do NOT set last_stmt_produced_rows: the trailing blank line
-            // was already output above, so blank lines that follow in the
-            // input file should NOT be echoed a second time.
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{e}");
         }
     }
-}
-
-/// Return true for `PostgreSQL` OIDs that represent numeric types
-/// (which should be right-aligned in table output).
-/// Returns true if `sql` is a pure SELECT-like statement (SELECT, WITH, VALUES,
-/// TABLE, FETCH, EXPLAIN SELECT, etc.) — i.e. not DML+RETURNING (INSERT/UPDATE/
-/// DELETE). psql echoes blank lines after pure SELECT results but not after DML.
-fn is_pure_select(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    // Skip leading comments (-- and /* */).
-    let upper = upper.trim_start();
-    // Find first non-comment, non-whitespace token.
-    let first_word = upper
-        .split_whitespace()
-        .find(|w| !w.starts_with("--"))
-        .unwrap_or("");
-    matches!(
-        first_word,
-        "SELECT" | "WITH" | "VALUES" | "TABLE" | "FETCH" | "EXPLAIN"
-    )
-}
-
-fn is_numeric_oid(oid: u32) -> bool {
-    matches!(
-        oid,
-        20   // int8 / bigint
-        | 21 // int2 / smallint
-        | 23 // int4 / integer
-        | 26 // oid
-        | 700 // float4 / real
-        | 701 // float8 / double precision
-        | 790 // money
-        | 1700 // numeric / decimal
-        | 2278 // void (rare)
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2584,7 +1770,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
     let stmt = match client.prepare(buf).await {
         Ok(s) => s,
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(buf), verbose_errors, false, false);
+            crate::output::eprint_db_error(&e, Some(buf), verbose_errors);
             return;
         }
     };
@@ -2618,7 +1804,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
             .map(|i| row.get::<_, String>(i))
             .collect(),
         Err(e) => {
-            crate::output::eprint_db_error(&e, None, verbose_errors, false, false);
+            crate::output::eprint_db_error(&e, None, verbose_errors);
             return;
         }
     };
@@ -2861,14 +2047,11 @@ mod tests {
         print_result_set_pset(
             &mut buf,
             &[],       // zero column names
-            &[],       // zero type OIDs
             &[vec![]], // one row, no cells
             true,      // is_select
             1,         // rows_affected (not used for SELECT)
-            "SELECT FROM t WHERE i = 10",
-            true, // is_first
+            true,      // is_first
             &PsetConfig::default(),
-            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert!(
@@ -2883,14 +2066,11 @@ mod tests {
         print_result_set_pset(
             &mut buf,
             &[], // zero column names
-            &[], // zero type OIDs
             &[], // zero rows
             true,
             0,
-            "SELECT FROM t WHERE false",
             true,
             &PsetConfig::default(),
-            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert!(
@@ -2905,14 +2085,11 @@ mod tests {
         print_result_set_pset(
             &mut buf,
             &[],
-            &[],
             &[vec![]],
             true,
             1,
-            "SELECT FROM t",
             true,
             &PsetConfig::default(),
-            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
         assert!(
@@ -2922,47 +2099,22 @@ mod tests {
     }
 
     #[test]
-    fn ddl_shows_command_tag() {
-        // DDL commands (rows_affected=0) must show their command tag to match psql.
+    fn non_select_zero_rows_affected_produces_no_output() {
         let mut buf: Vec<u8> = Vec::new();
         print_result_set_pset(
             &mut buf,
-            &[],
             &[],
             &[],
             false, // not a SELECT
-            0,     // DDL always has rows_affected=0
-            "CREATE TABLE foo (id int)",
+            0,     // zero rows affected (e.g. UPDATE that matched nothing)
             true,
             &PsetConfig::default(),
-            false, // not quiet
         );
         let out = String::from_utf8(buf).unwrap();
-        assert_eq!(
-            out.trim(),
-            "CREATE TABLE",
-            "CREATE TABLE must print its command tag: {out:?}"
+        assert!(
+            out.is_empty(),
+            "non-SELECT with 0 rows affected must produce no output: {out:?}"
         );
-    }
-
-    #[test]
-    fn update_zero_rows_shows_tag() {
-        // UPDATE with 0 matching rows must print "UPDATE 0" (matches psql).
-        let mut buf: Vec<u8> = Vec::new();
-        print_result_set_pset(
-            &mut buf,
-            &[],
-            &[],
-            &[],
-            false,
-            0, // 0 rows affected
-            "UPDATE foo SET x = 1 WHERE false",
-            true,
-            &PsetConfig::default(),
-            false, // not quiet
-        );
-        let out = String::from_utf8(buf).unwrap();
-        assert_eq!(out.trim(), "UPDATE 0", "UPDATE 0 must print tag: {out:?}");
     }
 
     // -- is_explain_statement ------------------------------------------------
