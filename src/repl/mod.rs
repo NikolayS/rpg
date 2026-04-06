@@ -677,187 +677,110 @@ pub fn is_complete(buf: &str) -> bool {
 /// Return `true` when `buf` ends inside an unclosed dollar-quoted string.
 /// Used to decide whether to echo blank lines in `-a` mode: psql echoes blank
 /// lines inside dollar-quoted bodies but skips them between statements.
+/// Scan `buf` and return `(in_single_quote, in_dollar_quote)` — whether the
+/// buffer ends inside a single-quoted string and/or a dollar-quoted string.
+/// Block comments and line comments are skipped correctly.
+fn scan_quote_state(buf: &str) -> (bool, bool) {
+    let mut in_single = false;
+    let mut block_comment_depth: u32 = 0;
+    let mut dollar_tag: Option<String> = None;
+
+    let bytes = buf.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if let Some(ref tag) = dollar_tag.clone() {
+            let tag_bytes = tag.as_bytes();
+            if bytes[i..].starts_with(tag_bytes) {
+                i += tag_bytes.len();
+                dollar_tag = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                i += 2;
+                block_comment_depth -= 1;
+            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                block_comment_depth += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single {
+            if bytes[i] == b'\'' {
+                if i + 1 < len && bytes[i + 1] == b'\'' {
+                    i += 2;
+                } else {
+                    in_single = false;
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth += 1;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'$' {
+            let rest = &buf[i..];
+            if let Some(end) = rest[1..].find('$') {
+                let inner = &rest[1..=end];
+                let valid = inner.is_empty()
+                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !inner.chars().all(|c| c.is_ascii_digit()));
+                if valid {
+                    let tag = &rest[..end + 2];
+                    dollar_tag = Some(tag.to_owned());
+                    i += tag.len();
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    (in_single, dollar_tag.is_some())
+}
+
 /// Returns `true` if the buffer ends inside any string literal (dollar-quoted
 /// or single-quoted).  Used to decide whether blank lines should be echoed in
 /// `--echo-all` mode — psql echoes blank lines inside function bodies but
 /// skips them between statements or when only comments are buffered.
 fn is_inside_string_literal(buf: &str) -> bool {
-    let mut in_single = false;
-    let mut block_comment_depth: u32 = 0;
-    let mut dollar_tag: Option<String> = None;
-
-    let bytes = buf.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if let Some(ref tag) = dollar_tag.clone() {
-            let tag_bytes = tag.as_bytes();
-            if bytes[i..].starts_with(tag_bytes) {
-                i += tag_bytes.len();
-                dollar_tag = None;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        if block_comment_depth > 0 {
-            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2;
-                block_comment_depth -= 1;
-            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                i += 2;
-                block_comment_depth += 1;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if in_single {
-            if bytes[i] == b'\'' {
-                if i + 1 < len && bytes[i + 1] == b'\'' {
-                    i += 2;
-                } else {
-                    in_single = false;
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            block_comment_depth += 1;
-            i += 2;
-            continue;
-        }
-
-        if bytes[i] == b'\'' {
-            in_single = true;
-            i += 1;
-            continue;
-        }
-
-        if bytes[i] == b'$' {
-            let rest = &buf[i..];
-            if let Some(end) = rest[1..].find('$') {
-                let inner = &rest[1..=end];
-                let valid = inner.is_empty()
-                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !inner.chars().all(|c| c.is_ascii_digit()));
-                if valid {
-                    let tag = &rest[..end + 2];
-                    dollar_tag = Some(tag.to_owned());
-                    i += tag.len();
-                    continue;
-                }
-            }
-        }
-
-        i += 1;
-    }
-
-    in_single || dollar_tag.is_some()
+    let (in_single, in_dollar) = scan_quote_state(buf);
+    in_single || in_dollar
 }
 
 #[allow(dead_code)]
 fn is_inside_dollar_quote(buf: &str) -> bool {
-    let mut in_single = false;
-    let mut block_comment_depth: u32 = 0;
-    let mut dollar_tag: Option<String> = None;
-
-    let bytes = buf.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if let Some(ref tag) = dollar_tag.clone() {
-            let tag_bytes = tag.as_bytes();
-            if bytes[i..].starts_with(tag_bytes) {
-                i += tag_bytes.len();
-                dollar_tag = None;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        if block_comment_depth > 0 {
-            if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                i += 2;
-                block_comment_depth -= 1;
-            } else if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                i += 2;
-                block_comment_depth += 1;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if in_single {
-            if bytes[i] == b'\'' {
-                if i + 1 < len && bytes[i + 1] == b'\'' {
-                    i += 2;
-                } else {
-                    in_single = false;
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            block_comment_depth += 1;
-            i += 2;
-            continue;
-        }
-
-        if bytes[i] == b'\'' {
-            in_single = true;
-            i += 1;
-            continue;
-        }
-
-        if bytes[i] == b'$' {
-            let rest = &buf[i..];
-            if let Some(end) = rest[1..].find('$') {
-                let inner = &rest[1..=end];
-                let valid = inner.is_empty()
-                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !inner.chars().all(|c| c.is_ascii_digit()));
-                if valid {
-                    let tag = &rest[..end + 2];
-                    dollar_tag = Some(tag.to_owned());
-                    i += tag.len();
-                    continue;
-                }
-            }
-        }
-
-        i += 1;
-    }
-
-    dollar_tag.is_some()
+    scan_quote_state(buf).1
 }
 
 // ---------------------------------------------------------------------------
