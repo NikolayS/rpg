@@ -506,8 +506,9 @@ fn write_aligned_row_border<F>(
                             out.push('|');
                         } else if has_more {
                             out.push('+');
+                        } else {
+                            out.push(' '); // trailing space on last header col (psql compat)
                         }
-                        // else: trailing space → stripped → nothing needed
                     }
                 }
             }
@@ -619,9 +620,8 @@ fn write_aligned_row_border<F>(
                 let last_continues = col_continues.last().copied().unwrap_or(false);
                 if !is_last_phys && last_continues {
                     out.push('+');
-                } else {
-                    out.push(' ');
                 }
+                // No trailing space on data rows (psql compat).
             }
         }
         out.push('\n');
