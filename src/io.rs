@@ -67,10 +67,16 @@ pub fn include_file<'a>(
         let start_depth = settings.cond.depth();
 
         // Loop to handle \c reconnections within the included file.
-        let mut lines_iter: Box<dyn Iterator<Item = String>> =
-            Box::new(content.lines().map(str::to_owned).collect::<Vec<_>>().into_iter());
+        let mut lines_iter: Box<dyn Iterator<Item = String>> = Box::new(
+            content
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
         let mut active_client: &Client = client;
         let mut active_params: ConnParams = params.clone();
+        #[allow(unused_assignments)]
         let mut reconnected_client: Option<Box<Client>> = None;
         let mut exit_code: i32;
 

@@ -171,8 +171,8 @@ async fn run_and_print_full(
     show_row_count: bool,
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    use crate::output::{OutputFormat, format_rowset_pset};
-    use crate::query::{RowSet, ColumnMeta};
+    use crate::output::{format_rowset_pset, OutputFormat};
+    use crate::query::{ColumnMeta, RowSet};
 
     if echo_hidden {
         eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
@@ -234,7 +234,10 @@ async fn run_and_print_full(
                     .iter()
                     .map(|r| r.iter().map(|v| Some(v.clone())).collect())
                     .collect();
-                let rs = RowSet { columns, rows: rs_rows };
+                let rs = RowSet {
+                    columns,
+                    rows: rs_rows,
+                };
                 // Apply title to pset config temporarily.
                 let mut cfg = settings.pset.clone();
                 if let Some(t) = title {
@@ -315,14 +318,38 @@ fn format_table_inner(
             // Known text-type column names — never right-align these.
             if matches!(
                 name_lc.as_str(),
-                "type" | "schema" | "name" | "owner" | "collation" | "nullable"
-                    | "default" | "check" | "access privileges" | "storage"
-                    | "compression" | "stats target" | "description" | "column"
-                    | "definition" | "condition" | "columns" | "key?"
-                    | "primary" | "references" | "options" | "fdw options"
-                    | "cycles?" | "comment" | "inherits" | "tablespace"
-                    | "child tables" | "partition of" | "partition constraint"
-                    | "replica identity" | "access method" | "version"
+                "type"
+                    | "schema"
+                    | "name"
+                    | "owner"
+                    | "collation"
+                    | "nullable"
+                    | "default"
+                    | "check"
+                    | "access privileges"
+                    | "storage"
+                    | "compression"
+                    | "stats target"
+                    | "description"
+                    | "column"
+                    | "definition"
+                    | "condition"
+                    | "columns"
+                    | "key?"
+                    | "primary"
+                    | "references"
+                    | "options"
+                    | "fdw options"
+                    | "cycles?"
+                    | "comment"
+                    | "inherits"
+                    | "tablespace"
+                    | "child tables"
+                    | "partition of"
+                    | "partition constraint"
+                    | "replica identity"
+                    | "access method"
+                    | "version"
                     | "foreign-data wrapper"
             ) {
                 return false;
@@ -731,18 +758,26 @@ async fn list_functions(
     // \dfn → only normal functions, \dfp → only procedures, etc.
     let kind_filter = meta.kind_filter.map(|k| {
         let pg_kind = match k {
-            'n' => "'f'",        // normal function
-            'p' => "'p'",        // procedure
-            'a' => "'a'",        // aggregate
-            'w' => "'w'",        // window function
+            'n' => "'f'", // normal function
+            'p' => "'p'", // procedure
+            'a' => "'a'", // aggregate
+            'w' => "'w'", // window function
             _ => "null",
         };
         format!("p.prokind = {pg_kind}")
     });
 
     let where_parts: Vec<&str> = [
-        if sys_filter.is_empty() { None } else { Some(sys_filter.as_str()) },
-        if name_filter.is_empty() { None } else { Some(name_filter.as_str()) },
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
         kind_filter.as_deref(),
     ]
     .into_iter()
@@ -838,14 +873,7 @@ order by 1, 2, 4"
         "List of functions"
     };
 
-    run_and_print_titled(
-        client,
-        &sql,
-        meta.echo_hidden,
-        Some(title),
-        settings,
-    )
-    .await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some(title), settings).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2340,8 +2368,7 @@ async fn list_publications(
     meta: &ParsedMeta,
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    let name_filter =
-        pattern::where_clause(meta.pattern.as_deref(), "p.pubname", None);
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "p.pubname", None);
 
     let where_clause = if name_filter.is_empty() {
         String::new()
@@ -2413,38 +2440,56 @@ order by 1"
         eprintln!("/******** QUERY *********/\n{pubs_sql}\n/************************/");
     }
 
-    let pub_rows: Vec<(String, String, String, String, String, String, String, String, String)> =
-        match client.simple_query(&pubs_sql).await {
-            Ok(msgs) => msgs
-                .into_iter()
-                .filter_map(|m| {
-                    if let SimpleQueryMessage::Row(row) = m {
-                        Some((
-                            row.get(0).unwrap_or("").to_owned(), // oid
-                            row.get(1).unwrap_or("").to_owned(), // pubname
-                            row.get(2).unwrap_or("").to_owned(), // owner
-                            row.get(3).unwrap_or("").to_owned(), // puballtables
-                            row.get(4).unwrap_or("").to_owned(), // pubinsert
-                            row.get(5).unwrap_or("").to_owned(), // pubupdate
-                            row.get(6).unwrap_or("").to_owned(), // pubdelete
-                            row.get(7).unwrap_or("").to_owned(), // pubtruncate
-                            row.get(8).unwrap_or("").to_owned(), // pubviaroot
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            Err(e) => {
-                crate::output::eprint_db_error(&e, Some(&pubs_sql), false, false, false);
-                return false;
-            }
-        };
+    let pub_rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = match client.simple_query(&pubs_sql).await {
+        Ok(msgs) => msgs
+            .into_iter()
+            .filter_map(|m| {
+                if let SimpleQueryMessage::Row(row) = m {
+                    Some((
+                        row.get(0).unwrap_or("").to_owned(), // oid
+                        row.get(1).unwrap_or("").to_owned(), // pubname
+                        row.get(2).unwrap_or("").to_owned(), // owner
+                        row.get(3).unwrap_or("").to_owned(), // puballtables
+                        row.get(4).unwrap_or("").to_owned(), // pubinsert
+                        row.get(5).unwrap_or("").to_owned(), // pubupdate
+                        row.get(6).unwrap_or("").to_owned(), // pubdelete
+                        row.get(7).unwrap_or("").to_owned(), // pubtruncate
+                        row.get(8).unwrap_or("").to_owned(), // pubviaroot
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(e) => {
+            crate::output::eprint_db_error(&e, Some(&pubs_sql), false, false, false);
+            return false;
+        }
+    };
 
     let mut full_output = String::new();
 
-    for (oid, pubname, owner, puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, pubviaroot) in
-        &pub_rows
+    for (
+        oid,
+        pubname,
+        owner,
+        puballtables,
+        pubinsert,
+        pubupdate,
+        pubdelete,
+        pubtruncate,
+        pubviaroot,
+    ) in &pub_rows
     {
         // Build the attribute rows for this publication.
         let col_names: Vec<String> = vec![
@@ -2525,20 +2570,19 @@ order by 1"
         if meta.echo_hidden {
             eprintln!("/******** QUERY *********/\n{schemas_sql}\n/************************/");
         }
-        let schema_names: Vec<String> =
-            if let Ok(msgs) = client.simple_query(&schemas_sql).await {
-                msgs.into_iter()
-                    .filter_map(|m| {
-                        if let SimpleQueryMessage::Row(row) = m {
-                            Some(row.get(0).unwrap_or("").to_owned())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let schema_names: Vec<String> = if let Ok(msgs) = client.simple_query(&schemas_sql).await {
+            msgs.into_iter()
+                .filter_map(|m| {
+                    if let SimpleQueryMessage::Row(row) = m {
+                        Some(row.get(0).unwrap_or("").to_owned())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Write the publication header table.
         let title = format!("Publication {pubname}");
@@ -2589,8 +2633,7 @@ async fn list_subscriptions(
     meta: &ParsedMeta,
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    let name_filter =
-        pattern::where_clause(meta.pattern.as_deref(), "s.subname", None);
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "s.subname", None);
 
     let where_clause = if name_filter.is_empty() {
         String::new()
@@ -3271,9 +3314,7 @@ where c.oid = (
                     if !reloptions.is_empty() {
                         // reloptions is a PostgreSQL array literal like {key=val,key2=val2}
                         // Strip braces and rejoin with ", " to match psql output format.
-                        let inner = reloptions
-                            .trim_start_matches('{')
-                            .trim_end_matches('}');
+                        let inner = reloptions.trim_start_matches('{').trim_end_matches('}');
                         if !inner.is_empty() {
                             let opts = inner.split(',').collect::<Vec<_>>().join(", ");
                             println!("Options: {opts}");
@@ -3759,7 +3800,21 @@ where {name_cond} limit 1"
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
         // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident, idx_tablespace)
-        type IndexRow = (String, bool, bool, String, String, String, bool, String, String, bool, bool, bool, String);
+        type IndexRow = (
+            String,
+            bool,
+            bool,
+            String,
+            String,
+            String,
+            bool,
+            String,
+            String,
+            bool,
+            bool,
+            bool,
+            String,
+        );
         let mut index_rows: Vec<IndexRow> = Vec::new();
         for msg in messages {
             if let SimpleQueryMessage::Row(row) = msg {
@@ -3804,16 +3859,30 @@ where {name_cond} limit 1"
         }
         if !index_rows.is_empty() {
             println!("Indexes:");
-            for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident, idx_tablespace) in &index_rows {
+            for (
+                idx_name,
+                is_primary,
+                is_unique,
+                amname,
+                idx_oid_str,
+                idx_pred,
+                is_valid,
+                con_type,
+                con_oid,
+                nulls_not_distinct,
+                is_deferrable,
+                is_replident,
+                idx_tablespace,
+            ) in &index_rows
+            {
                 // EXCLUDE constraints use pg_get_constraintdef for full definition.
                 let is_exclude = con_type == "x";
                 // Extract column list from pg_get_indexdef (the part inside parens).
                 let col_expr = if is_exclude && !con_oid.is_empty() {
                     // For EXCLUDE constraints, use pg_get_constraintdef which gives the
                     // full "EXCLUDE USING gist (c4 WITH &&) INCLUDE ..." form.
-                    let condef_sql = format!(
-                        "select pg_catalog.pg_get_constraintdef({con_oid}, true)"
-                    );
+                    let condef_sql =
+                        format!("select pg_catalog.pg_get_constraintdef({con_oid}, true)");
                     if let Ok(def_msgs) = client.simple_query(&condef_sql).await {
                         let mut expr = String::new();
                         for def_msg in def_msgs {
@@ -3834,7 +3903,8 @@ where {name_cond} limit 1"
                         for def_msg in def_msgs {
                             if let SimpleQueryMessage::Row(def_row) = def_msg {
                                 let full = def_row.get(0).unwrap_or("");
-                                if let (Some(open), Some(close)) = (full.find('('), full.rfind(')')) {
+                                if let (Some(open), Some(close)) = (full.find('('), full.rfind(')'))
+                                {
                                     full[open..=close].clone_into(&mut expr);
                                 }
                                 break;
@@ -3877,7 +3947,11 @@ where {name_cond} limit 1"
 
                 let invalid_suffix = if *is_valid { "" } else { " INVALID" };
                 let deferrable_suffix = if *is_deferrable { " DEFERRABLE" } else { "" };
-                let replident_suffix = if *is_replident { " REPLICA IDENTITY" } else { "" };
+                let replident_suffix = if *is_replident {
+                    " REPLICA IDENTITY"
+                } else {
+                    ""
+                };
                 let tblspc_suffix = if idx_tablespace.is_empty() {
                     String::new()
                 } else {
@@ -4011,7 +4085,8 @@ order by pol.polname"
         );
         if let Ok(msgs) = client.simple_query(&pol_sql).await {
             use tokio_postgres::SimpleQueryMessage;
-            let mut policies: Vec<(String, bool, Option<String>, Option<String>, Option<String>)> = Vec::new();
+            let mut policies: Vec<(String, bool, Option<String>, Option<String>, Option<String>)> =
+                Vec::new();
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
                     let name = row.get(0).unwrap_or("").to_owned();
@@ -4071,7 +4146,8 @@ order by nsp, s.stxname"
         if let Ok(messages) = client.simple_query(&stat_sql).await {
             use tokio_postgres::SimpleQueryMessage;
             // (nsp, name, columns, has_ndistinct, has_deps, has_mcv, table_name, stxstattarget)
-            let mut stat_rows: Vec<(String, String, String, bool, bool, bool, String, String)> = Vec::new();
+            let mut stat_rows: Vec<(String, String, String, bool, bool, bool, String, String)> =
+                Vec::new();
             for msg in messages {
                 if let SimpleQueryMessage::Row(row) = msg {
                     let nsp = row.get(0).unwrap_or("").to_owned();
@@ -4093,9 +4169,15 @@ order by nsp, s.stxname"
                     let has_some = *has_nd || *has_dep || *has_mcv;
                     let kinds_str = if has_some && !has_all {
                         let mut parts = Vec::new();
-                        if *has_nd { parts.push("ndistinct"); }
-                        if *has_dep { parts.push("dependencies"); }
-                        if *has_mcv { parts.push("mcv"); }
+                        if *has_nd {
+                            parts.push("ndistinct");
+                        }
+                        if *has_dep {
+                            parts.push("dependencies");
+                        }
+                        if *has_mcv {
+                            parts.push("mcv");
+                        }
                         format!(" ({})", parts.join(", "))
                     } else {
                         String::new()
@@ -4200,20 +4282,28 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
                     }
                 }
                 if !parts.is_empty() {
-                    println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, pkind))| {
-                        let suffix = if pkind == "p" {
-                            ", PARTITIONED"
-                        } else if pkind == "f" {
-                            ", FOREIGN"
-                        } else {
-                            ""
-                        };
-                        if i == 0 {
-                            format!("{pn} {pb}{suffix}")
-                        } else {
-                            format!("            {pn} {pb}{suffix}")
-                        }
-                    }).collect::<Vec<_>>().join(",\n"));
+                    println!(
+                        "Partitions: {}",
+                        parts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (pn, pb, pkind))| {
+                                let suffix = if pkind == "p" {
+                                    ", PARTITIONED"
+                                } else if pkind == "f" {
+                                    ", FOREIGN"
+                                } else {
+                                    ""
+                                };
+                                if i == 0 {
+                                    format!("{pn} {pb}{suffix}")
+                                } else {
+                                    format!("            {pn} {pb}{suffix}")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n")
+                    );
                 } else {
                     println!("Number of partitions: 0");
                 }
@@ -4228,14 +4318,19 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
             );
             let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
                 use tokio_postgres::SimpleQueryMessage;
-                cmsgs.iter().find_map(|m| {
-                    if let SimpleQueryMessage::Row(r) = m {
-                        r.get(0).and_then(|v| v.parse::<u64>().ok())
-                    } else {
-                        None
-                    }
-                }).unwrap_or(0)
-            } else { 0 };
+                cmsgs
+                    .iter()
+                    .find_map(|m| {
+                        if let SimpleQueryMessage::Row(r) = m {
+                            r.get(0).and_then(|v| v.parse::<u64>().ok())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             if num_parts == 0 {
                 println!("Number of partitions: 0");
@@ -4387,13 +4482,14 @@ order by 1"
                     // Table (and other) rules: show name with 4-space indent,
                     // then the body lines after the "AS\n" separator.
                     println!("    {name} AS");
-                    let body = if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
-                        rest.strip_prefix('\n').unwrap_or(rest)
-                    } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
-                        rest.splitn(2, '\n').nth(1).unwrap_or("")
-                    } else {
-                        def.as_str()
-                    };
+                    let body =
+                        if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
+                            rest.strip_prefix('\n').unwrap_or(rest)
+                        } else if let Some(rest) = def.strip_prefix("CREATE RULE ") {
+                            rest.splitn(2, '\n').nth(1).unwrap_or("")
+                        } else {
+                            def.as_str()
+                        };
                     for line in body.lines() {
                         println!("{line}");
                     }
@@ -4401,7 +4497,6 @@ order by 1"
             }
         }
     }
-
 
     // Inherits — show parent table(s) for non-partition inheritance.
     let inherits_sql = format!(
@@ -4500,9 +4595,7 @@ order by 1"
                 } else {
                     // \d mode: show count summary
                     let n = children.len();
-                    println!(
-                        "Number of child tables: {n} (Use \\d+ to list them.)"
-                    );
+                    println!("Number of child tables: {n} (Use \\d+ to list them.)");
                 }
             }
         }
@@ -4786,64 +4879,44 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // relation_title — always "List of relations" to match psql
+    // relation_title — type-specific headings to match psql
     // -----------------------------------------------------------------------
 
-    /// psql always shows "List of relations" for \dt, \di, \dv, \ds, \dm and
-    /// their + variants.  Verify that `relation_title()` matches this for all
-    /// relkind combinations.
+    /// psql uses type-specific headings: "List of tables" for \dt, etc.
+    /// Verify that `relation_title()` returns the correct heading for each
+    /// relkind combination.
     #[test]
     fn relation_title_tables() {
-        assert_eq!(
-            relation_title(&["r", "p"]),
-            "List of relations",
-            "\\dt and \\dt+ should show 'List of relations' to match psql"
-        );
+        assert_eq!(relation_title(&["r", "p"]), "List of tables");
+        assert_eq!(relation_title(&["r"]), "List of tables");
+        assert_eq!(relation_title(&["p"]), "List of tables");
     }
 
     #[test]
     fn relation_title_indexes() {
-        assert_eq!(
-            relation_title(&["i"]),
-            "List of relations",
-            "\\di and \\di+ should show 'List of relations' to match psql"
-        );
+        assert_eq!(relation_title(&["i"]), "List of indexes");
+        assert_eq!(relation_title(&["I"]), "List of indexes");
+        assert_eq!(relation_title(&["i", "I"]), "List of indexes");
     }
 
     #[test]
     fn relation_title_sequences() {
-        assert_eq!(
-            relation_title(&["S"]),
-            "List of relations",
-            "\\ds and \\ds+ should show 'List of relations' to match psql"
-        );
+        assert_eq!(relation_title(&["S"]), "List of sequences");
     }
 
     #[test]
     fn relation_title_views() {
-        assert_eq!(
-            relation_title(&["v"]),
-            "List of relations",
-            "\\dv and \\dv+ should show 'List of relations' to match psql"
-        );
+        assert_eq!(relation_title(&["v"]), "List of views");
     }
 
     #[test]
     fn relation_title_matviews() {
-        assert_eq!(
-            relation_title(&["m"]),
-            "List of relations",
-            "\\dm and \\dm+ should show 'List of relations' to match psql"
-        );
+        assert_eq!(relation_title(&["m"]), "List of materialized views");
     }
 
     #[test]
     fn relation_title_foreign_tables() {
-        assert_eq!(
-            relation_title(&["f"]),
-            "List of relations",
-            "\\dE and \\dE+ should show 'List of relations' to match psql"
-        );
+        assert_eq!(relation_title(&["f"]), "List of foreign tables");
     }
 
     #[test]

@@ -94,7 +94,10 @@ impl ConditionalState {
     /// Create a new, empty (unconstrained) state.
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self { stack: Vec::new(), error_depth: 0 }
+        Self {
+            stack: Vec::new(),
+            error_depth: 0,
+        }
     }
 
     /// Return `true` when every open block is currently active.

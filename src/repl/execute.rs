@@ -56,13 +56,48 @@ fn row_cell_to_string(row: &tokio_postgres::Row, i: usize) -> Option<String> {
     // Try common numeric types.
     let oid = row.columns().get(i).map(|c| c.type_().oid()).unwrap_or(0);
     match oid {
-        20 => return row.try_get::<_, Option<i64>>(i).ok().flatten().map(|v| v.to_string()),
-        21 => return row.try_get::<_, Option<i16>>(i).ok().flatten().map(|v| v.to_string()),
-        23 => return row.try_get::<_, Option<i32>>(i).ok().flatten().map(|v| v.to_string()),
-        700 => return row.try_get::<_, Option<f32>>(i).ok().flatten().map(|v| v.to_string()),
-        701 => return row.try_get::<_, Option<f64>>(i).ok().flatten().map(|v| v.to_string()),
-        16 => return row.try_get::<_, Option<bool>>(i).ok().flatten()
-            .map(|v: bool| if v { "t".to_owned() } else { "f".to_owned() }),
+        20 => {
+            return row
+                .try_get::<_, Option<i64>>(i)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+        }
+        21 => {
+            return row
+                .try_get::<_, Option<i16>>(i)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+        }
+        23 => {
+            return row
+                .try_get::<_, Option<i32>>(i)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+        }
+        700 => {
+            return row
+                .try_get::<_, Option<f32>>(i)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+        }
+        701 => {
+            return row
+                .try_get::<_, Option<f64>>(i)
+                .ok()
+                .flatten()
+                .map(|v| v.to_string())
+        }
+        16 => {
+            return row
+                .try_get::<_, Option<bool>>(i)
+                .ok()
+                .flatten()
+                .map(|v: bool| if v { "t".to_owned() } else { "f".to_owned() })
+        }
         _ => {}
     }
     None
@@ -238,12 +273,12 @@ fn infer_numeric_column(
     // columns (left-aligned in psql) but NOT in numeric/float columns (which
     // always use capital "Infinity"/"-Infinity").  Only suppress numeric
     // inference for the lowercase variant; capital-I Infinity is unambiguous.
-    let all_lowercase_infinity = rows.iter().all(|row| {
-        match row.get(col_idx).and_then(|v| v.as_deref()) {
-            None | Some("") => true,
-            Some(v) => v == "infinity" || v == "-infinity",
-        }
-    });
+    let all_lowercase_infinity =
+        rows.iter()
+            .all(|row| match row.get(col_idx).and_then(|v| v.as_deref()) {
+                None | Some("") => true,
+                Some(v) => v == "infinity" || v == "-infinity",
+            });
     if all_lowercase_infinity {
         return false;
     }
@@ -287,7 +322,9 @@ fn infer_numeric_column(
                 (v.contains(':') && !looks_like_timestamp)
                     || (v.len() >= 3
                         && v.bytes().filter(|&b| b == b'-').count() == 1
-                        && v.chars().next().map_or(false, |c| c.is_ascii_digit() || c == '-')
+                        && v.chars()
+                            .next()
+                            .map_or(false, |c| c.is_ascii_digit() || c == '-')
                         && v.chars().any(|c| c.is_ascii_digit())
                         && v.parse::<f64>().is_err())
             })
@@ -341,7 +378,8 @@ pub(super) fn print_result_set_pset(
         //
         // SHOW commands return a single text column regardless of value content.
         // psql left-aligns SHOW output because the underlying type is always text.
-        let is_show = sql.trim_start()
+        let is_show = sql
+            .trim_start()
             .get(..4)
             .map_or(false, |p| p.eq_ignore_ascii_case("show"));
         let columns: Vec<ColumnMeta> = col_names
@@ -349,12 +387,13 @@ pub(super) fn print_result_set_pset(
             .enumerate()
             .map(|(col_idx, n)| ColumnMeta {
                 name: n.clone(),
-                is_numeric: !is_show && infer_numeric_column(
-                    col_idx,
-                    n,
-                    rows,
-                    col_oids.get(col_idx).copied().unwrap_or(0),
-                ),
+                is_numeric: !is_show
+                    && infer_numeric_column(
+                        col_idx,
+                        n,
+                        rows,
+                        col_oids.get(col_idx).copied().unwrap_or(0),
+                    ),
             })
             .collect();
 
@@ -377,9 +416,7 @@ pub(super) fn print_result_set_pset(
             if !tag.is_empty()
                 && tag
                     .split_once(' ')
-                    .map(|(verb, _)| {
-                        matches!(verb, "INSERT" | "UPDATE" | "DELETE" | "MERGE")
-                    })
+                    .map(|(verb, _)| matches!(verb, "INSERT" | "UPDATE" | "DELETE" | "MERGE"))
                     .unwrap_or(false)
             {
                 let _ = writeln!(writer, "{tag}");
@@ -682,7 +719,13 @@ pub async fn execute_query(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             // A failed query doesn't produce rows; psql does not echo blank
             // lines after error messages.
             settings.last_stmt_produced_rows = false;
@@ -758,10 +801,9 @@ pub async fn execute_query(
             });
             // Update psql-compatible error variables for use in subsequent commands.
             settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
-            settings.vars.set(
-                "LAST_ERROR_SQLSTATE",
-                sqlstate.as_deref().unwrap_or(""),
-            );
+            settings
+                .vars
+                .set("LAST_ERROR_SQLSTATE", sqlstate.as_deref().unwrap_or(""));
 
             // Inline error suggestion: if AI is configured and
             // auto_explain_errors is on, show a brief LLM hint.
@@ -906,7 +948,13 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             tx.on_error();
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
@@ -936,16 +984,8 @@ pub async fn execute_query_extended(
     };
 
     // Get column metadata from the prepared statement for display.
-    let col_names: Vec<String> = stmt
-        .columns()
-        .iter()
-        .map(|c| c.name().to_owned())
-        .collect();
-    let col_oids: Vec<u32> = stmt
-        .columns()
-        .iter()
-        .map(|c| c.type_().oid())
-        .collect();
+    let col_names: Vec<String> = stmt.columns().iter().map(|c| c.name().to_owned()).collect();
+    let col_oids: Vec<u32> = stmt.columns().iter().map(|c| c.type_().oid()).collect();
 
     // Substitute $N parameters directly into the SQL and execute via
     // simple_query.  This matches psql's text-parameter semantics: each
@@ -955,9 +995,9 @@ pub async fn execute_query_extended(
 
     let success = match client.simple_query(&parameterised_sql).await {
         Ok(messages) => {
-            use tokio_postgres::SimpleQueryMessage;
             use crate::output::format_rowset_pset;
             use crate::query::{ColumnMeta, RowSet};
+            use tokio_postgres::SimpleQueryMessage;
 
             let mut row_data: Vec<Vec<Option<String>>> = Vec::new();
             for msg in messages {
@@ -984,7 +1024,10 @@ pub async fn execute_query_extended(
                     })
                     .collect();
                 let row_count = row_data.len();
-                let rs = RowSet { columns, rows: row_data };
+                let rs = RowSet {
+                    columns,
+                    rows: row_data,
+                };
                 let mut out = String::new();
                 format_rowset_pset(&mut out, &rs, &settings.pset);
                 let out_bytes = out.as_bytes();
@@ -1007,7 +1050,13 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             tx.on_error();
 
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
@@ -1120,8 +1169,7 @@ pub(super) async fn execute_named_stmt(
                 let col_names: Vec<String> =
                     stmt.columns().iter().map(|c| c.name().to_owned()).collect();
 
-                let col_oids: Vec<u32> =
-                    stmt.columns().iter().map(|c| c.type_().oid()).collect();
+                let col_oids: Vec<u32> = stmt.columns().iter().map(|c| c.type_().oid()).collect();
 
                 let row_data: Vec<Vec<Option<String>>> = rows
                     .iter()
@@ -1167,7 +1215,13 @@ pub(super) async fn execute_named_stmt(
             true
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, None, settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                None,
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             tx.on_error();
             false
         }
@@ -1959,7 +2013,13 @@ pub(super) async fn execute_gexec(
             cells
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             tx.on_error();
             return;
         }
@@ -1991,6 +2051,7 @@ pub(super) async fn execute_gexec(
 /// For most DDL statements the tag is just the uppercased verb + noun
 /// (e.g. `"CREATE TABLE"`).  For INSERT/UPDATE/DELETE/SELECT we append the
 /// row count.
+#[allow(dead_code)]
 pub(super) fn command_tag_for(sql: &str, n: u64) -> String {
     let upper = sql.trim().to_uppercase();
     let words: Vec<&str> = upper.split_whitespace().take(2).collect();
@@ -2093,7 +2154,9 @@ pub(super) async fn execute_gset(
                         match val {
                             Some(v) => settings.vars.set(&var_name, v),
                             // NULL result → unset the variable (psql behaviour).
-                            None => { settings.vars.unset(&var_name); }
+                            None => {
+                                settings.vars.unset(&var_name);
+                            }
                         }
                     }
                     let _ = had_error;
@@ -2105,7 +2168,13 @@ pub(super) async fn execute_gset(
             settings.last_stmt_produced_rows = false;
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             settings.last_stmt_produced_rows = false;
             tx.on_error();
         }
@@ -2128,7 +2197,8 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
         return sql.to_owned();
     }
 
-    let mut out = String::with_capacity(sql.len() + params.iter().map(|p| p.len() + 20).sum::<usize>());
+    let mut out =
+        String::with_capacity(sql.len() + params.iter().map(|p| p.len() + 20).sum::<usize>());
     let bytes = sql.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -2139,8 +2209,13 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
 
     while i < len {
         // Track line comments.
-        if !in_single && in_dollar.is_none() && in_block_comment == 0 && !in_line_comment
-            && i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-'
+        if !in_single
+            && in_dollar.is_none()
+            && in_block_comment == 0
+            && !in_line_comment
+            && i + 1 < len
+            && bytes[i] == b'-'
+            && bytes[i + 1] == b'-'
         {
             in_line_comment = true;
             out.push('-');
@@ -2158,8 +2233,11 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
         }
 
         // Track block comments.
-        if !in_single && in_dollar.is_none() && i + 1 < len
-            && bytes[i] == b'/' && bytes[i + 1] == b'*'
+        if !in_single
+            && in_dollar.is_none()
+            && i + 1 < len
+            && bytes[i] == b'/'
+            && bytes[i + 1] == b'*'
         {
             in_block_comment += 1;
             out.push('/');
@@ -2207,7 +2285,10 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
                 let tag = &rest[..end + 2]; // includes both $
                 let inner = &rest[1..end + 1];
                 let is_valid_tag = inner.is_empty()
-                    || (inner.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                    || (inner
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_alphabetic() || c == '_')
                         && inner.chars().all(|c| c.is_alphanumeric() || c == '_'));
                 if is_valid_tag {
                     if let Some(ref open_tag) = in_dollar.clone() {
@@ -2228,7 +2309,10 @@ fn substitute_bind_params(sql: &str, params: &[String]) -> String {
         }
 
         // Substitute $N when outside strings/comments.
-        if bytes[i] == b'$' && !in_single && in_dollar.is_none() && !in_line_comment
+        if bytes[i] == b'$'
+            && !in_single
+            && in_dollar.is_none()
+            && !in_line_comment
             && in_block_comment == 0
         {
             // Parse the number after $.
@@ -2370,7 +2454,13 @@ pub(super) async fn execute_crosstabview(
             Some((col_names, col_oids, rows))
         }
         Err(e) => {
-            crate::output::eprint_db_error(&e, Some(sql_to_send), settings.verbose_errors, settings.terse_errors, settings.sqlstate_errors);
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql_to_send),
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            );
             tx.on_error();
             None
         }
@@ -2386,15 +2476,17 @@ pub(super) async fn execute_crosstabview(
         Ok((pivot_headers, pivot_rows)) => {
             // Determine column alignment: right-align numeric columns.
             let row_right_align = {
-                let idx_v = args.col_v.as_ref().map_or(0, |s| {
-                    s.resolve(&col_names).unwrap_or(0)
-                });
+                let idx_v = args
+                    .col_v
+                    .as_ref()
+                    .map_or(0, |s| s.resolve(&col_names).unwrap_or(0));
                 col_oids.get(idx_v).copied().map_or(false, is_numeric_oid)
             };
             let data_right_align = {
-                let idx_d = args.col_d.as_ref().map_or(2, |s| {
-                    s.resolve(&col_names).unwrap_or(2)
-                });
+                let idx_d = args
+                    .col_d
+                    .as_ref()
+                    .map_or(2, |s| s.resolve(&col_names).unwrap_or(2));
                 col_oids.get(idx_d).copied().map_or(false, is_numeric_oid)
             };
             let mut out = String::new();
@@ -2766,7 +2858,7 @@ mod tests {
             true,      // is_select
             1,         // rows_affected (not used for SELECT)
             "SELECT FROM t WHERE i = 10",
-            true,      // is_first
+            true, // is_first
             &PsetConfig::default(),
             false, // not quiet
         );

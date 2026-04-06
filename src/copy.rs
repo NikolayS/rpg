@@ -172,8 +172,7 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
     // -----------------------------------------------------------------------
     // Step 4 — options (CSV, TEXT, DELIMITER 'x', HEADER, NULL 'str', …)
     // -----------------------------------------------------------------------
-    let (format, delimiter, header, null_string, extra_options) =
-        parse_copy_options(&mut tokens)?;
+    let (format, delimiter, header, null_string, extra_options) = parse_copy_options(&mut tokens)?;
 
     Ok(CopySpec {
         direction,
@@ -1209,8 +1208,8 @@ mod tests {
 
     #[test]
     fn test_parse_bare_paren_force_quote_columns() {
-        let spec =
-            parse_copy_args("y TO stdout (FORMAT CSV, FORCE_QUOTE (col2), ESCAPE E'\\\\')").unwrap();
+        let spec = parse_copy_args("y TO stdout (FORMAT CSV, FORCE_QUOTE (col2), ESCAPE E'\\\\')")
+            .unwrap();
         assert_eq!(spec.format, CopyFormat::Csv);
         assert_eq!(spec.extra_options[0], "FORCE_QUOTE (col2)");
         assert_eq!(spec.extra_options[1], "ESCAPE E'\\\\'");

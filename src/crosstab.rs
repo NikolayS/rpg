@@ -72,9 +72,10 @@ impl ColSpec {
                     ))
                 }
             }
-            Self::Name(name) => headers.iter().position(|h| h == name).ok_or_else(|| {
-                format!("\\crosstabview: column name not found: \"{name}\"")
-            }),
+            Self::Name(name) => headers
+                .iter()
+                .position(|h| h == name)
+                .ok_or_else(|| format!("\\crosstabview: column name not found: \"{name}\"")),
         }
     }
 }
@@ -219,8 +220,7 @@ pub fn pivot(
     // Validate: colV / colH must be distinct.
     if idx_v == idx_h {
         return Err(
-            "\\crosstabview: vertical and horizontal headers must be different columns"
-                .to_owned(),
+            "\\crosstabview: vertical and horizontal headers must be different columns".to_owned(),
         );
     }
 
@@ -351,7 +351,11 @@ pub fn format_pivot(
     for row in pivot_rows {
         for (col_idx, cell) in row.iter().enumerate() {
             if col_idx < ncols {
-                let max_line_w = cell.split('\n').map(UnicodeWidthStr::width).max().unwrap_or(0);
+                let max_line_w = cell
+                    .split('\n')
+                    .map(UnicodeWidthStr::width)
+                    .max()
+                    .unwrap_or(0);
                 if max_line_w > widths[col_idx] {
                     widths[col_idx] = max_line_w;
                 }
@@ -436,6 +440,7 @@ fn build_header_row(cells: &[String], widths: &[usize]) -> String {
 /// Build a single-line row: ` cell1 | cell2 | cell3`.
 ///
 /// Used for rows that don't need centering (legacy usage, not used for headers).
+#[allow(dead_code)]
 fn build_row(cells: &[String], widths: &[usize]) -> String {
     cells
         .iter()
@@ -493,7 +498,11 @@ fn render_multiline_row(
             let padding = w.saturating_sub(content_w);
 
             // Determine alignment: col 0 uses row_right_align, cols 1+ use data_right_align.
-            let right_align = if col == 0 { row_right_align } else { data_right_align };
+            let right_align = if col == 0 {
+                row_right_align
+            } else {
+                data_right_align
+            };
 
             if right_align {
                 // Right-align: leading space + padding + content + trailing space.
@@ -630,7 +639,7 @@ mod tests {
         let hdrs = vec!["a".to_owned(), "b".to_owned()];
         let rows: Vec<Vec<String>> = vec![];
         let err = pivot(&hdrs, &rows, &CrosstabArgs::default()).unwrap_err();
-        assert!(err.contains("at least 3 columns"), "got: {err}");
+        assert!(err.contains("at least three"), "got: {err}");
     }
 
     #[test]
@@ -640,7 +649,7 @@ mod tests {
             vec!["a".to_owned(), "x".to_owned(), "2".to_owned()], // duplicate
         ];
         let err = pivot(&headers(), &rows, &CrosstabArgs::default()).unwrap_err();
-        assert!(err.contains("duplicate"), "got: {err}");
+        assert!(err.contains("multiple data values"), "got: {err}");
     }
 
     #[test]
@@ -651,7 +660,7 @@ mod tests {
             ..Default::default()
         };
         let err = pivot(&headers(), &simple_rows(), &args).unwrap_err();
-        assert!(err.contains("colV"), "got: {err}");
+        assert!(err.contains("vertical and horizontal"), "got: {err}");
     }
 
     #[test]

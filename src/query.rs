@@ -173,8 +173,8 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
             "OR" => {
                 // CREATE OR REPLACE FUNCTION/PROCEDURE/VIEW/RULE/TRANSFORM
                 let kind = match w3 {
-                    "FUNCTION" | "PROCEDURE" | "VIEW" | "RULE" | "AGGREGATE"
-                    | "TRANSFORM" | "TRIGGER" => w3,
+                    "FUNCTION" | "PROCEDURE" | "VIEW" | "RULE" | "AGGREGATE" | "TRANSFORM"
+                    | "TRIGGER" => w3,
                     _ => w3,
                 };
                 format!("CREATE {kind}")
@@ -361,9 +361,7 @@ fn skip_leading_comments(sql: &str) -> &str {
     loop {
         if s.starts_with("--") {
             // Line comment: skip to end of line.
-            s = s
-                .find('\n')
-                .map_or("", |i| s[i + 1..].trim_start());
+            s = s.find('\n').map_or("", |i| s[i + 1..].trim_start());
         } else if s.starts_with("/*") {
             // Block comment: skip to matching `*/`, handling nesting.
             let bytes = s.as_bytes();
@@ -898,44 +896,83 @@ mod tests {
 
     #[test]
     fn test_reconstruct_insert() {
-        assert_eq!(reconstruct_command_tag("INSERT INTO t VALUES (1)", 1), "INSERT 0 1");
-        assert_eq!(reconstruct_command_tag("INSERT INTO t VALUES (1),(2),(3)", 3), "INSERT 0 3");
-        assert_eq!(reconstruct_command_tag("insert into t values (1)", 1), "INSERT 0 1");
+        assert_eq!(
+            reconstruct_command_tag("INSERT INTO t VALUES (1)", 1),
+            "INSERT 0 1"
+        );
+        assert_eq!(
+            reconstruct_command_tag("INSERT INTO t VALUES (1),(2),(3)", 3),
+            "INSERT 0 3"
+        );
+        assert_eq!(
+            reconstruct_command_tag("insert into t values (1)", 1),
+            "INSERT 0 1"
+        );
     }
 
     #[test]
     fn test_reconstruct_update() {
         assert_eq!(reconstruct_command_tag("UPDATE t SET x = 1", 5), "UPDATE 5");
-        assert_eq!(reconstruct_command_tag("UPDATE t SET x = 1 WHERE false", 0), "UPDATE 0");
+        assert_eq!(
+            reconstruct_command_tag("UPDATE t SET x = 1 WHERE false", 0),
+            "UPDATE 0"
+        );
     }
 
     #[test]
     fn test_reconstruct_delete() {
-        assert_eq!(reconstruct_command_tag("DELETE FROM t WHERE id = 1", 1), "DELETE 1");
+        assert_eq!(
+            reconstruct_command_tag("DELETE FROM t WHERE id = 1", 1),
+            "DELETE 1"
+        );
         assert_eq!(reconstruct_command_tag("delete from t", 0), "DELETE 0");
     }
 
     #[test]
     fn test_reconstruct_copy() {
-        assert_eq!(reconstruct_command_tag("COPY t FROM 'file.csv'", 42), "COPY 42");
+        assert_eq!(
+            reconstruct_command_tag("COPY t FROM 'file.csv'", 42),
+            "COPY 42"
+        );
         assert_eq!(reconstruct_command_tag("COPY t TO STDOUT", 10), "COPY 10");
     }
 
     #[test]
     fn test_reconstruct_ddl() {
-        assert_eq!(reconstruct_command_tag("CREATE TABLE foo (id int)", 0), "CREATE TABLE");
+        assert_eq!(
+            reconstruct_command_tag("CREATE TABLE foo (id int)", 0),
+            "CREATE TABLE"
+        );
         assert_eq!(reconstruct_command_tag("DROP TABLE foo", 0), "DROP TABLE");
-        assert_eq!(reconstruct_command_tag("ALTER TABLE foo ADD COLUMN x int", 0), "ALTER TABLE");
-        assert_eq!(reconstruct_command_tag("CREATE INDEX idx ON foo (id)", 0), "CREATE INDEX");
-        assert_eq!(reconstruct_command_tag("CREATE UNIQUE INDEX idx ON foo (id)", 0), "CREATE INDEX");
-        assert_eq!(reconstruct_command_tag("CREATE MATERIALIZED VIEW v AS SELECT 1", 0), "CREATE MATERIALIZED VIEW");
-        assert_eq!(reconstruct_command_tag("DROP MATERIALIZED VIEW v", 0), "DROP MATERIALIZED VIEW");
+        assert_eq!(
+            reconstruct_command_tag("ALTER TABLE foo ADD COLUMN x int", 0),
+            "ALTER TABLE"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE INDEX idx ON foo (id)", 0),
+            "CREATE INDEX"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE UNIQUE INDEX idx ON foo (id)", 0),
+            "CREATE INDEX"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE MATERIALIZED VIEW v AS SELECT 1", 0),
+            "CREATE MATERIALIZED VIEW"
+        );
+        assert_eq!(
+            reconstruct_command_tag("DROP MATERIALIZED VIEW v", 0),
+            "DROP MATERIALIZED VIEW"
+        );
     }
 
     #[test]
     fn test_reconstruct_create_or_replace() {
         assert_eq!(
-            reconstruct_command_tag("CREATE OR REPLACE FUNCTION foo() RETURNS void AS $$ $$ LANGUAGE sql", 0),
+            reconstruct_command_tag(
+                "CREATE OR REPLACE FUNCTION foo() RETURNS void AS $$ $$ LANGUAGE sql",
+                0
+            ),
             "CREATE FUNCTION"
         );
         assert_eq!(
@@ -950,16 +987,25 @@ mod tests {
         assert_eq!(reconstruct_command_tag("COMMIT", 0), "COMMIT");
         assert_eq!(reconstruct_command_tag("ROLLBACK", 0), "ROLLBACK");
         assert_eq!(reconstruct_command_tag("SAVEPOINT sp1", 0), "SAVEPOINT");
-        assert_eq!(reconstruct_command_tag("RELEASE SAVEPOINT sp1", 0), "RELEASE");
+        assert_eq!(
+            reconstruct_command_tag("RELEASE SAVEPOINT sp1", 0),
+            "RELEASE"
+        );
     }
 
     #[test]
     fn test_reconstruct_utility() {
-        assert_eq!(reconstruct_command_tag("SET search_path = public", 0), "SET");
+        assert_eq!(
+            reconstruct_command_tag("SET search_path = public", 0),
+            "SET"
+        );
         assert_eq!(reconstruct_command_tag("TRUNCATE foo", 0), "TRUNCATE TABLE");
         assert_eq!(reconstruct_command_tag("VACUUM", 0), "VACUUM");
         assert_eq!(reconstruct_command_tag("ANALYZE foo", 0), "ANALYZE");
-        assert_eq!(reconstruct_command_tag("COMMENT ON TABLE foo IS 'bar'", 0), "COMMENT");
+        assert_eq!(
+            reconstruct_command_tag("COMMENT ON TABLE foo IS 'bar'", 0),
+            "COMMENT"
+        );
     }
 
     #[test]

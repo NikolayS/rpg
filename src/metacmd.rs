@@ -568,7 +568,7 @@ pub fn parse(input: &str) -> ParsedMeta {
                         },
                         echo_hidden: false,
                         kind_filter: None,
-            continuation: None,
+                        continuation: None,
                     };
                 }
             }
@@ -1197,7 +1197,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     pattern: None,
                     echo_hidden: false,
                     kind_filter: None,
-            continuation: None,
+                    continuation: None,
                 };
             }
         }
@@ -1256,7 +1256,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1275,7 +1275,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1303,7 +1303,7 @@ fn parse_h(input: &str) -> ParsedMeta {
         },
         echo_hidden: false,
         kind_filter: None,
-            continuation: None,
+        continuation: None,
     }
 }
 
@@ -1378,7 +1378,7 @@ fn parse_l(input: &str) -> ParsedMeta {
         pattern,
         echo_hidden: false,
         kind_filter: None,
-            continuation: None,
+        continuation: None,
     }
 }
 
@@ -1514,7 +1514,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1549,7 +1549,11 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                     };
                 }
             } else {
-                m.pattern = if raw.is_empty() { None } else { Some(raw.to_owned()) };
+                m.pattern = if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw.to_owned())
+                };
             }
             return m;
         }
@@ -1585,7 +1589,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1623,7 +1627,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1641,7 +1645,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1710,7 +1714,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1729,7 +1733,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1747,7 +1751,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1772,7 +1776,7 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                 },
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -1830,7 +1834,7 @@ fn parse_shell(input: &str) -> ParsedMeta {
         },
         echo_hidden: false,
         kind_filter: None,
-            continuation: None,
+        continuation: None,
     }
 }
 
@@ -1979,9 +1983,7 @@ fn parse_b_family(input: &str) -> ParsedMeta {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let rest = rest.trim();
             // Find the statement name (first token).
-            let name_end = rest
-                .find(|c: char| c.is_whitespace())
-                .unwrap_or(rest.len());
+            let name_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
             let name = rest[..name_end].to_owned();
             let params_str = rest[name_end..].trim();
             let (params, cont) = split_params_with_continuation(params_str);
@@ -2179,12 +2181,26 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 if after.starts_with('\\') {
                     (Some(first.to_owned()), Some(after.to_owned()))
                 } else {
-                    (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+                    (
+                        if raw_arg.is_empty() {
+                            None
+                        } else {
+                            Some(raw_arg.to_owned())
+                        },
+                        None,
+                    )
                 }
             } else {
-                (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+                (
+                    if raw_arg.is_empty() {
+                        None
+                    } else {
+                        Some(raw_arg.to_owned())
+                    },
+                    None,
+                )
             };
-            let mut m = ParsedMeta {
+            let m = ParsedMeta {
                 cmd: MetaCmd::GoExecuteExpanded(file_arg),
                 plus: false,
                 system: false,
@@ -2217,10 +2233,24 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 if after.starts_with('\\') {
                     (Some(first.to_owned()), Some(after.to_owned()))
                 } else {
-                    (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+                    (
+                        if raw_arg.is_empty() {
+                            None
+                        } else {
+                            Some(raw_arg.to_owned())
+                        },
+                        None,
+                    )
                 }
             } else {
-                (if raw_arg.is_empty() { None } else { Some(raw_arg.to_owned()) }, None)
+                (
+                    if raw_arg.is_empty() {
+                        None
+                    } else {
+                        Some(raw_arg.to_owned())
+                    },
+                    None,
+                )
             };
             return ParsedMeta {
                 cmd: MetaCmd::GoExecute(file_arg),
@@ -2306,7 +2336,10 @@ fn parse_d_family(input: &str) -> ParsedMeta {
             Some(k @ ('n' | 'p' | 'a' | 'w')) => (Some(k), &rest[1..]),
             _ => (None, rest),
         };
-        if kind_char.is_some() || rest2.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S') || rest2.is_empty() {
+        if kind_char.is_some()
+            || rest2.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S')
+            || rest2.is_empty()
+        {
             let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
             return ParsedMeta {
                 cmd: MetaCmd::ListFunctions,
@@ -2315,15 +2348,14 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 pattern,
                 echo_hidden: false,
                 kind_filter: kind_char,
-            continuation: None,
+                continuation: None,
             };
         }
     }
 
     // \da [pattern] — shorthand for \dfa (list aggregate functions).
     if let Some(rest) = input.strip_prefix("da") {
-        if rest.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S')
-            || rest.is_empty()
+        if rest.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S') || rest.is_empty()
         {
             let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
             return ParsedMeta {
@@ -2351,7 +2383,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 pattern,
                 echo_hidden: false,
                 kind_filter: None,
-            continuation: None,
+                continuation: None,
             };
         }
     }
@@ -2366,7 +2398,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         pattern,
         echo_hidden: false,
         kind_filter: None,
-            continuation: None,
+        continuation: None,
     }
 }
 

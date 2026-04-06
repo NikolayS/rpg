@@ -2417,14 +2417,11 @@ pub async fn connect(
                         && !is_numeric_addr(host)
                     {
                         let addr_str = format!("{host}:{port}");
-                        let ipv4 = std::net::ToSocketAddrs::to_socket_addrs(
-                            &addr_str.as_str(),
-                        )
-                        .ok()
-                        .and_then(|mut it| {
-                            it.find(|a| a.is_ipv4())
-                                .map(|a| a.ip().to_string())
-                        });
+                        let ipv4 = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str())
+                            .ok()
+                            .and_then(|mut it| {
+                                it.find(|a| a.is_ipv4()).map(|a| a.ip().to_string())
+                            });
 
                         if let Some(ip4) = ipv4 {
                             let mut pg4 = pg_config.clone();
@@ -2742,8 +2739,7 @@ fn is_af_not_supported_err(e: &ConnectionError) -> bool {
     match e {
         ConnectionError::ConnectionFailed { reason, .. } => {
             let r = reason.to_lowercase();
-            r.contains("address family not supported")
-                || r.contains("os error 97")
+            r.contains("address family not supported") || r.contains("os error 97")
         }
         _ => false,
     }

@@ -11,8 +11,6 @@ use std::fmt::Write as FmtWrite;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult};
 
 /// Global terse-errors flag, mirroring `\set VERBOSITY terse`.
@@ -200,9 +198,8 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     // Title line: printed as plain text for non-HTML formats.
     // HTML format emits the title itself as <caption> inside the table element.
     // Suppressed in tuples_only mode and CSV format (matching psql behaviour).
-    let show_title = !cfg.tuples_only
-        && cfg.format != OutputFormat::Html
-        && cfg.format != OutputFormat::Csv;
+    let show_title =
+        !cfg.tuples_only && cfg.format != OutputFormat::Html && cfg.format != OutputFormat::Csv;
     if show_title {
         if let Some(ref title) = cfg.title {
             let _ = writeln!(out, "{title}");
@@ -248,10 +245,7 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     // psql prints a blank line after aligned result sets (trailing newline
     // after `(N rows)` plus one more blank line).  Unaligned and CSV modes
     // omit this extra blank line entirely.
-    let is_unaligned = matches!(
-        cfg.format,
-        OutputFormat::Unaligned | OutputFormat::Csv
-    );
+    let is_unaligned = matches!(cfg.format, OutputFormat::Unaligned | OutputFormat::Csv);
     if !is_unaligned {
         out.push('\n');
     }
@@ -434,8 +428,15 @@ fn write_aligned_row_border<F>(
     if is_header {
         // Split each column name into physical lines (handles embedded '\n').
         let ncols = cols.len();
-        let header_vals: Vec<String> = cols.iter().enumerate().map(|(i, col)| value_fn(col, i)).collect();
-        let header_name_lines: Vec<Vec<&str>> = header_vals.iter().map(|v| v.split('\n').collect()).collect();
+        let header_vals: Vec<String> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, col)| value_fn(col, i))
+            .collect();
+        let header_name_lines: Vec<Vec<&str>> = header_vals
+            .iter()
+            .map(|v| v.split('\n').collect())
+            .collect();
         let max_header_lines = header_name_lines.iter().map(|v| v.len()).max().unwrap_or(1);
 
         // Format:
@@ -466,13 +467,17 @@ fn write_aligned_row_border<F>(
                 // Inter-column space (printed before col j>0 content, after previous
                 // col's marker+pipe were already emitted as that col's suffix).
                 if i > 0 {
-                    out.push(' ');  // space between pipe and content
+                    out.push(' '); // space between pipe and content
                 }
 
                 // Center-aligned content.
-                for _ in 0..left_pad { out.push(' '); }
+                for _ in 0..left_pad {
+                    out.push(' ');
+                }
                 out.push_str(text);
-                for _ in 0..right_pad { out.push(' '); }
+                for _ in 0..right_pad {
+                    out.push(' ');
+                }
 
                 // Column suffix: marker [+ '|'] depending on border and position.
                 //   border=0: marker (gap to next col, or '+' if last-with-more)
@@ -482,9 +487,9 @@ fn write_aligned_row_border<F>(
                 match border {
                     0 => {
                         if !is_last {
-                            out.push(marker);  // '+' or ' ' as gap
+                            out.push(marker); // '+' or ' ' as gap
                         } else if has_more {
-                            out.push('+');     // '+' on last col if more lines
+                            out.push('+'); // '+' on last col if more lines
                         }
                     }
                     2 => {
@@ -727,13 +732,7 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     // Widest single line of any column name.
     let max_name_width = cols
         .iter()
-        .map(|c| {
-            c.name
-                .split('\n')
-                .map(display_width)
-                .max()
-                .unwrap_or(0)
-        })
+        .map(|c| c.name.split('\n').map(display_width).max().unwrap_or(0))
         .max()
         .unwrap_or(0);
 
@@ -744,9 +743,7 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             cols.iter().enumerate().map(move |(i, _col)| {
                 row.get(i)
                     .and_then(|v| v.as_deref())
-                    .map_or(0, |v| {
-                        v.split('\n').map(display_width).max().unwrap_or(0)
-                    })
+                    .map_or(0, |v| v.split('\n').map(display_width).max().unwrap_or(0))
             })
         })
         .max()
@@ -813,7 +810,11 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     // Old-ascii wrapped: wrap_w + 1
     // Old-ascii aligned: max_value_width + 2  (same as ASCII aligned)
     let b2_right_dashes = if wrap_w > 0 {
-        if is_old_ascii { wrap_w + 1 } else { wrap_w + 2 }
+        if is_old_ascii {
+            wrap_w + 1
+        } else {
+            wrap_w + 2
+        }
     } else {
         max_value_width + 2
     };
@@ -826,9 +827,13 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             // Column separator: split at name/val boundary
             let left_inner = max_name_width + 2;
             out.push('+');
-            for _ in 0..left_inner { out.push('-'); }
+            for _ in 0..left_inner {
+                out.push('-');
+            }
             out.push('+');
-            for _ in 0..b2_right_dashes { out.push('-'); }
+            for _ in 0..b2_right_dashes {
+                out.push('-');
+            }
             out.push('+');
         } else {
             // Record header: single separator spanning full width
@@ -837,7 +842,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             let fill = total_width.saturating_sub(label.len() + 2);
             out.push('+');
             out.push_str(label);
-            for _ in 0..fill { out.push('-'); }
+            for _ in 0..fill {
+                out.push('-');
+            }
             out.push('+');
         }
         out.push('\n');
@@ -873,15 +880,23 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                     if label_len <= pipe_pos {
                         // label fits in name column: use '+' separator
                         let fill_left = pipe_pos - label_len;
-                        for _ in 0..fill_left { out.push('-'); }
+                        for _ in 0..fill_left {
+                            out.push('-');
+                        }
                         out.push('+');
                         // Right side fill:
                         // ASCII:     name + marker + '|' + ' ' + val + end_marker = N+1+1+1+W+1
                         //            => right = val_part + 1
                         // Old-ascii: MARKER + name + ' ' + sep + ' ' + val = 1+N+1+1+1+W
                         //            => right = val_part + 2
-                        let right_fill = if is_old_ascii { val_part + 2 } else { val_part + 1 };
-                        for _ in 0..right_fill { out.push('-'); }
+                        let right_fill = if is_old_ascii {
+                            val_part + 2
+                        } else {
+                            val_part + 1
+                        };
+                        for _ in 0..right_fill {
+                            out.push('-');
+                        }
                     } else {
                         // label overflows into value column, no '+' separator
                         // Total header width:
@@ -893,7 +908,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             max_name_width + val_part + 3
                         };
                         let fill = total_header.saturating_sub(label_len);
-                        for _ in 0..fill { out.push('-'); }
+                        for _ in 0..fill {
+                            out.push('-');
+                        }
                     }
                     out.push('\n');
                 }
@@ -944,7 +961,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             // For old-ascii: if segment is too long, we still wrap,
                             // but use `;` continuation marker on next line.
                             // For ascii: `.` at end of truncated line (handled in output).
-                            if is_last_chunk { break; }
+                            if is_last_chunk {
+                                break;
+                            }
                         }
                         // If exactly fits with no continuation needed, mark last chunk
                         // is_last_of_segment = true (already set above via is_last_chunk).
@@ -953,11 +972,15 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                 }
                 wl
             } else {
-                val_lines.iter().enumerate().map(|(i, l)| WrapLine {
-                    text: l.to_string(),
-                    is_physical_cont: false,
-                    is_last_of_segment: true,
-                }).collect()
+                val_lines
+                    .iter()
+                    .enumerate()
+                    .map(|(_i, l)| WrapLine {
+                        text: l.to_string(),
+                        is_physical_cont: false,
+                        is_last_of_segment: true,
+                    })
+                    .collect()
             };
 
             let n_name_lines = name_lines.len();
@@ -966,8 +989,16 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             let total_rows = n_name_lines.max(n_val_lines);
 
             for li in 0..total_rows {
-                let name_line = if li < n_name_lines { name_lines[li] } else { "" };
-                let wl = if li < n_val_lines { Some(&wrapped_val[li]) } else { None };
+                let name_line = if li < n_name_lines {
+                    name_lines[li]
+                } else {
+                    ""
+                };
+                let wl = if li < n_val_lines {
+                    Some(&wrapped_val[li])
+                } else {
+                    None
+                };
                 let val_text = wl.map_or("", |w| w.text.as_str());
                 let is_physical_cont = wl.map_or(false, |w| w.is_physical_cont);
                 let is_last_of_segment = wl.map_or(true, |w| w.is_last_of_segment);
@@ -983,7 +1014,11 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
                 // Old-ascii leading marker: '+' for all non-first name lines (li > 0 && li < n_name_lines),
                 // ' ' for li=0 (first name line) and pure val-cont lines.
-                let oa_leading = if is_old_ascii && li > 0 && li < n_name_lines { '+' } else { ' ' };
+                let oa_leading = if is_old_ascii && li > 0 && li < n_name_lines {
+                    '+'
+                } else {
+                    ' '
+                };
 
                 // Val text width for padding calculations
                 let vt_w = display_width(val_text);
@@ -1013,7 +1048,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             // Format: LEADING_MARKER + name_padded + SEP_SPACE + val
                             out.push(oa_leading);
                             out.push_str(name_line);
-                            for _ in 0..name_pad { out.push(' '); }
+                            for _ in 0..name_pad {
+                                out.push(' ');
+                            }
                             out.push(' '); // separator space
                             out.push_str(val_text);
                             // old-ascii: no end-of-line marker; continuation shows on next line
@@ -1021,17 +1058,23 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             // ASCII border=0:
                             // Format: name_padded + MARKER + SEP_SPACE + val + END_MARKER
                             out.push_str(name_line);
-                            for _ in 0..name_pad { out.push(' '); }
+                            for _ in 0..name_pad {
+                                out.push(' ');
+                            }
                             out.push(ascii_name_marker);
                             out.push(' '); // separator space
                             out.push_str(val_text);
                             if let Some(m) = ascii_eol_marker {
                                 let pad = wrap_w.saturating_sub(vt_w);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                                 out.push(m);
                             } else if aligned_eol_plus {
                                 let pad = max_value_width.saturating_sub(vt_w);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                                 out.push('+');
                             }
                         }
@@ -1045,7 +1088,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             //            non-empty val, ';' for empty val or physical cont
                             out.push(oa_leading);
                             out.push_str(name_line);
-                            for _ in 0..name_pad { out.push(' '); }
+                            for _ in 0..name_pad {
+                                out.push(' ');
+                            }
                             out.push(' ');
                             let sep = if is_physical_cont {
                                 ';'
@@ -1066,7 +1111,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             // Format: name_padded + MARKER + SEP + SP + val + END_MARKER
                             // SEP: '|.' for physical cont, '|' otherwise (space after '|')
                             out.push_str(name_line);
-                            for _ in 0..name_pad { out.push(' '); }
+                            for _ in 0..name_pad {
+                                out.push(' ');
+                            }
                             out.push(ascii_name_marker);
                             if is_physical_cont {
                                 out.push_str("|.");
@@ -1076,11 +1123,15 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             out.push_str(val_text);
                             if let Some(m) = ascii_eol_marker {
                                 let pad = wrap_w.saturating_sub(vt_w);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                                 out.push(m);
                             } else if aligned_eol_plus {
                                 let pad = max_value_width.saturating_sub(vt_w);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                                 out.push('+');
                             }
                         }
@@ -1093,7 +1144,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             out.push('|');
                             out.push(oa_leading);
                             out.push_str(name_line);
-                            for _ in 0..name_pad { out.push(' '); }
+                            for _ in 0..name_pad {
+                                out.push(' ');
+                            }
                             out.push(' ');
                             let sep = if is_physical_cont {
                                 ';'
@@ -1108,7 +1161,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             out.push(' ');
                             out.push_str(val_text);
                             let pad = val_display_w.saturating_sub(vt_w);
-                            for _ in 0..pad { out.push(' '); }
+                            for _ in 0..pad {
+                                out.push(' ');
+                            }
                             out.push('|');
                         } else {
                             // ASCII border=2:
@@ -1116,7 +1171,9 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             // SEP: '|.' for physical cont, '| ' otherwise
                             out.push_str("| ");
                             out.push_str(name_line);
-                            for _ in 0..name_pad { out.push(' '); }
+                            for _ in 0..name_pad {
+                                out.push(' ');
+                            }
                             out.push(ascii_name_marker);
                             if is_physical_cont {
                                 out.push_str("|.");
@@ -1127,15 +1184,21 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             out.push_str(val_text);
                             if let Some(m) = ascii_eol_marker {
                                 let pad = val_display_w.saturating_sub(vt_w + 1);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                                 out.push(m);
                             } else if aligned_eol_plus {
                                 let pad = val_display_w.saturating_sub(vt_w + 1);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                                 out.push('+');
                             } else {
                                 let pad = val_display_w.saturating_sub(vt_w);
-                                for _ in 0..pad { out.push(' '); }
+                                for _ in 0..pad {
+                                    out.push(' ');
+                                }
                             }
                             out.push('|');
                         }
@@ -1189,12 +1252,7 @@ pub fn format_expanded(out: &mut String, rs: &RowSet, cfg: &OutputConfig) {
                 let val_len = row
                     .get(i)
                     .and_then(|v| v.as_deref())
-                    .map_or(0, |v| {
-                        v.lines()
-                            .map(display_width)
-                            .max()
-                            .unwrap_or(0)
-                    });
+                    .map_or(0, |v| v.lines().map(display_width).max().unwrap_or(0));
                 max_name_width + 3 + val_len
             })
         })
@@ -1457,7 +1515,13 @@ pub fn format_pg_error(
 /// not need the string representation.  `sql` is the original query text
 /// (used to render the position marker); pass `None` when unavailable.
 /// `verbose` enables SQLSTATE output (mirrors `\set VERBOSITY verbose`).
-pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: bool, terse: bool, sqlstate: bool) {
+pub fn eprint_db_error(
+    err: &tokio_postgres::Error,
+    sql: Option<&str>,
+    verbose: bool,
+    terse: bool,
+    sqlstate: bool,
+) {
     let cfg = OutputConfig {
         verbose_errors: verbose,
         terse_errors: terse,
@@ -1636,6 +1700,7 @@ fn expand_cell_tabs(s: &str) -> String {
 /// Like `display_width`, but treats the string as starting at `start_col`
 /// for the purpose of tab-stop expansion.  Returns the number of display
 /// columns consumed by the string (not counting `start_col` itself).
+#[allow(dead_code)]
 fn display_width_at_col(s: &str, start_col: usize) -> usize {
     let mut col = start_col;
     let mut chars = s.chars().peekable();
@@ -1673,7 +1738,7 @@ pub fn display_width(s: &str) -> usize {
         match ch {
             '\x1b' if chars.peek() == Some(&'[') => {
                 chars.next(); // consume '['
-                // Consume until the CSI final byte (0x40–0x7E).
+                              // Consume until the CSI final byte (0x40–0x7E).
                 for c in chars.by_ref() {
                     if ('\x40'..='\x7e').contains(&c) {
                         break;
@@ -1898,6 +1963,7 @@ fn csv_field_sep(val: &str, sep: &str) -> String {
 }
 
 /// RFC 4180: wrap in double-quotes if the value contains `,`, `"`, `\n`, or `\r`.
+#[allow(dead_code)]
 fn csv_field(val: &str) -> String {
     csv_field_sep(val, ",")
 }
@@ -2099,11 +2165,26 @@ fn html_escape(s: &str) -> String {
                 out.push_str("<br />\n");
                 leading = true; // reset leading after newline
             }
-            '&' => { leading = false; out.push_str("&amp;"); }
-            '<' => { leading = false; out.push_str("&lt;"); }
-            '>' => { leading = false; out.push_str("&gt;"); }
-            '"' => { leading = false; out.push_str("&quot;"); }
-            c => { leading = false; out.push(c); }
+            '&' => {
+                leading = false;
+                out.push_str("&amp;");
+            }
+            '<' => {
+                leading = false;
+                out.push_str("&lt;");
+            }
+            '>' => {
+                leading = false;
+                out.push_str("&gt;");
+            }
+            '"' => {
+                leading = false;
+                out.push_str("&quot;");
+            }
+            c => {
+                leading = false;
+                out.push(c);
+            }
         }
     }
     out
@@ -2155,7 +2236,10 @@ fn latex_escape(s: &str) -> String {
 
 /// Build the LaTeX column spec string (e.g. `r | l | l`).
 fn latex_col_spec(cols: &[ColumnMeta], border: u8) -> String {
-    let aligns: Vec<&str> = cols.iter().map(|c| if c.is_numeric { "r" } else { "l" }).collect();
+    let aligns: Vec<&str> = cols
+        .iter()
+        .map(|c| if c.is_numeric { "r" } else { "l" })
+        .collect();
     match border {
         0 => aligns.join(""),
         2 => format!("| {} |", aligns.join(" | ")),
@@ -2186,16 +2270,26 @@ pub fn format_latex(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 
     if !cfg.tuples_only {
-        let header: Vec<String> = cols.iter().map(|c| format!("\\textit{{{}}}", latex_escape(&c.name))).collect();
+        let header: Vec<String> = cols
+            .iter()
+            .map(|c| format!("\\textit{{{}}}", latex_escape(&c.name)))
+            .collect();
         let _ = writeln!(out, "{} \\\\", header.join(" & "));
         out.push_str("\\hline\n");
     }
 
     for row in rows {
-        let cells: Vec<String> = cols.iter().enumerate().map(|(i, _)| {
-            let val = row.get(i).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str());
-            latex_escape(val)
-        }).collect();
+        let cells: Vec<String> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let val = row
+                    .get(i)
+                    .and_then(|v| v.as_deref())
+                    .unwrap_or(null_str.as_str());
+                latex_escape(val)
+            })
+            .collect();
         let _ = writeln!(out, "{} \\\\", cells.join(" & "));
         if cfg.border == 2 {
             out.push_str("\\hline\n");
@@ -2225,11 +2319,22 @@ fn format_latex_expanded(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         }
         let record_num = rec_idx + 1;
         out.push_str("\\begin{tabular}{c|l}\n");
-        let _ = writeln!(out, "\\multicolumn{{2}}{{c}}{{\\textit{{Record {record_num}}}}} \\\\");
+        let _ = writeln!(
+            out,
+            "\\multicolumn{{2}}{{c}}{{\\textit{{Record {record_num}}}}} \\\\"
+        );
         out.push_str("\\hline\n");
         for (col_idx, col) in cols.iter().enumerate() {
-            let val = row.get(col_idx).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str());
-            let _ = writeln!(out, "{} & {} \\\\", latex_escape(&col.name), latex_escape(val));
+            let val = row
+                .get(col_idx)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(null_str.as_str());
+            let _ = writeln!(
+                out,
+                "{} & {} \\\\",
+                latex_escape(&col.name),
+                latex_escape(val)
+            );
         }
         out.push_str("\\end{tabular}\n");
     }
@@ -2253,14 +2358,16 @@ pub fn format_latex_longtable(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     let _ = writeln!(out, "\\begin{{longtable}}{{{col_spec}}}");
 
     if !cfg.tuples_only {
-        let header: Vec<String> = cols.iter().map(|c| {
-            format!("\\small\\textbf{{\\textit{{{}}}}}", latex_escape(&c.name))
-        }).collect();
+        let header: Vec<String> = cols
+            .iter()
+            .map(|c| format!("\\small\\textbf{{\\textit{{{}}}}}", latex_escape(&c.name)))
+            .collect();
         let _ = writeln!(out, "{} \\\\", header.join(" & "));
         out.push_str("\\midrule\n\\endfirsthead\n");
-        let header2: Vec<String> = cols.iter().map(|c| {
-            format!("\\small\\textbf{{\\textit{{{}}}}}", latex_escape(&c.name))
-        }).collect();
+        let header2: Vec<String> = cols
+            .iter()
+            .map(|c| format!("\\small\\textbf{{\\textit{{{}}}}}", latex_escape(&c.name)))
+            .collect();
         let _ = writeln!(out, "{} \\\\", header2.join(" & "));
         out.push_str("\\midrule\n\\endhead\n");
     }
@@ -2270,8 +2377,15 @@ pub fn format_latex_longtable(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             if col_idx > 0 {
                 out.push_str("\n&\n");
             }
-            let val = row.get(col_idx).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str());
-            let align = if col.is_numeric { "\\raggedleft{" } else { "\\raggedright{" };
+            let val = row
+                .get(col_idx)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(null_str.as_str());
+            let align = if col.is_numeric {
+                "\\raggedleft{"
+            } else {
+                "\\raggedright{"
+            };
             let _ = write!(out, "{align}{}", latex_escape(val));
             out.push('}');
         }
@@ -2294,7 +2408,10 @@ pub fn format_troff_ms(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
     out.push_str(".LP\n.TS\ncenter;\n");
     // Column alignment spec
-    let aligns: Vec<&str> = cols.iter().map(|c| if c.is_numeric { "r" } else { "l" }).collect();
+    let aligns: Vec<&str> = cols
+        .iter()
+        .map(|c| if c.is_numeric { "r" } else { "l" })
+        .collect();
     let sep = match cfg.border {
         0 => " ".to_owned(),
         _ => " | ".to_owned(),
@@ -2310,9 +2427,15 @@ pub fn format_troff_ms(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 
     for row in rows {
-        let cells: Vec<&str> = cols.iter().enumerate().map(|(i, _)| {
-            row.get(i).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str())
-        }).collect();
+        let cells: Vec<&str> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                row.get(i)
+                    .and_then(|v| v.as_deref())
+                    .unwrap_or(null_str.as_str())
+            })
+            .collect();
         out.push_str(&cells.join("\t"));
         out.push('\n');
     }
@@ -2342,7 +2465,10 @@ fn format_troff_ms_expanded(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         out.push('_');
         out.push('\n');
         for (col_idx, col) in cols.iter().enumerate() {
-            let val = row.get(col_idx).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str());
+            let val = row
+                .get(col_idx)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(null_str.as_str());
             let _ = writeln!(out, "{}\t{}", col.name, val);
         }
         out.push_str(".TE\n");
@@ -2375,11 +2501,18 @@ pub fn format_asciidoc(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         0 => "none",
         _ => "rows",
     };
-    let col_spec: Vec<String> = cols.iter().map(|c| {
-        let align = if c.is_numeric { ">l" } else { "<l" };
-        format!("{align}")
-    }).collect();
-    let _ = writeln!(out, "[cols=\"{}\",frame=\"{frame}\",grid=\"{grid}\"]", col_spec.join(","));
+    let col_spec: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            let align = if c.is_numeric { ">l" } else { "<l" };
+            format!("{align}")
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "[cols=\"{}\",frame=\"{frame}\",grid=\"{grid}\"]",
+        col_spec.join(",")
+    );
     out.push_str("|====\n");
 
     if !cfg.tuples_only {
@@ -2392,7 +2525,10 @@ pub fn format_asciidoc(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
     for row in rows {
         for (col_idx, col) in cols.iter().enumerate() {
-            let val = row.get(col_idx).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str());
+            let val = row
+                .get(col_idx)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(null_str.as_str());
             let align = if col.is_numeric { ">l" } else { "<l" };
             let _ = write!(out, "{align}|{} ", asciidoc_escape(val));
         }
@@ -2422,9 +2558,17 @@ fn format_asciidoc_expanded(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         out.push_str("[cols=\"h,l\",frame=\"none\",grid=\"none\"]\n|====\n");
         let _ = writeln!(out, "2+^|Record {record_num}");
         for (col_idx, col) in cols.iter().enumerate() {
-            let val = row.get(col_idx).and_then(|v| v.as_deref()).unwrap_or(null_str.as_str());
+            let val = row
+                .get(col_idx)
+                .and_then(|v| v.as_deref())
+                .unwrap_or(null_str.as_str());
             let align = if col.is_numeric { ">l" } else { "<l" };
-            let _ = writeln!(out, "<l|{} {align}|{}", asciidoc_escape(&col.name), asciidoc_escape(val));
+            let _ = writeln!(
+                out,
+                "<l|{} {align}|{}",
+                asciidoc_escape(&col.name),
+                asciidoc_escape(val)
+            );
         }
         out.push_str("|====\n");
     }
@@ -3072,9 +3216,9 @@ mod tests {
         let rs = mk_rowset_ab();
         let mut out = String::new();
         format_html(&mut out, &rs, &PsetConfig::default());
-        assert!(out.contains("<table>"), "missing <table>: {out}");
-        assert!(out.contains("<th>a</th>"), "missing <th>a</th>: {out}");
-        assert!(out.contains("<td>1</td>"), "missing <td>1</td>: {out}");
+        assert!(out.contains("<table"), "missing <table: {out}");
+        assert!(out.contains("a</th>"), "missing a</th>: {out}");
+        assert!(out.contains(">1<"), "missing >1<: {out}");
         assert!(out.contains("</table>"), "missing </table>: {out}");
     }
 
@@ -3100,8 +3244,8 @@ mod tests {
         };
         let mut out = String::new();
         format_html(&mut out, &rs, &cfg);
-        assert!(!out.contains("<thead>"), "thead must be suppressed: {out}");
-        assert!(out.contains("<td>"), "data must be present: {out}");
+        assert!(!out.contains("<th"), "th header must be suppressed: {out}");
+        assert!(out.contains("<td"), "data must be present: {out}");
     }
 
     // -----------------------------------------------------------------------

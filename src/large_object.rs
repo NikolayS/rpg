@@ -103,9 +103,7 @@ async fn run_lo_import(
     // Write data in chunks.
     for chunk in data.chunks(CHUNK_SIZE) {
         let hex = hex_encode(chunk);
-        try_or_rb!(
-            simple_exec(client, &format!("select lowrite({fd}, '\\x{hex}'::bytea)")).await
-        );
+        try_or_rb!(simple_exec(client, &format!("select lowrite({fd}, '\\x{hex}'::bytea)")).await);
     }
 
     // Close the large object descriptor.
@@ -403,8 +401,8 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     // Total visible table width (matches the separator line length).
     // Each col contributes `width+2` chars (1 leading space + content + 1 trailing
     // space or `+`), and columns are joined by `|` (ncols-1 separators).
-    let table_width = widths.iter().map(|w| w + 2).sum::<usize>()
-        + if ncols > 1 { ncols - 1 } else { 0 };
+    let table_width =
+        widths.iter().map(|w| w + 2).sum::<usize>() + if ncols > 1 { ncols - 1 } else { 0 };
 
     if let Some(t) = title {
         let tlen = t.len();
