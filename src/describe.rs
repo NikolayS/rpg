@@ -4580,6 +4580,62 @@ order by 1"
         }
     }
 
+    // Not-null constraints — verbose only (\d+), PostgreSQL 17+.
+    // Shown after Publications and before Access method, matching psql ordering.
+    if meta.plus && matches!(relkind_char, 'r' | 'p' | 'f') {
+        let nn_sql = format!(
+            "select co.conname, a.attname, co.connoinherit, co.conislocal,
+    co.coninhcount <> 0 as inherited,
+    co.convalidated
+from pg_catalog.pg_constraint as co
+join pg_catalog.pg_attribute as a
+    on (a.attrelid = co.conrelid and a.attnum = co.conkey[1])
+where co.contype = 'n'
+    and co.conrelid = (
+        select c.oid
+        from pg_catalog.pg_class as c
+        left join pg_catalog.pg_namespace as n
+            on n.oid = c.relnamespace
+        where {name_cond}
+        limit 1
+    )
+order by a.attnum"
+        );
+        if let Ok(messages) = client.simple_query(&nn_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut lines: Vec<String> = Vec::new();
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let conname = row.get(0).unwrap_or("");
+                    let attname = row.get(1).unwrap_or("");
+                    let connoinherit = row.get(2).unwrap_or("f") == "t";
+                    let conislocal = row.get(3).unwrap_or("t") == "t";
+                    let inherited = row.get(4).unwrap_or("f") == "t";
+                    let validated = row.get(5).unwrap_or("t") == "t";
+                    let modifier = if connoinherit {
+                        " NO INHERIT".to_owned()
+                    } else if conislocal && inherited {
+                        " (local, inherited)".to_owned()
+                    } else if inherited {
+                        " (inherited)".to_owned()
+                    } else {
+                        String::new()
+                    };
+                    let not_valid = if !validated { " NOT VALID" } else { "" };
+                    lines.push(format!(
+                        "    \"{conname}\" NOT NULL \"{attname}\"{modifier}{not_valid}"
+                    ));
+                }
+            }
+            if !lines.is_empty() {
+                println!("Not-null constraints:");
+                for line in &lines {
+                    println!("{line}");
+                }
+            }
+        }
+    }
+
     // Access method — shown by psql \d+ for tables and materialized views.
     if meta.plus {
         let am_sql = format!(
@@ -4660,6 +4716,8 @@ mod tests {
             system,
             pattern: pattern.map(ToOwned::to_owned),
             echo_hidden: false,
+            kind_filter: None,
+            continuation: None,
         }
     }
 

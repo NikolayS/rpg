@@ -718,8 +718,17 @@ pub async fn execute_query(
                         // COMMIT/ROLLBACK inside the batch also failed, so the
                         // connection is left in E state.  Send a standalone
                         // ROLLBACK to restore to Idle, matching psql semantics.
-                        let _ = client.simple_query("ROLLBACK").await;
-                        *tx = crate::repl::TxState::Idle;
+                        //
+                        // Exception: if the batch ends with COMMIT/ROLLBACK AND
+                        // CHAIN, an earlier COMMIT/ROLLBACK already closed the
+                        // original transaction.  The server is already Idle, so
+                        // sending ROLLBACK would produce a spurious "no transaction
+                        // in progress" warning.
+                        let ends_with_and_chain = last_upper.contains("AND CHAIN");
+                        if !ends_with_and_chain {
+                            let _ = client.simple_query("ROLLBACK").await;
+                            *tx = crate::repl::TxState::Idle;
+                        }
                     } else if matches!(last_first, "ROLLBACK" | "ABORT")
                         && last_second == "TO"
                         && *tx == crate::repl::TxState::Failed

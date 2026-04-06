@@ -71,20 +71,19 @@ impl Stream for CopyInReceiver {
             }
             None => {
                 self.done = true;
+                let mut buf = BytesMut::new();
                 if self.in_copy_mode {
                     // Server entered copy mode but the client dropped the sink
                     // without calling finish() — send CopyFail to abort.
-                    let mut buf = BytesMut::new();
                     frontend::copy_fail("", &mut buf).unwrap();
-                    frontend::sync(&mut buf);
-                    Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
-                } else {
-                    // The server never entered copy mode (it rejected the COPY
-                    // command with an ErrorResponse before CopyInResponse).
-                    // Do NOT send CopyFail — it would be a protocol violation
-                    // that terminates the connection.
-                    Poll::Ready(None)
                 }
+                // Always send Sync so the server sends ReadyForQuery and the
+                // connection driver can complete the response cycle.  With the
+                // old encode() the Sync was already in Bind+Execute+Sync,
+                // causing a second ReadyForQuery (double-Sync bug).  Now that
+                // we use encode_no_sync(), this is the only Sync in the cycle.
+                frontend::sync(&mut buf);
+                Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
             }
         }
     }
@@ -221,7 +220,7 @@ where
 {
     debug!("executing copy in statement {}", statement.name());
 
-    let buf = query::encode(client, &statement, slice_iter(&[]))?;
+    let buf = query::encode_no_sync(client, &statement, slice_iter(&[]))?;
 
     let (mut sender, receiver) = mpsc::channel(1);
     let receiver = CopyInReceiver::new(receiver);

@@ -215,6 +215,30 @@ where
     })
 }
 
+/// Like [`encode`] but omits the trailing Sync message.
+///
+/// Used by `copy_in` where the Sync must be deferred: either sent with
+/// CopyDone (success path) or sent alone when the server rejected the command
+/// before entering copy mode (error path).  Sending two Syncs (one here and
+/// one in CopyInReceiver) would produce two ReadyForQuery messages from the
+/// server, which would crash the connection driver.
+pub fn encode_no_sync<P, I>(
+    client: &InnerClient,
+    statement: &Statement,
+    params: I,
+) -> Result<Bytes, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
+    client.with_buf(|buf| {
+        encode_bind(statement, params, "", buf)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        Ok(buf.split().freeze())
+    })
+}
+
 pub fn encode_bind<P, I>(
     statement: &Statement,
     params: I,

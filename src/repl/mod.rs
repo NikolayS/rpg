@@ -2759,17 +2759,9 @@ pub(crate) async fn exec_lines(
                             };
                             buf.clear();
 
-                            // Try the COPY command.  copy_in() uses the
-                            // extended-query protocol: prepare → bind →
-                            // execute.  If the server rejects the COPY before
-                            // entering copy mode the protocol state may be
-                            // left inconsistent (CopyFail sent when not in
-                            // copy mode).  Resync with batch_execute("") after
-                            // any copy_in failure to drain pending responses
-                            // and restore a clean protocol state before the
-                            // next query.  We do NOT consume any data lines on
-                            // failure — they remain in the iterator for the
-                            // outer loop to process as regular SQL.
+                            // Try the COPY command.  We do NOT consume any data
+                            // lines on failure — they remain in the iterator
+                            // for the outer loop to process as regular SQL.
                             match client.copy_in(&sql_owned).await {
                                 Err(e) => {
                                     crate::output::eprint_db_error(
@@ -2798,7 +2790,7 @@ pub(crate) async fn exec_lines(
                                     }
 
                                     let mut payload = copy_data.join("\n");
-                                    if !payload.is_empty() {
+                                    if !copy_data.is_empty() {
                                         payload.push('\n');
                                     }
 

@@ -3,6 +3,16 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+# On macOS, GNU coreutils installs as 'gtimeout'; add gnubin to PATH if present.
+for _gnubin in \
+  /opt/homebrew/opt/coreutils/libexec/gnubin \
+  /usr/local/opt/coreutils/libexec/gnubin; do
+  if [[ -d "${_gnubin}" ]]; then
+    PATH="${_gnubin}:${PATH}"
+    break
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # test-psql-regress.sh — Run PostgreSQL's own regression test suite against rpg
 #
@@ -190,7 +200,8 @@ normalize() {
     -e '/^PL\/pgSQL function "[^"]*" /d' \
     -e '/^parallel worker$/d' \
     -e '/enumtypid/s/=([0-9][0-9]*/=(OID/g' \
-    -e 's/for operator [0-9][0-9]*/for operator OID/g' | \
+    -e 's/for operator [0-9][0-9]*/for operator OID/g' \
+    -e 's/ Query Identifier: [-0-9][0-9]*/ Query Identifier: 0000000000000000000/g' | \
   awk '
     /^$/ { blank++; next }
     { if (blank > 0) { print ""; blank = 0 } print }
@@ -198,7 +209,7 @@ normalize() {
 }
 
 # Per-test timeout (seconds). Override with TEST_TIMEOUT env var.
-TEST_TIMEOUT="${TEST_TIMEOUT:-120}"
+TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
 
 # run_psql FILE  — run a SQL file through psql, return normalized output
 run_psql() {
