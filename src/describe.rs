@@ -538,11 +538,20 @@ fn system_schema_filter(system: bool) -> &'static str {
 
 /// Return the result-set title for a given set of relkinds.
 ///
-/// psql always uses "List of relations" as the heading for all \d
-/// type-filtered commands (\dt, \di, \dv, \ds, \dm, \df, etc.).
-/// This matches psql's listTables() which hard-codes "List of relations".
-fn relation_title(_relkinds: &[&str]) -> &'static str {
-    "List of relations"
+/// Returns a type-specific heading to match psql's listTables() behavior.
+/// psql uses "List of tables", "List of indexes", etc. for single-type
+/// commands (\dt, \di, \dv, \ds, \dm, \df) and "List of relations" for
+/// multi-type queries.
+fn relation_title(relkinds: &[&str]) -> &'static str {
+    match relkinds {
+        ["r", "p"] | ["r"] | ["p"] => "List of tables",
+        ["i"] => "List of indexes",
+        ["v"] => "List of views",
+        ["S"] => "List of sequences",
+        ["m"] => "List of materialized views",
+        ["f"] => "List of foreign tables",
+        _ => "List of relations",
+    }
 }
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
@@ -3609,7 +3618,12 @@ limit 1"
        and conindid = i.oid
      limit 1) as condeferrable,
     ix.indisreplident,
-    coalesce(spc.spcname, '') as idx_tablespace
+    coalesce(spc.spcname, '') as idx_tablespace,
+    (select condeferred
+     from pg_catalog.pg_constraint
+     where conrelid = ix.indrelid
+       and conindid = i.oid
+     limit 1) as condeferred
 from pg_catalog.pg_index as ix
 join pg_catalog.pg_class as i
     on i.oid = ix.indexrelid
@@ -3798,7 +3812,7 @@ where {name_cond} limit 1"
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
-        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident, idx_tablespace)
+        // Collect: (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred, is_valid, con_type, con_oid, nulls_not_distinct, is_deferrable, is_replident, idx_tablespace, is_deferred)
         type IndexRow = (
             String,
             bool,
@@ -3813,6 +3827,7 @@ where {name_cond} limit 1"
             bool,
             bool,
             String,
+            bool,
         );
         let mut index_rows: Vec<IndexRow> = Vec::new();
         for msg in messages {
@@ -3839,6 +3854,8 @@ where {name_cond} limit 1"
                 let is_replident = row.get(12).is_some_and(|v| v == "t");
                 // col 13 = idx_tablespace: non-empty when index is in non-default tablespace
                 let idx_tablespace = row.get(13).unwrap_or("").to_owned();
+                // col 14 = condeferred: true when the constraint is INITIALLY DEFERRED
+                let is_deferred = row.get(14).is_some_and(|v| v == "t");
                 index_rows.push((
                     idx_name,
                     is_primary,
@@ -3853,6 +3870,7 @@ where {name_cond} limit 1"
                     is_deferrable,
                     is_replident,
                     idx_tablespace,
+                    is_deferred,
                 ));
             }
         }
@@ -3872,6 +3890,7 @@ where {name_cond} limit 1"
                 is_deferrable,
                 is_replident,
                 idx_tablespace,
+                is_deferred,
             ) in &index_rows
             {
                 // EXCLUDE constraints use pg_get_constraintdef for full definition.
@@ -3946,7 +3965,15 @@ where {name_cond} limit 1"
                 };
 
                 let invalid_suffix = if *is_valid { "" } else { " INVALID" };
-                let deferrable_suffix = if *is_deferrable { " DEFERRABLE" } else { "" };
+                let deferrable_suffix = if *is_deferrable {
+                    if *is_deferred {
+                        " DEFERRABLE INITIALLY DEFERRED"
+                    } else {
+                        " DEFERRABLE"
+                    }
+                } else {
+                    ""
+                };
                 let replident_suffix = if *is_replident {
                     " REPLICA IDENTITY"
                 } else {
@@ -4330,7 +4357,9 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
                 0
             };
 
-            if num_parts > 0 {
+            if num_parts == 0 {
+                println!("Number of partitions: 0");
+            } else {
                 println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
             }
         }
@@ -4876,16 +4905,15 @@ mod tests {
     // relation_title — type-specific headings to match psql
     // -----------------------------------------------------------------------
 
-    /// psql always uses "List of relations" for all \d type-filtered commands.
-    /// Verify `relation_title()` returns "List of relations" for all inputs.
+    /// Verify `relation_title()` returns type-specific headings matching psql.
     #[test]
-    fn relation_title_always_relations() {
-        assert_eq!(relation_title(&["r", "p"]), "List of relations");
-        assert_eq!(relation_title(&["i"]), "List of relations");
-        assert_eq!(relation_title(&["v"]), "List of relations");
-        assert_eq!(relation_title(&["S"]), "List of relations");
-        assert_eq!(relation_title(&["m"]), "List of relations");
-        assert_eq!(relation_title(&["f"]), "List of relations");
+    fn relation_title_type_specific() {
+        assert_eq!(relation_title(&["r", "p"]), "List of tables");
+        assert_eq!(relation_title(&["i"]), "List of indexes");
+        assert_eq!(relation_title(&["v"]), "List of views");
+        assert_eq!(relation_title(&["S"]), "List of sequences");
+        assert_eq!(relation_title(&["m"]), "List of materialized views");
+        assert_eq!(relation_title(&["f"]), "List of foreign tables");
         assert_eq!(relation_title(&["r", "p", "v", "m"]), "List of relations");
     }
 
