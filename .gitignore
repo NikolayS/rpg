@@ -27,3 +27,4 @@ Thumbs.db
 
 # Debug
 *.dSYM/
+stdout;
