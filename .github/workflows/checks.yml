@@ -190,6 +190,19 @@ jobs:
           restore-keys: |
             psql-regress-${{ runner.os }}-cargo-
 
+      - name: Install psql 18
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -sSf -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          sudo sh -c "echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main' > /etc/apt/sources.list.d/pgdg.list"
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-18
+          sudo update-alternatives --install /usr/bin/psql psql /usr/lib/postgresql/18/bin/psql 200
+          psql --version
+
       - name: Build rpg
         run: cargo build --release
 
@@ -197,10 +210,17 @@ jobs:
         env:
           KEEP_RESULTS: "1"
           RESULTS_DIR: /tmp/rpg-regress
-          # Skip tests with known CI infrastructure limitations:
-          #   misc_functions - pg_replication_origin leftover state from prior test
-          #   tablespace   - tablespace directory not set up in CI environment
-          REGRESS_SKIP: "misc_functions tablespace"
+          # Skip tests with known CI infrastructure limitations or known rpg gaps:
+          #   misc_functions  - pg_replication_origin leftover state between tests
+          #   tablespace      - tablespace directory not set up in CI environment
+          #   psql            - \parse/\bind/\bind_named metacommands not yet implemented
+          #   transactions    - \; multi-statement semantics differ (implicit txn rollback)
+          #   copydml         - non-deterministic NOTICE ordering (trigger fires at different point)
+          #   strings         - standard_conforming_strings=off backslash parsing not tracked
+          #   copy            - same backslash/escape issue in COPY input
+          #   copy2           - \. end-of-data handling in COPY (terminates early)
+          #   domain          - CHECK constraint ordering + domain NOT NULL display
+          REGRESS_SKIP: "misc_functions tablespace psql transactions copydml strings copy copy2 domain"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \

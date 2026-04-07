@@ -4117,85 +4117,6 @@ order by pol.polname"
         }
     }
 
-    // Phase 2: print "after constraints" partition info for partition parents:
-    // "Partitions:" list (for \d+) or "Number of partitions: N" (for \d).
-    if part_relkind == "p" && !partkeydef.is_empty() {
-        if meta.plus {
-            // List individual partitions for \d+.
-            let parts_list_sql = format!(
-                "select case when pg_catalog.pg_table_is_visible(c2.oid)
-         then c2.relname
-         else n2.nspname || '.' || c2.relname end as partname,
-    pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) as partbound,
-    c2.relkind
-from pg_catalog.pg_inherits as i
-join pg_catalog.pg_class as c2 on c2.oid = i.inhrelid
-join pg_catalog.pg_namespace as n2 on n2.oid = c2.relnamespace
-where i.inhparent = (select c.oid from pg_catalog.pg_class as c
-    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-    where {name_cond} limit 1)
-order by c2.oid::pg_catalog.regclass::pg_catalog.text"
-            );
-            if let Ok(pmsgs) = client.simple_query(&parts_list_sql).await {
-                use tokio_postgres::SimpleQueryMessage;
-                let mut parts: Vec<(String, String, bool)> = Vec::new();
-                for pmsg in pmsgs {
-                    if let SimpleQueryMessage::Row(prow) = pmsg {
-                        let pname = prow.get(0).unwrap_or("").to_owned();
-                        let pbound = prow.get(1).unwrap_or("").to_owned();
-                        let pkind = prow.get(2).unwrap_or("") == "p";
-                        parts.push((pname, pbound, pkind));
-                    }
-                }
-                if !parts.is_empty() {
-                    println!(
-                        "Partitions: {}",
-                        parts
-                            .iter()
-                            .enumerate()
-                            .map(|(i, (pn, pb, is_p))| {
-                                let suffix = if *is_p { ", PARTITIONED" } else { "" };
-                                if i == 0 {
-                                    format!("{pn} {pb}{suffix}")
-                                } else {
-                                    format!("            {pn} {pb}{suffix}")
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(",\n")
-                    );
-                }
-            }
-        } else {
-            // For \d (non-plus), show "Number of partitions: N" only when > 0.
-            let count_sql = format!(
-                "select count(*) from pg_catalog.pg_inherits
-where inhparent = (select c.oid from pg_catalog.pg_class as c
-    left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-    where {name_cond} limit 1)"
-            );
-            let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
-                use tokio_postgres::SimpleQueryMessage;
-                cmsgs
-                    .iter()
-                    .find_map(|m| {
-                        if let SimpleQueryMessage::Row(r) = m {
-                            r.get(0).and_then(|v| v.parse::<u64>().ok())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-
-            if num_parts > 0 {
-                println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
-            }
-        }
-    }
-
     // Statistics objects — print as "Statistics objects:" section.
     // Matches psql's describeOneTableDetails statistics footer (PG14+).
     // psql places this after Row Security Policies and before Not-null constraints.
@@ -4360,9 +4281,7 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
                         parts.push((pname, pbound, pkind));
                     }
                 }
-                if parts.is_empty() {
-                    println!("Number of partitions: 0");
-                } else {
+                if !parts.is_empty() {
                     println!(
                         "Partitions: {}",
                         parts
@@ -4411,9 +4330,7 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
                 0
             };
 
-            if num_parts == 0 {
-                println!("Number of partitions: 0");
-            } else {
+            if num_parts > 0 {
                 println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
             }
         }
