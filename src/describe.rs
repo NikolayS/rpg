@@ -544,7 +544,7 @@ fn system_schema_filter(system: bool) -> &'static str {
 /// multi-type queries.
 fn relation_title(relkinds: &[&str]) -> &'static str {
     match relkinds {
-        ["r", "p"] | ["r"] | ["p"] => "List of tables",
+        ["r" | "p"] | ["r", "p"] => "List of tables",
         ["i"] => "List of indexes",
         ["v"] => "List of views",
         ["S"] => "List of sequences",
