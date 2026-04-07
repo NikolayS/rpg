@@ -674,9 +674,6 @@ pub fn is_complete(buf: &str) -> bool {
     false
 }
 
-/// Return `true` when `buf` ends inside an unclosed dollar-quoted string.
-/// Used to decide whether to echo blank lines in `-a` mode: psql echoes blank
-/// lines inside dollar-quoted bodies but skips them between statements.
 /// Scan `buf` and return `(in_single_quote, in_dollar_quote)` — whether the
 /// buffer ends inside a single-quoted string and/or a dollar-quoted string.
 /// Block comments and line comments are skipped correctly.

@@ -4164,12 +4164,10 @@ order by c2.oid::pg_catalog.regclass::pg_catalog.text"
                             .collect::<Vec<_>>()
                             .join(",\n")
                     );
-                } else {
-                    println!("Number of partitions: 0");
                 }
             }
         } else {
-            // For \d (non-plus), show "Number of partitions: N".
+            // For \d (non-plus), show "Number of partitions: N" only when > 0.
             let count_sql = format!(
                 "select count(*) from pg_catalog.pg_inherits
 where inhparent = (select c.oid from pg_catalog.pg_class as c
@@ -4192,9 +4190,7 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
                 0
             };
 
-            if num_parts == 0 {
-                println!("Number of partitions: 0");
-            } else {
+            if num_parts > 0 {
                 println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
             }
         }

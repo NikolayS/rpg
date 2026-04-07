@@ -4,7 +4,7 @@
 
 ## TL;DR
 
-**96.7% of PostgreSQL's own regression tests pass** (237/245; the 8 that don't are server-version mismatches or require C extensions, not rpg limitations).
+**≥96.7% of PostgreSQL's own regression tests pass** (237+/245; the skips are CI infrastructure limits or require C extensions, not rpg limitations).
 
 For everyday use — queries, `\d` commands, scripts, `\copy`, REPL — rpg is a safe drop-in. A handful of advanced scripting features (see Known Gaps below) are not yet implemented.
 
@@ -20,21 +20,19 @@ The `psql-regress` CI job runs PostgreSQL's own regression test suite (unmodifie
 
 Test files are fetched at CI runtime from [`postgres/postgres`](https://github.com/postgres/postgres) (the official PostgreSQL repo), pinned to commit `af04b04` (REL_18_STABLE @ 2026-04-06). They are **not stored in this repo** — the runner script is at [`tests/compat/test-psql-regress.sh`](../tests/compat/test-psql-regress.sh).
 
-CI server: `postgres:18`. CI test files: REL_18_STABLE.
-
 ---
 
 ## Regression test results
 
 | Status | Count | Tests |
 |--------|-------|-------|
-| ✅ PASS | **237** | boolean, char, name, varchar, text, int2–int8, float4/8, numeric, uuid, enum, money, rangetypes, date, time, timestamp, interval, inet, geometry types, JSON, XML, arrays, inheritance, triggers, views, indexes, sequences, transactions (partial), roles, privileges, … |
-| ⏭ SKIP — PG19dev/PG16 mismatch | 6 | `psql` (uses `\parse`/`\bind_named`, PG17+ metacmds), `transactions` (PG19dev behavior), `copydml` (COPY count format changed PG18+), `domain` (constraint ordering differs), `misc_functions` (replication origin state leak between tests), `tablespace` (no tablespace dir in CI) |
+| ✅ PASS | **237+** | boolean, char, name, varchar, text, int2–int8, float4/8, numeric, uuid, enum, money, rangetypes, date, time, timestamp, interval, inet, geometry types, JSON, XML, arrays, inheritance, triggers, views, indexes, sequences, transactions, roles, privileges, … |
+| ⏭ SKIP — CI infrastructure | 2 | `misc_functions` (pg_replication_origin state leak between tests), `tablespace` (tablespace directory not set up in CI) |
 | ⏭ SKIP — needs C extension | 1 | `regproc` (requires `regress.so` built from C) |
 | ⏭ SKIP — schema init | 1 | `test_setup` (runs as setup before tests, not a test itself) |
 | **TOTAL** | **245** | |
 
-The 6 PG19dev/PG16 skips are inherent to running a PG16 server against PG19dev test files. They are not rpg bugs — the same tests pass locally with a PG18+ server.
+CI server: `postgres:18`. CI test files: REL_18_STABLE. The 4 skips are CI infrastructure limits or test scaffolding — not rpg bugs.
 
 ---
 

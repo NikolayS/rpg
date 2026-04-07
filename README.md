@@ -394,7 +394,7 @@ Supports PostgreSQL 14–18.
 
 rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree). Both psql and rpg are run against the same queries; outputs are normalized and diff'd — pass only if identical.
 
-**96.7% of PostgreSQL's own regression tests pass** (237/245). The 8 that don't are server-version mismatches or require C extensions unavailable in CI — not rpg limitations.
+**≥96.7% of PostgreSQL's own regression tests pass** (237+/245). The skips are CI infrastructure limits or require C extensions — not rpg limitations.
 
 → Full compatibility report: [`docs/psql-compat.md`](docs/psql-compat.md)
 
