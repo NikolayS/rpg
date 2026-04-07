@@ -4148,14 +4148,22 @@ order by c2.oid::pg_catalog.regclass::pg_catalog.text"
                     }
                 }
                 if !parts.is_empty() {
-                    println!("Partitions: {}", parts.iter().enumerate().map(|(i, (pn, pb, is_p))| {
-                        let suffix = if *is_p { ", PARTITIONED" } else { "" };
-                        if i == 0 {
-                            format!("{pn} {pb}{suffix}")
-                        } else {
-                            format!("            {pn} {pb}{suffix}")
-                        }
-                    }).collect::<Vec<_>>().join(",\n"));
+                    println!(
+                        "Partitions: {}",
+                        parts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (pn, pb, is_p))| {
+                                let suffix = if *is_p { ", PARTITIONED" } else { "" };
+                                if i == 0 {
+                                    format!("{pn} {pb}{suffix}")
+                                } else {
+                                    format!("            {pn} {pb}{suffix}")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",\n")
+                    );
                 } else {
                     println!("Number of partitions: 0");
                 }
@@ -4170,14 +4178,19 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
             );
             let num_parts = if let Ok(cmsgs) = client.simple_query(&count_sql).await {
                 use tokio_postgres::SimpleQueryMessage;
-                cmsgs.iter().find_map(|m| {
-                    if let SimpleQueryMessage::Row(r) = m {
-                        r.get(0).and_then(|v| v.parse::<u64>().ok())
-                    } else {
-                        None
-                    }
-                }).unwrap_or(0)
-            } else { 0 };
+                cmsgs
+                    .iter()
+                    .find_map(|m| {
+                        if let SimpleQueryMessage::Row(r) = m {
+                            r.get(0).and_then(|v| v.parse::<u64>().ok())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             if num_parts == 0 {
                 println!("Number of partitions: 0");
