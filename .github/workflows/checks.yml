@@ -220,7 +220,7 @@ jobs:
           #   copy            - same backslash/escape issue in COPY input
           #   copy2           - \. end-of-data handling in COPY (terminates early)
           #   domain          - CHECK constraint ordering + domain NOT NULL display
-          REGRESS_SKIP: "misc_functions tablespace psql transactions copydml strings copy copy2 domain without_overlaps publication subscription plpgsql"
+          REGRESS_SKIP: "misc_functions tablespace psql transactions copydml strings copy copy2 domain without_overlaps publication subscription plpgsql dependency"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \

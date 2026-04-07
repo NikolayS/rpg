@@ -538,20 +538,11 @@ fn system_schema_filter(system: bool) -> &'static str {
 
 /// Return the result-set title for a given set of relkinds.
 ///
-/// Returns a type-specific heading to match psql's listTables() behavior.
-/// psql uses "List of tables", "List of indexes", etc. for single-type
-/// commands (\dt, \di, \dv, \ds, \dm, \df) and "List of relations" for
-/// multi-type queries.
-fn relation_title(relkinds: &[&str]) -> &'static str {
-    match relkinds {
-        ["r" | "p"] | ["r", "p"] => "List of tables",
-        ["i"] => "List of indexes",
-        ["v"] => "List of views",
-        ["S"] => "List of sequences",
-        ["m"] => "List of materialized views",
-        ["f"] => "List of foreign tables",
-        _ => "List of relations",
-    }
+/// psql uses "List of relations" for all \d type-filtered commands
+/// (\dt, \di, \dv, \ds, \dm, \df, etc.). This matches psql through PG16
+/// and is what the compatibility test expects.
+fn relation_title(_relkinds: &[&str]) -> &'static str {
+    "List of relations"
 }
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
@@ -4308,7 +4299,9 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
                         parts.push((pname, pbound, pkind));
                     }
                 }
-                if !parts.is_empty() {
+                if parts.is_empty() {
+                    println!("Number of partitions: 0");
+                } else {
                     println!(
                         "Partitions: {}",
                         parts
@@ -4905,15 +4898,16 @@ mod tests {
     // relation_title — type-specific headings to match psql
     // -----------------------------------------------------------------------
 
-    /// Verify `relation_title()` returns type-specific headings matching psql.
+    /// Verify `relation_title()` returns "List of relations" for all inputs
+    /// (matches psql through PG16; PG17+ psql uses type-specific names).
     #[test]
-    fn relation_title_type_specific() {
-        assert_eq!(relation_title(&["r", "p"]), "List of tables");
-        assert_eq!(relation_title(&["i"]), "List of indexes");
-        assert_eq!(relation_title(&["v"]), "List of views");
-        assert_eq!(relation_title(&["S"]), "List of sequences");
-        assert_eq!(relation_title(&["m"]), "List of materialized views");
-        assert_eq!(relation_title(&["f"]), "List of foreign tables");
+    fn relation_title_always_relations() {
+        assert_eq!(relation_title(&["r", "p"]), "List of relations");
+        assert_eq!(relation_title(&["i"]), "List of relations");
+        assert_eq!(relation_title(&["v"]), "List of relations");
+        assert_eq!(relation_title(&["S"]), "List of relations");
+        assert_eq!(relation_title(&["m"]), "List of relations");
+        assert_eq!(relation_title(&["f"]), "List of relations");
         assert_eq!(relation_title(&["r", "p", "v", "m"]), "List of relations");
     }
 
