@@ -1,0 +1,105 @@
+commit d0fbe4f7ab66a36a9206910538a15368af05392c
+Author: Nik Samokhvalov <nik@Niks-MacBook-Pro.local>
+Date:   Mon Apr 6 02:54:18 2026 -0700
+
+    fix(copy): fix copy_in double-Sync crash and empty-row detection
+    
+    The copy_in function used query::encode() which sends Bind+Execute+Sync,
+    then CopyInReceiver sent another Sync with CopyDone.  Two Syncs produced
+    two ReadyForQuery messages; the second arrived with an empty response
+    queue in the connection driver, causing 'unexpected message from server'
+    and killing the connection.
+    
+    Fix:
+    - Add encode_no_sync() to query.rs (Bind+Execute without Sync)
+    - copy_in() uses encode_no_sync so only one Sync is ever sent
+    - CopyInReceiver None branch now always sends Sync (error path: server
+      rejected before copy mode; success path already covered by Done branch)
+    - Remove three spurious batch_execute("") resync workarounds that were
+      papering over the protocol violation
+    
+    Also fix: copy data with a single blank line (COPY x FROM stdin followed
+    by just a newline before \.) now correctly sends '\n' to the server
+    instead of empty bytes.  The payload trailing-newline check was testing
+    the joined string (which is "" for one blank line) instead of whether
+    copy_data has any elements at all.
+    
+    copy2 regression test: 767-line diff → 0 (PASS)
+
+diff --git a/tokio-postgres/src/copy_in.rs b/tokio-postgres/src/copy_in.rs
+index 142c69d..fd6c59e 100644
+--- a/tokio-postgres/src/copy_in.rs
++++ b/tokio-postgres/src/copy_in.rs
+@@ -71,20 +71,19 @@ impl Stream for CopyInReceiver {
+             }
+             None => {
+                 self.done = true;
++                let mut buf = BytesMut::new();
+                 if self.in_copy_mode {
+                     // Server entered copy mode but the client dropped the sink
+                     // without calling finish() — send CopyFail to abort.
+-                    let mut buf = BytesMut::new();
+                     frontend::copy_fail("", &mut buf).unwrap();
+-                    frontend::sync(&mut buf);
+-                    Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
+-                } else {
+-                    // The server never entered copy mode (it rejected the COPY
+-                    // command with an ErrorResponse before CopyInResponse).
+-                    // Do NOT send CopyFail — it would be a protocol violation
+-                    // that terminates the connection.
+-                    Poll::Ready(None)
+                 }
++                // Always send Sync so the server sends ReadyForQuery and the
++                // connection driver can complete the response cycle.  With the
++                // old encode() the Sync was already in Bind+Execute+Sync,
++                // causing a second ReadyForQuery (double-Sync bug).  Now that
++                // we use encode_no_sync(), this is the only Sync in the cycle.
++                frontend::sync(&mut buf);
++                Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
+             }
+         }
+     }
+@@ -221,7 +220,7 @@ where
+ {
+     debug!("executing copy in statement {}", statement.name());
+ 
+-    let buf = query::encode(client, &statement, slice_iter(&[]))?;
++    let buf = query::encode_no_sync(client, &statement, slice_iter(&[]))?;
+ 
+     let (mut sender, receiver) = mpsc::channel(1);
+     let receiver = CopyInReceiver::new(receiver);
+diff --git a/tokio-postgres/src/query.rs b/tokio-postgres/src/query.rs
+index 124c8cc..44d7b6c 100644
+--- a/tokio-postgres/src/query.rs
++++ b/tokio-postgres/src/query.rs
+@@ -215,6 +215,30 @@ where
+     })
+ }
+ 
++/// Like [`encode`] but omits the trailing Sync message.
++///
++/// Used by `copy_in` where the Sync must be deferred: either sent with
++/// CopyDone (success path) or sent alone when the server rejected the command
++/// before entering copy mode (error path).  Sending two Syncs (one here and
++/// one in CopyInReceiver) would produce two ReadyForQuery messages from the
++/// server, which would crash the connection driver.
++pub fn encode_no_sync<P, I>(
++    client: &InnerClient,
++    statement: &Statement,
++    params: I,
++) -> Result<Bytes, Error>
++where
++    P: BorrowToSql,
++    I: IntoIterator<Item = P>,
++    I::IntoIter: ExactSizeIterator,
++{
++    client.with_buf(|buf| {
++        encode_bind(statement, params, "", buf)?;
++        frontend::execute("", 0, buf).map_err(Error::encode)?;
++        Ok(buf.split().freeze())
++    })
++}
++
+ pub fn encode_bind<P, I>(
+     statement: &Statement,
+     params: I,
