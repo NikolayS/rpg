@@ -17,6 +17,7 @@ use std::path::Path;
 
 use tokio_postgres::Client;
 
+#[cfg(unix)]
 extern crate libc;
 
 /// Chunk size for `loread` / `lowrite` calls (64 KiB, matching psql).
@@ -502,24 +503,37 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     println!();
 }
 
+/// Return the OS error message without the Rust "(os error N)" suffix.
+/// On Unix uses `libc::strerror_r` for POSIX-style messages; on other
+/// platforms falls back to `std::io::Error::to_string`.
+#[cfg(unix)]
+fn os_error_message(e: &std::io::Error) -> String {
+    if let Some(code) = e.raw_os_error() {
+        let mut buf = [0u8; 256];
+        // SAFETY: strerror_r is always safe with a valid error code.
+        unsafe {
+            libc::strerror_r(code, buf.as_mut_ptr().cast::<libc::c_char>(), buf.len());
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        std::str::from_utf8(&buf[..end])
+            .ok()
+            .map_or_else(|| e.to_string(), str::to_owned)
+    } else {
+        e.to_string()
+    }
+}
+
+#[cfg(not(unix))]
+fn os_error_message(e: &std::io::Error) -> String {
+    e.to_string()
+}
+
 /// Read the entire contents of a local file.
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
     let mut f = std::fs::File::open(Path::new(path)).map_err(|e| {
         // Match psql's error format: "could not open file "<path>": <strerror>"
         // (without the Rust "(os error N)" suffix).
-        let msg = if let Some(code) = e.raw_os_error() {
-            // SAFETY: strerror_r is always safe with a valid error code.
-            let mut buf = [0u8; 256];
-            unsafe {
-                libc::strerror_r(code, buf.as_mut_ptr().cast::<libc::c_char>(), buf.len());
-            }
-            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            std::str::from_utf8(&buf[..end])
-                .ok()
-                .map_or_else(|| e.to_string(), str::to_owned)
-        } else {
-            e.to_string()
-        };
+        let msg = os_error_message(&e);
         format!("could not open file \"{path}\": {msg}")
     })?;
     let mut buf = Vec::new();
