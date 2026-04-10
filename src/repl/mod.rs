@@ -6612,7 +6612,7 @@ fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
     let mut dollar_tag: Option<String> = None;
 
     while i < len {
-        if let Some(ref tag) = dollar_tag.clone() {
+        if let Some(tag) = dollar_tag.as_ref() {
             let tb = tag.as_bytes();
             if bytes[i..].starts_with(tb) {
                 i += tb.len();
