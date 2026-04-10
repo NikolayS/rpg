@@ -72,68 +72,6 @@ pub async fn execute(
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Pager helper
-// ---------------------------------------------------------------------------
-
-/// Route `text` through the pager when it exceeds the terminal height,
-/// otherwise print directly to stdout.
-///
-/// Mirrors the logic used by `maybe_page` in `src/repl/mod.rs`.
-fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
-    use std::io::Write;
-
-    // Honour \o redirect.
-    if let Some(ref mut w) = settings.output_target {
-        let _ = writeln!(w, "{text}");
-        return;
-    }
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
-    if settings.pager_enabled
-        && crate::pager::needs_paging_with_min(
-            text,
-            term_rows.saturating_sub(2),
-            settings.pager_min_lines,
-        )
-    {
-        if let Some(ref sl_arc) = settings.statusline {
-            let sl = sl_arc.lock().unwrap();
-            sl.clear();
-            sl.teardown_scroll_region();
-        }
-        if let Some(ref cmd) = settings.pager_command.clone() {
-            if let Err(e) = crate::pager::run_pager_external(cmd, text) {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "rpg: pager '{cmd}' not found — check your PAGER setting \
-                         (\\set PAGER off to disable)"
-                    );
-                } else {
-                    eprintln!("rpg: pager error: {e}");
-                }
-                let _ = std::io::stdout().write_all(text.as_bytes());
-            }
-        } else if let Err(e) = crate::pager::run_pager(text) {
-            // Unsupported means no TTY available (piped/non-interactive).
-            // Fall back silently — no error message, just print.
-            if e.kind() != std::io::ErrorKind::Unsupported {
-                eprintln!("rpg: pager error: {e}");
-            }
-            let _ = std::io::stdout().write_all(text.as_bytes());
-        }
-        if let Some(ref sl_arc) = settings.statusline {
-            let sl = sl_arc.lock().unwrap();
-            sl.setup_scroll_region();
-            sl.render();
-        }
-    } else {
-        print!("{text}");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Internal execution helper
 // ---------------------------------------------------------------------------
 
@@ -248,7 +186,7 @@ async fn run_and_print_full(
                 format_rowset_pset(&mut out, &rs, &cfg);
                 out
             };
-            maybe_page(settings, &text);
+            crate::repl::maybe_page(settings, &text);
         }
         Err(e) => {
             crate::output::eprint_db_error(&e, Some(sql), false, false, false);
@@ -2602,7 +2540,7 @@ order by 1"
     }
 
     if !full_output.is_empty() {
-        maybe_page(settings, &full_output);
+        crate::repl::maybe_page(settings, &full_output);
     }
 
     false

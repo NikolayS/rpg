@@ -95,7 +95,7 @@ pub async fn execute(
             None
         }
         "" | "help" => {
-            maybe_page(settings, &dba_help_text());
+            crate::repl::maybe_page(settings, &dba_help_text());
             None
         }
         _ => {
@@ -111,67 +111,6 @@ pub async fn execute(
             eprintln!("Try \\dba help for available subcommands.");
             None
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pager helper
-// ---------------------------------------------------------------------------
-
-/// Print `text` through the pager if the content exceeds the terminal height,
-/// otherwise print directly to stdout.
-///
-/// Mirrors the same logic used by `\?` (help) in `src/repl/mod.rs`.
-fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
-    // Honour \o redirect: write to file instead of stdout/pager.
-    if let Some(ref mut w) = settings.output_target {
-        use std::io::Write;
-        let _ = writeln!(w, "{text}");
-        return;
-    }
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
-    if settings.pager_enabled
-        && crate::pager::needs_paging_with_min(
-            text,
-            term_rows.saturating_sub(2),
-            settings.pager_min_lines,
-        )
-    {
-        if let Some(ref sl_arc) = settings.statusline {
-            let sl = sl_arc.lock().unwrap();
-            sl.clear();
-            sl.teardown_scroll_region();
-        }
-        // Use the public pager API directly.
-        if let Some(ref cmd) = settings.pager_command {
-            if let Err(e) = crate::pager::run_pager_external(cmd, text) {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "rpg: pager '{cmd}' not found — check your PAGER setting \
-                         (\\set PAGER off to disable)"
-                    );
-                } else {
-                    eprintln!("rpg: pager error: {e}");
-                }
-                print!("{text}");
-            }
-        } else if let Err(e) = crate::pager::run_pager(text) {
-            // Unsupported means no TTY available (piped/non-interactive).
-            // Fall back silently — no error message, just print.
-            if e.kind() != std::io::ErrorKind::Unsupported {
-                eprintln!("rpg: pager error: {e}");
-            }
-            print!("{text}");
-        }
-        if let Some(ref sl_arc) = settings.statusline {
-            let sl = sl_arc.lock().unwrap();
-            sl.setup_scroll_region();
-            sl.render();
-        }
-    } else {
-        print!("{text}");
     }
 }
 
@@ -211,7 +150,7 @@ async fn run_and_print(client: &Client, sql: &str, settings: &mut crate::repl::R
                 }
             }
 
-            maybe_page(settings, &format_table(&col_names, &rows));
+            crate::repl::maybe_page(settings, &format_table(&col_names, &rows));
         }
         Err(e) => {
             if let Some(db_err) = e.as_db_error() {
@@ -514,7 +453,7 @@ async fn dba_activity(
         counts.total()
     );
 
-    maybe_page(settings, &text);
+    crate::repl::maybe_page(settings, &text);
 }
 
 // ---------------------------------------------------------------------------
@@ -947,7 +886,7 @@ async fn dba_locks(
 ) {
     let edges = collect_lock_edges(client, capabilities).await;
     let forest = build_lock_forest(&edges);
-    maybe_page(settings, &render_lock_forest(&forest));
+    crate::repl::maybe_page(settings, &render_lock_forest(&forest));
 }
 
 async fn dba_bloat(client: &Client, _verbose: bool, settings: &mut crate::repl::ReplSettings) {

@@ -3169,7 +3169,7 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
 ///
 /// Honours `\o` redirection: when `settings.output_target` is set the text
 /// is written to that file instead of stdout / the pager.
-pub(super) fn maybe_page(settings: &mut ReplSettings, text: &str) {
+pub(crate) fn maybe_page(settings: &mut ReplSettings, text: &str) {
     // Honour \o redirect.
     if let Some(ref mut w) = settings.output_target {
         let _ = writeln!(w, "{text}");
@@ -3190,7 +3190,26 @@ pub(super) fn maybe_page(settings: &mut ReplSettings, text: &str) {
             sl.clear();
             sl.teardown_scroll_region();
         }
-        run_pager_for_text(settings, text, text.as_bytes());
+        if let Some(ref cmd) = settings.pager_command {
+            if let Err(e) = crate::pager::run_pager_external(cmd, text) {
+                if e.kind() == io::ErrorKind::NotFound {
+                    eprintln!(
+                        "rpg: pager '{cmd}' not found — check your PAGER setting \
+                         (\\set PAGER off to disable)"
+                    );
+                } else {
+                    eprintln!("rpg: pager error: {e}");
+                }
+                let _ = io::stdout().write_all(text.as_bytes());
+            }
+        } else if let Err(e) = crate::pager::run_pager(text) {
+            // Unsupported means no TTY available (piped/non-interactive).
+            // Fall back silently — no error message, just print.
+            if e.kind() != io::ErrorKind::Unsupported {
+                eprintln!("rpg: pager error: {e}");
+            }
+            let _ = io::stdout().write_all(text.as_bytes());
+        }
         if let Some(ref sl_arc) = settings.statusline {
             let sl = sl_arc.lock().unwrap();
             sl.setup_scroll_region();
