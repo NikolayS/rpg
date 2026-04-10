@@ -193,6 +193,7 @@ pub fn parse_copy_args(args: &str) -> Result<CopySpec, String> {
 /// - flat: `CSV HEADER`
 /// - parenthesised with WITH: `WITH (FORMAT csv, HEADER)`
 /// - parenthesised without WITH: `(FORMAT csv, HEADER)` (psql compat)
+#[allow(clippy::type_complexity)]
 fn parse_copy_options(
     tokens: &mut Tokenizer<'_>,
 ) -> Result<(CopyFormat, Option<char>, bool, Option<String>, Vec<String>), String> {

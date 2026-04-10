@@ -2351,6 +2351,7 @@ where
 /// until one accepts a connection that satisfies `params.target_session_attrs`.
 /// For `prefer-standby` the entire list is tried for standbys first; if none
 /// qualify, the list is retried accepting any host.
+#[allow(clippy::too_many_lines)]
 pub async fn connect(
     mut params: ConnParams,
     opts: &CliConnOpts,

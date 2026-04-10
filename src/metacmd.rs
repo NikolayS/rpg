@@ -787,6 +787,7 @@ pub fn parse_set_with_vars(raw_input: &str, vars: &crate::vars::Variables) -> Pa
 /// - `\\`: command-separator stop signal — collect no more tokens.
 ///
 /// All tokens are concatenated without separating spaces (psql behaviour).
+#[allow(clippy::too_many_lines)]
 fn split_params_set(s: &str, vars: &crate::vars::Variables) -> String {
     let mut out = String::new();
     let mut chars = s.chars().peekable();
@@ -2109,6 +2110,7 @@ fn parse_n_family(input: &str) -> ParsedMeta {
 ///   `g`     → [`MetaCmd::GoExecute`]
 ///
 /// Any unrecognised `g`-prefixed command falls through to [`MetaCmd::Unknown`].
+#[allow(clippy::too_many_lines)]
 fn parse_g_family(input: &str) -> ParsedMeta {
     // `\gexec` — execute buffer, then execute each result cell as SQL.
     // Checked before the generic long-prefix guard below.

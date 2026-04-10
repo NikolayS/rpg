@@ -669,6 +669,7 @@ order by 1, 2"
 // \df — list functions
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 async fn list_functions(
     client: &Client,
     meta: &ParsedMeta,
@@ -2340,6 +2341,7 @@ order by 1"
 ///
 /// For each matching publication: print its attribute table, then list the
 /// tables and schemas it covers.
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
 async fn list_publications_verbose(
     client: &Client,
     meta: &ParsedMeta,
@@ -2807,7 +2809,7 @@ order by 1, 2"
 }
 
 /// Describe a single table (or view, sequence, …): columns + indexes + constraints.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
 async fn describe_table(
     client: &Client,
     meta: &ParsedMeta,

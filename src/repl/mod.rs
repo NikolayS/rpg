@@ -482,6 +482,7 @@ pub fn build_prompt_from_settings(
 /// - `--` line comments are stripped before analysis.
 /// - `/* … */` block comments are tracked.
 /// - Parenthesis depth does not affect statement completion.
+#[allow(clippy::too_many_lines)]
 pub fn is_complete(buf: &str) -> bool {
     let mut in_single = false;
     let mut in_double = false; // double-quoted identifier: "foo's bar"
@@ -6619,6 +6620,7 @@ fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> 
 /// Returns a `Vec` of string slices, split at each unquoted `\;`.  If there
 /// are no `\;` in the line, returns a single-element vec containing the whole
 /// line.  The `\;` token itself is consumed (not included in any segment).
+#[allow(clippy::too_many_lines)]
 fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let len = bytes.len();

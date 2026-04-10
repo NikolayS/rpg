@@ -56,6 +56,7 @@ pub fn eval_bool_strict(expr: &str) -> Option<bool> {
 // ---------------------------------------------------------------------------
 
 /// One level of a conditional block (`\if` … `\endif`).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CondBlock {
     /// Has any branch in this `\if`/`\elif`/`\else` chain already been true?

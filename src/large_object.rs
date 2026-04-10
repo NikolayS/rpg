@@ -363,6 +363,7 @@ async fn run_and_print(client: &Client, sql: &str, title: Option<&str>) {
 /// - Multiline values (containing `\n`) are split across continuation rows with
 ///   a trailing `+` on each non-last line, and blank cells on other columns,
 ///   matching psql's `\x off` aligned output for multi-line data.
+#[allow(clippy::too_many_lines)]
 fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
     if col_names.is_empty() {
         let n = rows.len();

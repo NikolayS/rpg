@@ -415,6 +415,7 @@ fn column_widths(
 /// `value_fn` maps `(column_meta, column_index) → String`.
 /// `is_header` – when true, all headers are center-aligned (psql centers
 /// numeric headers too; only data rows are right-aligned for numeric columns).
+#[allow(clippy::too_many_lines)]
 fn write_aligned_row_border<F>(
     out: &mut String,
     cols: &[ColumnMeta],
@@ -720,6 +721,7 @@ fn write_row_count(out: &mut String, n: usize) {
 // ---------------------------------------------------------------------------
 
 /// Format expanded output using full `PsetConfig` (supports border=0/1/2 and wrapping).
+#[allow(clippy::too_many_lines)]
 fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     let cols = &rs.columns;
     let rows = &rs.rows;

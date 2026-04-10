@@ -142,6 +142,7 @@ fn classify_numeric_by_oid(oid: u32) -> Option<bool> {
 /// (OID ≥ 16384) are always treated as non-numeric.  Built-in numeric types
 /// (int2/int4/int8/float4/float8/numeric/money) are always numeric.
 /// For all other non-zero OIDs the value heuristic is applied.
+#[allow(clippy::too_many_lines)]
 fn infer_numeric_column(
     col_idx: usize,
     name: &str,
@@ -348,6 +349,7 @@ fn infer_numeric_column(
 /// multi-statement query, in which case a blank separator line is printed
 /// before the table (matching psql behaviour).
 /// `writer` is the output destination (stdout or a redirected file).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn print_result_set_pset(
     writer: &mut dyn io::Write,
     col_names: &[String],
@@ -2191,6 +2193,7 @@ pub(super) async fn execute_gset(
 /// so that any embedded single quotes or backslashes are handled correctly.
 /// If the parameter appears to be NULL (the value is literally `\N` per psql
 /// convention), it is substituted as the SQL keyword `NULL`.
+#[allow(clippy::too_many_lines)]
 fn substitute_bind_params(sql: &str, params: &[String]) -> String {
     if params.is_empty() {
         return sql.to_owned();

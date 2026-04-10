@@ -138,6 +138,7 @@ fn parse_rows_affected(tag: &str) -> u64 {
 /// - `FETCH`   → `"FETCH {n}"`
 /// - `MOVE`    → `"MOVE {n}"`
 /// - DDL / utility → the tag text (e.g. `"CREATE TABLE"`, `"SET"`, `"BEGIN"`)
+#[allow(clippy::too_many_lines)]
 pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
     // Skip leading whitespace and block/line comments to find the first keyword.
     let sql = skip_leading_comments(sql);
