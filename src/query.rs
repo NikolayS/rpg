@@ -205,8 +205,9 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
                 "MAPPING" => "CREATE USER MAPPING".to_string(),
                 _ => "CREATE ROLE".to_string(),
             },
+            "GROUP" => "CREATE ROLE".to_string(),
             "ACCESS" => "CREATE ACCESS METHOD".to_string(),
-            "DEFAULT" => "CREATE CONSTRAINT".to_string(),
+            "DEFAULT" => "CREATE CONVERSION".to_string(),
             "EVENT" => "CREATE EVENT TRIGGER".to_string(),
             "" => "CREATE".to_string(),
             _ => format!("CREATE {w1}"),
@@ -230,6 +231,7 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
                 "MAPPING" => "DROP USER MAPPING".to_string(),
                 _ => "DROP ROLE".to_string(),
             },
+            "GROUP" => "DROP ROLE".to_string(),
             "ACCESS" => "DROP ACCESS METHOD".to_string(),
             "EVENT" => "DROP EVENT TRIGGER".to_string(),
             "OWNED" => "DROP OWNED".to_string(),
@@ -256,6 +258,7 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
                 "MAPPING" => "ALTER USER MAPPING".to_string(),
                 _ => "ALTER ROLE".to_string(), // ALTER USER → ALTER ROLE tag
             },
+            "GROUP" => "ALTER ROLE".to_string(),
             "ACCESS" => "ALTER ACCESS METHOD".to_string(),
             "" => "ALTER".to_string(),
             _ => format!("ALTER {w1}"),
@@ -1087,6 +1090,32 @@ mod tests {
         assert_eq!(
             reconstruct_command_tag("CLOSE my_cursor", 0),
             "CLOSE CURSOR"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_group_aliases() {
+        // CREATE/DROP/ALTER GROUP are aliases for ROLE operations.
+        assert_eq!(
+            reconstruct_command_tag("CREATE GROUP staff", 0),
+            "CREATE ROLE"
+        );
+        assert_eq!(reconstruct_command_tag("DROP GROUP staff", 0), "DROP ROLE");
+        assert_eq!(
+            reconstruct_command_tag("ALTER GROUP staff ADD USER alice", 0),
+            "ALTER ROLE"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_create_default_conversion() {
+        // CREATE DEFAULT CONVERSION should produce CREATE CONVERSION.
+        assert_eq!(
+            reconstruct_command_tag(
+                "CREATE DEFAULT CONVERSION myconv FOR 'UTF8' TO 'LATIN1' FROM utf8_to_iso8859_1",
+                0
+            ),
+            "CREATE CONVERSION"
         );
     }
 
