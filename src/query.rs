@@ -590,6 +590,10 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 }
             }
         }
+        // Only decrement for END that closes a BEGIN ATOMIC body.
+        // The closing END must be preceded by `;` (the last statement in
+        // the body), optionally with whitespace between.  This avoids
+        // confusing CASE...END, LOOP...END LOOP, etc.
         if begin_atomic_depth > 0
             && b.eq_ignore_ascii_case(&b'e')
             && i + 3 <= len
@@ -597,7 +601,15 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         {
             let after = if i + 3 < len { bytes[i + 3] } else { b';' };
             if !after.is_ascii_alphanumeric() && after != b'_' {
-                begin_atomic_depth -= 1;
+                // Walk backwards over whitespace; the character before must
+                // be `;` (end of the last statement in the ATOMIC body).
+                let mut k = i;
+                while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                    k -= 1;
+                }
+                if k > 0 && bytes[k - 1] == b';' {
+                    begin_atomic_depth -= 1;
+                }
             }
         }
 
@@ -1087,6 +1099,60 @@ mod tests {
             stmts.len(),
             1,
             "BEGIN ATOMIC body should not be split: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_plain_begin_still_splits() {
+        // Plain BEGIN (transaction) should still split normally.
+        let stmts = split_statements("BEGIN; SELECT 1; COMMIT;");
+        assert_eq!(stmts, vec!["BEGIN", "SELECT 1", "COMMIT"]);
+    }
+
+    #[test]
+    fn test_split_begin_atomic_case_insensitive() {
+        let sql =
+            "create function f() returns void language sql begin atomic select 1; select 2; end;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "lowercase BEGIN ATOMIC should work: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_begin_atomic_with_case_end() {
+        // CASE...END inside BEGIN ATOMIC must not prematurely close the block.
+        let sql = "CREATE FUNCTION f() RETURNS int LANGUAGE SQL BEGIN ATOMIC SELECT CASE WHEN true THEN 1 ELSE 0 END; END;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "CASE...END should not close BEGIN ATOMIC: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_begin_atomic_in_dollar_quote() {
+        // BEGIN ATOMIC inside a dollar-quoted string should not be detected.
+        let sql = "SELECT $$BEGIN ATOMIC SELECT 1; END$$; SELECT 2;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "dollar-quoted BEGIN ATOMIC is just a string: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_two_begin_atomic_functions() {
+        let sql = "CREATE FUNCTION f() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 1; END; CREATE FUNCTION g() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 2; END;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "two BEGIN ATOMIC functions should be 2 statements: {stmts:?}"
         );
     }
 
