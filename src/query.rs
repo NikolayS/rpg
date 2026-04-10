@@ -201,7 +201,10 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
                 "FAMILY" => "CREATE OPERATOR FAMILY".to_string(),
                 _ => "CREATE OPERATOR".to_string(),
             },
-            "USER" => "CREATE USER MAPPING".to_string(),
+            "USER" => match w2 {
+                "MAPPING" => "CREATE USER MAPPING".to_string(),
+                _ => "CREATE ROLE".to_string(),
+            },
             "ACCESS" => "CREATE ACCESS METHOD".to_string(),
             "DEFAULT" => "CREATE CONSTRAINT".to_string(),
             "EVENT" => "CREATE EVENT TRIGGER".to_string(),
@@ -223,7 +226,10 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
                 "FAMILY" => "DROP OPERATOR FAMILY".to_string(),
                 _ => "DROP OPERATOR".to_string(),
             },
-            "USER" => "DROP USER MAPPING".to_string(),
+            "USER" => match w2 {
+                "MAPPING" => "DROP USER MAPPING".to_string(),
+                _ => "DROP ROLE".to_string(),
+            },
             "ACCESS" => "DROP ACCESS METHOD".to_string(),
             "EVENT" => "DROP EVENT TRIGGER".to_string(),
             "OWNED" => "DROP OWNED".to_string(),
@@ -270,10 +276,7 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
 
         // --- Cursor commands ---
         "DECLARE" => "DECLARE CURSOR".to_string(),
-        "CLOSE" => match w1 {
-            "ALL" => "CLOSE CURSOR ALL".to_string(),
-            _ => "CLOSE CURSOR".to_string(),
-        },
+        "CLOSE" => "CLOSE CURSOR".to_string(),
 
         // --- Prepare / execute ---
         "PREPARE" => "PREPARE".to_string(),
@@ -448,6 +451,9 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     // the statement.  This handles cases like CREATE RULE ... DO ALSO (s1; s2)
     // and function calls with multiple arguments.
     let mut paren_depth: u32 = 0;
+    // Track BEGIN ATOMIC depth so that semicolons inside SQL-language function
+    // bodies are not treated as statement terminators.
+    let mut begin_atomic_depth: u32 = 0;
 
     while i < len {
         let b = bytes[i];
@@ -574,8 +580,29 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             paren_depth = paren_depth.saturating_sub(1);
         }
 
+        // -- BEGIN ATOMIC / END depth (SQL-language function bodies) -------
+        if b.eq_ignore_ascii_case(&b'b') && i + 12 <= len {
+            let ahead = &bytes[i..i + 12];
+            if ahead.eq_ignore_ascii_case(b"begin atomic") {
+                let after = if i + 12 < len { bytes[i + 12] } else { b' ' };
+                if !after.is_ascii_alphanumeric() && after != b'_' {
+                    begin_atomic_depth += 1;
+                }
+            }
+        }
+        if begin_atomic_depth > 0
+            && b.eq_ignore_ascii_case(&b'e')
+            && i + 3 <= len
+            && bytes[i..i + 3].eq_ignore_ascii_case(b"end")
+        {
+            let after = if i + 3 < len { bytes[i + 3] } else { b';' };
+            if !after.is_ascii_alphanumeric() && after != b'_' {
+                begin_atomic_depth -= 1;
+            }
+        }
+
         // -- statement terminator (only at top-level, depth == 0) ----------
-        if b == b';' && paren_depth == 0 {
+        if b == b';' && paren_depth == 0 && begin_atomic_depth == 0 {
             flush_to!(current, i);
             let trimmed = current.trim().to_owned();
             if !trimmed.is_empty() {
@@ -1017,6 +1044,49 @@ mod tests {
         assert_eq!(
             reconstruct_command_tag("CREATE TEMPORARY TABLE foo (id int)", 0),
             "CREATE TABLE"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_create_user_vs_user_mapping() {
+        // CREATE USER is an alias for CREATE ROLE — tag should be CREATE ROLE
+        assert_eq!(
+            reconstruct_command_tag("CREATE USER alice PASSWORD 'secret'", 0),
+            "CREATE ROLE"
+        );
+        // CREATE USER MAPPING is a separate command
+        assert_eq!(
+            reconstruct_command_tag("CREATE USER MAPPING FOR alice SERVER s", 0),
+            "CREATE USER MAPPING"
+        );
+        // DROP USER (alias for DROP ROLE)
+        assert_eq!(reconstruct_command_tag("DROP USER alice", 0), "DROP ROLE");
+        // DROP USER MAPPING
+        assert_eq!(
+            reconstruct_command_tag("DROP USER MAPPING FOR alice SERVER s", 0),
+            "DROP USER MAPPING"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_close_all() {
+        // CLOSE ALL produces tag "CLOSE CURSOR", not "CLOSE CURSOR ALL"
+        assert_eq!(reconstruct_command_tag("CLOSE ALL", 0), "CLOSE CURSOR");
+        assert_eq!(
+            reconstruct_command_tag("CLOSE my_cursor", 0),
+            "CLOSE CURSOR"
+        );
+    }
+
+    #[test]
+    fn test_split_begin_atomic() {
+        let sql =
+            "CREATE FUNCTION f() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 1; SELECT 2; END;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "BEGIN ATOMIC body should not be split: {stmts:?}"
         );
     }
 

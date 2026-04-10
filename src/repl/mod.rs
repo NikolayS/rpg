@@ -502,7 +502,7 @@ pub fn is_complete(buf: &str) -> bool {
 
     while i < len {
         // If inside a dollar-quoted string, look for the closing tag.
-        if let Some(ref tag) = dollar_tag.clone() {
+        if let Some(tag) = dollar_tag.as_ref() {
             let tag_bytes = tag.as_bytes();
             if bytes[i..].starts_with(tag_bytes) {
                 i += tag_bytes.len();
@@ -687,7 +687,7 @@ fn scan_quote_state(buf: &str) -> (bool, bool) {
     let mut i = 0;
 
     while i < len {
-        if let Some(ref tag) = dollar_tag.clone() {
+        if let Some(tag) = dollar_tag.as_ref() {
             let tag_bytes = tag.as_bytes();
             if bytes[i..].starts_with(tag_bytes) {
                 i += tag_bytes.len();
@@ -6311,7 +6311,7 @@ fn get_open_dollar_tag(buf: &str) -> Option<String> {
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        if let Some(ref tag) = dollar_tag.clone() {
+        if let Some(tag) = dollar_tag.as_ref() {
             let tag_bytes = tag.as_bytes();
             if bytes[i..].starts_with(tag_bytes) {
                 i += tag_bytes.len();
@@ -6485,7 +6485,7 @@ fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> 
 
     while i < len {
         // Dollar-quoted string
-        if let Some(ref tag) = dollar_tag.clone() {
+        if let Some(tag) = dollar_tag.as_ref() {
             let tag_bytes = tag.as_bytes();
             if bytes[i..].starts_with(tag_bytes) {
                 i += tag_bytes.len();

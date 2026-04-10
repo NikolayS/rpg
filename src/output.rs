@@ -1559,20 +1559,27 @@ pub fn eprint_pg_notice(notice: &tokio_postgres::error::DbError) {
 
 /// Write the `LINE N: …` context and the `^` position marker.
 fn write_error_position(out: &mut String, sql: &str, pos: &tokio_postgres::error::ErrorPosition) {
-    // Postgres reports `position` as a 1-based byte offset into the query.
-    let byte_offset = match pos {
+    // Postgres reports `position` as a 1-based *character* offset into the
+    // query string, not a byte offset.
+    let char_offset = match pos {
         tokio_postgres::error::ErrorPosition::Original(n) => (*n as usize).saturating_sub(1),
         tokio_postgres::error::ErrorPosition::Internal { position, .. } => {
             (*position as usize).saturating_sub(1)
         }
     };
 
+    // Convert character offset to byte offset for slicing.
+    let byte_offset = sql
+        .char_indices()
+        .nth(char_offset)
+        .map_or(sql.len(), |(idx, _)| idx);
+
     // Find which line the offset falls on and the column within that line.
-    let before = sql.get(..byte_offset.min(sql.len())).unwrap_or(sql);
+    let before = &sql[..byte_offset];
     let line_num = before.chars().filter(|&c| c == '\n').count() + 1;
 
     let line_start = before.rfind('\n').map_or(0, |p| p + 1);
-    let col_offset = before.len() - line_start;
+    let col_offset = before[line_start..].chars().count();
 
     // The line text (stop at the next newline).
     let line_text = sql[line_start..].lines().next().unwrap_or("");
@@ -3612,5 +3619,32 @@ mod tests {
         // Column name "id" is 2 chars; value "1" is padded to 2 chars.
         assert!(out.contains("| 1"), "data missing: {out}");
         assert!(!out.contains("(1 row)"), "footer must be suppressed: {out}");
+    }
+
+    // -----------------------------------------------------------------------
+    // write_error_position — non-ASCII caret placement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_error_position_non_ascii() {
+        // PostgreSQL reports position as 1-based *character* offset.
+        // "SELECT * FROM «тест»" — error at char 16 (the 'т' in тест).
+        // Characters: S(1) E(2) L(3) E(4) C(5) T(6) (7) *(8) (9) F(10) R(11) O(12) M(13) (14) «(15) т(16)
+        let sql = "SELECT * FROM «тест»";
+        let pos = tokio_postgres::error::ErrorPosition::Original(16);
+        let mut out = String::new();
+        write_error_position(&mut out, sql, &pos);
+        // The caret should point at char 16 (т), not at byte 16 (which is
+        // inside the multi-byte « character).
+        assert!(out.contains("LINE 1:"), "should have LINE 1: prefix: {out}");
+        // Count spaces before ^ in the caret line.
+        let caret_line = out.lines().nth(1).expect("should have caret line");
+        let caret_col = caret_line.find('^').expect("should have ^ marker");
+        // "LINE 1: " prefix is 8 chars, then 15 chars before position 16
+        let expected_col = "LINE 1: ".len() + 15;
+        assert_eq!(
+            caret_col, expected_col,
+            "caret at wrong position: expected {expected_col}, got {caret_col}\nfull output:\n{out}"
+        );
     }
 }
