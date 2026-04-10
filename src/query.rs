@@ -588,7 +588,9 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             let ahead = &bytes[i..i + 12];
             if ahead.eq_ignore_ascii_case(b"begin atomic") {
                 let after = if i + 12 < len { bytes[i + 12] } else { b' ' };
-                if !after.is_ascii_alphanumeric() && after != b'_' {
+                let before_ok =
+                    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+                if before_ok && !after.is_ascii_alphanumeric() && after != b'_' {
                     begin_atomic_depth += 1;
                 }
             }
