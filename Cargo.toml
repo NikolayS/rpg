@@ -25,7 +25,7 @@ bytes = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
+russh = { version = "0.60", default-features = false, features = ["ring", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -78,4 +78,4 @@ match_same_arms = "allow"
 wildcard_imports = "allow"
 
 [patch.crates-io]
-tokio-postgres = { path = "vendor/tokio-postgres" }
+tokio-postgres = { git = "https://github.com/NikolayS/rust-postgres", tag = "tokio-postgres-v0.7.17-patched.1" }
