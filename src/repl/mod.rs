@@ -5,7 +5,7 @@
 //! SQL accumulation, backslash command handling, transaction-state prompts,
 //! and signal-aware Ctrl-C / Ctrl-D behaviour.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -1152,6 +1152,11 @@ pub struct ReplSettings {
     /// (`client.query`) with these values as positional parameters.  The
     /// field is cleared to `None` after each query execution.
     pub pending_bind_params: Option<Vec<String>>,
+    /// Pending named-statement execution stored by `\bind_named`.
+    ///
+    /// Like `pending_bind_params`, execution is deferred until `\g`.
+    /// Holds `(stmt_name, params)`.  Cleared after each execution.
+    pub pending_bind_named: Option<(String, Vec<String>)>,
     /// Inline pset options for the next `\g` / `\gx` execution.
     ///
     /// Set by `\g (option=value ...)` or `\gx (option=value ...)` and
@@ -1159,8 +1164,8 @@ pub struct ReplSettings {
     pub pending_pset_opts: Vec<(String, Option<String>)>,
     /// Named prepared statements stored by `\parse`.
     ///
-    /// Maps statement name → compiled [`tokio_postgres::Statement`].
-    pub named_statements: HashMap<String, tokio_postgres::Statement>,
+    /// Tracks statement names that exist on the server (via SQL `PREPARE`).
+    pub named_statements: HashSet<String>,
     /// Disable ANSI syntax highlighting in the interactive REPL.
     ///
     /// Set by `--no-highlight` CLI flag or `\set HIGHLIGHT off`.
@@ -1546,8 +1551,9 @@ impl Default for ReplSettings {
             cond: crate::conditional::ConditionalState::default(),
             last_query: None,
             pending_bind_params: None,
+            pending_bind_named: None,
             pending_pset_opts: Vec::new(),
-            named_statements: HashMap::new(),
+            named_statements: HashSet::new(),
             no_highlight: false,
             no_completion: false,
             // Pager is enabled by default in interactive mode.
@@ -2130,6 +2136,16 @@ pub(crate) async fn exec_lines(
                 // Handle buffer-aware results that exec_lines must act on directly.
                 match result {
                     MetaResult::ExecuteBuffer => {
+                        // \bind_named deferred execution: if pending, execute
+                        // the named statement instead of the buffer.
+                        if let Some((ref name, ref parms)) = settings.pending_bind_named.take() {
+                            if !execute_named_stmt(client, name, parms, settings, tx).await {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    break 'lines;
+                                }
+                            }
+                        } else {
                         // The buffer lines were already echoed individually above;
                         // disable echo_all so execute_query doesn't echo again.
                         let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
@@ -2174,6 +2190,7 @@ pub(crate) async fn exec_lines(
                                 }
                             }
                         }
+                        } // end else (no pending_bind_named)
                     }
                     MetaResult::ExecuteBufferExpanded => {
                         let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
@@ -2331,12 +2348,20 @@ pub(crate) async fn exec_lines(
                     }
                     MetaResult::ParseStatement(name) => {
                         let sql = buf.trim().to_owned();
+                        buf.clear();
                         if sql.is_empty() {
                             eprintln!("\\parse: query buffer is empty");
                         } else {
-                            match client.prepare(&sql).await {
-                                Ok(stmt) => {
-                                    settings.named_statements.insert(name, stmt);
+                            // Use SQL PREPARE so error messages match psql.
+                            let sql_name = if name.is_empty() {
+                                "__rpg_unnamed".to_owned()
+                            } else {
+                                name.clone()
+                            };
+                            let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
+                            match client.batch_execute(&prepare_sql).await {
+                                Ok(()) => {
+                                    settings.named_statements.insert(name);
                                 }
                                 Err(e) => {
                                     crate::output::eprint_db_error(
@@ -2354,18 +2379,23 @@ pub(crate) async fn exec_lines(
                             }
                         }
                     }
-                    MetaResult::BindNamedExec(name, params) => {
-                        if !execute_named_stmt(client, &name, &params, settings, tx).await {
-                            exit_code = 1;
-                            if settings.single_transaction {
-                                break 'lines;
-                            }
-                        }
-                    }
                     MetaResult::ClosePrepared(name) => {
-                        if settings.named_statements.remove(&name).is_some() {
-                            let deallocate = format!("deallocate {name}");
-                            if !execute_query(client, &deallocate, settings, tx).await {
+                        if settings.named_statements.remove(&name) {
+                            // Send SQL DEALLOCATE silently via batch_execute.
+                            let sql_name = if name.is_empty() {
+                                "__rpg_unnamed".to_owned()
+                            } else {
+                                name.clone()
+                            };
+                            let deallocate = format!("DEALLOCATE {sql_name}");
+                            if let Err(e) = client.batch_execute(&deallocate).await {
+                                crate::output::eprint_db_error(
+                                    &e,
+                                    None,
+                                    settings.verbose_errors,
+                                    settings.terse_errors,
+                                    settings.sqlstate_errors,
+                                );
                                 exit_code = 1;
                                 if settings.single_transaction {
                                     break 'lines;
@@ -2484,6 +2514,15 @@ pub(crate) async fn exec_lines(
                     let result = dispatch_meta(parsed, client, params, settings, tx).await;
                     match result {
                         MetaResult::ExecuteBuffer => {
+                            // \bind_named deferred execution.
+                            if let Some((ref name, ref parms)) = settings.pending_bind_named.take() {
+                                if !execute_named_stmt(client, name, parms, settings, tx).await {
+                                    exit_code = 1;
+                                    if settings.single_transaction {
+                                        break 'lines;
+                                    }
+                                }
+                            } else {
                             let stripped =
                                 crate::query::strip_leading_preamble(buf.trim()).to_owned();
                             let sql = if stripped.is_empty() {
@@ -2525,6 +2564,7 @@ pub(crate) async fn exec_lines(
                                     }
                                 }
                             }
+                            } // end else (no pending_bind_named)
                         }
                         MetaResult::ExecuteBufferExpanded => {
                             let stripped =
@@ -2607,14 +2647,23 @@ pub(crate) async fn exec_lines(
                             // psql clears the buffer after a successful parse,
                             // so subsequent lines start with an empty buffer.
                             let sql = buf.trim().to_owned();
+                            buf.clear();
                             if sql.is_empty() {
                                 eprintln!("\\parse: query buffer is empty");
                             } else {
-                                match client.prepare(&sql).await {
-                                    Ok(stmt) => {
-                                        prev_buf = sql;
-                                        buf.clear();
-                                        settings.named_statements.insert(name, stmt);
+                                // Use SQL PREPARE so error messages match psql.
+                                let sql_name = if name.is_empty() {
+                                    "__rpg_unnamed".to_owned()
+                                } else {
+                                    name.clone()
+                                };
+                                let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
+                                match client.batch_execute(&prepare_sql).await {
+                                    Ok(()) => {
+                                        // Do NOT set prev_buf: \parse only prepares,
+                                        // it doesn't execute — the parsed SQL should
+                                        // not be the fallback for a subsequent \g.
+                                        settings.named_statements.insert(name);
                                     }
                                     Err(e) => {
                                         crate::output::eprint_db_error(
@@ -2634,13 +2683,31 @@ pub(crate) async fn exec_lines(
                                 }
                             }
                         }
-                        MetaResult::BindNamedExec(name, params) => {
-                            if !execute_named_stmt(client, &name, &params, settings, tx).await {
-                                exit_code = 1;
-                                if settings.single_transaction {
-                                    break 'lines;
+                        MetaResult::ClosePrepared(name) => {
+                            if settings.named_statements.remove(&name) {
+                                // Send SQL DEALLOCATE silently via batch_execute.
+                                let sql_name = if name.is_empty() {
+                                    "__rpg_unnamed".to_owned()
+                                } else {
+                                    name.clone()
+                                };
+                                let deallocate = format!("DEALLOCATE {sql_name}");
+                                if let Err(e) = client.batch_execute(&deallocate).await {
+                                    crate::output::eprint_db_error(
+                                        &e,
+                                        None,
+                                        settings.verbose_errors,
+                                        settings.terse_errors,
+                                        settings.sqlstate_errors,
+                                    );
+                                    exit_code = 1;
+                                    if settings.single_transaction {
+                                        break 'lines;
+                                    }
                                 }
                             }
+                            // psql silently ignores \close_prepared for
+                            // statements that don't exist in its local map.
                         }
                         MetaResult::ExecuteBufferToFile(path) => {
                             let stripped =
@@ -4432,10 +4499,6 @@ pub enum MetaResult {
     /// The REPL calls `client.prepare(buf)` and stores the result under `name`
     /// in `ReplSettings::named_statements`.
     ParseStatement(String),
-    /// Execute a named prepared statement with the given params (`\bind_named name params…`).
-    ///
-    /// The REPL retrieves the stored statement and calls `client.query`.
-    BindNamedExec(String, Vec<String>),
     /// Deallocate a named prepared statement (`\close_prepared name`).
     ///
     /// Sends `DEALLOCATE name` to the server and removes it from the local map.
@@ -4658,7 +4721,13 @@ pub(super) async fn dispatch_io(
         // -- Extended query protocol (#57) -----------------------------------
         MetaCmd::Bind(ref params) => Some(MetaResult::BindParams(params.clone())),
         MetaCmd::BindNamed(ref name, ref params) => {
-            Some(MetaResult::BindNamedExec(name.clone(), params.clone()))
+            // Store pending bind_named; execution is deferred until \g.
+            // The validation (stmt exists) happens at execution time, matching
+            // psql's deferred-execution model.
+            settings.pending_bind_named = Some((name.clone(), params.clone()));
+            // Clear any pending_bind_params so they don't interfere.
+            settings.pending_bind_params = None;
+            Some(MetaResult::Continue)
         }
         MetaCmd::Parse(ref name) => Some(MetaResult::ParseStatement(name.clone())),
         MetaCmd::ClosePrepared(ref name) => Some(MetaResult::ClosePrepared(name.clone())),
@@ -7056,14 +7125,18 @@ async fn handle_backslash_dumb(
             HandleLineResult::BufferUpdated
         }
         MetaResult::ExecuteBuffer => {
-            let sql = buf.trim().to_owned();
-            buf.clear();
-            if !sql.is_empty() {
-                if let Some(bind_params) = settings.pending_bind_params.take() {
-                    execute_query_extended_interactive(client, &sql, &bind_params, settings, tx)
-                        .await;
-                } else {
-                    execute_query_interactive(client, &sql, settings, tx).await;
+            if let Some((ref name, ref parms)) = settings.pending_bind_named.take() {
+                execute_named_stmt(client, name, parms, settings, tx).await;
+            } else {
+                let sql = buf.trim().to_owned();
+                buf.clear();
+                if !sql.is_empty() {
+                    if let Some(bind_params) = settings.pending_bind_params.take() {
+                        execute_query_extended_interactive(client, &sql, &bind_params, settings, tx)
+                            .await;
+                    } else {
+                        execute_query_interactive(client, &sql, settings, tx).await;
+                    }
                 }
             }
             HandleLineResult::BufferUpdated
@@ -7151,12 +7224,20 @@ async fn handle_backslash_dumb(
         }
         MetaResult::ParseStatement(name) => {
             let sql = buf.trim().to_owned();
+            buf.clear();
             if sql.is_empty() {
                 eprintln!("\\parse: query buffer is empty");
             } else {
-                match client.prepare(&sql).await {
-                    Ok(stmt) => {
-                        settings.named_statements.insert(name.clone(), stmt);
+                // Use SQL PREPARE so error messages match psql.
+                let sql_name = if name.is_empty() {
+                    "__rpg_unnamed".to_owned()
+                } else {
+                    name.clone()
+                };
+                let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
+                match client.batch_execute(&prepare_sql).await {
+                    Ok(()) => {
+                        settings.named_statements.insert(name);
                     }
                     Err(e) => {
                         crate::output::eprint_db_error(
@@ -7171,14 +7252,24 @@ async fn handle_backslash_dumb(
             }
             HandleLineResult::Continue
         }
-        MetaResult::BindNamedExec(name, params) => {
-            execute_named_stmt(client, &name, &params, settings, tx).await;
-            HandleLineResult::Continue
-        }
         MetaResult::ClosePrepared(name) => {
-            if settings.named_statements.remove(&name).is_some() {
-                let deallocate = format!("deallocate {name}");
-                execute_query_interactive(client, &deallocate, settings, tx).await;
+            if settings.named_statements.remove(&name) {
+                // Send SQL DEALLOCATE silently via batch_execute.
+                let sql_name = if name.is_empty() {
+                    "__rpg_unnamed".to_owned()
+                } else {
+                    name.clone()
+                };
+                let deallocate = format!("DEALLOCATE {sql_name}");
+                if let Err(e) = client.batch_execute(&deallocate).await {
+                    crate::output::eprint_db_error(
+                        &e,
+                        None,
+                        settings.verbose_errors,
+                        settings.terse_errors,
+                        settings.sqlstate_errors,
+                    );
+                }
             }
             // psql silently ignores \close_prepared for non-existent stmts.
             HandleLineResult::Continue
@@ -7517,12 +7608,20 @@ async fn handle_line(
             }
             MetaResult::ParseStatement(name) => {
                 let sql = buf.trim().to_owned();
+                buf.clear();
                 if sql.is_empty() {
                     eprintln!("\\parse: query buffer is empty");
                 } else {
-                    match client.prepare(&sql).await {
-                        Ok(stmt) => {
-                            settings.named_statements.insert(name.clone(), stmt);
+                    // Use SQL PREPARE so error messages match psql.
+                    let sql_name = if name.is_empty() {
+                        "__rpg_unnamed".to_owned()
+                    } else {
+                        name.clone()
+                    };
+                    let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
+                    match client.batch_execute(&prepare_sql).await {
+                        Ok(()) => {
+                            settings.named_statements.insert(name);
                         }
                         Err(e) => {
                             crate::output::eprint_db_error(
@@ -7537,14 +7636,24 @@ async fn handle_line(
                 }
                 HandleLineResult::Continue
             }
-            MetaResult::BindNamedExec(name, params) => {
-                execute_named_stmt(client, &name, &params, settings, tx).await;
-                HandleLineResult::Continue
-            }
             MetaResult::ClosePrepared(name) => {
-                if settings.named_statements.remove(&name).is_some() {
-                    let deallocate = format!("deallocate {name}");
-                    execute_query_interactive(client, &deallocate, settings, tx).await;
+                if settings.named_statements.remove(&name) {
+                    // Send SQL DEALLOCATE silently via batch_execute.
+                    let sql_name = if name.is_empty() {
+                        "__rpg_unnamed".to_owned()
+                    } else {
+                        name.clone()
+                    };
+                    let deallocate = format!("DEALLOCATE {sql_name}");
+                    if let Err(e) = client.batch_execute(&deallocate).await {
+                        crate::output::eprint_db_error(
+                            &e,
+                            None,
+                            settings.verbose_errors,
+                            settings.terse_errors,
+                            settings.sqlstate_errors,
+                        );
+                    }
                 }
                 // psql silently ignores \close_prepared for non-existent stmts.
                 HandleLineResult::Continue
@@ -7614,24 +7723,28 @@ async fn handle_line(
             MetaResult::Quit => HandleLineResult::Quit,
             MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
             MetaResult::ExecuteBuffer => {
-                let sql = buf.trim().to_owned();
-                buf.clear();
-                // stmt_buf is intentionally NOT cleared here — the readline
-                // loop adds stmt_buf (which contains the original input with
-                // the terminator, e.g. "select now() \g") to history before
-                // clearing it. See #360.
-                if !sql.is_empty() {
-                    if let Some(bind_params) = settings.pending_bind_params.take() {
-                        execute_query_extended_interactive(
-                            client,
-                            &sql,
-                            &bind_params,
-                            settings,
-                            tx,
-                        )
-                        .await;
-                    } else {
-                        execute_query_interactive(client, &sql, settings, tx).await;
+                if let Some((ref name, ref parms)) = settings.pending_bind_named.take() {
+                    execute_named_stmt(client, name, parms, settings, tx).await;
+                } else {
+                    let sql = buf.trim().to_owned();
+                    buf.clear();
+                    // stmt_buf is intentionally NOT cleared here — the readline
+                    // loop adds stmt_buf (which contains the original input with
+                    // the terminator, e.g. "select now() \g") to history before
+                    // clearing it. See #360.
+                    if !sql.is_empty() {
+                        if let Some(bind_params) = settings.pending_bind_params.take() {
+                            execute_query_extended_interactive(
+                                client,
+                                &sql,
+                                &bind_params,
+                                settings,
+                                tx,
+                            )
+                            .await;
+                        } else {
+                            execute_query_interactive(client, &sql, settings, tx).await;
+                        }
                     }
                 }
                 HandleLineResult::BufferUpdated
@@ -7713,10 +7826,6 @@ async fn handle_line(
             }
             MetaResult::BindParams(params) => {
                 settings.pending_bind_params = Some(params);
-                HandleLineResult::Continue
-            }
-            MetaResult::BindNamedExec(name, params) => {
-                execute_named_stmt(client, &name, &params, settings, tx).await;
                 HandleLineResult::Continue
             }
             _ => {

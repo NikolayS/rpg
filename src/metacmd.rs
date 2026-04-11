@@ -1257,11 +1257,11 @@ fn parse_c_family(input: &str) -> ParsedMeta {
     // `\close_prepared stmt_name` — deallocate a named prepared statement.
     if let Some(rest) = input.strip_prefix("close_prepared") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let name = rest.trim().to_owned();
-            if name.is_empty() {
+            let args = split_params(rest);
+            if args.is_empty() {
                 return ParsedMeta::simple(MetaCmd::MissingArg("close_prepared".to_owned()));
             }
-            return ParsedMeta::simple(MetaCmd::ClosePrepared(name));
+            return ParsedMeta::simple(MetaCmd::ClosePrepared(args[0].clone()));
         }
     }
     // `\cd [dir]` — must be checked before bare `\c`.
@@ -1812,11 +1812,13 @@ fn parse_p_family(input: &str) -> ParsedMeta {
     // `\parse stmt_name` — prepare buffer as named prepared statement.
     if let Some(rest) = input.strip_prefix("parse") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let name = rest.trim().to_owned();
-            if name.is_empty() {
+            let args = split_params(rest);
+            if args.is_empty() {
                 return ParsedMeta::simple(MetaCmd::MissingArg("parse".to_owned()));
             }
-            return ParsedMeta::simple(MetaCmd::Parse(name));
+            // Use the first arg as the statement name (quote-aware:
+            // `\parse ''` gives an empty-string name).
+            return ParsedMeta::simple(MetaCmd::Parse(args[0].clone()));
         }
     }
     // `\plan` — enter plan execution mode.
@@ -2004,15 +2006,14 @@ fn parse_b_family(input: &str) -> ParsedMeta {
     // `\bind_named stmt_name [params...]` — checked before `\bind`.
     if let Some(rest) = input.strip_prefix("bind_named") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let rest = rest.trim();
-            // Find the statement name (first token).
-            let name_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-            let name = rest[..name_end].to_owned();
-            let params_str = rest[name_end..].trim();
-            let (params, cont) = split_params_with_continuation(params_str);
-            if name.is_empty() {
+            // Use split_params_with_continuation to handle quoted names
+            // (e.g. `\bind_named '' \g` gives an empty-string name).
+            let (all_args, cont) = split_params_with_continuation(rest.trim());
+            if all_args.is_empty() {
                 return ParsedMeta::simple(MetaCmd::MissingArg("bind_named".to_owned()));
             }
+            let name = all_args[0].clone();
+            let params = all_args[1..].to_vec();
             return ParsedMeta {
                 cmd: MetaCmd::BindNamed(name, params),
                 plus: false,
@@ -2185,7 +2186,21 @@ fn parse_g_family(input: &str) -> ParsedMeta {
     // `\gdesc` — describe buffer columns without executing.
     if let Some(rest) = input.strip_prefix("gdesc") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            return ParsedMeta::simple(MetaCmd::GDesc);
+            let trimmed = rest.trim_start();
+            let cont = if trimmed.starts_with('\\') {
+                Some(trimmed.to_owned())
+            } else {
+                None
+            };
+            return ParsedMeta {
+                cmd: MetaCmd::GDesc,
+                plus: false,
+                system: false,
+                pattern: None,
+                echo_hidden: false,
+                kind_filter: None,
+                continuation: cont,
+            };
         }
     }
 

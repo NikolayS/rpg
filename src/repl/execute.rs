@@ -48,6 +48,7 @@ const TEXT_TYPE_OIDS: &[u32] = &[
 ///
 /// Extended query results are typed, so we try String first (for text/varchar
 /// columns), then common numeric/bool types, falling back to None for NULLs.
+#[allow(dead_code)]
 fn row_cell_to_string(row: &tokio_postgres::Row, i: usize) -> Option<String> {
     // Attempt to read as Option<String> — works for text, varchar, name, etc.
     if let Ok(v) = row.try_get::<_, Option<String>>(i) {
@@ -1301,120 +1302,41 @@ pub(super) async fn execute_named_stmt(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> bool {
-    // Clone the statement out of the map so we don't hold a borrow on
-    // settings while calling async client methods.
-    let Some(stmt) = settings.named_statements.get(stmt_name).cloned() else {
-        eprintln!("\\bind_named: prepared statement \"{stmt_name}\" does not exist");
+    if !settings.named_statements.contains(stmt_name) {
+        eprintln!("ERROR:  prepared statement \"{stmt_name}\" does not exist");
         return false;
-    };
-
-    if settings.single_step {
-        let preview = format!("[execute stmt \"{stmt_name}\"]");
-        if !confirm_single_step(&preview) {
-            return true;
-        }
     }
 
-    if settings.echo_queries {
-        eprintln!("[execute stmt \"{stmt_name}\"]");
-    }
-
-    let start = if settings.timing {
-        Some(Instant::now())
+    // Use SQL EXECUTE for all statements (both named and empty-name).
+    // Empty name → EXECUTE __rpg_unnamed (internal alias).
+    let sql_name = if stmt_name.is_empty() {
+        "__rpg_unnamed".to_owned()
     } else {
-        None
+        stmt_name.to_owned()
     };
 
-    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-    let dyn_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_refs
-        .iter()
-        .map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync))
-        .collect();
-
-    let success = match client.query(&stmt, dyn_params.as_slice()).await {
-        Ok(rows) => {
-            use crate::output::format_rowset_pset;
-            use crate::query::{ColumnMeta, RowSet};
-
-            if !rows.is_empty() || !stmt.columns().is_empty() {
-                let col_names: Vec<String> =
-                    stmt.columns().iter().map(|c| c.name().to_owned()).collect();
-
-                let col_oids: Vec<u32> = stmt.columns().iter().map(|c| c.type_().oid()).collect();
-
-                let row_data: Vec<Vec<Option<String>>> = rows
-                    .iter()
-                    .map(|row| {
-                        (0..col_names.len())
-                            .map(|i| row_cell_to_string(row, i))
-                            .collect()
-                    })
-                    .collect();
-
-                let columns: Vec<ColumnMeta> = col_names
-                    .iter()
-                    .enumerate()
-                    .map(|(col_idx, n)| ColumnMeta {
-                        name: n.clone(),
-                        is_numeric: infer_numeric_column(
-                            col_idx,
-                            n,
-                            &row_data,
-                            col_oids.get(col_idx).copied().unwrap_or(0),
-                        ),
-                    })
-                    .collect();
-
-                let rs = RowSet {
-                    columns,
-                    rows: row_data,
-                };
-
-                let mut out = String::new();
-                format_rowset_pset(&mut out, &rs, &settings.pset);
-
-                let out_bytes = out.as_bytes();
-
-                if let Some(ref mut w) = settings.output_target {
-                    let _ = w.write_all(out_bytes);
-                } else {
-                    let _ = io::stdout().write_all(out_bytes);
-                }
-            }
-
-            tx.update_from_sql(&format!("[bind_named {stmt_name}]"));
-            true
-        }
-        Err(e) => {
-            crate::output::eprint_db_error(
-                &e,
-                None,
-                settings.verbose_errors,
-                settings.terse_errors,
-                settings.sqlstate_errors,
-            );
-            tx.on_error();
-            false
-        }
+    let execute_sql = if params.is_empty() {
+        format!("EXECUTE {sql_name}")
+    } else {
+        let param_list: Vec<String> = params
+            .iter()
+            .map(|p| {
+                // Escape single quotes by doubling them (SQL standard).
+                let escaped = p.replace('\'', "''");
+                format!("'{escaped}'")
+            })
+            .collect();
+        format!("EXECUTE {sql_name}({})", param_list.join(", "))
     };
 
-    if let Some(t) = start {
-        let elapsed = t.elapsed();
-        // Timing output is written through the active output target so that
-        // it appears after the result set (matching psql behaviour).
-        let line = format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
-        if let Some(ref mut w) = settings.output_target {
-            let _ = w.write_all(line.as_bytes());
-        } else {
-            let _ = io::stdout().write_all(line.as_bytes());
-        }
-    }
-
-    if success {
-        settings.last_query = Some(format!("[bind_named {stmt_name}]"));
-    }
-
-    success
+    // Suppress echo_all: psql uses the extended protocol for \bind_named,
+    // so the EXECUTE statement is never echoed.  We use simple-query EXECUTE
+    // but should not echo the internally-generated SQL.
+    let saved_echo = settings.echo_all;
+    settings.echo_all = false;
+    let result = execute_query(client, &execute_sql, settings, tx).await;
+    settings.echo_all = saved_echo;
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2781,26 +2703,46 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 
     let cols = stmt.columns();
     if cols.is_empty() {
-        println!("This command doesn't return data.");
+        println!("The command has no result, or the result has no columns.");
         return;
     }
 
-    // Collect (name, oid) pairs.
-    let col_info: Vec<(String, u32)> = cols
+    // Collect (name, oid, typmod) triples.
+    let col_info: Vec<(String, u32, i32)> = cols
         .iter()
-        .map(|c| (c.name().to_owned(), c.type_().oid()))
+        .map(|c| {
+            (
+                c.name().to_owned(),
+                c.type_().oid(),
+                c.type_modifier(),
+            )
+        })
         .collect();
 
-    // Resolve OIDs to display type names in a single query.
-    // Build: SELECT format_type($1, NULL), format_type($2, NULL), …
-    let select_exprs: Vec<String> = (1..=col_info.len())
-        .map(|i| format!("pg_catalog.format_type(${i}, NULL)"))
+    // Resolve OIDs + typmods to display type names in a single query.
+    // Build: SELECT format_type($1, $2), format_type($3, $4), …
+    // The typmod is passed so that precision/scale is included
+    // (e.g. `character varying(4)` instead of `character varying`).
+    let select_exprs: Vec<String> = col_info
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| {
+            let oid_param = idx * 2 + 1;
+            let mod_param = idx * 2 + 2;
+            format!("pg_catalog.format_type(${oid_param}, ${mod_param})")
+        })
         .collect();
     let type_query = format!("select {}", select_exprs.join(", "));
 
-    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = col_info
+    // Interleave oid and typmod parameters: $1=oid1, $2=typmod1, $3=oid2, …
+    let mut param_values: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = Vec::new();
+    for (_, oid, typmod) in &col_info {
+        param_values.push(Box::new(*oid));
+        param_values.push(Box::new(*typmod));
+    }
+    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_values
         .iter()
-        .map(|(_, oid)| oid as &(dyn tokio_postgres::types::ToSql + Sync))
+        .map(|b| b.as_ref())
         .collect();
 
     let type_names: Vec<String> = match client.query_one(&type_query, &oid_params).await {
@@ -2813,37 +2755,36 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
         }
     };
 
-    // Compute column widths for aligned output.
-    let header_col = "Column";
-    let header_type = "Type";
-    let col_w = col_info
-        .iter()
-        .map(|(n, _)| n.len())
-        .max()
-        .unwrap_or(0)
-        .max(header_col.len());
-    let type_w = type_names
-        .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or(0)
-        .max(header_type.len());
+    // Build a RowSet and use format_rowset_pset for proper alignment
+    // (center-aligned headers, trailing blank line — matching psql).
+    use crate::output::format_rowset_pset;
+    use crate::query::{ColumnMeta, RowSet};
 
-    // Header.
-    println!(" {header_col:<col_w$} | {header_type:<type_w$}");
-    // Separator.
-    println!("-{}-+-{}-", "-".repeat(col_w), "-".repeat(type_w));
-    // Rows.
-    for ((name, _), type_name) in col_info.iter().zip(type_names.iter()) {
-        println!(" {name:<col_w$} | {type_name:<type_w$}");
-    }
-    // Footer.
-    let n = col_info.len();
-    if n == 1 {
-        println!("(1 row)");
-    } else {
-        println!("({n} rows)");
-    }
+    let columns = vec![
+        ColumnMeta {
+            name: "Column".to_owned(),
+            is_numeric: false,
+        },
+        ColumnMeta {
+            name: "Type".to_owned(),
+            is_numeric: false,
+        },
+    ];
+
+    let rows: Vec<Vec<Option<String>>> = col_info
+        .iter()
+        .zip(type_names.iter())
+        .map(|((name, _, _), type_name)| {
+            vec![Some(name.clone()), Some(type_name.clone())]
+        })
+        .collect();
+
+    let rs = RowSet { columns, rows };
+
+    let mut out = String::new();
+    format_rowset_pset(&mut out, &rs, &crate::output::PsetConfig::default());
+
+    let _ = io::stdout().write_all(out.as_bytes());
 }
 
 // ---------------------------------------------------------------------------
