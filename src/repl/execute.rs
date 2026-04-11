@@ -1303,9 +1303,10 @@ pub(super) async fn execute_named_stmt(
     // Use SQL EXECUTE for all statements (both named and empty-name).
     // Empty name → EXECUTE __rpg_unnamed (internal alias).
     let sql_name = if stmt_name.is_empty() {
-        "__rpg_unnamed".to_owned()
+        "\"__rpg_unnamed\"".to_owned()
     } else {
-        stmt_name.to_owned()
+        // Quote as SQL identifier to prevent injection.
+        format!("\"{}\"", stmt_name.replace('"', "\"\""))
     };
 
     let execute_sql = if params.is_empty() {
@@ -1455,8 +1456,9 @@ fn is_transaction_control_command(sql: &str) -> bool {
 
     matches!(
         first,
-        "BEGIN" | "COMMIT" | "END" | "ABORT" | "SAVEPOINT" | "PREPARE"
+        "BEGIN" | "COMMIT" | "END" | "ABORT" | "SAVEPOINT"
     ) || (first == "START" && second == "TRANSACTION")
+        || (first == "PREPARE" && second == "TRANSACTION")
         || first == "ROLLBACK"
         || first == "RELEASE"
 }

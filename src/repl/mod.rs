@@ -2356,9 +2356,9 @@ pub(crate) async fn exec_lines(
                         } else {
                             // Use SQL PREPARE so error messages match psql.
                             let sql_name = if name.is_empty() {
-                                "__rpg_unnamed".to_owned()
+                                "\"__rpg_unnamed\"".to_owned()
                             } else {
-                                name.clone()
+                                format!("\"{}\"", name.replace('"', "\"\""))
                             };
                             let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
                             match client.batch_execute(&prepare_sql).await {
@@ -2385,9 +2385,9 @@ pub(crate) async fn exec_lines(
                         if settings.named_statements.remove(&name) {
                             // Send SQL DEALLOCATE silently via batch_execute.
                             let sql_name = if name.is_empty() {
-                                "__rpg_unnamed".to_owned()
+                                "\"__rpg_unnamed\"".to_owned()
                             } else {
-                                name.clone()
+                                format!("\"{}\"", name.replace('"', "\"\""))
                             };
                             let deallocate = format!("DEALLOCATE {sql_name}");
                             if let Err(e) = client.batch_execute(&deallocate).await {
