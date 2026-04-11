@@ -213,12 +213,9 @@ jobs:
         env:
           KEEP_RESULTS: "1"
           RESULTS_DIR: /tmp/rpg-regress
-          # Skip tests with known CI infrastructure limitations or known rpg gaps:
-          #   misc_functions  - pg_replication_origin leftover state between tests
-          #   tablespace      - tablespace directory not set up in CI environment
-          #   psql            - \parse/\bind/\bind_named metacommands not yet implemented
-          #   strings         - standard_conforming_strings=off backslash parsing not tracked
-          REGRESS_SKIP: "misc_functions tablespace psql strings plpgsql"
+          # Skip tests with known rpg gaps:
+          #   psql  - cross-database \d references, \drg, wrapped format edge cases
+          REGRESS_SKIP: "psql"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \
