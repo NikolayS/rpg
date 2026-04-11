@@ -1454,10 +1454,8 @@ fn is_transaction_control_command(sql: &str) -> bool {
     let first = tokens.next().unwrap_or("");
     let second = tokens.next().unwrap_or("");
 
-    matches!(
-        first,
-        "BEGIN" | "COMMIT" | "END" | "ABORT" | "SAVEPOINT"
-    ) || (first == "START" && second == "TRANSACTION")
+    matches!(first, "BEGIN" | "COMMIT" | "END" | "ABORT" | "SAVEPOINT")
+        || (first == "START" && second == "TRANSACTION")
         || (first == "PREPARE" && second == "TRANSACTION")
         || first == "ROLLBACK"
         || first == "RELEASE"
