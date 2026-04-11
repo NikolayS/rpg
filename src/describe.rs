@@ -479,16 +479,22 @@ fn system_schema_filter(system: bool) -> &'static str {
 /// psql 18 uses type-specific titles for type-filtered commands:
 /// `\dt` → "List of tables", `\di` → "List of indexes", etc.
 /// When multiple or unknown relkinds are combined, fall back to "List of relations".
-fn relation_title(relkinds: &[&str]) -> &'static str {
-    match relkinds {
-        ["r" | "p"] | ["r", "p"] => "List of tables",
-        ["i" | "I"] | ["i", "I"] => "List of indexes",
-        ["v"] => "List of views",
-        ["S"] => "List of sequences",
-        ["m"] => "List of materialized views",
-        ["f"] => "List of foreign tables",
-        ["c"] => "List of composite types",
-        _ => "List of relations",
+fn relation_title(relkinds: &[&str], pg_major: Option<u32>) -> &'static str {
+    // Type-specific titles are a PG 18+ feature. On older versions, psql
+    // always shows "List of relations".
+    if pg_major.is_some_and(|v| v >= 18) {
+        match relkinds {
+            ["r" | "p"] | ["r", "p"] => "List of tables",
+            ["i" | "I"] | ["i", "I"] => "List of indexes",
+            ["v"] => "List of views",
+            ["S"] => "List of sequences",
+            ["m"] => "List of materialized views",
+            ["f"] => "List of foreign tables",
+            ["c"] => "List of composite types",
+            _ => "List of relations",
+        }
+    } else {
+        "List of relations"
     }
 }
 
@@ -670,7 +676,8 @@ order by 1, 2"
         )
     };
 
-    let title = relation_title(relkinds);
+    let pg_ver = settings.db_capabilities.pg_major_version();
+    let title = relation_title(relkinds, pg_ver);
     run_and_print_titled(client, &sql, meta.echo_hidden, Some(title), settings).await
 }
 
@@ -4876,18 +4883,30 @@ mod tests {
     // relation_title — type-specific headings to match psql
     // -----------------------------------------------------------------------
 
-    /// Verify `relation_title()` returns type-specific names (psql 18+).
+    /// Verify `relation_title()` returns type-specific names for PG 18+.
     #[test]
-    fn relation_title_type_specific() {
-        assert_eq!(relation_title(&["r", "p"]), "List of tables");
-        assert_eq!(relation_title(&["r"]), "List of tables");
-        assert_eq!(relation_title(&["i"]), "List of indexes");
-        assert_eq!(relation_title(&["v"]), "List of views");
-        assert_eq!(relation_title(&["S"]), "List of sequences");
-        assert_eq!(relation_title(&["m"]), "List of materialized views");
-        assert_eq!(relation_title(&["f"]), "List of foreign tables");
-        // mixed relkinds fall back to generic
-        assert_eq!(relation_title(&["r", "p", "v", "m"]), "List of relations");
+    fn relation_title_pg18() {
+        let pg18 = Some(18);
+        assert_eq!(relation_title(&["r", "p"], pg18), "List of tables");
+        assert_eq!(relation_title(&["r"], pg18), "List of tables");
+        assert_eq!(relation_title(&["i"], pg18), "List of indexes");
+        assert_eq!(relation_title(&["v"], pg18), "List of views");
+        assert_eq!(relation_title(&["S"], pg18), "List of sequences");
+        assert_eq!(relation_title(&["m"], pg18), "List of materialized views");
+        assert_eq!(relation_title(&["f"], pg18), "List of foreign tables");
+        assert_eq!(
+            relation_title(&["r", "p", "v", "m"], pg18),
+            "List of relations"
+        );
+    }
+
+    /// Verify `relation_title()` returns "List of relations" for PG < 18.
+    #[test]
+    fn relation_title_pg16() {
+        let pg16 = Some(16);
+        assert_eq!(relation_title(&["r", "p"], pg16), "List of relations");
+        assert_eq!(relation_title(&["i"], pg16), "List of relations");
+        assert_eq!(relation_title(&["v"], pg16), "List of relations");
     }
 
     // -----------------------------------------------------------------------

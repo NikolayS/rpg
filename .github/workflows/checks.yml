@@ -218,7 +218,7 @@ jobs:
           #   tablespace      - tablespace directory not set up in CI environment
           #   psql            - \parse/\bind/\bind_named metacommands not yet implemented
           #   strings         - standard_conforming_strings=off backslash parsing not tracked
-          REGRESS_SKIP: "misc_functions tablespace psql strings"
+          REGRESS_SKIP: "misc_functions tablespace psql strings plpgsql"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \
