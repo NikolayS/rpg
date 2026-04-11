@@ -2710,6 +2710,7 @@ fn shrink_widths(
 
         for i in 0..widths.len() {
             if width_average[i] > 0 && widths[i] > width_header[i] {
+                #[allow(clippy::cast_precision_loss)]
                 let ratio = widths[i] as f64 / width_average[i] as f64 + max_width[i] as f64 * 0.01;
                 if ratio > max_ratio {
                     max_ratio = ratio;
@@ -2750,7 +2751,7 @@ fn compute_width_average(
             // psql uses pg_wcssize which returns the max line width within the cell.
             let w = cell_str
                 .split('\n')
-                .map(|line| display_width(line))
+                .map(display_width)
                 .max()
                 .unwrap_or(0);
             sums[i] += w;
@@ -2769,7 +2770,7 @@ fn compute_width_header(cols: &[ColumnMeta]) -> Vec<usize> {
         .map(|c| {
             c.name
                 .split('\n')
-                .map(|line| display_width(line))
+                .map(display_width)
                 .max()
                 .unwrap_or(0)
         })
@@ -2792,7 +2793,7 @@ fn column_widths_max_line(
         .map(|c| {
             c.name
                 .split('\n')
-                .map(|line| display_width(line))
+                .map(display_width)
                 .max()
                 .unwrap_or(0)
         })
@@ -2806,7 +2807,7 @@ fn column_widths_max_line(
             let cell_str = cell.as_deref().unwrap_or(null_str);
             let w = cell_str
                 .split('\n')
-                .map(|line| display_width(line))
+                .map(display_width)
                 .max()
                 .unwrap_or(0);
             if w > widths[i] {
@@ -2928,7 +2929,7 @@ fn format_wrapped_pset(out: &mut String, rs: &RowSet, pcfg: &PsetConfig) {
 
     let natural_widths = column_widths_max_line(cols, rows, null_str);
     let mut widths = natural_widths.clone();
-    let target = pcfg.columns as usize;
+    let target = pcfg.columns;
 
     // Compute header and average widths for the shrinking heuristic.
     let width_header = compute_width_header(cols);
@@ -2942,7 +2943,7 @@ fn format_wrapped_pset(out: &mut String, rs: &RowSet, pcfg: &PsetConfig) {
             _ => cols
                 .len()
                 .saturating_mul(3)
-                .saturating_sub(if cols.is_empty() { 0 } else { 1 }),
+                .saturating_sub(usize::from(!cols.is_empty())),
         };
         overhead + width_header.iter().sum::<usize>()
     };

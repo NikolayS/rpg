@@ -481,8 +481,8 @@ fn system_schema_filter(system: bool) -> &'static str {
 /// When multiple or unknown relkinds are combined, fall back to "List of relations".
 fn relation_title(relkinds: &[&str]) -> &'static str {
     match relkinds {
-        ["r"] | ["r", "p"] | ["p"] => "List of tables",
-        ["i"] | ["I"] | ["i", "I"] => "List of indexes",
+        ["r" | "p"] | ["r", "p"] => "List of tables",
+        ["i" | "I"] | ["i", "I"] => "List of indexes",
         ["v"] => "List of views",
         ["S"] => "List of sequences",
         ["m"] => "List of materialized views",

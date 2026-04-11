@@ -3966,7 +3966,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             if value.is_none_or(str::is_empty) {
                 // \pset format (no value) — show current setting.
                 if !quiet {
-                    println!("Output format is {}.", format_name(&settings.pset.format));
+                    println!("Output format is {}.", format_name(settings.pset.format));
                 }
                 return;
             }
@@ -4028,7 +4028,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             };
             settings.pset.format = fmt;
             if !quiet {
-                println!("Output format is {}.", format_name(&settings.pset.format));
+                println!("Output format is {}.", format_name(settings.pset.format));
             }
         }
         "border" => {
@@ -4274,7 +4274,7 @@ fn bool_value(value: Option<&str>, current: bool) -> bool {
 }
 
 /// Return a short human-readable name for an `OutputFormat`.
-fn format_name(fmt: &crate::output::OutputFormat) -> &'static str {
+fn format_name(fmt: crate::output::OutputFormat) -> &'static str {
     use crate::output::OutputFormat;
     match fmt {
         OutputFormat::Aligned => "aligned",
@@ -4321,7 +4321,7 @@ fn pset_status_text(settings: &ReplSettings) -> String {
     let _ = writeln!(
         out,
         "format                   {}",
-        format_name(&pset.format)
+        format_name(pset.format)
     );
     let _ = writeln!(out, "linestyle                {}", pset.linestyle);
     let _ = writeln!(out, "null                     '{}'", pset.null_display);
@@ -4397,7 +4397,7 @@ fn apply_toggle_align(settings: &mut ReplSettings) {
         _ => OutputFormat::Aligned,
     };
     if settings.is_interactive {
-        println!("Output format is {}.", format_name(&settings.pset.format));
+        println!("Output format is {}.", format_name(settings.pset.format));
     }
 }
 
@@ -4428,7 +4428,7 @@ fn apply_toggle_html(settings: &mut ReplSettings) {
         OutputFormat::Html => OutputFormat::Aligned,
         _ => OutputFormat::Html,
     };
-    println!("Output format is {}.", format_name(&settings.pset.format));
+    println!("Output format is {}.", format_name(settings.pset.format));
 }
 
 /// Apply `\C [title]` — set or clear table title.
