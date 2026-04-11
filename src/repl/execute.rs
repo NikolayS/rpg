@@ -584,7 +584,8 @@ pub async fn execute_query(
     let use_implicit_savepoint = *tx == TxState::InTransaction && {
         let oer = settings.vars.get("ON_ERROR_ROLLBACK").unwrap_or("off");
         // "interactive" is treated same as "on" for now.
-        (oer == "on" || oer == "interactive") && !is_transaction_control_command(sql_to_send)
+        (oer.eq_ignore_ascii_case("on") || oer.eq_ignore_ascii_case("interactive"))
+            && !is_transaction_control_command(sql_to_send)
     };
 
     if use_implicit_savepoint {
@@ -1073,7 +1074,8 @@ pub async fn execute_query_extended(
     // ON_ERROR_ROLLBACK: same implicit savepoint logic as simple_query path.
     let use_implicit_savepoint_ext = *tx == TxState::InTransaction && {
         let oer = settings.vars.get("ON_ERROR_ROLLBACK").unwrap_or("off");
-        (oer == "on" || oer == "interactive") && !is_transaction_control_command(sql_to_send)
+        (oer.eq_ignore_ascii_case("on") || oer.eq_ignore_ascii_case("interactive"))
+            && !is_transaction_control_command(sql_to_send)
     };
 
     if use_implicit_savepoint_ext {

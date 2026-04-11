@@ -2036,6 +2036,83 @@ async fn execute_inline_copy_from(
     }
 }
 
+// ---------------------------------------------------------------------------
+// PREPARE / DEALLOCATE helpers (shared across all code paths)
+// ---------------------------------------------------------------------------
+
+/// Convert a statement name to a properly quoted SQL identifier.
+///
+/// An empty name maps to the unnamed statement (`"__rpg_unnamed"`); otherwise
+/// the name is double-quoted with any embedded `"` escaped by doubling.
+fn sql_quoted_name(name: &str) -> String {
+    if name.is_empty() {
+        "\"__rpg_unnamed\"".to_owned()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// Execute `PREPARE <name> AS <sql>` via `batch_execute` and, on success,
+/// register `name` in the local `named_statements` set.
+///
+/// Returns `true` on success, `false` on error (after printing the error).
+async fn prepare_named(
+    client: &Client,
+    name: &str,
+    sql: &str,
+    named_statements: &mut HashSet<String>,
+    verbose_errors: bool,
+    terse_errors: bool,
+    sqlstate_errors: bool,
+) -> bool {
+    let sql_name = sql_quoted_name(name);
+    let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
+    match client.batch_execute(&prepare_sql).await {
+        Ok(()) => {
+            named_statements.insert(name.to_owned());
+            true
+        }
+        Err(e) => {
+            crate::output::eprint_db_error(
+                &e,
+                Some(sql),
+                verbose_errors,
+                terse_errors,
+                sqlstate_errors,
+            );
+            false
+        }
+    }
+}
+
+/// Execute `DEALLOCATE <name>` via `batch_execute` and remove the name from
+/// the local `named_statements` set.
+///
+/// Returns `true` on success, `false` on error (after printing the error).
+async fn deallocate_named(
+    client: &Client,
+    name: &str,
+    named_statements: &mut HashSet<String>,
+    verbose_errors: bool,
+    terse_errors: bool,
+    sqlstate_errors: bool,
+) -> bool {
+    if !named_statements.remove(name) {
+        // psql silently ignores \close_prepared for statements that don't
+        // exist in its local map.
+        return true;
+    }
+    let sql_name = sql_quoted_name(name);
+    let deallocate = format!("DEALLOCATE {sql_name}");
+    match client.batch_execute(&deallocate).await {
+        Ok(()) => true,
+        Err(e) => {
+            crate::output::eprint_db_error(&e, None, verbose_errors, terse_errors, sqlstate_errors);
+            false
+        }
+    }
+}
+
 /// Shared line-processing core for `exec_file`, `exec_stdin`, and
 /// `io::include_file`.
 ///
@@ -2353,59 +2430,39 @@ pub(crate) async fn exec_lines(
                         buf.clear();
                         if sql.is_empty() {
                             eprintln!("\\parse: query buffer is empty");
-                        } else {
-                            // Use SQL PREPARE so error messages match psql.
-                            let sql_name = if name.is_empty() {
-                                "\"__rpg_unnamed\"".to_owned()
-                            } else {
-                                format!("\"{}\"", name.replace('"', "\"\""))
-                            };
-                            let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
-                            match client.batch_execute(&prepare_sql).await {
-                                Ok(()) => {
-                                    settings.named_statements.insert(name);
-                                }
-                                Err(e) => {
-                                    crate::output::eprint_db_error(
-                                        &e,
-                                        Some(&sql),
-                                        settings.verbose_errors,
-                                        settings.terse_errors,
-                                        settings.sqlstate_errors,
-                                    );
-                                    exit_code = 1;
-                                    if settings.single_transaction {
-                                        break 'lines;
-                                    }
-                                }
+                        } else if !prepare_named(
+                            client,
+                            &name,
+                            &sql,
+                            &mut settings.named_statements,
+                            settings.verbose_errors,
+                            settings.terse_errors,
+                            settings.sqlstate_errors,
+                        )
+                        .await
+                        {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
                             }
                         }
                     }
                     MetaResult::ClosePrepared(name) => {
-                        if settings.named_statements.remove(&name) {
-                            // Send SQL DEALLOCATE silently via batch_execute.
-                            let sql_name = if name.is_empty() {
-                                "\"__rpg_unnamed\"".to_owned()
-                            } else {
-                                format!("\"{}\"", name.replace('"', "\"\""))
-                            };
-                            let deallocate = format!("DEALLOCATE {sql_name}");
-                            if let Err(e) = client.batch_execute(&deallocate).await {
-                                crate::output::eprint_db_error(
-                                    &e,
-                                    None,
-                                    settings.verbose_errors,
-                                    settings.terse_errors,
-                                    settings.sqlstate_errors,
-                                );
-                                exit_code = 1;
-                                if settings.single_transaction {
-                                    break 'lines;
-                                }
+                        if !deallocate_named(
+                            client,
+                            &name,
+                            &mut settings.named_statements,
+                            settings.verbose_errors,
+                            settings.terse_errors,
+                            settings.sqlstate_errors,
+                        )
+                        .await
+                        {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
                             }
                         }
-                        // psql silently ignores \close_prepared for
-                        // statements that don't exist in its local map.
                     }
                     MetaResult::ClearBuffer => {
                         // \r — reset/clear the query buffer (psql behaviour in -f mode).
@@ -2654,64 +2711,39 @@ pub(crate) async fn exec_lines(
                             buf.clear();
                             if sql.is_empty() {
                                 eprintln!("\\parse: query buffer is empty");
-                            } else {
-                                // Use SQL PREPARE so error messages match psql.
-                                let sql_name = if name.is_empty() {
-                                    "__rpg_unnamed".to_owned()
-                                } else {
-                                    name.clone()
-                                };
-                                let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
-                                match client.batch_execute(&prepare_sql).await {
-                                    Ok(()) => {
-                                        // Do NOT set prev_buf: \parse only prepares,
-                                        // it doesn't execute — the parsed SQL should
-                                        // not be the fallback for a subsequent \g.
-                                        settings.named_statements.insert(name);
-                                    }
-                                    Err(e) => {
-                                        crate::output::eprint_db_error(
-                                            &e,
-                                            Some(&sql),
-                                            settings.verbose_errors,
-                                            settings.terse_errors,
-                                            settings.sqlstate_errors,
-                                        );
-                                        // On error psql does NOT clear the buffer
-                                        // (the parse fails, buffer stays).
-                                        exit_code = 1;
-                                        if settings.single_transaction {
-                                            break 'lines;
-                                        }
-                                    }
+                            } else if !prepare_named(
+                                client,
+                                &name,
+                                &sql,
+                                &mut settings.named_statements,
+                                settings.verbose_errors,
+                                settings.terse_errors,
+                                settings.sqlstate_errors,
+                            )
+                            .await
+                            {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    break 'lines;
                                 }
                             }
                         }
                         MetaResult::ClosePrepared(name) => {
-                            if settings.named_statements.remove(&name) {
-                                // Send SQL DEALLOCATE silently via batch_execute.
-                                let sql_name = if name.is_empty() {
-                                    "__rpg_unnamed".to_owned()
-                                } else {
-                                    name.clone()
-                                };
-                                let deallocate = format!("DEALLOCATE {sql_name}");
-                                if let Err(e) = client.batch_execute(&deallocate).await {
-                                    crate::output::eprint_db_error(
-                                        &e,
-                                        None,
-                                        settings.verbose_errors,
-                                        settings.terse_errors,
-                                        settings.sqlstate_errors,
-                                    );
-                                    exit_code = 1;
-                                    if settings.single_transaction {
-                                        break 'lines;
-                                    }
+                            if !deallocate_named(
+                                client,
+                                &name,
+                                &mut settings.named_statements,
+                                settings.verbose_errors,
+                                settings.terse_errors,
+                                settings.sqlstate_errors,
+                            )
+                            .await
+                            {
+                                exit_code = 1;
+                                if settings.single_transaction {
+                                    break 'lines;
                                 }
                             }
-                            // psql silently ignores \close_prepared for
-                            // statements that don't exist in its local map.
                         }
                         MetaResult::ExecuteBufferToFile(path) => {
                             let stripped =
@@ -7229,50 +7261,29 @@ async fn handle_backslash_dumb(
             if sql.is_empty() {
                 eprintln!("\\parse: query buffer is empty");
             } else {
-                // Use SQL PREPARE so error messages match psql.
-                let sql_name = if name.is_empty() {
-                    "__rpg_unnamed".to_owned()
-                } else {
-                    name.clone()
-                };
-                let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
-                match client.batch_execute(&prepare_sql).await {
-                    Ok(()) => {
-                        settings.named_statements.insert(name);
-                    }
-                    Err(e) => {
-                        crate::output::eprint_db_error(
-                            &e,
-                            Some(&sql),
-                            settings.verbose_errors,
-                            settings.terse_errors,
-                            settings.sqlstate_errors,
-                        );
-                    }
-                }
+                prepare_named(
+                    client,
+                    &name,
+                    &sql,
+                    &mut settings.named_statements,
+                    settings.verbose_errors,
+                    settings.terse_errors,
+                    settings.sqlstate_errors,
+                )
+                .await;
             }
             HandleLineResult::Continue
         }
         MetaResult::ClosePrepared(name) => {
-            if settings.named_statements.remove(&name) {
-                // Send SQL DEALLOCATE silently via batch_execute.
-                let sql_name = if name.is_empty() {
-                    "__rpg_unnamed".to_owned()
-                } else {
-                    name.clone()
-                };
-                let deallocate = format!("DEALLOCATE {sql_name}");
-                if let Err(e) = client.batch_execute(&deallocate).await {
-                    crate::output::eprint_db_error(
-                        &e,
-                        None,
-                        settings.verbose_errors,
-                        settings.terse_errors,
-                        settings.sqlstate_errors,
-                    );
-                }
-            }
-            // psql silently ignores \close_prepared for non-existent stmts.
+            deallocate_named(
+                client,
+                &name,
+                &mut settings.named_statements,
+                settings.verbose_errors,
+                settings.terse_errors,
+                settings.sqlstate_errors,
+            )
+            .await;
             HandleLineResult::Continue
         }
         result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
@@ -7614,50 +7625,29 @@ async fn handle_line(
                 if sql.is_empty() {
                     eprintln!("\\parse: query buffer is empty");
                 } else {
-                    // Use SQL PREPARE so error messages match psql.
-                    let sql_name = if name.is_empty() {
-                        "__rpg_unnamed".to_owned()
-                    } else {
-                        name.clone()
-                    };
-                    let prepare_sql = format!("PREPARE {sql_name} AS {sql}");
-                    match client.batch_execute(&prepare_sql).await {
-                        Ok(()) => {
-                            settings.named_statements.insert(name);
-                        }
-                        Err(e) => {
-                            crate::output::eprint_db_error(
-                                &e,
-                                Some(&sql),
-                                settings.verbose_errors,
-                                settings.terse_errors,
-                                settings.sqlstate_errors,
-                            );
-                        }
-                    }
+                    prepare_named(
+                        client,
+                        &name,
+                        &sql,
+                        &mut settings.named_statements,
+                        settings.verbose_errors,
+                        settings.terse_errors,
+                        settings.sqlstate_errors,
+                    )
+                    .await;
                 }
                 HandleLineResult::Continue
             }
             MetaResult::ClosePrepared(name) => {
-                if settings.named_statements.remove(&name) {
-                    // Send SQL DEALLOCATE silently via batch_execute.
-                    let sql_name = if name.is_empty() {
-                        "__rpg_unnamed".to_owned()
-                    } else {
-                        name.clone()
-                    };
-                    let deallocate = format!("DEALLOCATE {sql_name}");
-                    if let Err(e) = client.batch_execute(&deallocate).await {
-                        crate::output::eprint_db_error(
-                            &e,
-                            None,
-                            settings.verbose_errors,
-                            settings.terse_errors,
-                            settings.sqlstate_errors,
-                        );
-                    }
-                }
-                // psql silently ignores \close_prepared for non-existent stmts.
+                deallocate_named(
+                    client,
+                    &name,
+                    &mut settings.named_statements,
+                    settings.verbose_errors,
+                    settings.terse_errors,
+                    settings.sqlstate_errors,
+                )
+                .await;
                 HandleLineResult::Continue
             }
             result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
