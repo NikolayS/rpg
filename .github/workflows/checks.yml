@@ -6,6 +6,9 @@ on:
       CODECOV_TOKEN:
         required: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"

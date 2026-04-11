@@ -577,6 +577,22 @@ pub async fn execute_query(
     // Whether the original SQL is a manual EXPLAIN statement (not auto-explain).
     let is_manual_explain = is_explain_statement(sql_to_send) && !auto_explain_active;
 
+    // ON_ERROR_ROLLBACK: when enabled and inside a transaction, wrap the
+    // statement with an implicit savepoint so that errors do not abort the
+    // entire transaction — matching psql behaviour.
+    let use_implicit_savepoint = *tx == TxState::InTransaction && {
+        let oer = settings.vars.get("ON_ERROR_ROLLBACK").unwrap_or("off");
+        // "interactive" is treated same as "on" for now.
+        (oer == "on" || oer == "interactive") && !is_transaction_control_command(sql_to_send)
+    };
+
+    if use_implicit_savepoint {
+        // Create the savepoint silently before executing the user's statement.
+        let _ = client
+            .simple_query("SAVEPOINT pg_psql_savepoint")
+            .await;
+    }
+
     // Use simple_query_raw to stream messages one at a time.  This allows us
     // to display intermediate result sets from statements that completed
     // before an error occurs in a later statement of the same batch, matching
@@ -802,6 +818,14 @@ pub async fn execute_query(
     drop(stream);
 
     let success = if let Some(e) = stream_error {
+        // ON_ERROR_ROLLBACK: roll back to the implicit savepoint so
+        // the transaction stays alive (not aborted).
+        if use_implicit_savepoint {
+            let _ = client
+                .simple_query("ROLLBACK TO SAVEPOINT pg_psql_savepoint")
+                .await;
+        }
+
         // -b / --echo-errors: echo the failing query to stderr.
         if settings.echo_errors {
             eprintln!("{sql_to_send}");
@@ -816,7 +840,12 @@ pub async fn execute_query(
         // A failed query doesn't produce rows; psql does not echo blank
         // lines after error messages.
         settings.last_stmt_produced_rows = false;
-        tx.on_error();
+
+        // Only transition to Failed state when implicit savepoint is
+        // NOT active — the rollback-to-savepoint keeps the tx alive.
+        if !use_implicit_savepoint {
+            tx.on_error();
+        }
 
         // For multi-statement batches, PostgreSQL processes ALL statements
         // in simple-query mode even after an error (subsequent ones fail
@@ -924,6 +953,13 @@ pub async fn execute_query(
 
         false
     } else {
+        // ON_ERROR_ROLLBACK: release the implicit savepoint on success.
+        if use_implicit_savepoint {
+            let _ = client
+                .simple_query("RELEASE SAVEPOINT pg_psql_savepoint")
+                .await;
+        }
+
         // Update transaction state based on what SQL was sent.
         tx.update_from_sql(sql_to_send);
 
@@ -1039,10 +1075,29 @@ pub async fn execute_query_extended(
         None
     };
 
+    // ON_ERROR_ROLLBACK: same implicit savepoint logic as simple_query path.
+    let use_implicit_savepoint_ext = *tx == TxState::InTransaction && {
+        let oer = settings.vars.get("ON_ERROR_ROLLBACK").unwrap_or("off");
+        (oer == "on" || oer == "interactive") && !is_transaction_control_command(sql_to_send)
+    };
+
+    if use_implicit_savepoint_ext {
+        let _ = client
+            .simple_query("SAVEPOINT pg_psql_savepoint")
+            .await;
+    }
+
     // Prepare the statement so that the server can describe its columns.
     let stmt = match client.prepare(sql_to_send).await {
         Ok(s) => s,
         Err(e) => {
+            // ON_ERROR_ROLLBACK: roll back to the implicit savepoint.
+            if use_implicit_savepoint_ext {
+                let _ = client
+                    .simple_query("ROLLBACK TO SAVEPOINT pg_psql_savepoint")
+                    .await;
+            }
+
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
@@ -1053,7 +1108,9 @@ pub async fn execute_query_extended(
                 settings.terse_errors,
                 settings.sqlstate_errors,
             );
-            tx.on_error();
+            if !use_implicit_savepoint_ext {
+                tx.on_error();
+            }
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
             settings.last_error = Some(LastError {
@@ -1141,10 +1198,24 @@ pub async fn execute_query_extended(
                 }
             }
 
+            // ON_ERROR_ROLLBACK: release the implicit savepoint on success.
+            if use_implicit_savepoint_ext {
+                let _ = client
+                    .simple_query("RELEASE SAVEPOINT pg_psql_savepoint")
+                    .await;
+            }
+
             tx.update_from_sql(sql_to_send);
             true
         }
         Err(e) => {
+            // ON_ERROR_ROLLBACK: roll back to the implicit savepoint.
+            if use_implicit_savepoint_ext {
+                let _ = client
+                    .simple_query("ROLLBACK TO SAVEPOINT pg_psql_savepoint")
+                    .await;
+            }
+
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
@@ -1155,7 +1226,9 @@ pub async fn execute_query_extended(
                 settings.terse_errors,
                 settings.sqlstate_errors,
             );
-            tx.on_error();
+            if !use_implicit_savepoint_ext {
+                tx.on_error();
+            }
 
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
@@ -1365,7 +1438,15 @@ pub(super) async fn execute_to_file(
             execute_query(client, buf, settings, tx).await;
             settings.output_target = prev;
         }
-        Err(e) => eprintln!("\\g: cannot open file \"{path}\": {e}"),
+        Err(e) => {
+            // Match psql's error format: "error: {path}: {os error string}"
+            // Rust appends " (os error N)" to the OS message; strip it.
+            let full = e.to_string();
+            let msg = full
+                .find(" (os error ")
+                .map_or(full.as_str(), |pos| &full[..pos]);
+            eprintln!("error: {path}: {msg}");
+        }
     }
 }
 
@@ -1444,6 +1525,25 @@ fn first_keyword_upper(sql: &str) -> String {
 /// Return `true` if `sql` is an EXPLAIN statement (any variant).
 fn is_explain_statement(sql: &str) -> bool {
     first_keyword_upper(sql) == "EXPLAIN"
+}
+
+/// Return `true` if `sql` is a transaction control command that should NOT
+/// be wrapped with implicit savepoints by ON_ERROR_ROLLBACK.
+///
+/// psql excludes: BEGIN, START TRANSACTION, COMMIT, END, ROLLBACK, ABORT,
+/// SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT, PREPARE TRANSACTION.
+fn is_transaction_control_command(sql: &str) -> bool {
+    let upper = sql.trim_start().to_uppercase();
+    let mut tokens = upper.split_whitespace();
+    let first = tokens.next().unwrap_or("");
+    let second = tokens.next().unwrap_or("");
+
+    matches!(
+        first,
+        "BEGIN" | "COMMIT" | "END" | "ABORT" | "SAVEPOINT" | "PREPARE"
+    ) || (first == "START" && second == "TRANSACTION")
+        || first == "ROLLBACK"
+        || first == "RELEASE"
 }
 
 /// Strip psql's aligned table formatting from EXPLAIN output.

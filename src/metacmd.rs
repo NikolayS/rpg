@@ -108,6 +108,11 @@ pub enum MetaCmd {
     ///
     /// Payload: `(var_name, env_var_name)`.
     GetEnv(String, String),
+    /// `\setenv ENVVAR [value]` — set or unset an environment variable.
+    ///
+    /// Payload: `(env_var_name, value)`.  When only one argument is given,
+    /// the environment variable is unset.
+    SetEnv(String, String),
     /// `\unset name` — unset a variable.
     Unset(String),
     /// `\prompt [text] name` — prompt the user for input and store in a variable.
@@ -661,6 +666,16 @@ fn parse_s_family(input: &str) -> ParsedMeta {
     if let Some(rest) = input.strip_prefix("session") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             return parse_session(rest.trim());
+        }
+    }
+    // \setenv ENVVAR [value] — set or unset an environment variable (check before \set).
+    if let Some(rest) = input.strip_prefix("setenv") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let trimmed = rest.trim();
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let env_name = parts.next().unwrap_or("").to_owned();
+            let value = parts.next().map_or(String::new(), |s| s.trim().to_owned());
+            return ParsedMeta::simple(MetaCmd::SetEnv(env_name, value));
         }
     }
     if let Some(after) = input.strip_prefix("set") {
@@ -3468,6 +3483,53 @@ mod tests {
     fn parse_gset_not_confused_with_g() {
         // \gset must NOT fall through to GoExecute.
         assert!(!matches!(parse("\\gset").cmd, MetaCmd::GoExecute(_)));
+    }
+
+    // -- \getenv / \setenv ---------------------------------------------------
+
+    #[test]
+    fn parse_getenv() {
+        let m = parse("\\getenv myvar MY_ENV");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::GetEnv("myvar".to_owned(), "MY_ENV".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_getenv_bare() {
+        let m = parse("\\getenv");
+        assert_eq!(m.cmd, MetaCmd::GetEnv(String::new(), String::new()));
+    }
+
+    #[test]
+    fn parse_setenv() {
+        let m = parse("\\setenv MY_VAR hello");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::SetEnv("MY_VAR".to_owned(), "hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_setenv_unset() {
+        let m = parse("\\setenv MY_VAR");
+        assert_eq!(
+            m.cmd,
+            MetaCmd::SetEnv("MY_VAR".to_owned(), String::new())
+        );
+    }
+
+    #[test]
+    fn parse_setenv_bare() {
+        let m = parse("\\setenv");
+        assert_eq!(m.cmd, MetaCmd::SetEnv(String::new(), String::new()));
+    }
+
+    #[test]
+    fn parse_setenv_not_confused_with_set() {
+        // \setenv must NOT parse as \set
+        assert!(!matches!(parse("\\setenv FOO bar").cmd, MetaCmd::Set(_, _)));
     }
 
     // -- \watch (#47) --------------------------------------------------------

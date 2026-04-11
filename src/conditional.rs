@@ -472,4 +472,135 @@ mod tests {
         s.pop_endif().unwrap();
         assert!(s.is_active());
     }
+
+    // -- eval_bool_strict ------------------------------------------------------
+
+    #[test]
+    fn eval_bool_strict_truthy() {
+        for val in &["true", "True", "TRUE", "on", "1", "yes", "t", "y"] {
+            assert_eq!(
+                eval_bool_strict(val),
+                Some(true),
+                "{val} should be Some(true)"
+            );
+        }
+    }
+
+    #[test]
+    fn eval_bool_strict_falsy() {
+        for val in &["false", "False", "off", "0", "no", "f", "n", ""] {
+            assert_eq!(
+                eval_bool_strict(val),
+                Some(false),
+                "{val} should be Some(false)"
+            );
+        }
+    }
+
+    #[test]
+    fn eval_bool_strict_unrecognised_is_none() {
+        assert_eq!(eval_bool_strict("maybe"), None);
+        assert_eq!(eval_bool_strict("2"), None);
+        assert_eq!(eval_bool_strict("yes_please"), None);
+    }
+
+    #[test]
+    fn eval_bool_strict_trims_whitespace() {
+        assert_eq!(eval_bool_strict("  true  "), Some(true));
+        assert_eq!(eval_bool_strict("  false  "), Some(false));
+        assert_eq!(eval_bool_strict("  maybe  "), None);
+    }
+
+    // -- push_if_error / is_error_conditional ----------------------------------
+
+    #[test]
+    fn empty_stack_is_not_error_conditional() {
+        let s = ConditionalState::new();
+        assert!(!s.is_error_conditional());
+    }
+
+    #[test]
+    fn push_if_error_sets_error_conditional() {
+        let mut s = ConditionalState::new();
+        s.push_if_error();
+        assert!(s.is_error_conditional());
+        // The block should be inactive (like \if false).
+        assert!(!s.is_active());
+        assert_eq!(s.depth(), 1);
+    }
+
+    #[test]
+    fn pop_endif_after_push_if_error_clears_error() {
+        let mut s = ConditionalState::new();
+        s.push_if_error();
+        assert!(s.is_error_conditional());
+        s.pop_endif().unwrap();
+        assert!(!s.is_error_conditional());
+        assert!(s.is_active());
+        assert_eq!(s.depth(), 0);
+    }
+
+    #[test]
+    fn push_if_error_nested_in_inactive_outer_not_error() {
+        // When outer block is inactive, push_if_error should NOT set error
+        // flag (because the outer block suppresses everything).
+        let mut s = ConditionalState::new();
+        s.push_if(false); // outer: inactive
+        s.push_if_error(); // inner: error-conditional but outer is suppressed
+                           // error flag should be false because outer_active was false
+        assert!(!s.is_error_conditional());
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn push_if_error_nested_in_active_outer_is_error() {
+        let mut s = ConditionalState::new();
+        s.push_if(true); // outer: active
+        s.push_if_error(); // inner: error-conditional
+        assert!(s.is_error_conditional());
+        assert!(!s.is_active());
+        // Pop the error block — error should clear.
+        s.pop_endif().unwrap();
+        assert!(!s.is_error_conditional());
+        assert!(s.is_active());
+    }
+
+    #[test]
+    fn push_if_error_else_branch_not_taken() {
+        // After push_if_error, \else should not activate (any_true is false
+        // but the block is in error mode, which acts like \if false).
+        let mut s = ConditionalState::new();
+        s.push_if_error();
+        s.handle_else().unwrap();
+        // \else after \if false would normally activate, and it does here too
+        // because push_if_error sets any_true=false. The error flag is
+        // orthogonal to activation.
+        assert!(s.is_active());
+        s.pop_endif().unwrap();
+        assert!(s.is_active());
+    }
+
+    #[test]
+    fn normal_push_if_is_not_error_conditional() {
+        let mut s = ConditionalState::new();
+        s.push_if(false);
+        assert!(!s.is_error_conditional());
+        s.push_if(true);
+        assert!(!s.is_error_conditional());
+    }
+
+    // -- reset -----------------------------------------------------------------
+
+    #[test]
+    fn reset_clears_all_blocks() {
+        let mut s = ConditionalState::new();
+        s.push_if(true);
+        s.push_if_error(); // outer is active, so error flag is set
+        assert_eq!(s.depth(), 2);
+        assert!(s.is_error_conditional());
+        s.reset();
+        assert_eq!(s.depth(), 0);
+        assert!(s.is_active());
+        assert!(!s.is_error_conditional());
+    }
 }

@@ -163,12 +163,10 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
                 .map_err(|e| {
                     // Match psql error format: "error: <path>: <strerror>"
                     // Strip the " (os error N)" suffix that Rust appends.
-                    let msg = e.to_string();
-                    let msg = if let Some(pos) = msg.rfind(" (os error ") {
-                        &msg[..pos]
-                    } else {
-                        &msg
-                    };
+                    let full = e.to_string();
+                    let msg = full
+                        .find(" (os error ")
+                        .map_or(full.as_str(), |pos| &full[..pos]);
                     format!("error: {p}: {msg}")
                 })?;
             // Wrap in BufWriter so that large result sets are written in

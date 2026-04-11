@@ -2079,7 +2079,10 @@ pub(crate) async fn exec_lines(
             // substitution, matching psql's behaviour (see parse_set_with_vars).
             let mut set_first_iter = true;
             while let Some(ref meta_input) = remaining_meta.clone() {
-                let mut parsed = if set_first_iter && meta_input.trim_start().starts_with("\\set") {
+                let trimmed_meta = meta_input.trim_start();
+                let is_set_cmd = trimmed_meta.strip_prefix("\\set")
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+                let mut parsed = if set_first_iter && is_set_cmd {
                     let raw_cmd = line.trim().trim_start_matches('\\');
                     crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
                 } else {
@@ -2217,6 +2220,62 @@ pub(crate) async fn exec_lines(
                                     break 'lines;
                                 }
                             }
+                        }
+                    }
+                    MetaResult::ExecuteBufferToFile(path) => {
+                        let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        let sql = if stripped.is_empty() {
+                            prev_buf.trim().to_owned()
+                        } else {
+                            stripped
+                        };
+                        buf.clear();
+                        if !sql.is_empty() {
+                            prev_buf = sql.clone();
+                            // psql splits \; segments and opens the file for
+                            // each one separately.
+                            let segments = split_on_backslash_semicolon(&sql);
+                            if segments.len() > 1 {
+                                for seg in &segments {
+                                    let s = seg.trim();
+                                    if !s.is_empty() {
+                                        execute_to_file(client, s, &path, settings, tx).await;
+                                    }
+                                }
+                            } else {
+                                execute_to_file(client, &sql, &path, settings, tx).await;
+                            }
+                        }
+                    }
+                    MetaResult::ExecuteBufferPiped(cmd) => {
+                        let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        let sql = if stripped.is_empty() {
+                            prev_buf.trim().to_owned()
+                        } else {
+                            stripped
+                        };
+                        buf.clear();
+                        if !sql.is_empty() {
+                            prev_buf = sql.clone();
+                            execute_piped(client, &sql, &cmd, settings, tx).await;
+                        }
+                    }
+                    MetaResult::ExecuteBufferExpandedToFile(path) => {
+                        let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                        let sql = if stripped.is_empty() {
+                            prev_buf.trim().to_owned()
+                        } else {
+                            stripped
+                        };
+                        buf.clear();
+                        if !sql.is_empty() {
+                            prev_buf = sql.clone();
+                            let saved_expanded = settings.expanded;
+                            settings.expanded = ExpandedMode::On;
+                            settings.pset.expanded = ExpandedMode::On;
+                            execute_to_file(client, &sql, &path, settings, tx).await;
+                            settings.pset.expanded = saved_expanded;
+                            settings.expanded = saved_expanded;
                         }
                     }
                     MetaResult::GExecBuffer => {
@@ -2393,8 +2452,11 @@ pub(crate) async fn exec_lines(
                 let mut inline_first = true;
                 while let Some(ref inline_raw) = inline_remaining.clone() {
                     let inline_input = settings.vars.interpolate(inline_raw);
+                    let trimmed_inline = inline_input.trim_start();
+                    let is_inline_set = trimmed_inline.strip_prefix("\\set")
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
                     let mut parsed =
-                        if inline_first && inline_input.trim_start().starts_with("\\set") {
+                        if inline_first && is_inline_set {
                             let raw_cmd = inline_raw.trim().trim_start_matches('\\');
                             crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
                         } else {
@@ -2526,12 +2588,7 @@ pub(crate) async fn exec_lines(
                             buf.clear();
                             if !sql.is_empty() {
                                 prev_buf = sql.clone();
-                                describe_buffer(
-                                    client,
-                                    &sql,
-                                    settings.verbose_errors,
-                                )
-                                .await;
+                                describe_buffer(client, &sql, settings.verbose_errors).await;
                             }
                         }
                         MetaResult::CrosstabViewBuffer(args) => {
@@ -2583,6 +2640,82 @@ pub(crate) async fn exec_lines(
                                 if settings.single_transaction {
                                     break 'lines;
                                 }
+                            }
+                        }
+                        MetaResult::ExecuteBufferToFile(path) => {
+                            let stripped =
+                                crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                            let sql = if stripped.is_empty() {
+                                prev_buf.trim().to_owned()
+                            } else {
+                                stripped
+                            };
+                            buf.clear();
+                            if !sql.is_empty() {
+                                prev_buf = sql.clone();
+                                let saved_echo = settings.echo_all;
+                                settings.echo_all = false;
+                                // psql splits \; segments and opens the file
+                                // for each one, so 3 statements produce 3
+                                // file-open attempts (and 3 errors when the
+                                // path is invalid).
+                                let segments = split_on_backslash_semicolon(&sql);
+                                if segments.len() > 1 {
+                                    for seg in &segments {
+                                        let s = seg.trim();
+                                        if !s.is_empty() {
+                                            execute_to_file(
+                                                client, s, &path, settings, tx,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                } else {
+                                    execute_to_file(
+                                        client, &sql, &path, settings, tx,
+                                    )
+                                    .await;
+                                }
+                                settings.echo_all = saved_echo;
+                            }
+                        }
+                        MetaResult::ExecuteBufferPiped(cmd) => {
+                            let stripped =
+                                crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                            let sql = if stripped.is_empty() {
+                                prev_buf.trim().to_owned()
+                            } else {
+                                stripped
+                            };
+                            buf.clear();
+                            if !sql.is_empty() {
+                                prev_buf = sql.clone();
+                                let saved_echo = settings.echo_all;
+                                settings.echo_all = false;
+                                execute_piped(client, &sql, &cmd, settings, tx).await;
+                                settings.echo_all = saved_echo;
+                            }
+                        }
+                        MetaResult::ExecuteBufferExpandedToFile(path) => {
+                            let stripped =
+                                crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                            let sql = if stripped.is_empty() {
+                                prev_buf.trim().to_owned()
+                            } else {
+                                stripped
+                            };
+                            buf.clear();
+                            if !sql.is_empty() {
+                                prev_buf = sql.clone();
+                                let saved_echo = settings.echo_all;
+                                let saved_expanded = settings.expanded;
+                                settings.echo_all = false;
+                                settings.expanded = ExpandedMode::On;
+                                settings.pset.expanded = ExpandedMode::On;
+                                execute_to_file(client, &sql, &path, settings, tx).await;
+                                settings.pset.expanded = saved_expanded;
+                                settings.expanded = saved_expanded;
+                                settings.echo_all = saved_echo;
                             }
                         }
                         _ => {}
@@ -3796,8 +3929,10 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                  troff-ms, unaligned, wrapped";
             let val = value.unwrap_or("");
             // Try exact match first.
-            let fmt_opt =
-                ALL_FORMATS.iter().find(|(name, _)| *name == val).map(|(_, f)| *f);
+            let fmt_opt = ALL_FORMATS
+                .iter()
+                .find(|(name, _)| *name == val)
+                .map(|(_, f)| *f);
             let fmt = if let Some(f) = fmt_opt {
                 f
             } else {
@@ -3812,21 +3947,17 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                     .filter(|(name, _)| name.starts_with(val))
                     .collect();
                 if psql_matches.len() > 1 {
-                    let names: Vec<&str> =
-                        psql_matches.iter().map(|(n, _)| *n).collect();
+                    let names: Vec<&str> = psql_matches.iter().map(|(n, _)| *n).collect();
                     eprintln!(
                         "error: \\pset: ambiguous abbreviation \"{val}\" \
                          matches both \"{}\" and \"{}\"",
-                        names[0],
-                        names[1]
+                        names[0], names[1]
                     );
                     return;
                 } else if !all_matches.is_empty() {
                     all_matches[0].1
                 } else {
-                    eprintln!(
-                        "error: \\pset: allowed formats are {PSQL_FORMAT_NAMES}"
-                    );
+                    eprintln!("error: \\pset: allowed formats are {PSQL_FORMAT_NAMES}");
                     return;
                 }
             };
@@ -3863,9 +3994,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             let sep = unescape_echo(value.unwrap_or(","));
             // Validate: must be exactly one byte (ASCII), and not a special char.
             if sep.len() != 1 || !sep.is_ascii() {
-                eprintln!(
-                    "error: \\pset: csv_fieldsep must be a single one-byte character"
-                );
+                eprintln!("error: \\pset: csv_fieldsep must be a single one-byte character");
                 return;
             }
             let c = sep.as_bytes()[0];
@@ -5141,6 +5270,21 @@ async fn dispatch_meta(
                 if let Ok(val) = std::env::var(env_name) {
                     settings.vars.set(var_name, &val);
                 }
+            }
+        }
+        MetaCmd::SetEnv(ref env_name, ref value) => {
+            // \setenv ENVVAR [value] — set or unset an OS environment variable.
+            // When value is empty, the variable is removed from the environment.
+            if env_name.is_empty() {
+                eprintln!("\\setenv: missing required argument");
+            } else if value.is_empty() {
+                // SAFETY: only called from a single-threaded context.
+                unsafe { std::env::remove_var(env_name) };
+            } else {
+                // Strip surrounding single quotes (psql passes them through).
+                let clean = value.trim_matches('\'');
+                // SAFETY: only called from a single-threaded context.
+                unsafe { std::env::set_var(env_name, clean) };
             }
         }
         MetaCmd::Unset(ref name) => {
@@ -6866,7 +7010,10 @@ async fn handle_backslash_dumb(
     tx: &mut TxState,
 ) -> HandleLineResult {
     let interpolated = settings.vars.interpolate(input);
-    let mut parsed = if interpolated.trim_start().starts_with("\\set") {
+    let trimmed_set = interpolated.trim_start();
+    let is_set = trimmed_set.strip_prefix("\\set")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    let mut parsed = if is_set {
         let raw_cmd = input.trim().trim_start_matches('\\');
         crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
     } else {
@@ -7206,7 +7353,10 @@ async fn handle_line(
         stmt_buf.push_str(line);
         // For \set, use token-level variable substitution with the raw line
         // so that :varname values containing spaces are not re-tokenised.
-        let mut parsed = if interpolated.trim_start().starts_with("\\set") {
+        let trimmed_seg = interpolated.trim_start();
+        let is_set_seg = trimmed_seg.strip_prefix("\\set")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+        let mut parsed = if is_set_seg {
             let raw_cmd = line.trim().trim_start_matches('\\');
             crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
         } else {
@@ -7450,7 +7600,10 @@ async fn handle_line(
         stmt_buf.push_str(meta_part);
         // Dispatch the backslash command (interpolate variables first).
         let interpolated_meta = settings.vars.interpolate(meta_part);
-        let mut parsed = if interpolated_meta.trim_start().starts_with("\\set") {
+        let trimmed_im = interpolated_meta.trim_start();
+        let is_set_im = trimmed_im.strip_prefix("\\set")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+        let mut parsed = if is_set_im {
             let raw_cmd = meta_part.trim().trim_start_matches('\\');
             crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
         } else {
@@ -10933,5 +11086,94 @@ mod tests {
     #[test]
     fn strip_explain_empty_returns_none() {
         assert!(strip_explain_prefix("EXPLAIN").is_none());
+    }
+
+    // -- scan_quote_state ------------------------------------------------------
+
+    #[test]
+    fn scan_quote_state_plain_sql() {
+        assert_eq!(scan_quote_state("select 1"), (false, false));
+    }
+
+    #[test]
+    fn scan_quote_state_inside_single_quote() {
+        // Unterminated single-quoted string.
+        assert_eq!(scan_quote_state("select 'hello"), (true, false));
+    }
+
+    #[test]
+    fn scan_quote_state_closed_single_quote() {
+        assert_eq!(scan_quote_state("select 'hello'"), (false, false));
+    }
+
+    #[test]
+    fn scan_quote_state_escaped_single_quote() {
+        // Two consecutive single quotes inside a string = escaped quote, still inside.
+        assert_eq!(scan_quote_state("select 'it''s"), (true, false));
+    }
+
+    #[test]
+    fn scan_quote_state_escaped_single_quote_closed() {
+        assert_eq!(scan_quote_state("select 'it''s done'"), (false, false));
+    }
+
+    #[test]
+    fn scan_quote_state_inside_dollar_quote() {
+        assert_eq!(scan_quote_state("do $$ begin"), (false, true));
+    }
+
+    #[test]
+    fn scan_quote_state_closed_dollar_quote() {
+        assert_eq!(scan_quote_state("do $$ begin end $$"), (false, false));
+    }
+
+    #[test]
+    fn scan_quote_state_named_dollar_quote() {
+        assert_eq!(scan_quote_state("do $fn$ begin"), (false, true));
+    }
+
+    #[test]
+    fn scan_quote_state_named_dollar_quote_closed() {
+        assert_eq!(scan_quote_state("do $fn$ begin end $fn$"), (false, false));
+    }
+
+    #[test]
+    fn scan_quote_state_single_inside_dollar() {
+        // Single quote inside dollar-quoted string should not start a single-quote context.
+        assert_eq!(scan_quote_state("do $$ select 'hi"), (false, true));
+    }
+
+    #[test]
+    fn scan_quote_state_semicolon_in_single() {
+        assert_eq!(scan_quote_state("select 'a;b"), (true, false));
+    }
+
+    #[test]
+    fn scan_quote_state_line_comment_hides_quote() {
+        // Single quote after -- should not start a string literal.
+        assert_eq!(
+            scan_quote_state("select 1 -- it's\nselect 2"),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn scan_quote_state_block_comment_hides_quote() {
+        // Single quote inside /* */ should not start a string literal.
+        assert_eq!(scan_quote_state("select /* it's */ 1"), (false, false));
+    }
+
+    #[test]
+    fn scan_quote_state_nested_block_comment() {
+        // Nested block comments: outer /* inner /* */ still inside outer */
+        assert_eq!(
+            scan_quote_state("select /* outer /* inner */ still comment"),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn scan_quote_state_empty() {
+        assert_eq!(scan_quote_state(""), (false, false));
     }
 }

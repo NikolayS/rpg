@@ -207,7 +207,7 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 
     match &cfg.format {
-        OutputFormat::Aligned | OutputFormat::Wrapped => {
+        OutputFormat::Aligned => {
             if cfg.expanded == ExpandedMode::On {
                 format_expanded_pset(out, rs, cfg);
             } else {
@@ -217,6 +217,13 @@ pub fn format_rowset_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                     ..Default::default()
                 };
                 format_aligned_pset(out, rs, &ocfg, cfg);
+            }
+        }
+        OutputFormat::Wrapped => {
+            if cfg.expanded == ExpandedMode::On {
+                format_expanded_pset(out, rs, cfg);
+            } else {
+                format_wrapped_pset(out, rs, cfg);
             }
         }
         OutputFormat::Unaligned => {
@@ -2659,6 +2666,512 @@ pub fn format_markdown(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     // Footer: `(N rows)` — outside the table, on its own line.
     if !cfg.tuples_only && cfg.footer {
         write_row_count(out, rows.len());
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Wrapped format
+// ---------------------------------------------------------------------------
+
+fn total_line_width(widths: &[usize], border: u8) -> usize {
+    let n = widths.len();
+    if n == 0 {
+        return 0;
+    }
+    let sum: usize = widths.iter().sum();
+    match border {
+        0 => sum + 2 * (n - 1),       // `w0  w1  w2`
+        2 => sum + 3 * n + 1,         // `| w0 | w1 | w2 |`
+        _ => sum + 3 * n - 1,         // ` w0 | w1 | w2 ` (border 1)
+    }
+}
+
+/// Shrink column widths so the total line fits within `target_width`.
+///
+/// Uses the same heuristic as psql: repeatedly shrink the column with the
+/// highest ratio of current-width / average-width (with a slight bias toward
+/// wider columns).  Columns cannot go below their header width.
+///
+/// - `widths`: mutable column widths (start at natural max).
+/// - `width_header`: minimum per-column width (from header display width).
+/// - `width_average`: average data cell width per column.
+/// - `max_width`: original natural (max) widths (for the width bias term).
+fn shrink_widths(
+    widths: &mut [usize],
+    width_header: &[usize],
+    width_average: &[usize],
+    max_width: &[usize],
+    target_width: usize,
+    border: u8,
+) {
+    while total_line_width(widths, border) > target_width {
+        let mut max_ratio: f64 = 0.0;
+        let mut worst_col: Option<usize> = None;
+
+        for i in 0..widths.len() {
+            if width_average[i] > 0 && widths[i] > width_header[i] {
+                let ratio = widths[i] as f64 / width_average[i] as f64
+                    + max_width[i] as f64 * 0.01;
+                if ratio > max_ratio {
+                    max_ratio = ratio;
+                    worst_col = Some(i);
+                }
+            }
+        }
+
+        match worst_col {
+            Some(col) => widths[col] -= 1,
+            None => break, // cannot shrink any further
+        }
+    }
+}
+
+/// Compute the average display width of data cells per column.
+///
+/// For multi-line cell values, the "display width" is the maximum display width
+/// of any single embedded-newline-delimited line within the cell (matching how
+/// psql computes `pg_wcssize` widths).
+fn compute_width_average(
+    cols: &[ColumnMeta],
+    rows: &[Vec<Option<String>>],
+    null_str: &str,
+) -> Vec<usize> {
+    let n = cols.len();
+    if rows.is_empty() {
+        return vec![0; n];
+    }
+
+    let mut sums = vec![0usize; n];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i >= n {
+                break;
+            }
+            let cell_str = cell.as_deref().unwrap_or(null_str);
+            // psql uses pg_wcssize which returns the max line width within the cell.
+            let w = cell_str.split('\n').map(|line| display_width(line)).max().unwrap_or(0);
+            sums[i] += w;
+        }
+    }
+
+    sums.iter().map(|s| s / rows.len()).collect()
+}
+
+/// Compute the header display width per column.
+///
+/// For headers with embedded newlines, this is the maximum width of any
+/// single line within the header text.
+fn compute_width_header(cols: &[ColumnMeta]) -> Vec<usize> {
+    cols.iter()
+        .map(|c| {
+            c.name
+                .split('\n')
+                .map(|line| display_width(line))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Calculate per-column display widths where multi-line cell values use the
+/// maximum single-line width (matching psql's `pg_wcssize` behavior).
+///
+/// This is the correct width calculation for wrapped format and for aligned
+/// format when cells contain embedded newlines.
+fn column_widths_max_line(
+    cols: &[ColumnMeta],
+    rows: &[Vec<Option<String>>],
+    null_str: &str,
+) -> Vec<usize> {
+    // Header widths: max line width within each header.
+    let mut widths: Vec<usize> = cols
+        .iter()
+        .map(|c| {
+            c.name
+                .split('\n')
+                .map(|line| display_width(line))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i >= widths.len() {
+                break;
+            }
+            let cell_str = cell.as_deref().unwrap_or(null_str);
+            let w = cell_str
+                .split('\n')
+                .map(|line| display_width(line))
+                .max()
+                .unwrap_or(0);
+            if w > widths[i] {
+                widths[i] = w;
+            }
+        }
+    }
+
+    widths
+}
+
+/// A visual line fragment for one cell in wrapped output.
+#[derive(Debug)]
+struct CellLine {
+    /// The text content for this line (may be shorter than the column width).
+    text: String,
+    /// `true` if this line comes from an embedded newline in the cell (show `+`).
+    has_newline: bool,
+    /// `true` if this line wraps to the next (show `.` at end/start).
+    wraps_to_next: bool,
+    /// `true` if this line is a continuation from a wrap on the previous line.
+    continued_from_wrap: bool,
+}
+
+/// Split a cell value into visual lines based on the column width.
+///
+/// Embedded newlines produce lines with `has_newline = true`.
+/// Lines that exceed `col_width` are hard-wrapped: the first part gets
+/// `wraps_to_next = true` and the continuation gets `continued_from_wrap = true`.
+fn split_cell_lines(value: &str, col_width: usize) -> Vec<CellLine> {
+    let mut result = Vec::new();
+    // First, split by embedded newlines (these produce the `+` marker in psql).
+    let nl_parts: Vec<&str> = value.split('\n').collect();
+    let num_nl_parts = nl_parts.len();
+
+    for (nl_idx, part) in nl_parts.iter().enumerate() {
+        let has_newline = nl_idx + 1 < num_nl_parts; // more newline-parts follow
+
+        if col_width == 0 || display_width(part) <= col_width {
+            result.push(CellLine {
+                text: (*part).to_owned(),
+                has_newline,
+                wraps_to_next: false,
+                continued_from_wrap: false,
+            });
+        } else {
+            // Need to hard-wrap this part.
+            let chars: Vec<char> = part.chars().collect();
+            let mut pos = 0;
+            let mut first_chunk = true;
+            while pos < chars.len() {
+                // Take up to `col_width` display-width characters.
+                let mut end = pos;
+                let mut w = 0;
+                while end < chars.len() {
+                    let cw = unicode_width::UnicodeWidthChar::width(chars[end]).unwrap_or(0);
+                    if w + cw > col_width {
+                        break;
+                    }
+                    w += cw;
+                    end += 1;
+                }
+                if end == pos && end < chars.len() {
+                    // Character wider than column; include at least one.
+                    end += 1;
+                }
+                let chunk: String = chars[pos..end].iter().collect();
+                let more_chunks = end < chars.len();
+                result.push(CellLine {
+                    text: chunk,
+                    has_newline: if more_chunks { false } else { has_newline },
+                    wraps_to_next: more_chunks,
+                    continued_from_wrap: !first_chunk,
+                });
+                first_chunk = false;
+                pos = end;
+            }
+            if pos == 0 {
+                // Empty part from newline.
+                result.push(CellLine {
+                    text: String::new(),
+                    has_newline,
+                    wraps_to_next: false,
+                    continued_from_wrap: false,
+                });
+            }
+        }
+    }
+
+    if result.is_empty() {
+        result.push(CellLine {
+            text: String::new(),
+            has_newline: false,
+            wraps_to_next: false,
+            continued_from_wrap: false,
+        });
+    }
+
+    result
+}
+
+/// Render a [`RowSet`] in wrapped format, honouring `PsetConfig` for border,
+/// tuples-only, footer, null display, and column-width target.
+fn format_wrapped_pset(out: &mut String, rs: &RowSet, pcfg: &PsetConfig) {
+    let cols = &rs.columns;
+    let rows = &rs.rows;
+    let border = pcfg.border;
+    let null_str = &pcfg.null_display;
+
+    if cols.is_empty() {
+        if !pcfg.tuples_only {
+            out.push_str("--\n");
+            if pcfg.footer {
+                write_row_count(out, rows.len());
+            }
+        }
+        return;
+    }
+
+    let natural_widths = column_widths_max_line(cols, rows, null_str);
+    let mut widths = natural_widths.clone();
+    let target = pcfg.columns as usize;
+
+    // Compute header and average widths for the shrinking heuristic.
+    let width_header = compute_width_header(cols);
+    let width_average = compute_width_average(cols, rows, null_str);
+
+    // Compute total header width (overhead + header widths) to check feasibility.
+    let total_header_width = {
+        let overhead = match border {
+            0 => cols.len(),
+            2 => cols.len() * 3 + 1,
+            _ => cols.len().saturating_mul(3).saturating_sub(if cols.is_empty() { 0 } else { 1 }),
+        };
+        overhead + width_header.iter().sum::<usize>()
+    };
+
+    // Shrink columns if target width is set and the table is too wide.
+    // Only shrink if the target is at least as wide as the total header width.
+    if target > 0
+        && total_line_width(&widths, border) > target
+        && target >= total_header_width
+    {
+        shrink_widths(
+            &mut widths,
+            &width_header,
+            &width_average,
+            &natural_widths,
+            target,
+            border,
+        );
+    }
+
+    // border 2: top border line.
+    if border == 2 && !pcfg.tuples_only {
+        write_separator_border(out, &widths, border);
+    }
+
+    // Header (suppressed in tuples-only mode).
+    if !pcfg.tuples_only {
+        // Headers can also have embedded newlines (e.g. the test uses "ab\n\nc").
+        write_wrapped_row(out, cols, &widths, border, |col, _| col.name.clone(), true);
+        write_separator_border(out, &widths, border);
+    }
+
+    // Data rows.
+    let null_rendered = if !pcfg.no_highlight && !null_str.is_empty() {
+        format!("\x1b[2m{null_str}\x1b[0m")
+    } else {
+        null_str.to_owned()
+    };
+    for row in rows {
+        let null = null_rendered.clone();
+        write_wrapped_row(
+            out,
+            cols,
+            &widths,
+            border,
+            |_col, cell_idx| {
+                row.get(cell_idx)
+                    .and_then(|v| v.as_deref().map(ToOwned::to_owned))
+                    .unwrap_or_else(|| null.clone())
+            },
+            false,
+        );
+    }
+
+    // border 2: bottom border line.
+    if border == 2 {
+        write_separator_border(out, &widths, border);
+    }
+
+    // Footer.
+    if !pcfg.tuples_only && pcfg.footer {
+        write_row_count(out, rows.len());
+    }
+}
+
+/// Write one (potentially multi-line) row in wrapped format.
+///
+/// Each cell value is split into visual lines.  All columns are padded to the
+/// same number of visual lines.  The `+` marker indicates an embedded newline
+/// and `.` at end/start indicates a hard wrap.
+///
+/// The output structure for each visual line is:
+///
+/// **border 0:** `content₀marker₀ content₁marker₁`
+///   - Between columns: marker + space (or marker + `.` for continuation).
+///   - Last column: just marker (which may be space, `+`, or `.`).
+///
+/// **border 1:** `leading₀content₀marker₀|leading₁content₁marker₁`
+///   - `leading` = ` ` normally, `.` for wrap continuation.
+///   - `marker` = ` ` normally, `+` for newline, `.` for wrap.
+///
+/// **border 2:** `|leading₀content₀marker₀|leading₁content₁marker₁|`
+///   - Same as border 1 but with `|` prefix and suffix.
+#[allow(clippy::too_many_lines)]
+fn write_wrapped_row<F>(
+    out: &mut String,
+    cols: &[ColumnMeta],
+    widths: &[usize],
+    border: u8,
+    value_fn: F,
+    is_header: bool,
+) where
+    F: Fn(&ColumnMeta, usize) -> String,
+{
+    // Split each cell into visual lines.
+    let mut all_lines: Vec<Vec<CellLine>> = Vec::with_capacity(cols.len());
+    let mut max_lines = 0;
+    for (i, col) in cols.iter().enumerate() {
+        let val = value_fn(col, i);
+        let lines = split_cell_lines(&val, widths[i]);
+        if lines.len() > max_lines {
+            max_lines = lines.len();
+        }
+        all_lines.push(lines);
+    }
+
+    // Render each visual line.
+    for line_idx in 0..max_lines {
+        for (col_idx, col) in cols.iter().enumerate() {
+            let w = widths[col_idx];
+            let cell_lines = &all_lines[col_idx];
+            let is_last_col = col_idx + 1 == cols.len();
+
+            let (text, has_newline, wraps_to_next, continued_from_wrap) =
+                if line_idx < cell_lines.len() {
+                    let cl = &cell_lines[line_idx];
+                    (
+                        cl.text.as_str(),
+                        cl.has_newline,
+                        cl.wraps_to_next,
+                        cl.continued_from_wrap,
+                    )
+                } else {
+                    ("", false, false, false)
+                };
+
+            let text_width = display_width(text);
+            let padding = w.saturating_sub(text_width);
+
+            // Whether to pad with trailing spaces (psql: finalspaces).
+            //
+            // Headers: border >= 1 always pads; border 0 always pads because
+            // wrap_right_border=true for ascii linestyle (the trailing marker
+            // is always written as the inter-column separator).
+            //
+            // Data: always pad for border 2; for border 0/1 pad all columns
+            // except the last one.  Exception: also pad the last column if
+            // the next visual line needs a wrap/newline marker.
+            let has_marker = has_newline || wraps_to_next;
+            let final_spaces = if is_header {
+                true // always pad headers (wrap_right_border=true for ascii)
+            } else {
+                border == 2 || !is_last_col || has_marker
+            };
+
+            // --- Leading ---
+            // For border 0: the trailing marker of the previous column serves
+            // as the inter-column separator, so there is NO separate leading
+            // character for col_idx > 0.  For col_idx == 0, no leading at all.
+            //
+            // For border 1/2: each column has a leading space (or `.` for
+            // wrap continuation), plus `|` separators between columns.
+            match border {
+                0 => {
+                    // No leading in border 0 — handled by previous col's trailing.
+                }
+                2 => {
+                    out.push('|');
+                    if continued_from_wrap {
+                        out.push('.');
+                    } else {
+                        out.push(' ');
+                    }
+                }
+                _ => {
+                    if col_idx > 0 {
+                        out.push('|');
+                    }
+                    if continued_from_wrap {
+                        out.push('.');
+                    } else {
+                        out.push(' ');
+                    }
+                }
+            }
+
+            // --- Content ---
+            if col.is_numeric && !is_header {
+                // Right-aligned: spaces before content.
+                if final_spaces {
+                    for _ in 0..padding {
+                        out.push(' ');
+                    }
+                }
+                out.push_str(text);
+            } else if is_header && !col.is_numeric {
+                // Center-aligned header.
+                let left_pad = padding / 2;
+                let right_pad = padding - left_pad;
+                for _ in 0..left_pad {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                if final_spaces {
+                    for _ in 0..right_pad {
+                        out.push(' ');
+                    }
+                }
+            } else if is_header && col.is_numeric {
+                // Right-aligned header.
+                if final_spaces {
+                    for _ in 0..padding {
+                        out.push(' ');
+                    }
+                }
+                out.push_str(text);
+            } else {
+                // Left-aligned data: content then spaces.
+                out.push_str(text);
+                if final_spaces {
+                    for _ in 0..padding {
+                        out.push(' ');
+                    }
+                }
+            }
+
+            // --- Trailing marker ---
+            // Write `+` (newline), `.` (wrap), or ` ` (normal).
+            // For the last column in border 0/1, only write if it's a
+            // meaningful marker (not a plain space).
+            if has_newline {
+                out.push('+');
+            } else if wraps_to_next {
+                out.push('.');
+            } else if final_spaces {
+                out.push(' ');
+            }
+        }
+
+        // Row-end border.
+        if border == 2 {
+            out.push('|');
+        }
+        out.push('\n');
     }
 }
 
