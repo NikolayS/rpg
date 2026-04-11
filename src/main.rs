@@ -1138,7 +1138,7 @@ mod tests {
     #[test]
     fn apply_cli_pset_unknown_option_is_silently_ignored() {
         let mut pset = output::PsetConfig::default();
-        let before_format = pset.format.clone();
+        let before_format = pset.format;
         apply_cli_pset(&mut pset, "unknownoption=somevalue");
         assert_eq!(pset.format, before_format);
     }
