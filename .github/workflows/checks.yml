@@ -214,13 +214,8 @@ jobs:
           #   misc_functions  - pg_replication_origin leftover state between tests
           #   tablespace      - tablespace directory not set up in CI environment
           #   psql            - \parse/\bind/\bind_named metacommands not yet implemented
-          #   transactions    - \; multi-statement semantics differ (implicit txn rollback)
-          #   copydml         - non-deterministic NOTICE ordering (trigger fires at different point)
           #   strings         - standard_conforming_strings=off backslash parsing not tracked
-          #   copy            - same backslash/escape issue in COPY input
-          #   copy2           - \. end-of-data handling in COPY (terminates early)
-          #   domain          - CHECK constraint ordering + domain NOT NULL display
-          REGRESS_SKIP: "misc_functions tablespace psql transactions copydml strings copy copy2 domain without_overlaps publication subscription plpgsql dependency"
+          REGRESS_SKIP: "misc_functions tablespace psql strings"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \

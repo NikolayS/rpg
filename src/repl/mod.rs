@@ -2241,8 +2241,16 @@ pub(crate) async fn exec_lines(
                         }
                     }
                     MetaResult::DescribeBuffer => {
-                        // Buffer is NOT cleared after \gdesc.
-                        describe_buffer(client, buf.trim(), settings.verbose_errors).await;
+                        // psql clears the query buffer after \gdesc (both
+                        // inline and standalone), matching observed psql
+                        // behaviour where PREPARE/EXECUTE after \gdesc works
+                        // without stale buffer content.
+                        let sql = buf.trim().to_owned();
+                        buf.clear();
+                        if !sql.is_empty() {
+                            prev_buf = sql.clone();
+                            describe_buffer(client, &sql, settings.verbose_errors).await;
+                        }
                     }
                     MetaResult::CrosstabViewBuffer(args) => {
                         // Like \gexec, fall back to prev_buf when current buf has no
@@ -2304,12 +2312,9 @@ pub(crate) async fn exec_lines(
                                     break 'lines;
                                 }
                             }
-                        } else {
-                            eprintln!(
-                                "\\close_prepared: prepared statement \
-                             \"{name}\" does not exist"
-                            );
                         }
+                        // psql silently ignores \close_prepared for
+                        // statements that don't exist in its local map.
                     }
                     MetaResult::ClearBuffer => {
                         // \r — reset/clear the query buffer (psql behaviour in -f mode).
@@ -2514,7 +2519,20 @@ pub(crate) async fn exec_lines(
                             }
                         }
                         MetaResult::DescribeBuffer => {
-                            describe_buffer(client, buf.trim(), settings.verbose_errors).await;
+                            let sql = buf.trim().to_owned();
+                            // psql clears the buffer after \gdesc (matching
+                            // observed psql behaviour: the prepare/execute
+                            // sequence after \gdesc works with a clean buffer).
+                            buf.clear();
+                            if !sql.is_empty() {
+                                prev_buf = sql.clone();
+                                describe_buffer(
+                                    client,
+                                    &sql,
+                                    settings.verbose_errors,
+                                )
+                                .await;
+                            }
                         }
                         MetaResult::CrosstabViewBuffer(args) => {
                             let sql = buf.trim().to_owned();
@@ -2525,6 +2543,39 @@ pub(crate) async fn exec_lines(
                         }
                         MetaResult::BindParams(params) => {
                             settings.pending_bind_params = Some(params);
+                        }
+                        MetaResult::ParseStatement(name) => {
+                            // `\parse stmt_name` inline: the sql_part that was
+                            // appended to `buf` becomes the prepared statement.
+                            // psql clears the buffer after a successful parse,
+                            // so subsequent lines start with an empty buffer.
+                            let sql = buf.trim().to_owned();
+                            if sql.is_empty() {
+                                eprintln!("\\parse: query buffer is empty");
+                            } else {
+                                match client.prepare(&sql).await {
+                                    Ok(stmt) => {
+                                        prev_buf = sql;
+                                        buf.clear();
+                                        settings.named_statements.insert(name, stmt);
+                                    }
+                                    Err(e) => {
+                                        crate::output::eprint_db_error(
+                                            &e,
+                                            Some(&sql),
+                                            settings.verbose_errors,
+                                            settings.terse_errors,
+                                            settings.sqlstate_errors,
+                                        );
+                                        // On error psql does NOT clear the buffer
+                                        // (the parse fails, buffer stays).
+                                        exit_code = 1;
+                                        if settings.single_transaction {
+                                            break 'lines;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         MetaResult::BindNamedExec(name, params) => {
                             if !execute_named_stmt(client, &name, &params, settings, tx).await {
@@ -3721,21 +3772,61 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
                 return;
             }
-            let fmt = match value.unwrap_or("") {
-                "aligned" => OutputFormat::Aligned,
-                "unaligned" => OutputFormat::Unaligned,
-                "csv" => OutputFormat::Csv,
-                "json" => OutputFormat::Json,
-                "html" => OutputFormat::Html,
-                "wrapped" => OutputFormat::Wrapped,
-                "markdown" => OutputFormat::Markdown,
-                "latex" => OutputFormat::Latex,
-                "latex-longtable" => OutputFormat::LatexLongtable,
-                "troff-ms" => OutputFormat::TroffMs,
-                "asciidoc" => OutputFormat::Asciidoc,
-                other => {
-                    eprintln!("\\pset: allowed formats are aligned, asciidoc, csv, html, latex, latex-longtable, troff-ms, unaligned, wrapped");
-                    let _ = other; // suppress unused warning
+            // All supported format names (psql-compatible ones first,
+            // then rpg extensions).  Order matters: the psql-compatible
+            // list is alphabetical so ambiguity messages match psql.
+            const ALL_FORMATS: &[(&str, OutputFormat)] = &[
+                ("aligned", OutputFormat::Aligned),
+                ("asciidoc", OutputFormat::Asciidoc),
+                ("csv", OutputFormat::Csv),
+                ("html", OutputFormat::Html),
+                ("latex", OutputFormat::Latex),
+                ("latex-longtable", OutputFormat::LatexLongtable),
+                ("troff-ms", OutputFormat::TroffMs),
+                ("unaligned", OutputFormat::Unaligned),
+                ("wrapped", OutputFormat::Wrapped),
+                // rpg extensions (not in psql):
+                ("json", OutputFormat::Json),
+                ("markdown", OutputFormat::Markdown),
+            ];
+            // psql-only format names (used in error message and ambiguity
+            // detection to stay compatible with psql).
+            const PSQL_FORMAT_NAMES: &str =
+                "aligned, asciidoc, csv, html, latex, latex-longtable, \
+                 troff-ms, unaligned, wrapped";
+            let val = value.unwrap_or("");
+            // Try exact match first.
+            let fmt_opt =
+                ALL_FORMATS.iter().find(|(name, _)| *name == val).map(|(_, f)| *f);
+            let fmt = if let Some(f) = fmt_opt {
+                f
+            } else {
+                // Try prefix match within the psql-compatible subset (first 9)
+                // for ambiguity detection; then full list for rpg extensions.
+                let psql_matches: Vec<_> = ALL_FORMATS[..9]
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(val))
+                    .collect();
+                let all_matches: Vec<_> = ALL_FORMATS
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(val))
+                    .collect();
+                if psql_matches.len() > 1 {
+                    let names: Vec<&str> =
+                        psql_matches.iter().map(|(n, _)| *n).collect();
+                    eprintln!(
+                        "error: \\pset: ambiguous abbreviation \"{val}\" \
+                         matches both \"{}\" and \"{}\"",
+                        names[0],
+                        names[1]
+                    );
+                    return;
+                } else if !all_matches.is_empty() {
+                    all_matches[0].1
+                } else {
+                    eprintln!(
+                        "error: \\pset: allowed formats are {PSQL_FORMAT_NAMES}"
+                    );
                     return;
                 }
             };
@@ -3751,7 +3842,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                     println!("Border style is {}.", settings.pset.border);
                 }
             } else {
-                eprintln!("\\pset: invalid border value");
+                eprintln!("error: \\pset: invalid border value");
             }
         }
         "null" => {
@@ -3770,6 +3861,21 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         }
         "csv_fieldsep" => {
             let sep = unescape_echo(value.unwrap_or(","));
+            // Validate: must be exactly one byte (ASCII), and not a special char.
+            if sep.len() != 1 || !sep.is_ascii() {
+                eprintln!(
+                    "error: \\pset: csv_fieldsep must be a single one-byte character"
+                );
+                return;
+            }
+            let c = sep.as_bytes()[0];
+            if c == b'"' || c == b'\n' || c == b'\r' || c == 0 {
+                eprintln!(
+                    "error: \\pset: csv_fieldsep cannot be a double quote, \
+                     a newline, or a carriage return"
+                );
+                return;
+            }
             if !quiet {
                 println!("CSV field separator is \"{sep}\".");
             }
@@ -3828,7 +3934,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                     println!("Pager minimum lines is {n}.");
                 }
             } else {
-                eprintln!("\\pset: invalid pager_min_lines value");
+                eprintln!("error: \\pset: invalid pager_min_lines value");
             }
         }
         "explain_format" => {
@@ -3839,7 +3945,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 "compact" => ExplainFormat::Compact,
                 other => {
                     eprintln!(
-                        "\\pset: unknown explain_format \"{other}\"\n\
+                        "error: \\pset: unknown explain_format \"{other}\"\n\
                          Valid: enhanced, raw, compact"
                     );
                     return;
@@ -3860,7 +3966,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                     }
                 }
                 other => {
-                    eprintln!("\\pset: unknown option: linestyle {other}");
+                    eprintln!("error: \\pset: unknown option: linestyle {other}");
                 }
             }
         }
@@ -3956,7 +4062,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
             }
         }
         other => {
-            eprintln!("\\pset: unknown option: {other}");
+            eprintln!("error: \\pset: unknown option: {other}");
         }
     }
 
@@ -4894,6 +5000,11 @@ async fn dispatch_meta(
         MetaCmd::NoOp => {
             // `\\` null command — no-op, continuation already handled by the
             // inline metacommand loop.
+        }
+        MetaCmd::MissingArg(ref name) => {
+            // Known command called without its required argument.
+            // psql prints: "error: \<name>: missing required argument"
+            eprintln!("error: \\{name}: missing required argument");
         }
         MetaCmd::Unknown(ref name) => {
             // Before reporting "unknown command", check whether a custom Lua
@@ -6921,9 +7032,8 @@ async fn handle_backslash_dumb(
             if settings.named_statements.remove(&name).is_some() {
                 let deallocate = format!("deallocate {name}");
                 execute_query_interactive(client, &deallocate, settings, tx).await;
-            } else {
-                eprintln!("\\close_prepared: prepared statement \"{name}\" does not exist");
             }
+            // psql silently ignores \close_prepared for non-existent stmts.
             HandleLineResult::Continue
         }
         result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
@@ -7285,12 +7395,8 @@ async fn handle_line(
                 if settings.named_statements.remove(&name).is_some() {
                     let deallocate = format!("deallocate {name}");
                     execute_query_interactive(client, &deallocate, settings, tx).await;
-                } else {
-                    eprintln!(
-                        "\\close_prepared: prepared statement \"{name}\" \
-                         does not exist"
-                    );
                 }
+                // psql silently ignores \close_prepared for non-existent stmts.
                 HandleLineResult::Continue
             }
             result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {

@@ -577,153 +577,19 @@ pub async fn execute_query(
     // Whether the original SQL is a manual EXPLAIN statement (not auto-explain).
     let is_manual_explain = is_explain_statement(sql_to_send) && !auto_explain_active;
 
-    let success = match client.simple_query(sql_to_send).await {
-        Ok(messages) => {
-            use tokio_postgres::SimpleQueryMessage;
-            let mut col_names: Vec<String> = Vec::new();
-            let mut col_oids: Vec<u32> = Vec::new();
-            let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-            // `is_select` is set to true when we receive a RowDescription
-            // message (or any Row message).  This distinguishes an empty
-            // SELECT (zero rows but column headers) from a DML command.
-            let mut is_select = false;
-            let mut result_set_index: usize = 0;
+    // Use simple_query_raw to stream messages one at a time.  This allows us
+    // to display intermediate result sets from statements that completed
+    // before an error occurs in a later statement of the same batch, matching
+    // psql's behaviour for \; multi-statement queries.
+    use futures::StreamExt as _;
+    use tokio_postgres::SimpleQueryMessage;
 
-            for msg in messages {
-                match msg {
-                    SimpleQueryMessage::RowDescription(cols) => {
-                        // Emitted before data rows (or before CommandComplete
-                        // when zero rows matched).  Capture column names here
-                        // so that empty result sets still show their headers.
-                        is_select = true;
-                        if col_names.is_empty() {
-                            col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                            col_oids = cols
-                                .iter()
-                                .map(tokio_postgres::SimpleColumn::type_oid)
-                                .collect();
-                        }
-                    }
-                    SimpleQueryMessage::Row(row) => {
-                        is_select = true;
-                        if col_names.is_empty() {
-                            col_names = (0..row.len())
-                                .map(|i| {
-                                    row.columns()
-                                        .get(i)
-                                        .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
-                                })
-                                .collect();
-                            col_oids = (0..row.len())
-                                .map(|i| {
-                                    row.columns()
-                                        .get(i)
-                                        .map_or(0, tokio_postgres::SimpleColumn::type_oid)
-                                })
-                                .collect();
-                        }
-                        let vals: Vec<Option<String>> = (0..row.len())
-                            .map(|i| row.get(i).map(str::to_owned))
-                            .collect();
-                        rows.push(vals);
-                    }
-                    SimpleQueryMessage::CommandComplete(n) => {
-                        // Capture plan text from auto-EXPLAIN before clearing
-                        // rows. EXPLAIN output is a single-column result set.
-                        if (auto_explain_active || is_manual_explain) && result_set_index == 0 {
-                            let plan_text: String = rows
-                                .iter()
-                                .filter_map(|r| {
-                                    r.first().and_then(|v| v.as_deref()).map(str::to_owned)
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !plan_text.is_empty() {
-                                if auto_explain_active {
-                                    auto_explain_plan = Some(plan_text.clone());
-                                }
-                                // Store for `\explain share` regardless of mode.
-                                settings.last_explain_text = Some(plan_text);
-                            }
-                        }
-
-                        // Flush the current result set, then reset for next
-                        // statement in a multi-statement query.
-                        // Capture rendered output so we can mirror to log.
-                        let mut out_buf = Vec::<u8>::new();
-
-                        // Print "[auto-explain: <mode>]" header before the
-                        // plan output so users know EXPLAIN was prepended.
-                        if auto_explain_active && result_set_index == 0 {
-                            let _ = writeln!(out_buf, "[auto-explain: {auto_explain_label}]");
-                        }
-
-                        print_result_set_pset(
-                            &mut out_buf,
-                            &col_names,
-                            &col_oids,
-                            &rows,
-                            is_select,
-                            n,
-                            sql_to_send,
-                            result_set_index == 0,
-                            &settings.pset,
-                            settings.quiet,
-                        );
-
-                        // Mirror output to log file if active.
-                        if let Some(ref mut lf) = settings.log_file {
-                            let _ = lf.write_all(&out_buf);
-                        }
-
-                        // Write to the configured output target.
-                        if let Some(ref mut w) = settings.output_target {
-                            let _ = w.write_all(&out_buf);
-                        } else {
-                            let _ = io::stdout().write_all(&out_buf);
-                        }
-
-                        // Store row count for audit log entry.
-                        if result_set_index == 0 {
-                            settings.last_row_count = Some(n);
-                        }
-                        // Signal to exec_lines that a result set was produced
-                        // (used to decide whether to echo following blank lines).
-                        // psql echoes blank lines ONLY after pure SELECT-like
-                        // statements in aligned format. DML+RETURNING statements
-                        // (INSERT/UPDATE/DELETE) also produce rows but psql does
-                        // NOT echo blanks after them (they emit a separate command
-                        // tag and format_rowset_pset already appends a blank).
-                        // Unaligned and tuples-only modes are excluded too.
-                        use crate::output::OutputFormat;
-                        if is_select
-                            && !settings.pset.tuples_only
-                            && matches!(
-                                settings.pset.format,
-                                OutputFormat::Aligned | OutputFormat::Wrapped
-                            )
-                            && is_pure_select(sql_to_send)
-                        {
-                            settings.last_stmt_produced_rows = true;
-                        }
-
-                        result_set_index += 1;
-                        col_names.clear();
-                        col_oids.clear();
-                        rows.clear();
-                        is_select = false;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Update transaction state based on what SQL was sent.
-            tx.update_from_sql(sql_to_send);
-
-            true
-        }
+    let stream_result = client.simple_query_raw(sql_to_send).await;
+    // Pin the stream so we can call .next() on it (SimpleQueryStream is !Unpin).
+    let mut stream = match stream_result {
+        Ok(s) => Box::pin(s),
         Err(e) => {
-            // -b / --echo-errors: echo the failing query to stderr.
+            // Connection-level error before any messages were sent.
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
@@ -734,69 +600,8 @@ pub async fn execute_query(
                 settings.terse_errors,
                 settings.sqlstate_errors,
             );
-            // A failed query doesn't produce rows; psql does not echo blank
-            // lines after error messages.
             settings.last_stmt_produced_rows = false;
             tx.on_error();
-
-            // For multi-statement batches, PostgreSQL processes ALL statements
-            // in simple-query mode even after an error (subsequent ones fail
-            // with "current transaction is aborted").  If the batch ends with
-            // COMMIT / ROLLBACK / END / ABORT, the server rolled back and
-            // returned to Idle — mirror that here so rpg's state stays in sync.
-            {
-                let stmts = crate::query::split_statements(&interpolated);
-                if let Some(last) = stmts.last() {
-                    tx.apply_terminal(last);
-                }
-
-                // In multi-statement batches, COMMIT/ROLLBACK inside the batch
-                // cannot roll back a failed transaction — they also fail with
-                // "transaction aborted".  psql avoids this by sending statements
-                // individually.  We attempt to replicate psql's per-statement
-                // semantics by re-sending recovery statements after a failure.
-                if stmts.len() > 1 {
-                    let first_upper = stmts[0].trim().to_uppercase();
-                    let first_word = first_upper.split_whitespace().next().unwrap_or("");
-                    let last_stmt = stmts.last().unwrap().trim();
-                    let last_upper = last_stmt.to_uppercase();
-                    let mut last_words = last_upper.split_whitespace();
-                    let last_first = last_words.next().unwrap_or("");
-                    let last_second = last_words.next().unwrap_or("");
-
-                    if matches!(first_word, "BEGIN" | "START") {
-                        // The batch opened a transaction that failed midway.
-                        // COMMIT/ROLLBACK inside the batch also failed, so the
-                        // connection is left in E state.  Send a standalone
-                        // ROLLBACK to restore to Idle, matching psql semantics.
-                        //
-                        // Exception: if the batch ends with COMMIT/ROLLBACK AND
-                        // CHAIN, an earlier COMMIT/ROLLBACK already closed the
-                        // original transaction.  The server is already Idle, so
-                        // sending ROLLBACK would produce a spurious "no transaction
-                        // in progress" warning.
-                        let ends_with_and_chain = last_upper.contains("AND CHAIN");
-                        if !ends_with_and_chain {
-                            let _ = client.simple_query("ROLLBACK").await;
-                            *tx = crate::repl::TxState::Idle;
-                        }
-                    } else if matches!(last_first, "ROLLBACK" | "ABORT")
-                        && last_second == "TO"
-                        && *tx == crate::repl::TxState::Failed
-                    {
-                        // Batch ends with ROLLBACK TO <savepoint>: the DELETE/etc.
-                        // failed in the middle, leaving the batch's ROLLBACK TO
-                        // unable to execute.  Re-send it standalone so the
-                        // savepoint can actually be rolled back, matching psql's
-                        // per-statement execution where this succeeds.
-                        if client.simple_query(last_stmt).await.is_ok() {
-                            *tx = crate::repl::TxState::InTransaction;
-                        }
-                    }
-                }
-            }
-
-            // Capture context for /fix.
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
             let error_message = e
@@ -807,22 +612,13 @@ pub async fn execute_query(
                 error_message: error_message.clone(),
                 sqlstate: sqlstate.clone(),
             });
-            // Update psql-compatible error variables for use in subsequent commands.
             settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
             settings
                 .vars
                 .set("LAST_ERROR_SQLSTATE", sqlstate.as_deref().unwrap_or(""));
-
-            // Inline error suggestion: if AI is configured and
-            // auto_explain_errors is on, show a brief LLM hint.
             if settings.config.ai.auto_explain_errors {
                 suggest_error_fix_inline(sql_to_send, &error_message, settings).await;
             }
-
-            // Auto-suggest /fix: show a dim hint pointing the user to /fix.
-            // Only shown for SQL errors (not connection errors), when AI is
-            // configured, auto_suggest_fix is enabled, and the user did not
-            // just invoke /fix (to avoid hint loops).
             if is_sql_error
                 && settings.auto_suggest_fix
                 && !settings.last_was_fix
@@ -835,9 +631,303 @@ pub async fn execute_query(
             {
                 eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
             }
-
-            false
+            // Store timing before returning.
+            if let Some(t) = start {
+                let elapsed = t.elapsed();
+                #[allow(clippy::cast_possible_truncation)]
+                let elapsed_ms = elapsed.as_millis() as u64;
+                if settings.timing {
+                    let line =
+                        format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
+                    if let Some(ref mut w) = settings.output_target {
+                        let _ = w.write_all(line.as_bytes());
+                    } else {
+                        let _ = io::stdout().write_all(line.as_bytes());
+                    }
+                }
+                settings.last_query_duration_ms = Some(elapsed_ms);
+            }
+            settings.last_was_fix = false;
+            return false;
         }
+    };
+
+    let mut col_names: Vec<String> = Vec::new();
+    let mut col_oids: Vec<u32> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    // `is_select` is set to true when we receive a RowDescription
+    // message (or any Row message).  This distinguishes an empty
+    // SELECT (zero rows but column headers) from a DML command.
+    let mut is_select = false;
+    let mut result_set_index: usize = 0;
+    // Tracks the db error from a failed statement in the stream, if any.
+    let mut stream_error: Option<tokio_postgres::Error> = None;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(msg) => match msg {
+                SimpleQueryMessage::RowDescription(cols) => {
+                    // Emitted before data rows (or before CommandComplete
+                    // when zero rows matched).  Capture column names here
+                    // so that empty result sets still show their headers.
+                    is_select = true;
+                    if col_names.is_empty() {
+                        col_names = cols.iter().map(|c| c.name().to_owned()).collect();
+                        col_oids = cols
+                            .iter()
+                            .map(tokio_postgres::SimpleColumn::type_oid)
+                            .collect();
+                    }
+                }
+                SimpleQueryMessage::Row(row) => {
+                    is_select = true;
+                    if col_names.is_empty() {
+                        col_names = (0..row.len())
+                            .map(|i| {
+                                row.columns()
+                                    .get(i)
+                                    .map_or_else(|| format!("col{i}"), |c| c.name().to_owned())
+                            })
+                            .collect();
+                        col_oids = (0..row.len())
+                            .map(|i| {
+                                row.columns()
+                                    .get(i)
+                                    .map_or(0, tokio_postgres::SimpleColumn::type_oid)
+                            })
+                            .collect();
+                    }
+                    let vals: Vec<Option<String>> = (0..row.len())
+                        .map(|i| row.get(i).map(str::to_owned))
+                        .collect();
+                    rows.push(vals);
+                }
+                SimpleQueryMessage::CommandComplete(n) => {
+                    // Capture plan text from auto-EXPLAIN before clearing
+                    // rows. EXPLAIN output is a single-column result set.
+                    if (auto_explain_active || is_manual_explain) && result_set_index == 0 {
+                        let plan_text: String = rows
+                            .iter()
+                            .filter_map(|r| {
+                                r.first().and_then(|v| v.as_deref()).map(str::to_owned)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !plan_text.is_empty() {
+                            if auto_explain_active {
+                                auto_explain_plan = Some(plan_text.clone());
+                            }
+                            // Store for `\explain share` regardless of mode.
+                            settings.last_explain_text = Some(plan_text);
+                        }
+                    }
+
+                    // Flush the current result set, then reset for next
+                    // statement in a multi-statement query.
+                    // Capture rendered output so we can mirror to log.
+                    let mut out_buf = Vec::<u8>::new();
+
+                    // Print "[auto-explain: <mode>]" header before the
+                    // plan output so users know EXPLAIN was prepended.
+                    if auto_explain_active && result_set_index == 0 {
+                        let _ = writeln!(out_buf, "[auto-explain: {auto_explain_label}]");
+                    }
+
+                    print_result_set_pset(
+                        &mut out_buf,
+                        &col_names,
+                        &col_oids,
+                        &rows,
+                        is_select,
+                        n,
+                        sql_to_send,
+                        result_set_index == 0,
+                        &settings.pset,
+                        settings.quiet,
+                    );
+
+                    // Mirror output to log file if active.
+                    if let Some(ref mut lf) = settings.log_file {
+                        let _ = lf.write_all(&out_buf);
+                    }
+
+                    // Write to the configured output target.
+                    if let Some(ref mut w) = settings.output_target {
+                        let _ = w.write_all(&out_buf);
+                    } else {
+                        let _ = io::stdout().write_all(&out_buf);
+                    }
+
+                    // Store row count for audit log entry.
+                    if result_set_index == 0 {
+                        settings.last_row_count = Some(n);
+                    }
+                    // Signal to exec_lines that a result set was produced
+                    // (used to decide whether to echo following blank lines).
+                    // psql echoes blank lines ONLY after pure SELECT-like
+                    // statements in aligned format. DML+RETURNING statements
+                    // (INSERT/UPDATE/DELETE) also produce rows but psql does
+                    // NOT echo blanks after them (they emit a separate command
+                    // tag and format_rowset_pset already appends a blank).
+                    // Unaligned and tuples-only modes are excluded too.
+                    use crate::output::OutputFormat;
+                    if is_select
+                        && !settings.pset.tuples_only
+                        && matches!(
+                            settings.pset.format,
+                            OutputFormat::Aligned | OutputFormat::Wrapped
+                        )
+                        && is_pure_select(sql_to_send)
+                    {
+                        settings.last_stmt_produced_rows = true;
+                    }
+
+                    result_set_index += 1;
+                    col_names.clear();
+                    col_oids.clear();
+                    rows.clear();
+                    is_select = false;
+                }
+                _ => {}
+            },
+            Err(e) => {
+                // A statement in the batch failed.  Display the error, then
+                // break — the stream is done (ReadyForQuery follows the error).
+                stream_error = Some(e);
+                break;
+            }
+        }
+    }
+    // Drop the stream so the connection is ready for the next query.
+    drop(stream);
+
+    let success = if let Some(e) = stream_error {
+        // -b / --echo-errors: echo the failing query to stderr.
+        if settings.echo_errors {
+            eprintln!("{sql_to_send}");
+        }
+        crate::output::eprint_db_error(
+            &e,
+            Some(sql_to_send),
+            settings.verbose_errors,
+            settings.terse_errors,
+            settings.sqlstate_errors,
+        );
+        // A failed query doesn't produce rows; psql does not echo blank
+        // lines after error messages.
+        settings.last_stmt_produced_rows = false;
+        tx.on_error();
+
+        // For multi-statement batches, PostgreSQL processes ALL statements
+        // in simple-query mode even after an error (subsequent ones fail
+        // with "current transaction is aborted").  If the batch ends with
+        // COMMIT / ROLLBACK / END / ABORT, the server rolled back and
+        // returned to Idle — mirror that here so rpg's state stays in sync.
+        {
+            let stmts = crate::query::split_statements(&interpolated);
+            // Skip trailing comment-only entries (artefacts of inline SQL
+            // comments after the last real statement in a \; batch).
+            let last_sql_stmt = stmts
+                .iter()
+                .rev()
+                .find(|s| !s.trim_start().starts_with("--"))
+                .map(String::as_str)
+                .unwrap_or("");
+            if !last_sql_stmt.is_empty() {
+                tx.apply_terminal(last_sql_stmt);
+            }
+
+            // In multi-statement batches, COMMIT/ROLLBACK inside the batch
+            // cannot roll back a failed transaction — they also fail with
+            // "transaction aborted".  psql avoids this by sending statements
+            // individually.  We attempt to replicate psql's per-statement
+            // semantics by re-sending recovery statements after a failure.
+            if stmts.len() > 1 {
+                let first_upper = stmts[0].trim().to_uppercase();
+                let first_word = first_upper.split_whitespace().next().unwrap_or("");
+                let last_upper = last_sql_stmt.to_uppercase();
+                let mut last_words = last_upper.split_whitespace();
+                let last_first = last_words.next().unwrap_or("");
+                let last_second = last_words.next().unwrap_or("");
+
+                if matches!(first_word, "BEGIN" | "START") {
+                    // The batch opened a transaction that failed midway.
+                    // COMMIT/ROLLBACK inside the batch also failed, so the
+                    // connection is left in E state.  Send a standalone
+                    // ROLLBACK to restore to Idle, matching psql semantics.
+                    //
+                    // Exception: if the batch ends with COMMIT/ROLLBACK AND
+                    // CHAIN, an earlier COMMIT/ROLLBACK already closed the
+                    // original transaction.  The server is already Idle, so
+                    // sending ROLLBACK would produce a spurious "no transaction
+                    // in progress" warning.
+                    let ends_with_and_chain = last_upper.contains("AND CHAIN");
+                    if !ends_with_and_chain {
+                        let _ = client.simple_query("ROLLBACK").await;
+                        *tx = crate::repl::TxState::Idle;
+                    }
+                } else if matches!(last_first, "ROLLBACK" | "ABORT")
+                    && last_second == "TO"
+                    && *tx == crate::repl::TxState::Failed
+                {
+                    // Batch ends with ROLLBACK TO <savepoint>: the DELETE/etc.
+                    // failed in the middle, leaving the batch's ROLLBACK TO
+                    // unable to execute.  Re-send it standalone so the
+                    // savepoint can actually be rolled back, matching psql's
+                    // per-statement execution where this succeeds.
+                    if client.simple_query(last_sql_stmt).await.is_ok() {
+                        *tx = crate::repl::TxState::InTransaction;
+                    }
+                }
+            }
+        }
+
+        // Capture context for /fix.
+        let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
+        let is_sql_error = e.as_db_error().is_some();
+        let error_message = e
+            .as_db_error()
+            .map_or_else(|| e.to_string(), |db| db.message().to_owned());
+        settings.last_error = Some(LastError {
+            query: sql_to_send.to_owned(),
+            error_message: error_message.clone(),
+            sqlstate: sqlstate.clone(),
+        });
+        // Update psql-compatible error variables for use in subsequent commands.
+        settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
+        settings
+            .vars
+            .set("LAST_ERROR_SQLSTATE", sqlstate.as_deref().unwrap_or(""));
+
+        // Inline error suggestion: if AI is configured and
+        // auto_explain_errors is on, show a brief LLM hint.
+        if settings.config.ai.auto_explain_errors {
+            suggest_error_fix_inline(sql_to_send, &error_message, settings).await;
+        }
+
+        // Auto-suggest /fix: show a dim hint pointing the user to /fix.
+        // Only shown for SQL errors (not connection errors), when AI is
+        // configured, auto_suggest_fix is enabled, and the user did not
+        // just invoke /fix (to avoid hint loops).
+        if is_sql_error
+            && settings.auto_suggest_fix
+            && !settings.last_was_fix
+            && settings
+                .config
+                .ai
+                .provider
+                .as_deref()
+                .is_some_and(|p| !p.is_empty())
+        {
+            eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+        }
+
+        false
+    } else {
+        // Update transaction state based on what SQL was sent.
+        tx.update_from_sql(sql_to_send);
+
+        true
     };
 
     if let Some(t) = start {

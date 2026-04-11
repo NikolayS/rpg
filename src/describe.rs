@@ -476,11 +476,20 @@ fn system_schema_filter(system: bool) -> &'static str {
 
 /// Return the result-set title for a given set of relkinds.
 ///
-/// psql uses "List of relations" for all \d type-filtered commands
-/// (\dt, \di, \dv, \ds, \dm, \df, etc.). This matches psql through PG16
-/// and is what the compatibility test expects.
-fn relation_title(_relkinds: &[&str]) -> &'static str {
-    "List of relations"
+/// psql 18 uses type-specific titles for type-filtered commands:
+/// `\dt` → "List of tables", `\di` → "List of indexes", etc.
+/// When multiple or unknown relkinds are combined, fall back to "List of relations".
+fn relation_title(relkinds: &[&str]) -> &'static str {
+    match relkinds {
+        ["r"] | ["r", "p"] | ["p"] => "List of tables",
+        ["i"] | ["I"] | ["i", "I"] => "List of indexes",
+        ["v"] => "List of views",
+        ["S"] => "List of sequences",
+        ["m"] => "List of materialized views",
+        ["f"] => "List of foreign tables",
+        ["c"] => "List of composite types",
+        _ => "List of relations",
+    }
 }
 
 /// List relations of the given `relkinds` (e.g. `["r","p"]` for tables).
@@ -2321,6 +2330,11 @@ async fn list_publications(
     p.pubupdate as \"Updates\",
     p.pubdelete as \"Deletes\",
     p.pubtruncate as \"Truncates\",
+    case p.pubgencols
+        when 'n' then 'none'
+        when 's' then 'stored'
+        else p.pubgencols::text
+    end as \"Generated columns\",
     p.pubviaroot as \"Via root\"
 from pg_catalog.pg_publication as p
 {where_clause}
@@ -2362,6 +2376,11 @@ async fn list_publications_verbose(
     p.pubupdate,
     p.pubdelete,
     p.pubtruncate,
+    case p.pubgencols
+        when 'n' then 'none'
+        when 's' then 'stored'
+        else p.pubgencols::text
+    end as pubgencols,
     p.pubviaroot
 from pg_catalog.pg_publication as p
 {where_clause}
@@ -2373,6 +2392,7 @@ order by 1"
     }
 
     let pub_rows: Vec<(
+        String,
         String,
         String,
         String,
@@ -2396,7 +2416,8 @@ order by 1"
                         row.get(5).unwrap_or("").to_owned(), // pubupdate
                         row.get(6).unwrap_or("").to_owned(), // pubdelete
                         row.get(7).unwrap_or("").to_owned(), // pubtruncate
-                        row.get(8).unwrap_or("").to_owned(), // pubviaroot
+                        row.get(8).unwrap_or("").to_owned(), // pubgencols
+                        row.get(9).unwrap_or("").to_owned(), // pubviaroot
                     ))
                 } else {
                     None
@@ -2420,6 +2441,7 @@ order by 1"
         pubupdate,
         pubdelete,
         pubtruncate,
+        pubgencols,
         pubviaroot,
     ) in &pub_rows
     {
@@ -2431,6 +2453,7 @@ order by 1"
             "Updates".to_owned(),
             "Deletes".to_owned(),
             "Truncates".to_owned(),
+            "Generated columns".to_owned(),
             "Via root".to_owned(),
         ];
         let data_rows: Vec<Vec<String>> = vec![vec![
@@ -2440,6 +2463,7 @@ order by 1"
             pubupdate.clone(),
             pubdelete.clone(),
             pubtruncate.clone(),
+            pubgencols.clone(),
             pubviaroot.clone(),
         ]];
         // Fetch tables covered by this publication.
@@ -2597,6 +2621,7 @@ async fn list_subscriptions(
     s.suborigin as \"Origin\",
     s.subpasswordrequired as \"Password required\",
     s.subrunasowner as \"Run as owner?\",
+    s.subfailover as \"Failover\",
     s.subsynccommit as \"Synchronous commit\",
     s.subconninfo as \"Conninfo\",
     s.subskiplsn as \"Skip LSN\"
@@ -3826,10 +3851,20 @@ where {name_cond} limit 1"
             {
                 // EXCLUDE constraints use pg_get_constraintdef for full definition.
                 let is_exclude = con_type == "x";
+                // Non-btree PK/UNIQUE (e.g. gist for WITHOUT OVERLAPS temporal
+                // constraints) also use pg_get_constraintdef, which already
+                // includes "PRIMARY KEY (...)" / "UNIQUE (...)" without the
+                // access method name.  This matches psql 18 output.
+                let is_non_btree_pk_or_uq = (*is_primary || (*is_unique && con_type == "u"))
+                    && amname != "btree"
+                    && !con_oid.is_empty();
                 // Extract column list from pg_get_indexdef (the part inside parens).
-                let col_expr = if is_exclude && !con_oid.is_empty() {
-                    // For EXCLUDE constraints, use pg_get_constraintdef which gives the
-                    // full "EXCLUDE USING gist (c4 WITH &&) INCLUDE ..." form.
+                let col_expr = if (is_exclude || is_non_btree_pk_or_uq) && !con_oid.is_empty() {
+                    // For EXCLUDE and non-btree PK/UNIQUE constraints, use
+                    // pg_get_constraintdef which gives the full definition:
+                    // "EXCLUDE USING gist (c4 WITH &&) INCLUDE ..."
+                    // "PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)"
+                    // "UNIQUE (id, valid_at WITHOUT OVERLAPS)"
                     let condef_sql =
                         format!("select pg_catalog.pg_get_constraintdef({con_oid}, true)");
                     if let Ok(def_msgs) = client.simple_query(&condef_sql).await {
@@ -3883,8 +3918,8 @@ where {name_cond} limit 1"
                     ""
                 };
 
-                // For EXCLUDE constraints, the full definition is already in col_expr.
-                let pred_suffix = if is_exclude || idx_pred.is_empty() {
+                // For EXCLUDE/non-btree PK|UNIQUE, the full definition is in col_expr.
+                let pred_suffix = if is_exclude || is_non_btree_pk_or_uq || idx_pred.is_empty() {
                     String::new()
                 } else {
                     // pg_get_expr wraps in parens; psql strips the outer pair.
@@ -3915,8 +3950,9 @@ where {name_cond} limit 1"
                 } else {
                     format!(", tablespace \"{idx_tablespace}\"")
                 };
-                if is_exclude {
-                    // EXCLUDE: show as "name" EXCLUDE USING ... (no amname prefix)
+                if is_exclude || is_non_btree_pk_or_uq {
+                    // EXCLUDE / non-btree PK|UNIQUE: full definition already in col_expr;
+                    // no access-method prefix, no separate type_label needed.
                     println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
                 } else {
                     println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{nulls_not_distinct_suffix}{pred_suffix}{deferrable_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
@@ -4152,8 +4188,71 @@ order by nsp, s.stxname"
         }
     }
 
+    // Publications — tables can belong to logical replication publications.
+    // psql shows a "Publications:" section for both \d and \d+.
+    // psql 18 ordering: after Statistics objects, before Not-null constraints.
+    if matches!(relkind_char, 'r' | 'p') {
+        let pub_sql = format!(
+            "select p.pubname,
+    case
+        when pr.prattrs is not null
+        then ' (' || (
+            select string_agg(a.attname, ', ' order by ka.ord)
+            from unnest(pr.prattrs::int2[]) with ordinality as ka(num, ord)
+            join pg_catalog.pg_attribute as a
+                on a.attrelid = pr.prrelid and a.attnum = ka.num
+        ) || ')'
+        else ''
+    end as col_list,
+    case
+        when pr.prqual is not null
+        then ' WHERE ' || pg_catalog.pg_get_expr(pr.prqual, pr.prrelid)
+        else ''
+    end as where_clause
+from pg_catalog.pg_publication as p
+join pg_catalog.pg_publication_rel as pr on pr.prpubid = p.oid
+join pg_catalog.pg_class as c on c.oid = pr.prrelid
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where {name_cond}
+union
+select p.pubname, '' as col_list, '' as where_clause
+from pg_catalog.pg_publication as p
+join pg_catalog.pg_class as c
+    on c.relnamespace = any(
+        select pn.pnnspid from pg_catalog.pg_publication_namespace as pn
+        where pn.pnpubid = p.oid)
+left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+where p.puballtables = false
+    and {name_cond}
+union
+select p.pubname, '' as col_list, '' as where_clause
+from pg_catalog.pg_publication as p
+where p.puballtables = true
+order by 1"
+        );
+        if let Ok(msgs) = client.simple_query(&pub_sql).await {
+            use tokio_postgres::SimpleQueryMessage;
+            let mut pubs: Vec<(String, String, String)> = Vec::new();
+            for msg in msgs {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    if let Some(name) = row.get(0) {
+                        let col_list = row.get(1).unwrap_or("").to_owned();
+                        let where_clause = row.get(2).unwrap_or("").to_owned();
+                        pubs.push((name.to_owned(), col_list, where_clause));
+                    }
+                }
+            }
+            if !pubs.is_empty() {
+                println!("Publications:");
+                for (p, col_list, where_clause) in &pubs {
+                    println!("    \"{p}\"{col_list}{where_clause}");
+                }
+            }
+        }
+    }
+
     // Not-null constraints — verbose only (\d+), PostgreSQL 17+.
-    // psql places this after Statistics objects and before Partitions list.
+    // psql places this after Publications and before Partitions list.
     if meta.plus && matches!(relkind_char, 'r' | 'p' | 'f') {
         let nn_sql = format!(
             "select co.conname, a.attname, co.connoinherit, co.conislocal,
@@ -4611,67 +4710,6 @@ limit 1"
             }
         }
     }
-    // Publications — tables can belong to logical replication publications.
-    // psql shows a "Publications:" section for both \d and \d+.
-    if matches!(relkind_char, 'r' | 'p') {
-        let pub_sql = format!(
-            "select p.pubname,
-    case
-        when pr.prattrs is not null
-        then ' (' || (
-            select string_agg(a.attname, ', ' order by ka.ord)
-            from unnest(pr.prattrs::int2[]) with ordinality as ka(num, ord)
-            join pg_catalog.pg_attribute as a
-                on a.attrelid = pr.prrelid and a.attnum = ka.num
-        ) || ')'
-        else ''
-    end as col_list,
-    case
-        when pr.prqual is not null
-        then ' WHERE ' || pg_catalog.pg_get_expr(pr.prqual, pr.prrelid)
-        else ''
-    end as where_clause
-from pg_catalog.pg_publication as p
-join pg_catalog.pg_publication_rel as pr on pr.prpubid = p.oid
-join pg_catalog.pg_class as c on c.oid = pr.prrelid
-left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-where {name_cond}
-union
-select p.pubname, '' as col_list, '' as where_clause
-from pg_catalog.pg_publication as p
-join pg_catalog.pg_class as c
-    on c.relnamespace = any(
-        select pn.pnnspid from pg_catalog.pg_publication_namespace as pn
-        where pn.pnpubid = p.oid)
-left join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-where p.puballtables = false
-    and {name_cond}
-union
-select p.pubname, '' as col_list, '' as where_clause
-from pg_catalog.pg_publication as p
-where p.puballtables = true
-order by 1"
-        );
-        if let Ok(msgs) = client.simple_query(&pub_sql).await {
-            use tokio_postgres::SimpleQueryMessage;
-            let mut pubs: Vec<(String, String, String)> = Vec::new();
-            for msg in msgs {
-                if let SimpleQueryMessage::Row(row) = msg {
-                    if let Some(name) = row.get(0) {
-                        let col_list = row.get(1).unwrap_or("").to_owned();
-                        let where_clause = row.get(2).unwrap_or("").to_owned();
-                        pubs.push((name.to_owned(), col_list, where_clause));
-                    }
-                }
-            }
-            if !pubs.is_empty() {
-                println!("Publications:");
-                for (p, col_list, where_clause) in &pubs {
-                    println!("    \"{p}\"{col_list}{where_clause}");
-                }
-            }
-        }
-    }
 
     // Replica Identity — psql only shows when not DEFAULT ('d').
     // psql places this after Child tables and before Access method.
@@ -4838,16 +4876,17 @@ mod tests {
     // relation_title — type-specific headings to match psql
     // -----------------------------------------------------------------------
 
-    /// Verify `relation_title()` returns "List of relations" for all inputs
-    /// (matches psql through PG16; PG17+ psql uses type-specific names).
+    /// Verify `relation_title()` returns type-specific names (psql 18+).
     #[test]
-    fn relation_title_always_relations() {
-        assert_eq!(relation_title(&["r", "p"]), "List of relations");
-        assert_eq!(relation_title(&["i"]), "List of relations");
-        assert_eq!(relation_title(&["v"]), "List of relations");
-        assert_eq!(relation_title(&["S"]), "List of relations");
-        assert_eq!(relation_title(&["m"]), "List of relations");
-        assert_eq!(relation_title(&["f"]), "List of relations");
+    fn relation_title_type_specific() {
+        assert_eq!(relation_title(&["r", "p"]), "List of tables");
+        assert_eq!(relation_title(&["r"]), "List of tables");
+        assert_eq!(relation_title(&["i"]), "List of indexes");
+        assert_eq!(relation_title(&["v"]), "List of views");
+        assert_eq!(relation_title(&["S"]), "List of sequences");
+        assert_eq!(relation_title(&["m"]), "List of materialized views");
+        assert_eq!(relation_title(&["f"]), "List of foreign tables");
+        // mixed relkinds fall back to generic
         assert_eq!(relation_title(&["r", "p", "v", "m"]), "List of relations");
     }
 

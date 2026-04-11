@@ -405,6 +405,13 @@ pub enum MetaCmd {
     // -- Fallback ----------------------------------------------------------
     /// Unrecognised command; carries the original command token.
     Unknown(String),
+    /// A known command called without its required argument (e.g. bare
+    /// `\parse` or `\bind_named`).  The string is the command name without
+    /// the leading backslash (e.g. `"parse"`).
+    ///
+    /// Prints `error: \<name>: missing required argument` to stderr, matching
+    /// psql behaviour.
+    MissingArg(String),
 }
 
 impl MetaCmd {
@@ -1237,7 +1244,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let name = rest.trim().to_owned();
             if name.is_empty() {
-                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+                return ParsedMeta::simple(MetaCmd::MissingArg("close_prepared".to_owned()));
             }
             return ParsedMeta::simple(MetaCmd::ClosePrepared(name));
         }
@@ -1792,7 +1799,7 @@ fn parse_p_family(input: &str) -> ParsedMeta {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
             let name = rest.trim().to_owned();
             if name.is_empty() {
-                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+                return ParsedMeta::simple(MetaCmd::MissingArg("parse".to_owned()));
             }
             return ParsedMeta::simple(MetaCmd::Parse(name));
         }
@@ -1989,7 +1996,7 @@ fn parse_b_family(input: &str) -> ParsedMeta {
             let params_str = rest[name_end..].trim();
             let (params, cont) = split_params_with_continuation(params_str);
             if name.is_empty() {
-                return ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()));
+                return ParsedMeta::simple(MetaCmd::MissingArg("bind_named".to_owned()));
             }
             return ParsedMeta {
                 cmd: MetaCmd::BindNamed(name, params),
@@ -3589,9 +3596,9 @@ mod tests {
 
     #[test]
     fn parse_bind_named_missing_name() {
-        // No name: should parse as Unknown.
+        // No name: should parse as MissingArg.
         let m = parse("\\bind_named");
-        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+        assert!(matches!(m.cmd, MetaCmd::MissingArg(_)));
     }
 
     // -- \parse (#57) --------------------------------------------------------
@@ -3604,9 +3611,9 @@ mod tests {
 
     #[test]
     fn parse_parse_missing_name() {
-        // No name: should parse as Unknown.
+        // No name: should parse as MissingArg.
         let m = parse("\\parse");
-        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+        assert!(matches!(m.cmd, MetaCmd::MissingArg(_)));
     }
 
     #[test]
@@ -3625,8 +3632,9 @@ mod tests {
 
     #[test]
     fn parse_close_prepared_missing_name() {
+        // No name: should parse as MissingArg.
         let m = parse("\\close_prepared");
-        assert!(matches!(m.cmd, MetaCmd::Unknown(_)));
+        assert!(matches!(m.cmd, MetaCmd::MissingArg(_)));
     }
 
     #[test]

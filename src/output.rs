@@ -82,7 +82,7 @@ pub struct OutputConfig {
 // ---------------------------------------------------------------------------
 
 /// The rendering format for query result sets (mirrors psql `\pset format`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OutputFormat {
     /// Column-aligned table (psql default).
     #[default]

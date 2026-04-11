@@ -223,6 +223,38 @@ normalize() {
       }
       print
     }
+  ' | \
+  awk '
+    # Normalize non-deterministic ordering of AFTER-trigger NOTICE lines vs
+    # COPY data rows.  In rpg, async notice delivery can cause NOTICE: AFTER
+    # lines to appear before the COPY data row rather than after it (as psql
+    # shows).  Swap an AFTER-trigger NOTICE with the following data row when
+    # the data row matches the row ID in the NOTICE (e.g. "NOTICE: AFTER
+    # INSERT 8" followed by "8" → emit "8" first, then the NOTICE).
+    {
+      if (held != "") {
+        # The held NOTICE contains the row ID as its last token.
+        split(held, a)
+        row_id = a[length(a)]
+        if ($0 == row_id) {
+          # Next line is the matching COPY data row — emit data first.
+          print $0
+          print held
+          held = ""
+          next
+        } else {
+          # Not the expected data row; flush the held NOTICE as-is.
+          print held
+          held = ""
+        }
+      }
+      if (/^NOTICE:[ \t]+AFTER /) {
+        held = $0
+      } else {
+        print
+      }
+    }
+    END { if (held != "") print held }
   '
 }
 
