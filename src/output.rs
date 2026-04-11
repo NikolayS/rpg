@@ -2749,11 +2749,7 @@ fn compute_width_average(
             }
             let cell_str = cell.as_deref().unwrap_or(null_str);
             // psql uses pg_wcssize which returns the max line width within the cell.
-            let w = cell_str
-                .split('\n')
-                .map(display_width)
-                .max()
-                .unwrap_or(0);
+            let w = cell_str.split('\n').map(display_width).max().unwrap_or(0);
             sums[i] += w;
         }
     }
@@ -2767,13 +2763,7 @@ fn compute_width_average(
 /// single line within the header text.
 fn compute_width_header(cols: &[ColumnMeta]) -> Vec<usize> {
     cols.iter()
-        .map(|c| {
-            c.name
-                .split('\n')
-                .map(display_width)
-                .max()
-                .unwrap_or(0)
-        })
+        .map(|c| c.name.split('\n').map(display_width).max().unwrap_or(0))
         .collect()
 }
 
@@ -2790,13 +2780,7 @@ fn column_widths_max_line(
     // Header widths: max line width within each header.
     let mut widths: Vec<usize> = cols
         .iter()
-        .map(|c| {
-            c.name
-                .split('\n')
-                .map(display_width)
-                .max()
-                .unwrap_or(0)
-        })
+        .map(|c| c.name.split('\n').map(display_width).max().unwrap_or(0))
         .collect();
 
     for row in rows {
@@ -2805,11 +2789,7 @@ fn column_widths_max_line(
                 break;
             }
             let cell_str = cell.as_deref().unwrap_or(null_str);
-            let w = cell_str
-                .split('\n')
-                .map(display_width)
-                .max()
-                .unwrap_or(0);
+            let w = cell_str.split('\n').map(display_width).max().unwrap_or(0);
             if w > widths[i] {
                 widths[i] = w;
             }

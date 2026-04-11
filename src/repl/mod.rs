@@ -4318,11 +4318,7 @@ fn pset_status_text(settings: &ReplSettings) -> String {
         "footer                   {}",
         if pset.footer { "on" } else { "off" }
     );
-    let _ = writeln!(
-        out,
-        "format                   {}",
-        format_name(pset.format)
-    );
+    let _ = writeln!(out, "format                   {}", format_name(pset.format));
     let _ = writeln!(out, "linestyle                {}", pset.linestyle);
     let _ = writeln!(out, "null                     '{}'", pset.null_display);
     let _ = writeln!(

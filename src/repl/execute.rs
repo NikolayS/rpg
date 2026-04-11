@@ -2726,8 +2726,10 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
         param_values.push(Box::new(*oid));
         param_values.push(Box::new(*typmod));
     }
-    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-        param_values.iter().map(std::convert::AsRef::as_ref).collect();
+    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_values
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect();
 
     let type_names: Vec<String> = match client.query_one(&type_query, &oid_params).await {
         Ok(row) => (0..col_info.len())
