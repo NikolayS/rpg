@@ -2086,7 +2086,8 @@ pub(crate) async fn exec_lines(
             let mut set_first_iter = true;
             while let Some(ref meta_input) = remaining_meta.clone() {
                 let trimmed_meta = meta_input.trim_start();
-                let is_set_cmd = trimmed_meta.strip_prefix("\\set")
+                let is_set_cmd = trimmed_meta
+                    .strip_prefix("\\set")
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
                 let mut parsed = if set_first_iter && is_set_cmd {
                     let raw_cmd = line.trim().trim_start_matches('\\');
@@ -2146,50 +2147,51 @@ pub(crate) async fn exec_lines(
                                 }
                             }
                         } else {
-                        // The buffer lines were already echoed individually above;
-                        // disable echo_all so execute_query doesn't echo again.
-                        let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
-                        // Fall back to the previous query when the buffer is empty
-                        // (e.g. standalone \g after a query already executed with \g).
-                        let sql = if stripped.is_empty() {
-                            prev_buf.trim().to_owned()
-                        } else {
-                            stripped
-                        };
-                        buf.clear();
-                        if !sql.is_empty() {
-                            let saved_echo = settings.echo_all;
-                            settings.echo_all = false;
-                            // Apply any inline pset options (e.g. \g (format=csv)).
-                            let saved_pset = if settings.pending_pset_opts.is_empty() {
-                                None
+                            // The buffer lines were already echoed individually above;
+                            // disable echo_all so execute_query doesn't echo again.
+                            let stripped =
+                                crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                            // Fall back to the previous query when the buffer is empty
+                            // (e.g. standalone \g after a query already executed with \g).
+                            let sql = if stripped.is_empty() {
+                                prev_buf.trim().to_owned()
                             } else {
-                                let saved = settings.pset.clone();
-                                let opts = std::mem::take(&mut settings.pending_pset_opts);
-                                let saved_quiet = settings.quiet;
-                                settings.quiet = true;
-                                for (opt, val) in &opts {
-                                    apply_pset(settings, opt, val.as_deref());
-                                }
-                                settings.quiet = saved_quiet;
-                                Some(saved)
+                                stripped
                             };
-                            let ok = if let Some(bp) = settings.pending_bind_params.take() {
-                                execute_query_extended(client, &sql, &bp, settings, tx).await
-                            } else {
-                                execute_query(client, &sql, settings, tx).await
-                            };
-                            if let Some(saved) = saved_pset {
-                                settings.pset = saved;
-                            }
-                            settings.echo_all = saved_echo;
-                            if !ok {
-                                exit_code = 1;
-                                if settings.single_transaction {
-                                    break 'lines;
+                            buf.clear();
+                            if !sql.is_empty() {
+                                let saved_echo = settings.echo_all;
+                                settings.echo_all = false;
+                                // Apply any inline pset options (e.g. \g (format=csv)).
+                                let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                    None
+                                } else {
+                                    let saved = settings.pset.clone();
+                                    let opts = std::mem::take(&mut settings.pending_pset_opts);
+                                    let saved_quiet = settings.quiet;
+                                    settings.quiet = true;
+                                    for (opt, val) in &opts {
+                                        apply_pset(settings, opt, val.as_deref());
+                                    }
+                                    settings.quiet = saved_quiet;
+                                    Some(saved)
+                                };
+                                let ok = if let Some(bp) = settings.pending_bind_params.take() {
+                                    execute_query_extended(client, &sql, &bp, settings, tx).await
+                                } else {
+                                    execute_query(client, &sql, settings, tx).await
+                                };
+                                if let Some(saved) = saved_pset {
+                                    settings.pset = saved;
+                                }
+                                settings.echo_all = saved_echo;
+                                if !ok {
+                                    exit_code = 1;
+                                    if settings.single_transaction {
+                                        break 'lines;
+                                    }
                                 }
                             }
-                        }
                         } // end else (no pending_bind_named)
                     }
                     MetaResult::ExecuteBufferExpanded => {
@@ -2483,15 +2485,15 @@ pub(crate) async fn exec_lines(
                 while let Some(ref inline_raw) = inline_remaining.clone() {
                     let inline_input = settings.vars.interpolate(inline_raw);
                     let trimmed_inline = inline_input.trim_start();
-                    let is_inline_set = trimmed_inline.strip_prefix("\\set")
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
-                    let mut parsed =
-                        if inline_first && is_inline_set {
-                            let raw_cmd = inline_raw.trim().trim_start_matches('\\');
-                            crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
-                        } else {
-                            crate::metacmd::parse(&inline_input)
-                        };
+                    let is_inline_set = trimmed_inline.strip_prefix("\\set").is_some_and(|rest| {
+                        rest.is_empty() || rest.starts_with(char::is_whitespace)
+                    });
+                    let mut parsed = if inline_first && is_inline_set {
+                        let raw_cmd = inline_raw.trim().trim_start_matches('\\');
+                        crate::metacmd::parse_set_with_vars(raw_cmd, &settings.vars)
+                    } else {
+                        crate::metacmd::parse(&inline_input)
+                    };
                     inline_first = false;
                     parsed.echo_hidden = settings.echo_hidden;
                     // Store continuation from the interpolated text.  Since `\cmd`
@@ -2515,7 +2517,8 @@ pub(crate) async fn exec_lines(
                     match result {
                         MetaResult::ExecuteBuffer => {
                             // \bind_named deferred execution.
-                            if let Some((ref name, ref parms)) = settings.pending_bind_named.take() {
+                            if let Some((ref name, ref parms)) = settings.pending_bind_named.take()
+                            {
                                 if !execute_named_stmt(client, name, parms, settings, tx).await {
                                     exit_code = 1;
                                     if settings.single_transaction {
@@ -2523,47 +2526,48 @@ pub(crate) async fn exec_lines(
                                     }
                                 }
                             } else {
-                            let stripped =
-                                crate::query::strip_leading_preamble(buf.trim()).to_owned();
-                            let sql = if stripped.is_empty() {
-                                prev_buf.trim().to_owned()
-                            } else {
-                                stripped
-                            };
-                            buf.clear();
-                            if !sql.is_empty() {
-                                prev_buf = sql.clone();
-                                let saved_echo = settings.echo_all;
-                                settings.echo_all = false;
-                                let saved_pset = if settings.pending_pset_opts.is_empty() {
-                                    None
+                                let stripped =
+                                    crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                                let sql = if stripped.is_empty() {
+                                    prev_buf.trim().to_owned()
                                 } else {
-                                    let saved = settings.pset.clone();
-                                    let opts = std::mem::take(&mut settings.pending_pset_opts);
-                                    let saved_quiet = settings.quiet;
-                                    settings.quiet = true;
-                                    for (opt, val) in &opts {
-                                        apply_pset(settings, opt, val.as_deref());
-                                    }
-                                    settings.quiet = saved_quiet;
-                                    Some(saved)
+                                    stripped
                                 };
-                                let ok = if let Some(bp) = settings.pending_bind_params.take() {
-                                    execute_query_extended(client, &sql, &bp, settings, tx).await
-                                } else {
-                                    execute_query(client, &sql, settings, tx).await
-                                };
-                                if let Some(saved) = saved_pset {
-                                    settings.pset = saved;
-                                }
-                                settings.echo_all = saved_echo;
-                                if !ok {
-                                    exit_code = 1;
-                                    if settings.single_transaction {
-                                        break 'lines;
+                                buf.clear();
+                                if !sql.is_empty() {
+                                    prev_buf = sql.clone();
+                                    let saved_echo = settings.echo_all;
+                                    settings.echo_all = false;
+                                    let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                        None
+                                    } else {
+                                        let saved = settings.pset.clone();
+                                        let opts = std::mem::take(&mut settings.pending_pset_opts);
+                                        let saved_quiet = settings.quiet;
+                                        settings.quiet = true;
+                                        for (opt, val) in &opts {
+                                            apply_pset(settings, opt, val.as_deref());
+                                        }
+                                        settings.quiet = saved_quiet;
+                                        Some(saved)
+                                    };
+                                    let ok = if let Some(bp) = settings.pending_bind_params.take() {
+                                        execute_query_extended(client, &sql, &bp, settings, tx)
+                                            .await
+                                    } else {
+                                        execute_query(client, &sql, settings, tx).await
+                                    };
+                                    if let Some(saved) = saved_pset {
+                                        settings.pset = saved;
+                                    }
+                                    settings.echo_all = saved_echo;
+                                    if !ok {
+                                        exit_code = 1;
+                                        if settings.single_transaction {
+                                            break 'lines;
+                                        }
                                     }
                                 }
-                            }
                             } // end else (no pending_bind_named)
                         }
                         MetaResult::ExecuteBufferExpanded => {
@@ -2731,17 +2735,11 @@ pub(crate) async fn exec_lines(
                                     for seg in &segments {
                                         let s = seg.trim();
                                         if !s.is_empty() {
-                                            execute_to_file(
-                                                client, s, &path, settings, tx,
-                                            )
-                                            .await;
+                                            execute_to_file(client, s, &path, settings, tx).await;
                                         }
                                     }
                                 } else {
-                                    execute_to_file(
-                                        client, &sql, &path, settings, tx,
-                                    )
-                                    .await;
+                                    execute_to_file(client, &sql, &path, settings, tx).await;
                                 }
                                 settings.echo_all = saved_echo;
                             }
@@ -7080,7 +7078,8 @@ async fn handle_backslash_dumb(
 ) -> HandleLineResult {
     let interpolated = settings.vars.interpolate(input);
     let trimmed_set = interpolated.trim_start();
-    let is_set = trimmed_set.strip_prefix("\\set")
+    let is_set = trimmed_set
+        .strip_prefix("\\set")
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
     let mut parsed = if is_set {
         let raw_cmd = input.trim().trim_start_matches('\\');
@@ -7132,8 +7131,14 @@ async fn handle_backslash_dumb(
                 buf.clear();
                 if !sql.is_empty() {
                     if let Some(bind_params) = settings.pending_bind_params.take() {
-                        execute_query_extended_interactive(client, &sql, &bind_params, settings, tx)
-                            .await;
+                        execute_query_extended_interactive(
+                            client,
+                            &sql,
+                            &bind_params,
+                            settings,
+                            tx,
+                        )
+                        .await;
                     } else {
                         execute_query_interactive(client, &sql, settings, tx).await;
                     }
@@ -7445,7 +7450,8 @@ async fn handle_line(
         // For \set, use token-level variable substitution with the raw line
         // so that :varname values containing spaces are not re-tokenised.
         let trimmed_seg = interpolated.trim_start();
-        let is_set_seg = trimmed_seg.strip_prefix("\\set")
+        let is_set_seg = trimmed_seg
+            .strip_prefix("\\set")
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
         let mut parsed = if is_set_seg {
             let raw_cmd = line.trim().trim_start_matches('\\');
@@ -7710,7 +7716,8 @@ async fn handle_line(
         // Dispatch the backslash command (interpolate variables first).
         let interpolated_meta = settings.vars.interpolate(meta_part);
         let trimmed_im = interpolated_meta.trim_start();
-        let is_set_im = trimmed_im.strip_prefix("\\set")
+        let is_set_im = trimmed_im
+            .strip_prefix("\\set")
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
         let mut parsed = if is_set_im {
             let raw_cmd = meta_part.trim().trim_start_matches('\\');

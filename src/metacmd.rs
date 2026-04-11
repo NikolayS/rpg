@@ -3529,10 +3529,7 @@ mod tests {
     #[test]
     fn parse_setenv_unset() {
         let m = parse("\\setenv MY_VAR");
-        assert_eq!(
-            m.cmd,
-            MetaCmd::SetEnv("MY_VAR".to_owned(), String::new())
-        );
+        assert_eq!(m.cmd, MetaCmd::SetEnv("MY_VAR".to_owned(), String::new()));
     }
 
     #[test]

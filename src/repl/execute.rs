@@ -589,9 +589,7 @@ pub async fn execute_query(
 
     if use_implicit_savepoint {
         // Create the savepoint silently before executing the user's statement.
-        let _ = client
-            .simple_query("SAVEPOINT pg_psql_savepoint")
-            .await;
+        let _ = client.simple_query("SAVEPOINT pg_psql_savepoint").await;
     }
 
     // Use simple_query_raw to stream messages one at a time.  This allows us
@@ -654,8 +652,7 @@ pub async fn execute_query(
                 #[allow(clippy::cast_possible_truncation)]
                 let elapsed_ms = elapsed.as_millis() as u64;
                 if settings.timing {
-                    let line =
-                        format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
+                    let line = format!("Time: {:.3} ms\n", elapsed.as_secs_f64() * 1000.0);
                     if let Some(ref mut w) = settings.output_target {
                         let _ = w.write_all(line.as_bytes());
                     } else {
@@ -725,9 +722,7 @@ pub async fn execute_query(
                     if (auto_explain_active || is_manual_explain) && result_set_index == 0 {
                         let plan_text: String = rows
                             .iter()
-                            .filter_map(|r| {
-                                r.first().and_then(|v| v.as_deref()).map(str::to_owned)
-                            })
+                            .filter_map(|r| r.first().and_then(|v| v.as_deref()).map(str::to_owned))
                             .collect::<Vec<_>>()
                             .join("\n");
                         if !plan_text.is_empty() {
@@ -1083,9 +1078,7 @@ pub async fn execute_query_extended(
     };
 
     if use_implicit_savepoint_ext {
-        let _ = client
-            .simple_query("SAVEPOINT pg_psql_savepoint")
-            .await;
+        let _ = client.simple_query("SAVEPOINT pg_psql_savepoint").await;
     }
 
     // Prepare the statement so that the server can describe its columns.
@@ -2710,13 +2703,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
     // Collect (name, oid, typmod) triples.
     let col_info: Vec<(String, u32, i32)> = cols
         .iter()
-        .map(|c| {
-            (
-                c.name().to_owned(),
-                c.type_().oid(),
-                c.type_modifier(),
-            )
-        })
+        .map(|c| (c.name().to_owned(), c.type_().oid(), c.type_modifier()))
         .collect();
 
     // Resolve OIDs + typmods to display type names in a single query.
@@ -2740,10 +2727,8 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
         param_values.push(Box::new(*oid));
         param_values.push(Box::new(*typmod));
     }
-    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_values
-        .iter()
-        .map(|b| b.as_ref())
-        .collect();
+    let oid_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        param_values.iter().map(|b| b.as_ref()).collect();
 
     let type_names: Vec<String> = match client.query_one(&type_query, &oid_params).await {
         Ok(row) => (0..col_info.len())
@@ -2774,9 +2759,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
     let rows: Vec<Vec<Option<String>>> = col_info
         .iter()
         .zip(type_names.iter())
-        .map(|((name, _, _), type_name)| {
-            vec![Some(name.clone()), Some(type_name.clone())]
-        })
+        .map(|((name, _, _), type_name)| vec![Some(name.clone()), Some(type_name.clone())])
         .collect();
 
     let rs = RowSet { columns, rows };

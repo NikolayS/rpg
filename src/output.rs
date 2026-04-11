@@ -2669,7 +2669,6 @@ pub fn format_markdown(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Wrapped format
 // ---------------------------------------------------------------------------
@@ -2681,9 +2680,9 @@ fn total_line_width(widths: &[usize], border: u8) -> usize {
     }
     let sum: usize = widths.iter().sum();
     match border {
-        0 => sum + 2 * (n - 1),       // `w0  w1  w2`
-        2 => sum + 3 * n + 1,         // `| w0 | w1 | w2 |`
-        _ => sum + 3 * n - 1,         // ` w0 | w1 | w2 ` (border 1)
+        0 => sum + 2 * (n - 1), // `w0  w1  w2`
+        2 => sum + 3 * n + 1,   // `| w0 | w1 | w2 |`
+        _ => sum + 3 * n - 1,   // ` w0 | w1 | w2 ` (border 1)
     }
 }
 
@@ -2711,8 +2710,7 @@ fn shrink_widths(
 
         for i in 0..widths.len() {
             if width_average[i] > 0 && widths[i] > width_header[i] {
-                let ratio = widths[i] as f64 / width_average[i] as f64
-                    + max_width[i] as f64 * 0.01;
+                let ratio = widths[i] as f64 / width_average[i] as f64 + max_width[i] as f64 * 0.01;
                 if ratio > max_ratio {
                     max_ratio = ratio;
                     worst_col = Some(i);
@@ -2750,7 +2748,11 @@ fn compute_width_average(
             }
             let cell_str = cell.as_deref().unwrap_or(null_str);
             // psql uses pg_wcssize which returns the max line width within the cell.
-            let w = cell_str.split('\n').map(|line| display_width(line)).max().unwrap_or(0);
+            let w = cell_str
+                .split('\n')
+                .map(|line| display_width(line))
+                .max()
+                .unwrap_or(0);
             sums[i] += w;
         }
     }
@@ -2937,17 +2939,17 @@ fn format_wrapped_pset(out: &mut String, rs: &RowSet, pcfg: &PsetConfig) {
         let overhead = match border {
             0 => cols.len(),
             2 => cols.len() * 3 + 1,
-            _ => cols.len().saturating_mul(3).saturating_sub(if cols.is_empty() { 0 } else { 1 }),
+            _ => cols
+                .len()
+                .saturating_mul(3)
+                .saturating_sub(if cols.is_empty() { 0 } else { 1 }),
         };
         overhead + width_header.iter().sum::<usize>()
     };
 
     // Shrink columns if target width is set and the table is too wide.
     // Only shrink if the target is at least as wide as the total header width.
-    if target > 0
-        && total_line_width(&widths, border) > target
-        && target >= total_header_width
-    {
+    if target > 0 && total_line_width(&widths, border) > target && target >= total_header_width {
         shrink_widths(
             &mut widths,
             &width_header,
