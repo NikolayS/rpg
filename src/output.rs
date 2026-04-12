@@ -452,71 +452,173 @@ fn write_aligned_row_border<F>(
             .max()
             .unwrap_or(1);
 
-        // Format:
+        // Format (ASCII):
         //   border=0: col0_centered marker col1_centered marker ... lastcol_centered ['+' if more]
         //     where marker = '+' if this col has more lines, else ' ' (1-space gap)
         //   border=1: ' ' col0_centered marker '|' ' ' col1_centered marker '|' ... lastcol_centered ['+' if more]
         //   border=2: '|' ' ' col0_centered marker '|' ' ' col1_centered marker '|' ... lastcol_centered marker '|'
+        //
+        // Format (old-ASCII):
+        //   On continuation lines (line_idx > 0), each column gets a leading '+' marker.
+        //   The column separator is always '|' (no trailing marker).
+        //   border=0: '+' col0_centered ' ' '+' col1_centered ...
+        //   border=1: '+' col0_centered ' |' '+' col1_centered ...
+        //   border=2: '|' '+' col0_centered ' |' '+' col1_centered ' |'
         for line_idx in 0..max_header_lines {
-            // Leading border prefix (before first column).
-            match border {
-                0 => {}
-                2 => out.push_str("| "),
-                _ => out.push(' '),
-            }
+            if is_old_ascii {
+                // Old-ASCII header rendering.
+                //
+                // For border=0: same as ASCII but '+' inter-column marker on
+                // continuation lines (line_idx > 0) regardless of which column
+                // has more lines.
+                //
+                // For border=1/2: each column gets a leading char (' ' on first
+                // line, '+' on continuations). The center width is w+1 (the
+                // trailing marker slot from ASCII is absorbed). Column separator
+                // is '|' directly.
+                let is_continuation = line_idx > 0;
+                for (i, _col) in cols.iter().enumerate() {
+                    let w = widths[i];
+                    let col_lines = &header_name_lines[i];
+                    let text = col_lines.get(line_idx).copied().unwrap_or("");
+                    let is_last = i == ncols - 1;
 
-            for (i, _col) in cols.iter().enumerate() {
-                let w = widths[i];
-                let col_lines = &header_name_lines[i];
-                let text = col_lines.get(line_idx).copied().unwrap_or("");
-                let has_more = line_idx + 1 < col_lines.len();
-                let marker = if has_more { '+' } else { ' ' };
+                    match border {
+                        0 => {
+                            // border=0 old-ascii: same layout as ASCII border=0
+                            // but inter-column marker = '+' if continuation line, ' ' otherwise
+                            // No trailing marker on last column.
+                            let text_width = display_width(text);
+                            let padding = w.saturating_sub(text_width);
+                            let left_pad = padding / 2;
+                            let right_pad = padding - left_pad;
 
-                let text_width = display_width(text);
-                let padding = w.saturating_sub(text_width);
-                let left_pad = padding / 2;
-                let right_pad = padding - left_pad;
+                            // Inter-column gap (before col i>0).
+                            if i > 0 {
+                                let marker = if is_continuation { '+' } else { ' ' };
+                                out.push(marker);
+                            }
 
-                // Inter-column space (printed before col j>0 content, after previous
-                // col's marker+pipe were already emitted as that col's suffix).
-                if i > 0 {
-                    out.push(' '); // space between pipe and content
-                }
+                            for _ in 0..left_pad {
+                                out.push(' ');
+                            }
+                            out.push_str(text);
+                            for _ in 0..right_pad {
+                                out.push(' ');
+                            }
+                            // No trailing marker for old-ascii border=0
+                        }
+                        2 => {
+                            // border=2 old-ascii: | leading center(w+2) | leading center(w+2) |
+                            // The leading char is part of the center left padding.
+                            let leading = if is_continuation { '+' } else { ' ' };
+                            let cw = w + 2;
+                            let text_width = display_width(text);
+                            let padding = cw.saturating_sub(text_width);
+                            let left_pad = padding / 2;
+                            let right_pad = padding - left_pad;
 
-                // Center-aligned content.
-                for _ in 0..left_pad {
-                    out.push(' ');
-                }
-                out.push_str(text);
-                for _ in 0..right_pad {
-                    out.push(' ');
-                }
+                            out.push('|');
+                            out.push(leading);
+                            for _ in 0..left_pad.saturating_sub(1) {
+                                out.push(' ');
+                            }
+                            out.push_str(text);
+                            for _ in 0..right_pad {
+                                out.push(' ');
+                            }
+                            if is_last {
+                                out.push('|');
+                            }
+                        }
+                        _ => {
+                            // border=1 old-ascii: leading + center(w+2) | leading + center(w+2)
+                            // The leading char is part of the center left padding.
+                            let leading = if is_continuation { '+' } else { ' ' };
+                            let cw = w + 2;
+                            let text_width = display_width(text);
+                            let padding = cw.saturating_sub(text_width);
+                            let left_pad = padding / 2;
+                            let right_pad = padding - left_pad;
 
-                // Column suffix: marker [+ '|'] depending on border and position.
-                //   border=0: marker (gap to next col, or '+' if last-with-more)
-                //   border=1: marker + '|' (non-last); '+' or nothing (last)
-                //   border=2: marker + '|' (all columns, including last = closing '|')
-                let is_last = i == ncols - 1;
-                match border {
-                    0 => {
-                        if !is_last {
-                            out.push(marker); // '+' or ' ' as gap
-                        } else if has_more {
-                            out.push('+'); // '+' on last col if more lines
+                            if i > 0 {
+                                out.push('|');
+                            }
+                            out.push(leading);
+                            for _ in 0..left_pad.saturating_sub(1) {
+                                out.push(' ');
+                            }
+                            out.push_str(text);
+                            for _ in 0..right_pad {
+                                out.push(' ');
+                            }
                         }
                     }
-                    2 => {
-                        out.push(marker);
-                        out.push('|');
+                }
+            } else {
+                // ASCII header rendering.
+                // Leading border prefix (before first column).
+                match border {
+                    0 => {}
+                    2 => out.push_str("| "),
+                    _ => out.push(' '),
+                }
+
+                for (i, _col) in cols.iter().enumerate() {
+                    let w = widths[i];
+                    let col_lines = &header_name_lines[i];
+                    let text = col_lines.get(line_idx).copied().unwrap_or("");
+                    let has_more = line_idx + 1 < col_lines.len();
+                    let marker = if has_more { '+' } else { ' ' };
+
+                    let text_width = display_width(text);
+                    let padding = w.saturating_sub(text_width);
+                    let left_pad = padding / 2;
+                    let right_pad = padding - left_pad;
+
+                    // Inter-column space: for border 1/2, printed after the '|' pipe
+                    // from the previous column's suffix.  For border 0, the marker
+                    // character already serves as the inter-column gap, so no extra
+                    // space is needed.
+                    if i > 0 && border > 0 {
+                        out.push(' '); // space between pipe and content
                     }
-                    _ => {
-                        if !is_last {
+
+                    // Center-aligned content.
+                    for _ in 0..left_pad {
+                        out.push(' ');
+                    }
+                    out.push_str(text);
+                    for _ in 0..right_pad {
+                        out.push(' ');
+                    }
+
+                    // Column suffix: marker [+ '|'] depending on border and position.
+                    //   border=0: marker (gap to next col, or '+' if last-with-more)
+                    //   border=1: marker + '|' (non-last); '+' or nothing (last)
+                    //   border=2: marker + '|' (all columns, including last = closing '|')
+                    let is_last = i == ncols - 1;
+                    match border {
+                        0 => {
+                            if !is_last {
+                                out.push(marker); // '+' or ' ' as gap
+                            } else if has_more {
+                                out.push('+'); // '+' on last col if more lines
+                            }
+                        }
+                        2 => {
                             out.push(marker);
                             out.push('|');
-                        } else if has_more {
-                            out.push('+');
-                        } else {
-                            out.push(' '); // trailing space on last header col (psql compat)
+                        }
+                        _ => {
+                            if !is_last {
+                                out.push(marker);
+                                out.push('|');
+                            } else if has_more {
+                                out.push('+');
+                            } else {
+                                out.push(' '); // trailing space on last header col (psql compat)
+                            }
                         }
                     }
                 }
@@ -849,16 +951,18 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
     let wrap_w: usize = if is_wrapped && columns > 0 {
         let overhead: usize = if is_old_ascii {
+            // Old-ascii always reserves the marker slot (same as ascii)
+            // even when no multiline names are present, for consistent wrapping.
             match border {
-                0 => max_name_width + 1 + marker_w, // MARKER? + name + SEP
-                1 => max_name_width + 3 + marker_w, // MARKER? + name + SP + SEP + SP
-                _ => max_name_width + 5 + marker_w, // | + MARKER? + name + SP + SEP + SP + val + SP + |
+                0 => max_name_width + 2, // MARKER + name + SEP
+                1 => max_name_width + 4, // MARKER + name + SP + SEP + SP
+                _ => max_name_width + 6, // | + MARKER + name + SP + SEP + SP + val + SP + |
             }
         } else {
             match border {
                 0 => max_name_width + 2 + marker_w, // name + MARKER? + SEP + END_MARKER
-                1 => max_name_width + 3 + marker_w, // name + MARKER? + | + SP + END_MARKER
-                _ => max_name_width + 6 + marker_w, // "| " + name + MARKER? + "| " + END_MARKER + |
+                1 => max_name_width + 4,            // name + MARKER(always) + | + SP + END_MARKER
+                _ => max_name_width + 7, // "| " + name + MARKER(always) + "| " + END_MARKER + |
             }
         };
         columns.saturating_sub(overhead).max(3)
@@ -916,14 +1020,30 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             }
             out.push('+');
         } else {
-            // Record header: single separator spanning full width
-            // total_width = 1(+) + left_inner(max_name_width+2) + 1(+) + b2_right_dashes + 1(+)
-            let total_width = max_name_width + b2_right_dashes + 5;
-            let fill = total_width.saturating_sub(label.len() + 2);
+            // Record header with split at column boundary:
+            // +-[ RECORD N ]---+------+
+            // The `+` at column boundary is at position left_inner + 1 = max_name_width + 3.
+            let left_inner = max_name_width + 2;
+            let split_pos = left_inner + 1; // position of the `+` separator
             out.push('+');
             out.push_str(label);
-            for _ in 0..fill {
-                out.push('-');
+            let label_end = label.len() + 1; // +1 for the leading '+'
+            if label_end <= split_pos {
+                // Label fits before the split: fill dashes to split, then `+`, then right dashes, then `+`
+                for _ in 0..(split_pos - label_end) {
+                    out.push('-');
+                }
+                out.push('+');
+                for _ in 0..b2_right_dashes {
+                    out.push('-');
+                }
+            } else {
+                // Label overflows past split: just fill dashes to total width
+                let total_width = max_name_width + b2_right_dashes + 5;
+                let fill = total_width.saturating_sub(label.len() + 2);
+                for _ in 0..fill {
+                    out.push('-');
+                }
             }
             out.push('+');
         }
@@ -965,11 +1085,13 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                         }
                         out.push('+');
                         // Right side fill:
-                        // ASCII:     name + marker + '|' + ' ' + val + end_marker = N+1+1+1+W+1
+                        // ASCII:     name + marker + '|' + ' ' + val + end_marker
                         //            => right = val_part + 1
-                        // Old-ascii: MARKER + name + ' ' + sep + ' ' + val = 1+N+1+1+1+W
+                        // Old-ascii (no multiline names): name + ' ' + sep + ' ' + val
+                        //            => right = val_part + 1
+                        // Old-ascii (multiline names): LEADING + name + ' ' + sep + ' ' + val
                         //            => right = val_part + 2
-                        let right_fill = if is_old_ascii {
+                        let right_fill = if is_old_ascii && any_name_multiline {
                             val_part + 2
                         } else {
                             val_part + 1
@@ -979,10 +1101,11 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                         }
                     } else {
                         // label overflows into value column, no '+' separator
-                        // Total header width:
-                        //   ASCII:     max_name_width + val_part + 3  (= columns - 1)
-                        //   Old-ascii: max_name_width + val_part + 4  (= columns)
-                        let total_header = if is_old_ascii {
+                        // Total header width depends on leading marker:
+                        // ASCII:     max_name_width + val_part + 3
+                        // Old-ascii (no multiline): max_name_width + val_part + 3
+                        // Old-ascii (multiline): max_name_width + val_part + 4
+                        let total_header = if is_old_ascii && any_name_multiline {
                             max_name_width + val_part + 4
                         } else {
                             max_name_width + val_part + 3
@@ -1123,8 +1246,11 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                     0 => {
                         if is_old_ascii {
                             // old-ascii border=0:
-                            // Format: LEADING_MARKER + name_padded + SEP_SPACE + val
-                            out.push(oa_leading);
+                            // When any_name_multiline: LEADING_MARKER + name_padded + SEP + val
+                            // Otherwise: name_padded + SEP + val (no leading marker)
+                            if any_name_multiline {
+                                out.push(oa_leading);
+                            }
                             out.push_str(name_line);
                             for _ in 0..name_pad {
                                 out.push(' ');
@@ -1169,19 +1295,22 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                     1 => {
                         if is_old_ascii {
                             // old-ascii border=1:
-                            // Format: LEADING_MARKER + name_padded + SP + SEPARATOR + SP + val
-                            // SEPARATOR: '|' for li=0 with non-empty val, ':' for subsequent
-                            //            non-empty val, ';' for empty val or physical cont
-                            out.push(oa_leading);
+                            // When any_name_multiline: LEADING_MARKER + name_padded + SP + SEP + SP + val
+                            // Otherwise: name_padded + SP + SEP + SP + val (no leading)
+                            // SEPARATOR: '|' for li=0, ':' for subsequent, ';' for empty/phys cont
+                            if any_name_multiline {
+                                out.push(oa_leading);
+                            }
                             out.push_str(name_line);
                             for _ in 0..name_pad {
                                 out.push(' ');
                             }
                             out.push(' ');
-                            let sep = if is_physical_cont || val_text.is_empty() {
-                                ';'
-                            } else if li == 0 {
+                            let sep = if li == 0 {
                                 '|'
+                            } else if is_physical_cont || (val_text.is_empty() && li < n_name_lines)
+                            {
+                                ';'
                             } else {
                                 ':'
                             };
@@ -1232,14 +1361,14 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                                 out.push(' ');
                             }
                             out.push(' ');
-                            let sep =
-                                if is_physical_cont || (val_text.is_empty() && li < n_name_lines) {
-                                    ';'
-                                } else if li == 0 {
-                                    '|'
-                                } else {
-                                    ':'
-                                };
+                            let sep = if li == 0 {
+                                '|'
+                            } else if is_physical_cont || (val_text.is_empty() && li < n_name_lines)
+                            {
+                                ';'
+                            } else {
+                                ':'
+                            };
                             out.push(sep);
                             out.push(' ');
                             out.push_str(val_text);
@@ -1884,7 +2013,7 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg
             |col, _| col.name.clone(),
             true,
             border,
-            false, // headers always use ASCII-style markers (old-ascii header handling is separate)
+            is_old_ascii,
         );
         write_separator_border(out, &widths, border);
     }
@@ -3031,9 +3160,33 @@ fn format_wrapped_pset(out: &mut String, rs: &RowSet, pcfg: &PsetConfig) {
     }
 
     // Header (suppressed in tuples-only mode).
+    let is_old_ascii = pcfg.linestyle == "old-ascii";
+
     if !pcfg.tuples_only {
         // Headers can also have embedded newlines (e.g. the test uses "ab\n\nc").
-        write_wrapped_row(out, cols, &widths, border, |col, _| col.name.clone(), true);
+        // For old-ascii headers, delegate to write_aligned_row_border which handles
+        // old-ascii leading markers correctly.
+        if is_old_ascii {
+            write_aligned_row_border(
+                out,
+                cols,
+                &widths,
+                |col, _| col.name.clone(),
+                true,
+                border,
+                true, // is_old_ascii
+            );
+        } else {
+            write_wrapped_row(
+                out,
+                cols,
+                &widths,
+                border,
+                |col, _| col.name.clone(),
+                true,
+                false,
+            );
+        }
         write_separator_border(out, &widths, border);
     }
 
@@ -3056,6 +3209,7 @@ fn format_wrapped_pset(out: &mut String, rs: &RowSet, pcfg: &PsetConfig) {
                     .unwrap_or_else(|| null.clone())
             },
             false,
+            is_old_ascii,
         );
     }
 
@@ -3096,6 +3250,7 @@ fn write_wrapped_row<F>(
     border: u8,
     value_fn: F,
     is_header: bool,
+    is_old_ascii: bool,
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
@@ -3113,6 +3268,18 @@ fn write_wrapped_row<F>(
 
     // Render each visual line.
     for line_idx in 0..max_lines {
+        // For old-ascii: check if all non-first columns are empty on this line.
+        // If so, omit the separator and just show col 0.
+        let oa_skip_trailing_cols = is_old_ascii && !is_header && cols.len() > 1 && {
+            (1..cols.len()).all(|c| {
+                let cl = all_lines[c].get(line_idx);
+                match cl {
+                    Some(cell) => cell.text.is_empty() && !cell.continued_from_wrap,
+                    None => true,
+                }
+            })
+        };
+
         for (col_idx, col) in cols.iter().enumerate() {
             let w = widths[col_idx];
             let cell_lines = &all_lines[col_idx];
@@ -3150,87 +3317,133 @@ fn write_wrapped_row<F>(
                 border == 2 || !is_last_col || has_marker
             };
 
-            // --- Leading ---
-            // For border 0: the trailing marker of the previous column serves
-            // as the inter-column separator, so there is NO separate leading
-            // character for col_idx > 0.  For col_idx == 0, no leading at all.
-            //
-            // For border 1/2: each column has a leading space (or `.` for
-            // wrap continuation), plus `|` separators between columns.
-            match border {
-                0 => {
-                    // No leading in border 0 — handled by previous col's trailing.
+            if is_old_ascii && !is_header {
+                // --- Old-ASCII data row rendering ---
+                // Skip trailing columns when all non-first columns are empty.
+                if oa_skip_trailing_cols && col_idx > 0 {
+                    continue;
                 }
-                2 => {
-                    out.push('|');
-                    if continued_from_wrap {
-                        out.push('.');
-                    } else {
-                        out.push(' ');
-                    }
-                }
-                _ => {
-                    if col_idx > 0 {
-                        out.push('|');
-                    }
-                    if continued_from_wrap {
-                        out.push('.');
-                    } else {
-                        out.push(' ');
-                    }
-                }
-            }
 
-            // --- Content ---
-            if col.is_numeric && !is_header {
-                // Right-aligned: spaces before content.
-                if final_spaces {
+                // Leading: use ':' for continuation lines, '|' for first line.
+                // No trailing markers (no '+', no '.').
+                match border {
+                    0 => {
+                        if col_idx > 0 {
+                            out.push(' '); // simple gap, no markers
+                        }
+                    }
+                    2 => {
+                        if col_idx == 0 {
+                            out.push_str("| ");
+                        } else if line_idx > 0 {
+                            out.push_str(" : ");
+                        } else {
+                            out.push_str(" | ");
+                        }
+                    }
+                    _ => {
+                        if col_idx == 0 {
+                            out.push(' ');
+                        } else if line_idx > 0 {
+                            out.push_str(" : ");
+                        } else {
+                            out.push_str(" | ");
+                        }
+                    }
+                }
+
+                // Content: left-aligned data (same as ASCII).
+                if col.is_numeric {
                     for _ in 0..padding {
                         out.push(' ');
                     }
+                    out.push_str(text);
+                } else {
+                    out.push_str(text);
+                    // Pad for border 2 and non-last columns.
+                    if border == 2 || !is_last_col {
+                        for _ in 0..padding {
+                            out.push(' ');
+                        }
+                    }
                 }
-                out.push_str(text);
-            } else if is_header && !col.is_numeric {
-                // Center-aligned header.
-                let left_pad = padding / 2;
-                let right_pad = padding - left_pad;
-                for _ in 0..left_pad {
+
+                // No trailing content marker in old-ascii, but for border=2
+                // we need a trailing space before the closing '|'.
+                if border == 2 {
                     out.push(' ');
                 }
-                out.push_str(text);
-                if final_spaces {
-                    for _ in 0..right_pad {
-                        out.push(' ');
-                    }
-                }
-            } else if is_header && col.is_numeric {
-                // Right-aligned header.
-                if final_spaces {
-                    for _ in 0..padding {
-                        out.push(' ');
-                    }
-                }
-                out.push_str(text);
             } else {
-                // Left-aligned data: content then spaces.
-                out.push_str(text);
-                if final_spaces {
-                    for _ in 0..padding {
-                        out.push(' ');
+                // --- ASCII / header rendering ---
+                // Leading.
+                match border {
+                    0 => {
+                        // No leading in border 0 — handled by previous col's trailing.
+                    }
+                    2 => {
+                        out.push('|');
+                        if continued_from_wrap {
+                            out.push('.');
+                        } else {
+                            out.push(' ');
+                        }
+                    }
+                    _ => {
+                        if col_idx > 0 {
+                            out.push('|');
+                        }
+                        if continued_from_wrap {
+                            out.push('.');
+                        } else {
+                            out.push(' ');
+                        }
                     }
                 }
-            }
 
-            // --- Trailing marker ---
-            // Write `+` (newline), `.` (wrap), or ` ` (normal).
-            // For the last column in border 0/1, only write if it's a
-            // meaningful marker (not a plain space).
-            if has_newline {
-                out.push('+');
-            } else if wraps_to_next {
-                out.push('.');
-            } else if final_spaces {
-                out.push(' ');
+                // Content.
+                if col.is_numeric && !is_header {
+                    if final_spaces {
+                        for _ in 0..padding {
+                            out.push(' ');
+                        }
+                    }
+                    out.push_str(text);
+                } else if is_header && !col.is_numeric {
+                    let left_pad = padding / 2;
+                    let right_pad = padding - left_pad;
+                    for _ in 0..left_pad {
+                        out.push(' ');
+                    }
+                    out.push_str(text);
+                    if final_spaces {
+                        for _ in 0..right_pad {
+                            out.push(' ');
+                        }
+                    }
+                } else if is_header && col.is_numeric {
+                    if final_spaces {
+                        for _ in 0..padding {
+                            out.push(' ');
+                        }
+                    }
+                    out.push_str(text);
+                } else {
+                    out.push_str(text);
+                    if final_spaces {
+                        for _ in 0..padding {
+                            out.push(' ');
+                        }
+                    }
+                }
+
+                // Trailing marker.
+                if has_newline {
+                    out.push('+');
+                } else if wraps_to_next {
+                    out.push('.');
+                } else if final_spaces {
+                    out.push(' ');
+                }
             }
         }
 
