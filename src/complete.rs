@@ -1405,7 +1405,11 @@ impl Highlighter for RpgHelper {
                     .chain(cache.columns.iter().map(|c| c.name.to_lowercase()))
                     .collect()
             });
-        crate::highlight::highlight_sql_scs(line, schema_names.as_ref(), self.standard_conforming_strings)
+        crate::highlight::highlight_sql_scs(
+            line,
+            schema_names.as_ref(),
+            self.standard_conforming_strings,
+        )
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {

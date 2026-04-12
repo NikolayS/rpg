@@ -1023,11 +1023,7 @@ pub async fn execute_query(
 ///
 /// This is intentionally conservative: we only fire the extra `SHOW` when the
 /// SQL contains both `standard_conforming_strings` and a SET-like keyword.
-async fn update_scs_if_changed(
-    sql: &str,
-    client: &Client,
-    settings: &mut ReplSettings,
-) {
+async fn update_scs_if_changed(sql: &str, client: &Client, settings: &mut ReplSettings) {
     let upper = sql.to_uppercase();
     if upper.contains("STANDARD_CONFORMING_STRINGS")
         && (upper.starts_with("SET ") || upper.starts_with("RESET "))

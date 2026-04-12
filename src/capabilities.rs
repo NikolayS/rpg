@@ -246,9 +246,7 @@ async fn detect_standard_conforming_strings(client: &tokio_postgres::Client) -> 
 
 /// Query `standard_conforming_strings` — public variant for re-detection
 /// after `\c` reconnect.
-pub async fn detect_standard_conforming_strings_pub(
-    client: &tokio_postgres::Client,
-) -> bool {
+pub async fn detect_standard_conforming_strings_pub(client: &tokio_postgres::Client) -> bool {
     match client
         .simple_query("SHOW standard_conforming_strings")
         .await

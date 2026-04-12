@@ -2597,11 +2597,8 @@ pub(crate) async fn exec_lines(
             // correctly — the `$$` closes the existing quote, leaving `\gset`
             // outside the string.
             let scs = settings.db_capabilities.standard_conforming_strings;
-            if let Some(pos) = find_inline_backslash_ctx(
-                &line,
-                get_open_dollar_tag(&buf, scs),
-                scs,
-            ) {
+            if let Some(pos) = find_inline_backslash_ctx(&line, get_open_dollar_tag(&buf, scs), scs)
+            {
                 // -a / --echo-all: echo the line (including the inline metacommand)
                 // before processing it, matching psql's echo-first-then-execute order.
                 if settings.echo_all && !line.trim().is_empty() {
@@ -6885,10 +6882,7 @@ fn get_open_dollar_tag(buf: &str, scs: bool) -> Option<String> {
             continue;
         }
         // E-string start
-        if (bytes[i] == b'E' || bytes[i] == b'e')
-            && i + 1 < len
-            && bytes[i + 1] == b'\''
-        {
+        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < len && bytes[i + 1] == b'\'' {
             in_single = true;
             bs_escapes = true;
             i += 2;
@@ -7117,10 +7111,7 @@ fn find_inline_backslash_ctx(
         }
 
         // E-string start: E'…' / e'…'
-        if (bytes[i] == b'E' || bytes[i] == b'e')
-            && i + 1 < len
-            && bytes[i + 1] == b'\''
-        {
+        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < len && bytes[i + 1] == b'\'' {
             in_single = true;
             bs_escapes = true;
             i += 2; // skip E and opening quote
@@ -7254,10 +7245,7 @@ fn split_on_backslash_semicolon(line: &str, scs: bool) -> Vec<&str> {
             continue;
         }
         // E-string start
-        if (bytes[i] == b'E' || bytes[i] == b'e')
-            && i + 1 < len
-            && bytes[i + 1] == b'\''
-        {
+        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < len && bytes[i + 1] == b'\'' {
             in_single = true;
             bs_escapes = true;
             i += 2;

@@ -333,9 +333,8 @@ pub fn tokenize_scs(input: &str, scs: bool) -> Vec<Token> {
         // E-string: E'…' / e'…' — backslash always escapes
         // ------------------------------------------------------------------
         // Detect E'...' escape-string prefix.
-        let is_e_string = (bytes[pos] == b'E' || bytes[pos] == b'e')
-            && pos + 1 < len
-            && bytes[pos + 1] == b'\'';
+        let is_e_string =
+            (bytes[pos] == b'E' || bytes[pos] == b'e') && pos + 1 < len && bytes[pos + 1] == b'\'';
         if bytes[pos] == b'\'' || is_e_string {
             let start = pos;
             // When SCS is off, backslash is an escape in plain strings.
