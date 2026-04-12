@@ -1763,6 +1763,25 @@ pub fn eprint_db_error(
     eprint!("{msg}");
 }
 
+/// Print a `tokio_postgres::Error` to stderr with a file location prefix.
+///
+/// Like [`eprint_db_error`] but prepends `rpg:filename:line: ` to the first
+/// line of the error message when `prefix` is `Some`, matching psql's
+/// behaviour during `-f` / `\i` file execution.
+pub fn eprint_db_error_located(
+    prefix: Option<&str>,
+    err: &tokio_postgres::Error,
+    sql: Option<&str>,
+    verbose: bool,
+    terse: bool,
+    sqlstate: bool,
+) {
+    if let Some(pfx) = prefix {
+        eprint!("{pfx}");
+    }
+    eprint_db_error(err, sql, verbose, terse, sqlstate);
+}
+
 /// Format a `PostgreSQL` notice (from `tokio_postgres::error::DbError`) in psql
 /// style, with a colored severity prefix.
 ///
