@@ -103,7 +103,7 @@ pub enum ManagedProvider {
 ///
 /// Populated once at connection time and stored in [`ReplSettings`] for
 /// use by the AI context builder, governance framework, and RCA subsystem.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DbCapabilities {
     /// `pg_ash` extension status.
     pub pg_ash: PgAshStatus,
@@ -113,6 +113,24 @@ pub struct DbCapabilities {
     pub pooler: PoolerType,
     /// Managed Postgres provider, if recognised.
     pub managed_provider: ManagedProvider,
+    /// Value of `standard_conforming_strings` GUC.
+    ///
+    /// When `false`, backslash inside single-quoted string literals is an
+    /// escape character (C-style escapes).  Default in modern PG is `true`.
+    pub standard_conforming_strings: bool,
+}
+
+impl Default for DbCapabilities {
+    fn default() -> Self {
+        Self {
+            pg_ash: PgAshStatus::default(),
+            server_version: None,
+            pooler: PoolerType::default(),
+            managed_provider: ManagedProvider::default(),
+            // PostgreSQL default is `on` since PG 9.1.
+            standard_conforming_strings: true,
+        }
+    }
 }
 
 impl DbCapabilities {
@@ -160,12 +178,14 @@ pub async fn detect(client: &tokio_postgres::Client) -> DbCapabilities {
     let server_version = detect_server_version(client).await;
     let pooler = detect_pooler(client, server_version.as_deref()).await;
     let managed_provider = detect_managed_provider(client).await;
+    let standard_conforming_strings = detect_standard_conforming_strings(client).await;
 
     DbCapabilities {
         pg_ash,
         server_version,
         pooler,
         managed_provider,
+        standard_conforming_strings,
     }
 }
 
@@ -213,6 +233,37 @@ async fn detect_pg_ash(client: &tokio_postgres::Client) -> PgAshStatus {
             // the schema is present.
             PgAshStatus::Available { version: None }
         }
+    }
+}
+
+/// Query the `standard_conforming_strings` GUC.
+///
+/// Returns `true` (the default) when the GUC is `on`, `false` when `off`.
+/// On any error the safe default (`true`) is returned.
+async fn detect_standard_conforming_strings(client: &tokio_postgres::Client) -> bool {
+    detect_standard_conforming_strings_pub(client).await
+}
+
+/// Query `standard_conforming_strings` — public variant for re-detection
+/// after `\c` reconnect.
+pub async fn detect_standard_conforming_strings_pub(
+    client: &tokio_postgres::Client,
+) -> bool {
+    match client
+        .simple_query("SHOW standard_conforming_strings")
+        .await
+    {
+        Ok(msgs) => msgs
+            .iter()
+            .find_map(|m| {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = m {
+                    row.get(0).map(|v| v == "on")
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(true),
+        Err(_) => true,
     }
 }
 
@@ -405,6 +456,8 @@ mod tests {
         assert!(caps.server_version.is_none());
         assert!(!caps.is_pooled());
         assert_eq!(caps.managed_provider, ManagedProvider::None);
+        // SCS defaults to true (PostgreSQL default since PG 9.1).
+        assert!(caps.standard_conforming_strings);
     }
 
     #[test]

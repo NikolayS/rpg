@@ -239,8 +239,26 @@ const ANSI_RESET: &str = "\x1b[0m";
 ///
 /// Returns a list of non-overlapping [`Token`]s that together cover the
 /// entire input (including whitespace, which is emitted as `Normal`).
-#[allow(clippy::too_many_lines)]
+///
+/// Assumes `standard_conforming_strings = on` (backslash is not special
+/// inside single-quoted strings).  Use [`tokenize_scs`] when the GUC
+/// value is known.
+#[allow(clippy::too_many_lines, dead_code)]
 pub fn tokenize(input: &str) -> Vec<Token> {
+    tokenize_scs(input, true)
+}
+
+/// Tokenize `input` with explicit `standard_conforming_strings` handling.
+///
+/// When `scs` is `true` (the PostgreSQL default), backslash inside
+/// single-quoted strings has no special meaning.  When `false`, `\x`
+/// sequences are treated as escape characters — the backslash and the
+/// following byte are consumed without ending the string.
+///
+/// `E'...'` (escape-string) literals always treat backslash as an escape
+/// regardless of the `scs` value.
+#[allow(clippy::too_many_lines)]
+pub fn tokenize_scs(input: &str, scs: bool) -> Vec<Token> {
     let bytes = input.as_bytes();
     let len = input.len();
     let mut tokens = Vec::new();
@@ -312,15 +330,32 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
         // ------------------------------------------------------------------
         // Single-quoted string: '…' ('' escape inside)
+        // E-string: E'…' / e'…' — backslash always escapes
         // ------------------------------------------------------------------
-        if bytes[pos] == b'\'' {
+        // Detect E'...' escape-string prefix.
+        let is_e_string = (bytes[pos] == b'E' || bytes[pos] == b'e')
+            && pos + 1 < len
+            && bytes[pos + 1] == b'\'';
+        if bytes[pos] == b'\'' || is_e_string {
             let start = pos;
-            pos += 1;
+            // When SCS is off, backslash is an escape in plain strings.
+            // In E-strings, backslash is always an escape regardless of SCS.
+            let backslash_escapes = is_e_string || !scs;
+            if is_e_string {
+                pos += 1; // skip 'E'/'e'
+            }
+            pos += 1; // skip opening quote
             loop {
                 if pos >= len {
                     break;
                 }
-                if bytes[pos] == b'\'' {
+                if backslash_escapes && bytes[pos] == b'\\' {
+                    // Backslash escape: skip the backslash and the next byte.
+                    pos += 1;
+                    if pos < len {
+                        pos += 1;
+                    }
+                } else if bytes[pos] == b'\'' {
                     pos += 1;
                     // '' is an escaped quote — continue inside the string.
                     if pos < len && bytes[pos] == b'\'' {
@@ -602,7 +637,21 @@ pub fn highlight_sql<'a>(
     input: &'a str,
     schema_names: Option<&std::collections::HashSet<String>>,
 ) -> std::borrow::Cow<'a, str> {
-    let tokens = tokenize(input);
+    highlight_sql_scs(input, schema_names, true)
+}
+
+/// Highlight SQL text with explicit `standard_conforming_strings` handling.
+///
+/// See [`highlight_sql`] for the general description.  When `scs` is
+/// `false`, backslash inside single-quoted strings is treated as an escape
+/// character, matching PostgreSQL's behaviour with
+/// `standard_conforming_strings = off`.
+pub fn highlight_sql_scs<'a>(
+    input: &'a str,
+    schema_names: Option<&std::collections::HashSet<String>>,
+    scs: bool,
+) -> std::borrow::Cow<'a, str> {
+    let tokens = tokenize_scs(input, scs);
 
     // Determine whether any token needs colouring (considering schema too).
     let needs_color = tokens.iter().any(|t| {
@@ -683,6 +732,13 @@ mod tests {
             .collect()
     }
 
+    fn token_kinds_scs(input: &str, scs: bool) -> Vec<(TokenKind, &str)> {
+        tokenize_scs(input, scs)
+            .into_iter()
+            .map(|t| (t.kind, &input[t.start..t.end]))
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // Basic tokenizer tests
     // -----------------------------------------------------------------------
@@ -724,6 +780,82 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].0, TokenKind::StringLiteral);
         assert_eq!(tokens[0].1, "'it''s'");
+    }
+
+    // -----------------------------------------------------------------------
+    // standard_conforming_strings tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tokenize_scs_off_backslash_in_string() {
+        // With SCS=off, 'a\bcd' is a single string (backslash escapes).
+        // The \b should NOT be treated as a metacommand.
+        let tokens = token_kinds_scs("SELECT 'a\\bcd'", false);
+        assert_eq!(tokens[0], (TokenKind::Keyword, "SELECT"));
+        assert_eq!(tokens[2], (TokenKind::StringLiteral, "'a\\bcd'"));
+    }
+
+    #[test]
+    fn test_tokenize_scs_on_backslash_in_string() {
+        // With SCS=on (default), 'a\bcd' is also a single string, but
+        // the backslash has no special meaning — the tokenizer treats
+        // everything between quotes as string content regardless.
+        let tokens = token_kinds_scs("SELECT 'a\\bcd'", true);
+        assert_eq!(tokens[0], (TokenKind::Keyword, "SELECT"));
+        assert_eq!(tokens[2], (TokenKind::StringLiteral, "'a\\bcd'"));
+    }
+
+    #[test]
+    fn test_tokenize_scs_off_escaped_quote() {
+        // With SCS=off, \' is an escaped single-quote — string continues.
+        let tokens = token_kinds_scs("SELECT 'hello\\'world'", false);
+        // 'hello\' = string with escaped quote, world' continues to close
+        assert_eq!(tokens.len(), 3); // Keyword, space, string
+        assert_eq!(tokens[2].0, TokenKind::StringLiteral);
+        assert_eq!(tokens[2].1, "'hello\\'world'");
+    }
+
+    #[test]
+    fn test_tokenize_scs_off_double_backslash() {
+        // With SCS=off, \\\\ is two escaped backslashes (literal \\).
+        let tokens = token_kinds_scs("SELECT 'a\\\\b'", false);
+        assert_eq!(tokens[2], (TokenKind::StringLiteral, "'a\\\\b'"));
+    }
+
+    #[test]
+    fn test_tokenize_e_string_always_escapes() {
+        // E'...' strings always treat backslash as escape regardless of SCS.
+        let tokens_scs_on = token_kinds_scs("SELECT E'a\\bcd'", true);
+        assert_eq!(tokens_scs_on[2], (TokenKind::StringLiteral, "E'a\\bcd'"));
+
+        let tokens_scs_off = token_kinds_scs("SELECT E'a\\bcd'", false);
+        assert_eq!(tokens_scs_off[2], (TokenKind::StringLiteral, "E'a\\bcd'"));
+    }
+
+    #[test]
+    fn test_tokenize_e_string_lowercase() {
+        // e'...' is equivalent to E'...'.
+        let tokens = token_kinds_scs("SELECT e'a\\bcd'", true);
+        assert_eq!(tokens[2], (TokenKind::StringLiteral, "e'a\\bcd'"));
+    }
+
+    #[test]
+    fn test_tokenize_scs_off_backslash_not_metacommand() {
+        // Regression: with SCS=off, SELECT 'a\bcd' must NOT produce a
+        // BackslashCmd token for \b.
+        let tokens = token_kinds_scs("SELECT 'a\\bcd'", false);
+        for (kind, _text) in &tokens {
+            assert_ne!(*kind, TokenKind::BackslashCmd);
+        }
+    }
+
+    #[test]
+    fn test_tokenize_scs_default_matches_scs_on() {
+        // tokenize() (no SCS arg) must behave like SCS=on.
+        let input = "SELECT 'a\\bcd'";
+        let default_tokens = token_kinds(input);
+        let scs_on_tokens = token_kinds_scs(input, true);
+        assert_eq!(default_tokens, scs_on_tokens);
     }
 
     #[test]

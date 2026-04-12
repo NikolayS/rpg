@@ -856,9 +856,12 @@ async fn async_main() {
             settings.db_capabilities = if is_interactive {
                 capabilities::detect(&client).await
             } else {
-                // Lightweight path: only the server version query.
+                // Lightweight path: server version + SCS (needed for correct
+                // backslash parsing even in non-interactive mode).
                 capabilities::DbCapabilities {
                     server_version: capabilities::detect_server_version_pub(&client).await,
+                    standard_conforming_strings:
+                        capabilities::detect_standard_conforming_strings_pub(&client).await,
                     ..Default::default()
                 }
             };
