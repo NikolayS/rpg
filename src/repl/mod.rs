@@ -5543,6 +5543,7 @@ async fn dispatch_meta(
                 &parsed,
                 settings.db_capabilities.pg_major_version(),
                 settings,
+                &params.dbname,
             )
             .await;
         }

@@ -477,6 +477,63 @@ impl MetaCmd {
             _ => "\\?",
         }
     }
+
+    /// Maximum number of dot-separated identifier parts this command accepts.
+    ///
+    /// - `1` = name only (e.g. `\dA`, `\db`, `\dx`)
+    /// - `2` = `database.name` or `schema.name` for commands that don't use
+    ///   schema qualification but accept a database prefix (`\dL`, `\dn`)
+    /// - `3` = `database.schema.name` (most `\d` commands: `\dt`, `\df`, …)
+    /// - `0` = not a describe command (no limit applies)
+    ///
+    /// This is used to detect "too many dotted names" and "cross-database
+    /// references" errors, matching psql behaviour.
+    pub fn max_name_parts(&self) -> usize {
+        match self {
+            // Commands that only accept a simple name (no schema or db prefix).
+            // 2 parts → "too many dotted names"
+            Self::ListTablespaces         // \db
+            | Self::ListExtensions        // \dx
+            | Self::ListEventTriggers     // \dy
+            | Self::ListPublications      // \dRp
+            | Self::ListSubscriptions     // \dRs
+            | Self::ListForeignServers    // \des
+            | Self::ListFdws             // \dew
+            | Self::ListUserMappings     // \deu
+            | Self::ListRoles            // \dg / \du
+            | Self::ListDatabases        // \l
+            => 1,
+
+            // Commands that accept 2 parts (database.name), where 2 parts
+            // triggers a cross-database check.  3+ parts → "too many".
+            Self::ListSchemas             // \dn
+            => 2,
+
+            // Commands that accept 3 parts (database.schema.name), where 3
+            // parts triggers a cross-database check.  4+ parts → "too many".
+            Self::DescribeObject          // \d
+            | Self::ListTables            // \dt
+            | Self::ListIndexes           // \di
+            | Self::ListSequences         // \ds
+            | Self::ListViews             // \dv
+            | Self::ListMatViews          // \dm
+            | Self::ListForeignTables     // \dE
+            | Self::ListFunctions         // \df
+            | Self::ListTypes             // \dT
+            | Self::ListDomains           // \dD
+            | Self::ListPrivileges        // \dp
+            | Self::ListConversions       // \dc
+            | Self::ListCasts             // \dC
+            | Self::ListComments          // \dd
+            | Self::ListOperators         // \do
+            | Self::ListExtStatistics     // \dX
+            | Self::ListForeignTablesViaFdw // \det
+            => 3,
+
+            // Not a describe command — no limit.
+            _ => 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

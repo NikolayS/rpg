@@ -430,6 +430,7 @@ fn write_aligned_row_border<F>(
     value_fn: F,
     is_header: bool,
     border: u8,
+    is_old_ascii: bool,
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
@@ -557,36 +558,73 @@ fn write_aligned_row_border<F>(
             let line = split_lines[i].get(phys_row).copied().unwrap_or("");
             let w = widths[i];
 
-            // Column prefix separator.  In border-1, if the PREVIOUS column
-            // has continuation on this physical row, its trailing-space slot
-            // becomes `+` — so use `+| ` instead of the normal ` | `.
-            match border {
-                0 => {
-                    if i > 0 {
-                        // border 0: one-space gap, replaced by '+' when previous
-                        // column has more physical lines.
-                        if !is_last_phys && col_continues[i - 1] {
-                            out.push('+');
-                        } else {
+            // Column prefix separator.
+            //
+            // ASCII: if the PREVIOUS column has continuation on this physical
+            // row, its trailing-space slot becomes `+` — so use `+| ` instead
+            // of the normal ` | `.
+            //
+            // Old-ASCII: continuation lines use `:` instead of `|`; no `+`
+            // markers.  The first physical line (phys_row==0) uses `|`, all
+            // subsequent use `:`.
+            if is_old_ascii {
+                match border {
+                    0 => {
+                        if i > 0 {
                             out.push(' ');
                         }
                     }
-                }
-                2 => {
-                    if i == 0 {
-                        out.push_str("| ");
-                    } else {
-                        out.push_str(" | ");
+                    2 => {
+                        if i == 0 {
+                            out.push_str("| ");
+                        } else if phys_row > 0 {
+                            out.push_str(" : ");
+                        } else {
+                            out.push_str(" | ");
+                        }
+                    }
+                    _ => {
+                        if i == 0 {
+                            out.push(' ');
+                        } else if phys_row > 0 {
+                            out.push_str(" : ");
+                        } else {
+                            out.push_str(" | ");
+                        }
                     }
                 }
-                _ => {
-                    if i == 0 {
-                        out.push(' ');
-                    } else if !is_last_phys && col_continues[i - 1] {
-                        // Previous column has continuation: `+| ` instead of ` | `.
-                        out.push_str("+| ");
-                    } else {
-                        out.push_str(" | ");
+            } else {
+                match border {
+                    0 => {
+                        if i > 0 {
+                            // border 0: one-space gap, replaced by '+' when previous
+                            // column has more physical lines.
+                            if !is_last_phys && col_continues[i - 1] {
+                                out.push('+');
+                            } else {
+                                out.push(' ');
+                            }
+                        }
+                    }
+                    2 => {
+                        if i == 0 {
+                            out.push_str("| ");
+                        } else if !is_last_phys && col_continues[i - 1] {
+                            // Previous column has continuation: `+| ` instead of ` | `.
+                            out.push_str("+| ");
+                        } else {
+                            out.push_str(" | ");
+                        }
+                    }
+                    _ => {
+                        if i == 0 {
+                            out.push(' ');
+                        } else if !is_last_phys && col_continues[i - 1] {
+                            // Previous column has continuation: `+| ` instead of ` | `.
+                            out.push_str("+| ");
+                        } else {
+                            out.push_str(" | ");
+                        }
                     }
                 }
             }
@@ -613,23 +651,40 @@ fn write_aligned_row_border<F>(
             }
         }
 
-        // Row suffix.  For border-0/1, if the LAST column has continuation on
-        // this physical row, append `+` (border-0) or replace trailing space
-        // with `+` (border-1).
-        match border {
-            0 => {
-                let last_continues = col_continues.last().copied().unwrap_or(false);
-                if !is_last_phys && last_continues {
-                    out.push('+');
-                }
+        // Row suffix.
+        //
+        // ASCII: For border-0/1, if the LAST column has continuation on this
+        // physical row, append `+`.  For border-2, `+|` or ` |`.
+        //
+        // Old-ASCII: no `+` markers; border-2 always ` |`.
+        if is_old_ascii {
+            if border == 2 {
+                out.push_str(" |");
             }
-            2 => out.push_str(" |"),
-            _ => {
-                let last_continues = col_continues.last().copied().unwrap_or(false);
-                if !is_last_phys && last_continues {
-                    out.push('+');
+            // Old-ASCII border 0/1: no trailing marker.
+        } else {
+            match border {
+                0 => {
+                    let last_continues = col_continues.last().copied().unwrap_or(false);
+                    if !is_last_phys && last_continues {
+                        out.push('+');
+                    }
                 }
-                // No trailing space on data rows (psql compat).
+                2 => {
+                    let last_continues = col_continues.last().copied().unwrap_or(false);
+                    if !is_last_phys && last_continues {
+                        out.push_str("+|");
+                    } else {
+                        out.push_str(" |");
+                    }
+                }
+                _ => {
+                    let last_continues = col_continues.last().copied().unwrap_or(false);
+                    if !is_last_phys && last_continues {
+                        out.push('+');
+                    }
+                    // No trailing space on data rows (psql compat).
+                }
             }
         }
         out.push('\n');
@@ -651,7 +706,7 @@ fn write_aligned_row<F>(
 ) where
     F: Fn(&ColumnMeta, usize) -> String,
 {
-    write_aligned_row_border(out, cols, widths, value_fn, is_header, 1);
+    write_aligned_row_border(out, cols, widths, value_fn, is_header, 1, false);
 }
 
 /// Write the separator line between the header and data rows.
@@ -753,6 +808,11 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
         .max()
         .unwrap_or(0);
 
+    // Whether any column name contains embedded newlines.  When true, a
+    // separate marker column (1 char) is allocated between name and value;
+    // when false, only a single space separator is used, matching psql.
+    let any_name_multiline = cols.iter().any(|c| c.name.contains('\n'));
+
     // Widest single line of any data value.
     let max_value_width = rows
         .iter()
@@ -784,18 +844,21 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     //             => wrap_w = columns - N - 4
     //   border=2: |(1) + MARKER(1) + name(N) + SP(1) + SEP(1) + SP(1) + val(wrap_w) + SP(1) + |(1) = cols
     //             => wrap_w = columns - N - 6
+    // The marker column (1 char) is only needed when any name is multi-line.
+    let marker_w: usize = usize::from(any_name_multiline);
+
     let wrap_w: usize = if is_wrapped && columns > 0 {
         let overhead: usize = if is_old_ascii {
             match border {
-                0 => max_name_width + 2,
-                1 => max_name_width + 4,
-                _ => max_name_width + 6,
+                0 => max_name_width + 1 + marker_w, // MARKER? + name + SEP
+                1 => max_name_width + 3 + marker_w, // MARKER? + name + SP + SEP + SP
+                _ => max_name_width + 5 + marker_w, // | + MARKER? + name + SP + SEP + SP + val + SP + |
             }
         } else {
             match border {
-                0 => max_name_width + 3,
-                1 => max_name_width + 4,
-                _ => max_name_width + 7,
+                0 => max_name_width + 2 + marker_w, // name + MARKER? + SEP + END_MARKER
+                1 => max_name_width + 3 + marker_w, // name + MARKER? + | + SP + END_MARKER
+                _ => max_name_width + 6 + marker_w, // "| " + name + MARKER? + "| " + END_MARKER + |
             }
         };
         columns.saturating_sub(overhead).max(3)
@@ -1044,14 +1107,17 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                     None
                 } else if !is_last_of_segment {
                     Some('.')
-                } else if !is_last_val {
+                } else if li < n_val_lines && !is_last_val {
                     Some('+')
                 } else {
                     None
                 };
 
-                // For aligned (wrap_w=0) ASCII: '+' with padding if more val segments
-                let aligned_eol_plus = !is_old_ascii && wrap_w == 0 && !is_last_val;
+                // For aligned (wrap_w=0) ASCII: '+' with padding if more val segments.
+                // Only show '+' when we are still within actual value lines
+                // (li < n_val_lines) and it's not the last value line.
+                let aligned_eol_plus =
+                    !is_old_ascii && wrap_w == 0 && li < n_val_lines && !is_last_val;
 
                 match border {
                     0 => {
@@ -1068,13 +1134,21 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                             // old-ascii: no end-of-line marker; continuation shows on next line
                         } else {
                             // ASCII border=0:
-                            // Format: name_padded + MARKER + SEP_SPACE + val + END_MARKER
+                            // Format: name_padded [+ MARKER] + SEP + val + END_MARKER
+                            // MARKER is only present when any column name is multi-line.
+                            // SEP = '.' for physical wrap continuation, ' ' otherwise.
                             out.push_str(name_line);
                             for _ in 0..name_pad {
                                 out.push(' ');
                             }
-                            out.push(ascii_name_marker);
-                            out.push(' '); // separator space
+                            if any_name_multiline {
+                                out.push(ascii_name_marker);
+                            }
+                            if is_physical_cont {
+                                out.push('.');
+                            } else {
+                                out.push(' ');
+                            }
                             out.push_str(val_text);
                             if let Some(m) = ascii_eol_marker {
                                 let pad = wrap_w.saturating_sub(vt_w);
@@ -1793,6 +1867,7 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg
     }
 
     let widths = column_widths_with_null(cols, rows, null_str);
+    let is_old_ascii = pcfg.linestyle == "old-ascii";
 
     // border 2: top border line `+----+------+` before the header.
     if border == 2 && !pcfg.tuples_only {
@@ -1802,7 +1877,15 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg
     // Header (suppressed in tuples-only mode).
     // psql center-aligns text headers and right-aligns numeric ones.
     if !pcfg.tuples_only {
-        write_aligned_row_border(out, cols, &widths, |col, _| col.name.clone(), true, border);
+        write_aligned_row_border(
+            out,
+            cols,
+            &widths,
+            |col, _| col.name.clone(),
+            true,
+            border,
+            false, // headers always use ASCII-style markers (old-ascii header handling is separate)
+        );
         write_separator_border(out, &widths, border);
     }
 
@@ -1827,6 +1910,7 @@ fn format_aligned_pset(out: &mut String, rs: &RowSet, _ocfg: &OutputConfig, pcfg
             },
             false,
             border,
+            is_old_ascii,
         );
     }
 

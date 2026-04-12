@@ -34,7 +34,26 @@ pub async fn execute(
     meta: &ParsedMeta,
     pg_major_version: Option<u32>,
     settings: &mut crate::repl::ReplSettings,
+    db_name: &str,
 ) -> bool {
+    // Validate multi-part qualified names (cross-database / too-many-dots).
+    if let Some(ref pat) = meta.pattern {
+        let max_parts = meta.cmd.max_name_parts();
+        if max_parts > 0 {
+            match pattern::validate_qualified_name(pat, max_parts, db_name) {
+                pattern::QualifiedNameCheck::Ok => {}
+                pattern::QualifiedNameCheck::TooManyDots => {
+                    eprintln!("error: improper qualified name (too many dotted names): {pat}");
+                    return false;
+                }
+                pattern::QualifiedNameCheck::CrossDatabase => {
+                    eprintln!("error: cross-database references are not implemented: {pat}");
+                    return false;
+                }
+            }
+        }
+    }
+
     match &meta.cmd {
         MetaCmd::DescribeObject => describe_object(client, meta, settings).await,
         MetaCmd::ListTables => list_relations(client, meta, &["r", "p"], settings).await,
