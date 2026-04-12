@@ -123,6 +123,18 @@ pub fn spawn_connection(connection: Connection<IoStream<WsStreamIo, Vec<u8>>, No
 }
 
 /// Convert any `Box<dyn Error>` into a `JsValue` for wasm-bindgen returns.
+///
+/// Walks the full error `.source()` chain so the browser sees useful
+/// diagnostics (e.g. "db error: FATAL: role \"x\" does not exist") instead
+/// of a bare "db error".
 pub(crate) fn to_js_err(e: Box<dyn std::error::Error>) -> JsValue {
-    JsValue::from_str(&e.to_string())
+    // Build the full error chain so the browser shows useful diagnostics.
+    let mut msg = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    JsValue::from_str(&msg)
 }

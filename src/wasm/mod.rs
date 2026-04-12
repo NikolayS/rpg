@@ -35,4 +35,7 @@ pub mod connector;
 pub mod entry;
 
 #[cfg(target_arch = "wasm32")]
+pub mod io;
+
+#[cfg(target_arch = "wasm32")]
 pub mod line_reader;

@@ -67,12 +67,15 @@ ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
 async_io_stream = { version = "0.3", features = ["tokio_io"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["WebSocket", "CloseEvent", "MessageEvent"] }
+web-sys = { version = "0.3", features = ["console", "WebSocket", "CloseEvent", "MessageEvent"] }
 js-sys = "0.3"
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"
 tokio-postgres = { version = "0.7", default-features = false }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [[bench]]
 name = "non_ai_paths"

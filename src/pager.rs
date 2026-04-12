@@ -207,10 +207,10 @@ pub fn run_pager(content: &str) -> io::Result<()> {
     run_pager_loop(&mut terminal, &lines, &mut state)
 }
 
-/// WASM stub: print content directly to stdout (no interactive pager).
+/// WASM stub: print content to browser console (no interactive pager).
 #[cfg(target_arch = "wasm32")]
 pub fn run_pager(content: &str) -> io::Result<()> {
-    print!("{content}");
+    crate::wasm::io::wasm_print(content);
     Ok(())
 }
 
@@ -269,7 +269,7 @@ pub fn run_pager_external(cmd: &str, content: &str) -> io::Result<()> {
 /// WASM stub: external pager not available.
 #[cfg(target_arch = "wasm32")]
 pub fn run_pager_external(_cmd: &str, content: &str) -> io::Result<()> {
-    print!("{content}");
+    crate::wasm::io::wasm_print(content);
     Ok(())
 }
 

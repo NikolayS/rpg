@@ -80,9 +80,43 @@
     const origLog   = console.log.bind(console);
     const origWarn  = console.warn.bind(console);
     const origError = console.error.bind(console);
-    console.log   = (...a) => { origLog(...a);   term.writeln(a.join(' ')); };
-    console.warn  = (...a) => { origWarn(...a);  term.writeln('\x1b[33m' + a.join(' ') + '\x1b[0m'); };
-    console.error = (...a) => { origError(...a); term.writeln('\x1b[31m' + a.join(' ') + '\x1b[0m'); };
+
+    // Prompt lines (e.g. "postgres=> ", "mydb~# ") should not get a
+    // trailing newline so the cursor stays on the same line for input.
+    const isPrompt = (s) => /^[a-zA-Z_][\w]*[=#\-~!*]>\s*$/.test(s);
+
+    console.log = (...a) => {
+      origLog(...a);
+      const text = a.join(' ');
+      // Detect connection success and update toolbar status.
+      if (text.includes('connected to')) {
+        status.textContent = 'connected';
+        status.className   = 'connected';
+      }
+      if (isPrompt(text)) {
+        term.write(text);
+      } else {
+        term.writeln(text);
+      }
+    };
+    console.warn = (...a) => {
+      origWarn(...a);
+      const text = a.join(' ');
+      if (isPrompt(text)) {
+        term.write('\x1b[33m' + text + '\x1b[0m');
+      } else {
+        term.writeln('\x1b[33m' + text + '\x1b[0m');
+      }
+    };
+    console.error = (...a) => {
+      origError(...a);
+      const text = a.join(' ');
+      if (isPrompt(text)) {
+        term.write('\x1b[31m' + text + '\x1b[0m');
+      } else {
+        term.writeln('\x1b[31m' + text + '\x1b[0m');
+      }
+    };
 
     // Line editing buffer for xterm.js keystrokes.
     let lineBuffer = '';

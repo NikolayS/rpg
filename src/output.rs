@@ -717,7 +717,10 @@ pub fn eprint_db_error(err: &tokio_postgres::Error, sql: Option<&str>, verbose: 
     };
     let msg = format_pg_error(err, sql, &cfg);
     // format_pg_error always ends with a newline; use eprint! to avoid double.
+    #[cfg(not(target_arch = "wasm32"))]
     eprint!("{msg}");
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm::io::wasm_eprint(&msg);
 }
 
 /// Format a `PostgreSQL` notice (from `tokio_postgres::error::DbError`) in psql
@@ -741,7 +744,10 @@ pub fn format_pg_notice(notice: &tokio_postgres::error::DbError) -> String {
 ///
 /// Convenience wrapper around [`format_pg_notice`].
 pub fn eprint_pg_notice(notice: &tokio_postgres::error::DbError) {
+    #[cfg(not(target_arch = "wasm32"))]
     eprint!("{}", format_pg_notice(notice));
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm::io::wasm_eprint(&format_pg_notice(notice));
 }
 
 /// Write the `LINE N: …` context and the `^` position marker.
