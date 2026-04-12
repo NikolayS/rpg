@@ -484,6 +484,10 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
                 // Count newlines as a proxy for row count (text/csv format).
+                // NOTE: this is an approximation — it can over-count when field
+                // values contain embedded newlines (e.g. multi-line text in CSV).
+                // A precise count would require full CSV/text-format parsing,
+                // which is not worth the complexity here.
                 row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
                 file.write_all(&chunk)
                     .map_err(|e| format!("\\copy: write error: {e}"))?;

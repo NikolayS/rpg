@@ -1116,13 +1116,18 @@ pub async fn execute_query_extended(
             }
             let sqlstate = e.as_db_error().map(|db| db.code().code().to_owned());
             let is_sql_error = e.as_db_error().is_some();
+            let error_message = e
+                .as_db_error()
+                .map_or_else(|| e.to_string(), |db| db.message().to_owned());
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
-                error_message: e
-                    .as_db_error()
-                    .map_or_else(|| e.to_string(), |db| db.message().to_owned()),
-                sqlstate,
+                error_message: error_message.clone(),
+                sqlstate: sqlstate.clone(),
             });
+            settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
+            settings
+                .vars
+                .set("LAST_ERROR_SQLSTATE", sqlstate.as_deref().unwrap_or(""));
             // Auto-suggest /fix hint for SQL errors when AI is configured.
             if is_sql_error
                 && settings.auto_suggest_fix
@@ -1244,9 +1249,13 @@ pub async fn execute_query_extended(
                 .map_or_else(|| e.to_string(), |db| db.message().to_owned());
             settings.last_error = Some(LastError {
                 query: sql_to_send.to_owned(),
-                error_message,
-                sqlstate,
+                error_message: error_message.clone(),
+                sqlstate: sqlstate.clone(),
             });
+            settings.vars.set("LAST_ERROR_MESSAGE", &error_message);
+            settings
+                .vars
+                .set("LAST_ERROR_SQLSTATE", sqlstate.as_deref().unwrap_or(""));
 
             // Auto-suggest /fix hint for SQL errors when AI is configured.
             if is_sql_error
@@ -2655,7 +2664,9 @@ pub(super) async fn execute_crosstabview(
 /// DELETE). psql echoes blank lines after pure SELECT results but not after DML.
 fn is_pure_select(sql: &str) -> bool {
     let upper = sql.trim().to_uppercase();
-    // Skip leading comments (-- and /* */).
+    // Skip leading single-line comments (--). Note: block comments (/* */)
+    // are not currently stripped; the split_whitespace heuristic below only
+    // handles `--` prefixed words.
     let upper = upper.trim_start();
     // Find first non-comment, non-whitespace token.
     let first_word = upper

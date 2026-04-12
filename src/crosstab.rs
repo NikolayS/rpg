@@ -96,46 +96,47 @@ pub struct CrosstabArgs {
 /// (matching psql: unquoted identifiers are case-insensitive).
 fn tokenize_args(raw: &str) -> Vec<(String, bool)> {
     let mut tokens = Vec::new();
-    let bytes = raw.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+    let mut chars = raw.char_indices().peekable();
 
-    while i < len {
+    loop {
         // Skip whitespace between tokens.
-        while i < len && bytes[i].is_ascii_whitespace() {
-            i += 1;
+        while chars.peek().is_some_and(|&(_, c)| c.is_ascii_whitespace()) {
+            chars.next();
         }
-        if i >= len {
+        let Some(&(_, first)) = chars.peek() else {
             break;
-        }
-        if bytes[i] == b'"' {
+        };
+        if first == '"' {
             // Quoted identifier: collect until closing unescaped '"'.
-            i += 1;
+            chars.next(); // consume opening '"'
             let mut tok = String::new();
-            while i < len {
-                if bytes[i] == b'"' {
-                    i += 1;
-                    if i < len && bytes[i] == b'"' {
-                        // Escaped double-quote inside identifier.
-                        tok.push('"');
-                        i += 1;
-                    } else {
-                        break; // End of quoted token.
+            loop {
+                match chars.next() {
+                    Some((_, '"')) => {
+                        // Doubled quote inside identifier → literal '"'.
+                        if chars.peek().is_some_and(|&(_, c)| c == '"') {
+                            tok.push('"');
+                            chars.next();
+                        } else {
+                            break; // End of quoted token.
+                        }
                     }
-                } else {
-                    tok.push(bytes[i] as char);
-                    i += 1;
+                    Some((_, c)) => tok.push(c),
+                    None => break, // Unterminated quote.
                 }
             }
             tokens.push((tok, true));
         } else {
             // Unquoted token: collect until whitespace.
-            let start = i;
-            while i < len && !bytes[i].is_ascii_whitespace() {
-                i += 1;
+            let start = chars.peek().map(|&(i, _)| i).unwrap();
+            let mut end = start;
+            while chars.peek().is_some_and(|&(_, c)| !c.is_ascii_whitespace()) {
+                if let Some((i, c)) = chars.next() {
+                    end = i + c.len_utf8();
+                }
             }
             // Fold to lowercase: unquoted identifiers are case-insensitive in psql.
-            tokens.push((raw[start..i].to_ascii_lowercase(), false));
+            tokens.push((raw[start..end].to_ascii_lowercase(), false));
         }
     }
 

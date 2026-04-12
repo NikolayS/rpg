@@ -719,7 +719,9 @@ fn build_lock_forest(edges: &[LockEdge]) -> Vec<LockNode> {
             let relation = first.relation.clone();
             let lock_type = first.lock_type.clone();
 
-            let children = build_children(root_pid, &blocker_map, &blocked_pids);
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(root_pid);
+            let children = build_children(root_pid, &blocker_map, &blocked_pids, &mut visited);
 
             Some(LockNode {
                 pid: root_pid,
@@ -739,10 +741,15 @@ fn build_lock_forest(edges: &[LockEdge]) -> Vec<LockNode> {
 }
 
 /// Recursively build child nodes for `parent_pid`.
+///
+/// `visited` tracks PIDs already processed on the current path to prevent
+/// infinite recursion when lock cycles exist (e.g. PID A waits on B which
+/// waits on A).
 fn build_children(
     parent_pid: i32,
     blocker_map: &std::collections::HashMap<i32, Vec<&LockEdge>>,
     blocked_pids: &std::collections::HashSet<i32>,
+    visited: &mut std::collections::HashSet<i32>,
 ) -> Vec<LockNode> {
     let Some(edges) = blocker_map.get(&parent_pid) else {
         return Vec::new();
@@ -754,9 +761,9 @@ fn build_children(
     let mut children: Vec<LockNode> = Vec::new();
 
     for edge in edges {
-        if seen.insert(edge.blocked_pid) {
+        if seen.insert(edge.blocked_pid) && visited.insert(edge.blocked_pid) {
             let grandchildren = if blocked_pids.contains(&edge.blocked_pid) {
-                build_children(edge.blocked_pid, blocker_map, blocked_pids)
+                build_children(edge.blocked_pid, blocker_map, blocked_pids, visited)
             } else {
                 Vec::new()
             };
@@ -1158,18 +1165,18 @@ async fn dba_waits(
     verbose: bool,
     settings: &mut crate::repl::ReplSettings,
 ) -> Option<String> {
-    let sql = "SELECT \
-        coalesce(wait_event_type, 'CPU/Running') AS wait_type, \
-        coalesce(wait_event, 'active') AS wait_event, \
-        count(*) AS sessions, \
-        count(*) FILTER (WHERE state = 'active') AS active, \
-        count(*) FILTER (WHERE now() - query_start > interval '5 seconds') AS slow \
-    FROM pg_stat_activity \
-    WHERE pid != pg_backend_pid() \
-      AND backend_type = 'client backend' \
-    GROUP BY wait_event_type, wait_event \
-    ORDER BY sessions DESC \
-    LIMIT 25";
+    let sql = "select \
+        coalesce(wait_event_type, 'CPU/Running') as wait_type, \
+        coalesce(wait_event, 'active') as wait_event, \
+        count(*) as sessions, \
+        count(*) filter (where state = 'active') as active, \
+        count(*) filter (where now() - query_start > interval '5 seconds') as slow \
+    from pg_stat_activity \
+    where pid != pg_backend_pid() \
+      and backend_type = 'client backend' \
+    group by wait_event_type, wait_event \
+    order by sessions desc \
+    limit 25";
     run_and_print(client, sql, settings).await;
 
     if !verbose {

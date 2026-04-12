@@ -1242,8 +1242,18 @@ fn percent_decode(input: &str) -> String {
     let mut chars = input.as_bytes().iter();
     while let Some(&b) = chars.next() {
         if b == b'%' {
-            let hi = chars.next().copied().unwrap_or(b'0');
-            let lo = chars.next().copied().unwrap_or(b'0');
+            // A valid percent-encoded triplet requires exactly two hex digits
+            // after the `%`. If fewer remain, pass the `%` through literally
+            // instead of substituting NUL bytes.
+            let Some(hi) = chars.next().copied() else {
+                out.push('%');
+                continue;
+            };
+            let Some(lo) = chars.next().copied() else {
+                out.push('%');
+                out.push(char::from(hi));
+                continue;
+            };
             let hex = [hi, lo];
             if let Ok(s) = std::str::from_utf8(&hex) {
                 if let Ok(byte) = u8::from_str_radix(s, 16) {
@@ -1251,7 +1261,7 @@ fn percent_decode(input: &str) -> String {
                     continue;
                 }
             }
-            // Malformed; pass through.
+            // Malformed hex digits; pass through literally.
             out.push('%');
             out.push(char::from(hi));
             out.push(char::from(lo));

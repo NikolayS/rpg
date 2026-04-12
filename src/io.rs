@@ -253,10 +253,15 @@ pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<St
 }
 
 /// Return a path for a temporary file.
+///
+/// Uses PID + high-resolution timestamp nanos to avoid predictable paths.
 fn temp_file_path() -> String {
     let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir();
-    dir.join(format!("rpg_edit_{pid}.sql"))
+    dir.join(format!("rpg_edit_{pid}_{nanos}.sql"))
         .to_string_lossy()
         .into_owned()
 }

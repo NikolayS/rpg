@@ -63,6 +63,9 @@ _psql_admin() {
     "$@" > /dev/null 2>&1 || true
 }
 
+# NOTE: DB names below are unquoted in SQL. This is safe because they are
+# derived from PGDATABASE (which CI controls) plus hardcoded suffixes, so
+# they never contain special characters or spaces.
 _drop_test_dbs() {
   _psql_admin \
     -c "DROP DATABASE IF EXISTS ${PSQL_DBNAME};" \
