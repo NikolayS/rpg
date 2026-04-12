@@ -3454,7 +3454,7 @@ mod tests {
         // Build a pathological value that contains $param$, $param0$–$param99$, and $p$.
         let mut evil = String::from("$param$ $p$");
         for n in 0..100 {
-            evil.push_str(&format!(" $param{n}$"));
+            write!(evil, " $param{n}$").unwrap();
         }
         let tag = super::find_dollar_quote_tag(&evil);
         assert!(
