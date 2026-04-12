@@ -3,6 +3,13 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+# Warn (but don't fail) if running on bash < 4. The script is portable to
+# bash 3.2, but newer bash is recommended for better performance.
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+  echo "WARNING: bash ${BASH_VERSION} detected." \
+    "bash 4+ is recommended but not required." >&2
+fi
+
 # On macOS, GNU coreutils installs as 'gtimeout'; add gnubin to PATH if present.
 for _gnubin in \
   /opt/homebrew/opt/coreutils/libexec/gnubin \
@@ -474,7 +481,21 @@ setup_regress_db
 
 # Collect the ordered list of tests from parallel_schedule.
 declare -a ORDERED_TESTS=()
-declare -A SEEN_TESTS=()
+
+# Portable deduplication for bash 3.2+ (no associative arrays).
+# _seen_tests holds "|name1|name2|…|" so we can match with case.
+_seen_tests="|"
+
+_is_seen() {
+  case "${_seen_tests}" in
+    *"|${1}|"*) return 0 ;;
+    *)          return 1 ;;
+  esac
+}
+
+_mark_seen() {
+  _seen_tests="${_seen_tests}${1}|"
+}
 
 schedule_file="${PG_SRC}/src/test/regress/parallel_schedule"
 if [[ -f "${schedule_file}" ]]; then
@@ -484,9 +505,9 @@ if [[ -f "${schedule_file}" ]]; then
       # Use read -ra to split on spaces (IFS=$'\n\t' prevents normal word-split)
       IFS=' ' read -ra sched_tests <<< "${BASH_REMATCH[1]}"
       for t in "${sched_tests[@]}"; do
-        if [[ -z "${SEEN_TESTS[${t}]:-}" ]]; then
+        if ! _is_seen "${t}"; then
           ORDERED_TESTS+=("${t}")
-          SEEN_TESTS["${t}"]=1
+          _mark_seen "${t}"
         fi
       done
     fi
@@ -496,9 +517,9 @@ fi
 # Append any .sql files not already in the schedule.
 for f in "${REGRESS_SQL_DIR}"/*.sql; do
   name="$(basename "${f}" .sql)"
-  if [[ -z "${SEEN_TESTS[${name}]:-}" ]]; then
+  if ! _is_seen "${name}"; then
     ORDERED_TESTS+=("${name}")
-    SEEN_TESTS["${name}"]=1
+    _mark_seen "${name}"
   fi
 done
 
