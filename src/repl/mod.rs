@@ -1283,6 +1283,12 @@ pub struct ReplSettings {
     /// of the current script rather than the process working directory,
     /// matching psql behaviour.
     pub current_file: Option<String>,
+    /// 1-based line number in the currently-executing script file.
+    ///
+    /// Tracked during `-f` / `\i` / `\ir` execution so that error messages
+    /// can include the `rpg:filename:line:` location prefix (matching psql).
+    /// `None` when not executing from a file.
+    pub current_line_number: Option<u64>,
     /// Unique identifier for the current session (used by session persistence).
     ///
     /// Assigned once at REPL startup from [`crate::session_store::new_session_id`].
@@ -1490,6 +1496,7 @@ impl std::fmt::Debug for ReplSettings {
             .field("verbose_errors", &self.verbose_errors)
             .field("vi_mode", &self.vi_mode)
             .field("current_file", &self.current_file)
+            .field("current_line_number", &self.current_line_number)
             .field("session_id", &self.session_id)
             .field("query_count", &self.query_count)
             .field("is_superuser", &self.is_superuser)
@@ -1595,6 +1602,7 @@ impl Default for ReplSettings {
             sqlstate_errors: false,
             vi_mode: false,
             current_file: None,
+            current_line_number: None,
             session_id: crate::session_store::new_session_id(),
             query_count: 0,
             is_superuser: false,
@@ -1618,6 +1626,20 @@ impl Default for ReplSettings {
             last_explain_text: None,
             lua_registry: crate::lua_commands::LuaRegistry::load(""),
             initial_input: None,
+        }
+    }
+}
+
+impl ReplSettings {
+    /// Return the `rpg:filename:line: ` error location prefix when executing
+    /// from a file, or `None` in interactive / `-c` / stdin mode.
+    ///
+    /// Matches psql's behaviour of prefixing error messages with the source
+    /// file and line number during `-f` / `\i` / `\ir` processing.
+    pub fn error_location_prefix(&self) -> Option<String> {
+        match (&self.current_file, self.current_line_number) {
+            (Some(file), Some(line)) => Some(format!("rpg:{file}:{line}: ")),
+            _ => None,
         }
     }
 }
@@ -1777,6 +1799,12 @@ pub async fn exec_file(
         tx.update_from_sql("begin");
     }
 
+    // Set the current file path and initialise the line counter so that
+    // error messages include the `rpg:filename:line:` location prefix
+    // (matching psql behaviour during `-f` file processing).
+    settings.current_file = Some(path.to_owned());
+    settings.current_line_number = Some(0);
+
     // Loop to handle \c reconnections in file mode.  When exec_lines
     // encounters \c it returns early with the new client; we continue
     // processing remaining lines with the new connection.
@@ -1834,6 +1862,11 @@ pub async fn exec_file(
             tx.update_from_sql("rollback");
         }
     }
+
+    // Clear file context so subsequent interactive use does not carry stale
+    // file/line state into error messages.
+    settings.current_file = None;
+    settings.current_line_number = None;
 
     exit_code
 }
@@ -1914,7 +1947,8 @@ async fn execute_inline_copy_to(client: &Client, sql: &str, settings: &mut ReplS
     let stream = match client.copy_out(sql).await {
         Ok(s) => s,
         Err(e) => {
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql),
                 settings.verbose_errors,
@@ -1941,7 +1975,8 @@ async fn execute_inline_copy_to(client: &Client, sql: &str, settings: &mut ReplS
                 }
             }
             Err(e) => {
-                crate::output::eprint_db_error(
+                crate::output::eprint_db_error_located(
+                    settings.error_location_prefix().as_deref(),
                     &e,
                     Some(sql),
                     settings.verbose_errors,
@@ -2006,7 +2041,8 @@ async fn execute_inline_copy_from(
     let sink = match client.copy_in(sql).await {
         Ok(s) => s,
         Err(e) => {
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql),
                 settings.verbose_errors,
@@ -2019,7 +2055,8 @@ async fn execute_inline_copy_from(
 
     tokio::pin!(sink);
     if let Err(e) = sink.send(bytes::Bytes::from(payload.into_bytes())).await {
-        crate::output::eprint_db_error(
+        crate::output::eprint_db_error_located(
+            settings.error_location_prefix().as_deref(),
             &e,
             Some(sql),
             settings.verbose_errors,
@@ -2042,7 +2079,8 @@ async fn execute_inline_copy_from(
             true
         }
         Err(e) => {
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql),
                 settings.verbose_errors,
@@ -2153,6 +2191,12 @@ pub(crate) async fn exec_lines(
     let mut prev_buf = String::new();
     let mut exit_code = 0i32;
     'lines: while let Some(line) = lines.next() {
+        // Track the current line number for error location prefixes.
+        // The counter is stored in settings so it persists across multiple
+        // exec_lines calls for the same file (e.g. after \c reconnections).
+        if let Some(ref mut n) = settings.current_line_number {
+            *n += 1;
+        }
         // `quit` / `exit` bare words work in all modes (psql behaviour).
         if is_quit_exit(line.trim(), buf.is_empty()) {
             break 'lines;
@@ -3048,7 +3092,8 @@ pub(crate) async fn exec_lines(
                             // for the outer loop to process as regular SQL.
                             match client.copy_in(&sql_owned).await {
                                 Err(e) => {
-                                    crate::output::eprint_db_error(
+                                    crate::output::eprint_db_error_located(
+                                        settings.error_location_prefix().as_deref(),
                                         &e,
                                         Some(&sql_owned),
                                         settings.verbose_errors,
@@ -3083,7 +3128,8 @@ pub(crate) async fn exec_lines(
                                         .send(bytes::Bytes::from(payload.into_bytes()))
                                         .await;
                                     if let Err(e) = send_ok {
-                                        crate::output::eprint_db_error(
+                                        crate::output::eprint_db_error_located(
+                                            settings.error_location_prefix().as_deref(),
                                             &e,
                                             Some(&sql_owned),
                                             settings.verbose_errors,
@@ -3108,7 +3154,8 @@ pub(crate) async fn exec_lines(
                                                 }
                                             }
                                             Err(e) => {
-                                                crate::output::eprint_db_error(
+                                                crate::output::eprint_db_error_located(
+                                                    settings.error_location_prefix().as_deref(),
                                                     &e,
                                                     Some(&sql_owned),
                                                     settings.verbose_errors,

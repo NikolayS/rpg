@@ -59,10 +59,13 @@ pub fn include_file<'a>(
             }
         };
 
-        // Save and update current_file so that nested \ir commands resolve
-        // paths relative to the directory of this file.
+        // Save and update current_file / line counter so that nested \ir
+        // commands resolve paths relative to the directory of this file,
+        // and error messages include the correct `rpg:filename:line:` prefix.
         let prev_file = settings.current_file.clone();
+        let prev_line = settings.current_line_number;
         settings.current_file = Some(path.to_owned());
+        settings.current_line_number = Some(0);
 
         let start_depth = settings.cond.depth();
 
@@ -99,9 +102,10 @@ pub fn include_file<'a>(
             }
         }
 
-        // Restore the previous current_file so callers see the right value
-        // after this include returns.
+        // Restore the previous current_file and line counter so callers
+        // see the right values after this include returns.
         settings.current_file = prev_file;
+        settings.current_line_number = prev_line;
 
         let end_depth = settings.cond.depth();
         if end_depth > start_depth {

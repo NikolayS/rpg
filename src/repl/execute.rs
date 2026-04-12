@@ -609,7 +609,8 @@ pub async fn execute_query(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql_to_send),
                 settings.verbose_errors,
@@ -831,7 +832,8 @@ pub async fn execute_query(
         if settings.echo_errors {
             eprintln!("{sql_to_send}");
         }
-        crate::output::eprint_db_error(
+        crate::output::eprint_db_error_located(
+            settings.error_location_prefix().as_deref(),
             &e,
             Some(sql_to_send),
             settings.verbose_errors,
@@ -1104,7 +1106,8 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql_to_send),
                 settings.verbose_errors,
@@ -1231,7 +1234,8 @@ pub async fn execute_query_extended(
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql_to_send),
                 settings.verbose_errors,
@@ -2144,7 +2148,8 @@ pub(super) async fn execute_gexec(
             cells
         }
         Err(e) => {
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql_to_send),
                 settings.verbose_errors,
@@ -2296,7 +2301,8 @@ pub(super) async fn execute_gset(
             settings.last_stmt_produced_rows = false;
         }
         Err(e) => {
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql_to_send),
                 settings.verbose_errors,
@@ -2600,7 +2606,8 @@ pub(super) async fn execute_crosstabview(
             Some((col_names, col_oids, rows))
         }
         Err(e) => {
-            crate::output::eprint_db_error(
+            crate::output::eprint_db_error_located(
+                settings.error_location_prefix().as_deref(),
                 &e,
                 Some(sql_to_send),
                 settings.verbose_errors,
