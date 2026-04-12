@@ -35,10 +35,8 @@ pub enum ColSpec {
 }
 
 impl ColSpec {
-    /// Parse a string as either a 1-based index (all digits, >= 1) or a name.
-    ///
-    /// The value `"0"` is treated as a name (matching psql: column numbers
-    /// start at 1).
+    /// Parse an unquoted token: numeric → Index, otherwise → Name (already
+    /// lowercased by `tokenize_args`).
     fn from_str(s: &str) -> Self {
         if let Ok(n) = s.parse::<usize>() {
             if n >= 1 {
@@ -54,7 +52,7 @@ impl ColSpec {
     ///
     /// Returns `Err` with an informative message if the column is not found or
     /// the index is out of range.
-    fn resolve(&self, headers: &[String]) -> Result<usize, String> {
+    pub fn resolve(&self, headers: &[String]) -> Result<usize, String> {
         match self {
             Self::Index(n) => {
                 // n is 1-based; convert to zero-based.
@@ -63,16 +61,16 @@ impl ColSpec {
                     Ok(zero)
                 } else {
                     Err(format!(
-                        "\\crosstabview: column number {} is out of range \
-                         (query has {} columns)",
+                        "\\crosstabview: column number {} is out of range 1..{}",
                         n,
                         headers.len()
                     ))
                 }
             }
-            Self::Name(name) => headers.iter().position(|h| h == name).ok_or_else(|| {
-                format!("\\crosstabview: column \"{name}\" not found in query result")
-            }),
+            Self::Name(name) => headers
+                .iter()
+                .position(|h| h == name)
+                .ok_or_else(|| format!("\\crosstabview: column name not found: \"{name}\"")),
         }
     }
 }
@@ -90,25 +88,92 @@ pub struct CrosstabArgs {
     pub sort_col_h: Option<ColSpec>,
 }
 
+/// Tokenize a `\crosstabview` argument string, respecting double-quoted tokens.
+///
+/// Returns `(token, was_quoted)` pairs.  A `"..."` token is returned with its
+/// outer quotes stripped and internal `""` sequences collapsed to `"` (SQL
+/// identifier quoting rules).  Unquoted tokens are folded to lower case
+/// (matching psql: unquoted identifiers are case-insensitive).
+fn tokenize_args(raw: &str) -> Vec<(String, bool)> {
+    let mut tokens = Vec::new();
+    let mut chars = raw.char_indices().peekable();
+
+    loop {
+        // Skip whitespace between tokens.
+        while chars.peek().is_some_and(|&(_, c)| c.is_ascii_whitespace()) {
+            chars.next();
+        }
+        let Some(&(_, first)) = chars.peek() else {
+            break;
+        };
+        if first == '"' {
+            // Quoted identifier: collect until closing unescaped '"'.
+            chars.next(); // consume opening '"'
+            let mut tok = String::new();
+            loop {
+                match chars.next() {
+                    Some((_, '"')) => {
+                        // Doubled quote inside identifier → literal '"'.
+                        if chars.peek().is_some_and(|&(_, c)| c == '"') {
+                            tok.push('"');
+                            chars.next();
+                        } else {
+                            break; // End of quoted token.
+                        }
+                    }
+                    Some((_, c)) => tok.push(c),
+                    None => break, // Unterminated quote.
+                }
+            }
+            tokens.push((tok, true));
+        } else {
+            // Unquoted token: collect until whitespace.
+            let start = chars.peek().map(|&(i, _)| i).unwrap();
+            let mut end = start;
+            while chars.peek().is_some_and(|&(_, c)| !c.is_ascii_whitespace()) {
+                if let Some((i, c)) = chars.next() {
+                    end = i + c.len_utf8();
+                }
+            }
+            // Fold to lowercase: unquoted identifiers are case-insensitive in psql.
+            tokens.push((raw[start..end].to_ascii_lowercase(), false));
+        }
+    }
+
+    tokens
+}
+
 /// Parse the argument string from `\crosstabview [args…]`.
 ///
-/// Arguments are whitespace-separated tokens.  Excess tokens beyond the
-/// fourth are silently ignored (matching psql behaviour).
+/// Arguments are whitespace-separated tokens.  Double-quoted column names
+/// (e.g., `"month name"`) are handled correctly — quoted tokens are treated
+/// as names even if they contain only digits.  Unquoted tokens are folded to
+/// lower case (psql identifier folding) and numeric tokens are treated as
+/// 1-based column indices.  Excess tokens beyond the fourth are silently
+/// ignored (matching psql behaviour).
 pub fn parse_args(raw: &str) -> CrosstabArgs {
     let mut args = CrosstabArgs::default();
-    let mut tokens = raw.split_whitespace();
+    let mut tokens = tokenize_args(raw).into_iter();
+
+    let make_spec = |(tok, quoted): (String, bool)| {
+        if quoted {
+            ColSpec::Name(tok)
+        } else {
+            ColSpec::from_str(&tok)
+        }
+    };
 
     if let Some(t) = tokens.next() {
-        args.col_v = Some(ColSpec::from_str(t));
+        args.col_v = Some(make_spec(t));
     }
     if let Some(t) = tokens.next() {
-        args.col_h = Some(ColSpec::from_str(t));
+        args.col_h = Some(make_spec(t));
     }
     if let Some(t) = tokens.next() {
-        args.col_d = Some(ColSpec::from_str(t));
+        args.col_d = Some(make_spec(t));
     }
     if let Some(t) = tokens.next() {
-        args.sort_col_h = Some(ColSpec::from_str(t));
+        args.sort_col_h = Some(make_spec(t));
     }
 
     args
@@ -140,11 +205,7 @@ pub fn pivot(
     args: &CrosstabArgs,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
     if headers.len() < 3 {
-        return Err(format!(
-            "\\crosstabview: query must return at least 3 columns \
-             (got {})",
-            headers.len()
-        ));
+        return Err("\\crosstabview: query must return at least three columns".to_owned());
     }
 
     // Resolve column indices (defaults: 0, 1, 2).
@@ -152,21 +213,11 @@ pub fn pivot(
     let idx_h = args.col_h.as_ref().map_or(Ok(1), |s| s.resolve(headers))?;
     let idx_d = args.col_d.as_ref().map_or(Ok(2), |s| s.resolve(headers))?;
 
-    // Validate: colV / colH / colD must all be distinct.
+    // Validate: colV / colH must be distinct.
     if idx_v == idx_h {
-        return Err("\\crosstabview: column for row headers (colV) must be \
-             different from column for column headers (colH)"
-            .to_owned());
-    }
-    if idx_v == idx_d {
-        return Err("\\crosstabview: column for row headers (colV) must be \
-             different from data column (colD)"
-            .to_owned());
-    }
-    if idx_h == idx_d {
-        return Err("\\crosstabview: column for column headers (colH) must be \
-             different from data column (colD)"
-            .to_owned());
+        return Err(
+            "\\crosstabview: vertical and horizontal headers must be different columns".to_owned(),
+        );
     }
 
     // Collect distinct colH values in encounter order; then optionally sort.
@@ -176,6 +227,14 @@ pub fn pivot(
         if !col_headers.contains(&h_val) {
             col_headers.push(h_val);
         }
+    }
+
+    // Enforce psql's maximum column count.
+    const MAX_CROSSTAB_COLS: usize = 1600;
+    if col_headers.len() > MAX_CROSSTAB_COLS {
+        return Err(format!(
+            "\\crosstabview: maximum number of columns ({MAX_CROSSTAB_COLS}) exceeded"
+        ));
     }
 
     // Apply sortcolH: if specified, sort col_headers by the value of that
@@ -194,7 +253,12 @@ pub fn pivot(
         col_headers.sort_by(|a, b| {
             let ka = sort_key.get(a).map_or("", String::as_str);
             let kb = sort_key.get(b).map_or("", String::as_str);
-            ka.cmp(kb)
+            // Use numeric comparison when both keys parse as numbers (psql behaviour).
+            if let (Ok(na), Ok(nb)) = (ka.parse::<f64>(), kb.parse::<f64>()) {
+                na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                ka.cmp(kb)
+            }
         });
     }
 
@@ -209,9 +273,8 @@ pub fn pivot(
         let key = (v_val.clone(), h_val.clone());
         if cell_map.contains_key(&key) {
             return Err(format!(
-                "\\crosstabview: duplicate value in column \"{}\" for \
-                 row \"{}\", column \"{}\"",
-                headers[idx_h], v_val, h_val,
+                "\\crosstabview: query result contains multiple data values \
+                 for row \"{v_val}\", column \"{h_val}\""
             ));
         }
         cell_map.insert(key, d_val);
@@ -260,30 +323,46 @@ pub fn pivot(
 ///
 /// `pivot_headers` is the first row (column names).
 /// `pivot_rows` is the data rows.
+/// `row_right_align` — when true, the row-label column (column 0) is
+/// right-aligned (used when `col_v` has a numeric `PostgreSQL` type).
+/// `data_right_align` — when true, data cells (columns 1+) are right-aligned
+/// (used for numeric data columns, matching psql behaviour).
 ///
 /// The output is appended to `out`.
-pub fn format_pivot(out: &mut String, pivot_headers: &[String], pivot_rows: &[Vec<String>]) {
+pub fn format_pivot(
+    out: &mut String,
+    pivot_headers: &[String],
+    pivot_rows: &[Vec<String>],
+    row_right_align: bool,
+    data_right_align: bool,
+) {
     use std::fmt::Write as _;
 
     let ncols = pivot_headers.len();
 
-    // Compute column widths: max of header width and all cell widths.
+    // Compute column widths: max of header width and max line width in cells.
+    // For multiline cells (containing '\n'), use the widest line.
     let mut widths: Vec<usize> = pivot_headers.iter().map(|h| h.width()).collect();
 
     for row in pivot_rows {
         for (col_idx, cell) in row.iter().enumerate() {
             if col_idx < ncols {
-                let w = cell.width();
-                if w > widths[col_idx] {
-                    widths[col_idx] = w;
+                let max_line_w = cell
+                    .split('\n')
+                    .map(UnicodeWidthStr::width)
+                    .max()
+                    .unwrap_or(0);
+                if max_line_w > widths[col_idx] {
+                    widths[col_idx] = max_line_w;
                 }
             }
         }
     }
 
-    // Header line.
-    let header_line = build_row(pivot_headers, &widths);
-    let _ = writeln!(out, "{header_line}");
+    // Header line: column headers are center-aligned (psql behaviour).
+    let header_line = build_header_row(pivot_headers, &widths);
+    out.push_str(header_line.trim_end());
+    out.push('\n');
 
     // Separator line: `-{dash}-+-{dash}-+-...`
     let sep = build_separator(&widths);
@@ -296,8 +375,7 @@ pub fn format_pivot(out: &mut String, pivot_headers: &[String], pivot_rows: &[Ve
         while cells.len() < ncols {
             cells.push(String::new());
         }
-        let line = build_row(&cells, &widths);
-        let _ = writeln!(out, "{line}");
+        render_multiline_row(out, &cells, &widths, row_right_align, data_right_align);
     }
 
     // Footer: row count.
@@ -325,10 +403,40 @@ fn build_separator(widths: &[usize]) -> String {
         .collect()
 }
 
-/// Build a data row: ` cell1 | cell2 | cell3`.
+/// Build a header row with center-aligned cells: ` cell1 | cell2 | cell3`.
 ///
-/// The first column is left-aligned; all others are also left-aligned
-/// (psql `\crosstabview` output uses left alignment for all columns).
+/// Column names are center-aligned within their column width (psql behaviour).
+/// The returned string is NOT trimmed — callers should trim trailing whitespace.
+fn build_header_row(cells: &[String], widths: &[usize]) -> String {
+    cells
+        .iter()
+        .zip(widths.iter())
+        .enumerate()
+        .map(|(i, (cell, &w))| {
+            let cell_w = cell.width();
+            let total_pad = w.saturating_sub(cell_w);
+            // Center: floor half on left, rest on right.
+            let left_pad = total_pad / 2;
+            let right_pad = total_pad - left_pad;
+            let padded = format!(
+                " {}{}{} ",
+                " ".repeat(left_pad),
+                cell,
+                " ".repeat(right_pad)
+            );
+            if i + 1 < cells.len() {
+                format!("{padded}|")
+            } else {
+                padded
+            }
+        })
+        .collect()
+}
+
+/// Build a single-line row: ` cell1 | cell2 | cell3`.
+///
+/// Used for rows that don't need centering (legacy usage, not used for headers).
+#[allow(dead_code)]
 fn build_row(cells: &[String], widths: &[usize]) -> String {
     cells
         .iter()
@@ -346,6 +454,88 @@ fn build_row(cells: &[String], widths: &[usize]) -> String {
             }
         })
         .collect()
+}
+
+/// Render a pivot data row, handling multiline cell content.
+///
+/// When any cell contains embedded `\n`, the row is rendered across multiple
+/// visual lines.  Continuation lines within a cell are indicated by appending
+/// `+` in place of the trailing space (psql behaviour).  Each visual line has
+/// trailing whitespace stripped.
+///
+/// `row_right_align` controls alignment of column 0 (row-label); it is true
+/// when `col_v` has a numeric `PostgreSQL` type.  `data_right_align` controls
+/// alignment of columns 1+ (data cells); it is true when `col_d` is numeric.
+fn render_multiline_row(
+    out: &mut String,
+    cells: &[String],
+    widths: &[usize],
+    row_right_align: bool,
+    data_right_align: bool,
+) {
+    let ncols = cells.len().min(widths.len());
+
+    // Split each cell into its visual lines.
+    let cell_lines: Vec<Vec<&str>> = cells[..ncols]
+        .iter()
+        .map(|c| c.split('\n').collect())
+        .collect();
+
+    let max_lines = cell_lines.iter().map(std::vec::Vec::len).max().unwrap_or(1);
+
+    for vrow in 0..max_lines {
+        let mut line = String::new();
+        for col in 0..ncols {
+            let lines = &cell_lines[col];
+            let content = lines.get(vrow).copied().unwrap_or("");
+            let has_more = lines.len() > vrow + 1;
+            let content_w = content.width();
+            let w = widths[col];
+            let padding = w.saturating_sub(content_w);
+
+            // Determine alignment: col 0 uses row_right_align, cols 1+ use data_right_align.
+            let right_align = if col == 0 {
+                row_right_align
+            } else {
+                data_right_align
+            };
+
+            if right_align {
+                // Right-align: leading space + padding + content + trailing space.
+                line.push(' ');
+                for _ in 0..padding {
+                    line.push(' ');
+                }
+                line.push_str(content);
+                if has_more {
+                    line.push('+');
+                } else {
+                    line.push(' ');
+                }
+            } else {
+                // Left-align: leading space + content + padding + trailing space/+.
+                line.push(' ');
+                line.push_str(content);
+                if has_more {
+                    for _ in 0..padding {
+                        line.push(' ');
+                    }
+                    line.push('+');
+                } else {
+                    for _ in 0..padding {
+                        line.push(' ');
+                    }
+                    line.push(' ');
+                }
+            }
+            if col + 1 < ncols {
+                line.push('|');
+            }
+        }
+        // Strip trailing whitespace (psql behaviour).
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +635,7 @@ mod tests {
         let hdrs = vec!["a".to_owned(), "b".to_owned()];
         let rows: Vec<Vec<String>> = vec![];
         let err = pivot(&hdrs, &rows, &CrosstabArgs::default()).unwrap_err();
-        assert!(err.contains("at least 3 columns"), "got: {err}");
+        assert!(err.contains("at least three"), "got: {err}");
     }
 
     #[test]
@@ -455,7 +645,7 @@ mod tests {
             vec!["a".to_owned(), "x".to_owned(), "2".to_owned()], // duplicate
         ];
         let err = pivot(&headers(), &rows, &CrosstabArgs::default()).unwrap_err();
-        assert!(err.contains("duplicate"), "got: {err}");
+        assert!(err.contains("multiple data values"), "got: {err}");
     }
 
     #[test]
@@ -466,7 +656,7 @@ mod tests {
             ..Default::default()
         };
         let err = pivot(&headers(), &simple_rows(), &args).unwrap_err();
-        assert!(err.contains("colV"), "got: {err}");
+        assert!(err.contains("vertical and horizontal"), "got: {err}");
     }
 
     #[test]
@@ -578,7 +768,7 @@ mod tests {
             vec!["b".to_owned(), "3".to_owned(), "4".to_owned()],
         ];
         let mut out = String::new();
-        format_pivot(&mut out, &ph, &pr);
+        format_pivot(&mut out, &ph, &pr, false, false);
         let lines: Vec<&str> = out.lines().collect();
         // Should have: header, separator, 2 data rows, footer = 5 lines.
         assert_eq!(lines.len(), 5);
@@ -595,7 +785,7 @@ mod tests {
         let ph = vec!["r".to_owned(), "c".to_owned()];
         let pr = vec![vec!["v".to_owned(), "w".to_owned()]];
         let mut out = String::new();
-        format_pivot(&mut out, &ph, &pr);
+        format_pivot(&mut out, &ph, &pr, false, false);
         assert!(out.contains("(1 row)"));
     }
 

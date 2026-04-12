@@ -17,6 +17,9 @@ use std::path::Path;
 
 use tokio_postgres::Client;
 
+#[cfg(unix)]
+extern crate libc;
+
 /// Chunk size for `loread` / `lowrite` calls (64 KiB, matching psql).
 const CHUNK_SIZE: usize = 64 * 1024;
 
@@ -41,62 +44,92 @@ const INV_READ: i32 = 0x0004_0000; // 0x40000
 /// 6. Close the large object descriptor.
 /// 7. Optionally set a comment on the object.
 /// 8. Commit and print `lo_import <oid>`.
-pub async fn lo_import(client: &Client, filename: &str, comment: &str) {
+///
+/// Returns the OID of the created large object so the caller can set LASTOID.
+pub async fn lo_import(client: &Client, filename: &str, comment: &str, quiet: bool) -> Option<i64> {
     // Read the file before touching the database so that a missing file
     // produces a clear error without starting a transaction.
     let data = match read_file(filename) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("\\lo_import: {e}");
-            return;
+            // psql prints the error without a command prefix, e.g.:
+            // could not open file "foo": No such file or directory
+            eprintln!("{e}");
+            return None;
         }
     };
 
-    if let Err(e) = run_lo_import(client, filename, comment, &data).await {
-        eprintln!("\\lo_import: {e}");
+    match run_lo_import(client, filename, comment, &data, quiet).await {
+        Ok(oid) => Some(oid),
+        Err(e) => {
+            eprintln!("\\lo_import: {e}");
+            None
+        }
     }
 }
 
 /// Inner async logic for `lo_import` — separated so we can use `?`.
+/// Returns the OID of the created large object.
 async fn run_lo_import(
     client: &Client,
     _filename: &str,
     comment: &str,
     data: &[u8],
-) -> Result<(), String> {
+    quiet: bool,
+) -> Result<i64, String> {
     // Begin transaction.
     simple_exec(client, "begin").await?;
 
+    // Helper macro: rollback and return Err if a step fails.
+    macro_rules! try_or_rb {
+        ($expr:expr) => {
+            match $expr {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = simple_exec(client, "rollback").await;
+                    return Err(e);
+                }
+            }
+        };
+    }
+
     // Create a new large object and retrieve its OID.
-    let oid = query_one_int(client, "select lo_create(0)").await?;
+    let oid = try_or_rb!(query_one_int(client, "select lo_create(0)").await);
 
     // Open the large object for reading and writing.
-    let fd = query_one_int(client, &format!("select lo_open({oid}, {INV_READ_WRITE})")).await?;
+    let fd = try_or_rb!(
+        query_one_int(client, &format!("select lo_open({oid}, {INV_READ_WRITE})")).await
+    );
 
     // Write data in chunks.
     for chunk in data.chunks(CHUNK_SIZE) {
         let hex = hex_encode(chunk);
-        simple_exec(client, &format!("select lowrite({fd}, '\\x{hex}'::bytea)")).await?;
+        try_or_rb!(simple_exec(client, &format!("select lowrite({fd}, '\\x{hex}'::bytea)")).await);
     }
 
     // Close the large object descriptor.
-    simple_exec(client, &format!("select lo_close({fd})")).await?;
+    try_or_rb!(simple_exec(client, &format!("select lo_close({fd})")).await);
 
     // Optionally set a comment.
     if !comment.is_empty() {
         let escaped = comment.replace('\'', "''");
-        simple_exec(
-            client,
-            &format!("comment on large object {oid} is '{escaped}'"),
-        )
-        .await?;
+        try_or_rb!(
+            simple_exec(
+                client,
+                &format!("comment on large object {oid} is '{escaped}'"),
+            )
+            .await
+        );
     }
 
     // Commit.
     simple_exec(client, "commit").await?;
 
-    println!("lo_import {oid}");
-    Ok(())
+    // With -q (quiet) psql suppresses the success message.
+    if !quiet {
+        println!("lo_import {oid}");
+    }
+    Ok(oid)
 }
 
 // ---------------------------------------------------------------------------
@@ -113,35 +146,65 @@ async fn run_lo_import(
 /// 5. Commit.
 /// 6. Write the accumulated bytes to the local file.
 /// 7. Print `lo_export`.
-pub async fn lo_export(client: &Client, loid: &str, filename: &str) {
-    let Ok(loid_parsed) = loid.trim().parse::<u32>() else {
-        eprintln!("\\lo_export: invalid OID \"{loid}\"");
-        return;
-    };
+pub async fn lo_export(client: &Client, loid: &str, filename: &str, quiet: bool) {
+    // psql uses atooid() which returns 0 for non-numeric input, then the server
+    // returns "large object 0 does not exist".  Match that behaviour.
+    let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
 
     match run_lo_export(client, loid_parsed, filename).await {
-        Ok(()) => println!("lo_export"),
-        Err(e) => eprintln!("\\lo_export: {e}"),
+        Ok(()) => {
+            if !quiet {
+                println!("lo_export");
+            }
+        }
+        // psql prints the PostgreSQL error directly without a command prefix.
+        Err(e) => eprintln!("{e}"),
     }
 }
 
 async fn run_lo_export(client: &Client, loid: u32, filename: &str) -> Result<(), String> {
     simple_exec(client, "begin").await?;
 
-    let fd = query_one_int(client, &format!("select lo_open({loid}, {INV_READ})")).await?;
+    let fd = match query_one_int(client, &format!("select lo_open({loid}, {INV_READ})")).await {
+        Ok(fd) => fd,
+        Err(e) => {
+            // Always rollback after a failed lo_open to keep the connection clean.
+            let _ = simple_exec(client, "rollback").await;
+            return Err(e);
+        }
+    };
 
+    let mut read_err: Option<String> = None;
     let mut buf: Vec<u8> = Vec::new();
     loop {
-        let hex = query_one_str(client, &format!("select loread({fd}, {CHUNK_SIZE})")).await?;
-        // Server returns `\x<hexdigits>` or an empty `\x`.
-        let bytes = decode_bytea_hex(&hex)?;
-        if bytes.is_empty() {
-            break;
+        match query_one_str(client, &format!("select loread({fd}, {CHUNK_SIZE})")).await {
+            Err(e) => {
+                read_err = Some(e);
+                break;
+            }
+            Ok(hex) => {
+                // Server returns `\x<hexdigits>` or an empty `\x`.
+                match decode_bytea_hex(&hex) {
+                    Err(e) => {
+                        read_err = Some(e);
+                        break;
+                    }
+                    Ok(bytes) if bytes.is_empty() => break,
+                    Ok(bytes) => buf.extend_from_slice(&bytes),
+                }
+            }
         }
-        buf.extend_from_slice(&bytes);
     }
 
-    simple_exec(client, &format!("select lo_close({fd})")).await?;
+    if let Some(e) = read_err {
+        let _ = simple_exec(client, "rollback").await;
+        return Err(e);
+    }
+
+    if let Err(e) = simple_exec(client, &format!("select lo_close({fd})")).await {
+        let _ = simple_exec(client, "rollback").await;
+        return Err(e);
+    }
     simple_exec(client, "commit").await?;
 
     write_file(filename, &buf)?;
@@ -152,17 +215,26 @@ async fn run_lo_export(client: &Client, loid: u32, filename: &str) -> Result<(),
 // lo_list  (\dl)
 // ---------------------------------------------------------------------------
 
-/// Implement `\lo_list` / `\dl`.
+/// Implement `\lo_list` / `\dl` / `\lo_list+`.
 ///
 /// Queries `pg_largeobject_metadata` and prints the result as an aligned
-/// table matching psql's output format.
-pub async fn lo_list(client: &Client) {
-    let sql = "\
-        select \
-            lom.oid as \"ID\", \
-            pg_catalog.obj_description(lom.oid, 'pg_largeobject') as \"Description\" \
-        from pg_catalog.pg_largeobject_metadata as lom \
-        order by lom.oid";
+/// table matching psql's output format.  With `plus = true` also shows
+/// access privileges.
+pub async fn lo_list(client: &Client, plus: bool) {
+    let sql = if plus {
+        "select oid as \"ID\", \
+            pg_catalog.pg_get_userbyid(lomowner) as \"Owner\", \
+            pg_catalog.array_to_string(lomacl, E'\\n') as \"Access privileges\", \
+            pg_catalog.obj_description(oid, 'pg_largeobject') as \"Description\" \
+        from pg_catalog.pg_largeobject_metadata \
+        order by oid"
+    } else {
+        "select oid as \"ID\", \
+            pg_catalog.pg_get_userbyid(lomowner) as \"Owner\", \
+            pg_catalog.obj_description(oid, 'pg_largeobject') as \"Description\" \
+        from pg_catalog.pg_largeobject_metadata \
+        order by oid"
+    };
 
     run_and_print(client, sql, Some("Large objects")).await;
 }
@@ -172,15 +244,19 @@ pub async fn lo_list(client: &Client) {
 // ---------------------------------------------------------------------------
 
 /// Implement `\lo_unlink <loid>`.
-pub async fn lo_unlink(client: &Client, loid: &str) {
-    let Ok(loid_parsed) = loid.trim().parse::<u32>() else {
-        eprintln!("\\lo_unlink: invalid OID \"{loid}\"");
-        return;
-    };
+pub async fn lo_unlink(client: &Client, loid: &str, quiet: bool) {
+    // psql uses atooid() which returns 0 for non-numeric input, then the server
+    // returns "large object 0 does not exist".  Match that behaviour.
+    let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
 
     match simple_exec(client, &format!("select lo_unlink({loid_parsed})")).await {
-        Ok(()) => println!("lo_unlink {loid_parsed}"),
-        Err(e) => eprintln!("\\lo_unlink: {e}"),
+        Ok(()) => {
+            if !quiet {
+                println!("lo_unlink {loid_parsed}");
+            }
+        }
+        // psql prints the PostgreSQL error directly without a command prefix.
+        Err(e) => eprintln!("{e}"),
     }
 }
 
@@ -188,20 +264,29 @@ pub async fn lo_unlink(client: &Client, loid: &str) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Format a tokio-postgres error the way psql does: "SEVERITY:  message".
+fn pg_err(e: &tokio_postgres::Error) -> String {
+    if let Some(db) = e.as_db_error() {
+        format!("{}:  {}", db.severity(), db.message())
+    } else {
+        e.to_string()
+    }
+}
+
 /// Execute a statement and discard the result, returning `Err(msg)` on failure.
 async fn simple_exec(client: &Client, sql: &str) -> Result<(), String> {
     client
         .simple_query(sql)
         .await
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| pg_err(&e))
 }
 
 /// Execute a query that returns exactly one integer cell.
 async fn query_one_int(client: &Client, sql: &str) -> Result<i64, String> {
     use tokio_postgres::SimpleQueryMessage;
 
-    let msgs = client.simple_query(sql).await.map_err(|e| e.to_string())?;
+    let msgs = client.simple_query(sql).await.map_err(|e| pg_err(&e))?;
 
     for msg in msgs {
         if let SimpleQueryMessage::Row(row) = msg {
@@ -218,7 +303,7 @@ async fn query_one_int(client: &Client, sql: &str) -> Result<i64, String> {
 async fn query_one_str(client: &Client, sql: &str) -> Result<String, String> {
     use tokio_postgres::SimpleQueryMessage;
 
-    let msgs = client.simple_query(sql).await.map_err(|e| e.to_string())?;
+    let msgs = client.simple_query(sql).await.map_err(|e| pg_err(&e))?;
 
     for msg in msgs {
         if let SimpleQueryMessage::Row(row) = msg {
@@ -271,7 +356,14 @@ async fn run_and_print(client: &Client, sql: &str, title: Option<&str>) {
     }
 }
 
-/// Print a simple column-aligned table to stdout.
+/// Print a simple column-aligned table to stdout, matching psql's aligned format.
+///
+/// Features:
+/// - Column headers are **centered** within the column width (psql behaviour).
+/// - Multiline values (containing `\n`) are split across continuation rows with
+///   a trailing `+` on each non-last line, and blank cells on other columns,
+///   matching psql's `\x off` aligned output for multi-line data.
+#[allow(clippy::too_many_lines)]
 fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
     if col_names.is_empty() {
         let n = rows.len();
@@ -280,18 +372,38 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         return;
     }
 
+    let ncols = col_names.len();
+
+    // Split each cell value on newlines and store as Vec<Vec<Vec<&str>>>:
+    // rows × cols × lines-within-cell.
+    let split_rows: Vec<Vec<Vec<&str>>> = rows
+        .iter()
+        .map(|row| {
+            (0..ncols)
+                .map(|i| {
+                    let v = row.get(i).map_or("", String::as_str);
+                    v.split('\n').collect::<Vec<_>>()
+                })
+                .collect()
+        })
+        .collect();
+
+    // Compute column widths: max(header_len, max_single_line_len_in_data).
     let mut widths: Vec<usize> = col_names.iter().map(String::len).collect();
-    for row in rows {
-        for (i, val) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(val.len());
+    for srow in &split_rows {
+        for (i, cell_lines) in srow.iter().enumerate() {
+            if i < ncols {
+                for line in cell_lines {
+                    widths[i] = widths[i].max(line.len());
+                }
             }
         }
     }
 
-    let ncols = widths.len();
-    let table_width =
-        1 + widths.iter().sum::<usize>() + if ncols > 1 { 3 * (ncols - 1) } else { 0 } + 1;
+    // Total visible table width (matches the separator line length).
+    // Each col contributes `width+2` chars (1 leading space + content + 1 trailing
+    // space or `+`), and columns are joined by `|` (ncols-1 separators).
+    let table_width = widths.iter().map(|w| w + 2).sum::<usize>() + ncols.saturating_sub(1);
 
     if let Some(t) = title {
         let tlen = t.len();
@@ -303,14 +415,60 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         }
     }
 
-    // Header row.
-    let header: String = col_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| format!(" {name:<w$}", w = widths[i]))
-        .collect::<Vec<_>>()
-        .join(" |");
-    println!("{header}");
+    // Helper: center a string `s` in a field of width `w`.
+    let center = |s: &str, w: usize| -> String {
+        let slen = s.len();
+        if slen >= w {
+            return s.to_owned();
+        }
+        let total_pad = w - slen;
+        let left = total_pad / 2;
+        let right = total_pad - left;
+        format!("{:left$}{s}{:right$}", "", "")
+    };
+
+    // Helper: build one display line from per-column (text, has_continuation) pairs.
+    // psql format: cells are " content " (width+2), joined by "|".
+    // Continuation cells replace the trailing space with "+": " content+"
+    // followed directly by "|" (no extra space).
+    let build_line = |cells: &[(&str, usize, bool)]| -> String {
+        let mut s = String::new();
+        for (col_idx, &(text, w, cont)) in cells.iter().enumerate() {
+            let is_last = col_idx + 1 == cells.len();
+            if cont {
+                // " text_padded+" then "|" (no space — `+` is the trailing char)
+                use std::fmt::Write as _;
+                let _ = write!(s, " {text:<w$}+");
+                if !is_last {
+                    s.push('|');
+                }
+            } else {
+                // " text_padded" then " |" (trailing space + pipe separator)
+                use std::fmt::Write as _;
+                let _ = write!(s, " {text:<w$}");
+                if !is_last {
+                    s.push_str(" |");
+                }
+            }
+        }
+        s
+    };
+
+    // Header row (centered headers, matching psql).
+    let header_line: String = {
+        let mut s = String::new();
+        for (col_idx, name) in col_names.iter().enumerate() {
+            let w = widths[col_idx];
+            let is_last = col_idx + 1 == ncols;
+            s.push(' ');
+            s.push_str(&center(name, w));
+            if !is_last {
+                s.push_str(" |");
+            }
+        }
+        s
+    };
+    println!("{header_line}");
 
     // Separator.
     let sep: String = widths
@@ -320,32 +478,68 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         .join("+");
     println!("{sep}");
 
-    // Data rows.
-    for row in rows {
-        let line: String = row
-            .iter()
-            .enumerate()
-            .map(|(i, val)| {
-                let w = widths.get(i).copied().unwrap_or(0);
-                format!(" {val:<w$}")
-            })
-            .collect::<Vec<_>>()
-            .join(" |");
-        println!("{line}");
+    // Data rows, handling multiline cells.
+    for srow in &split_rows {
+        // Number of printed lines for this logical row.
+        let max_lines = srow.iter().map(std::vec::Vec::len).max().unwrap_or(1);
+        for line_idx in 0..max_lines {
+            let cells: Vec<(&str, usize, bool)> = srow
+                .iter()
+                .enumerate()
+                .map(|(i, cell_lines)| {
+                    let w = widths.get(i).copied().unwrap_or(0);
+                    let text = cell_lines.get(line_idx).copied().unwrap_or("");
+                    let has_more = line_idx + 1 < cell_lines.len();
+                    (text, w, has_more)
+                })
+                .collect();
+            println!("{}", build_line(&cells));
+        }
     }
 
     let n = rows.len();
     let word = if n == 1 { "row" } else { "rows" };
     println!("({n} {word})");
+    // psql always prints a blank line after the result (aligned format trailing separator).
+    println!();
+}
+
+/// Return the OS error message without the Rust "(os error N)" suffix.
+/// On Unix uses `libc::strerror_r` for POSIX-style messages; on other
+/// platforms falls back to `std::io::Error::to_string`.
+#[cfg(unix)]
+fn os_error_message(e: &std::io::Error) -> String {
+    if let Some(code) = e.raw_os_error() {
+        let mut buf = [0u8; 256];
+        // SAFETY: strerror_r is always safe with a valid error code.
+        unsafe {
+            libc::strerror_r(code, buf.as_mut_ptr().cast::<libc::c_char>(), buf.len());
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        std::str::from_utf8(&buf[..end])
+            .ok()
+            .map_or_else(|| e.to_string(), str::to_owned)
+    } else {
+        e.to_string()
+    }
+}
+
+#[cfg(not(unix))]
+fn os_error_message(e: &std::io::Error) -> String {
+    e.to_string()
 }
 
 /// Read the entire contents of a local file.
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
-    let mut f =
-        std::fs::File::open(Path::new(path)).map_err(|e| format!("cannot open \"{path}\": {e}"))?;
+    let mut f = std::fs::File::open(Path::new(path)).map_err(|e| {
+        // Match psql's error format: "could not open file "<path>": <strerror>"
+        // (without the Rust "(os error N)" suffix).
+        let msg = os_error_message(&e);
+        format!("could not open file \"{path}\": {msg}")
+    })?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)
-        .map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+        .map_err(|e| format!("could not read file \"{path}\": {e}"))?;
     Ok(buf)
 }
 

@@ -6,6 +6,9 @@ on:
       CODECOV_TOKEN:
         required: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -137,6 +140,98 @@ jobs:
         run: cargo build --release
       - name: Run compatibility tests
         run: bash tests/compat/test-compat.sh target/release/rpg
+
+  psql-regress:
+    name: PostgreSQL Regress Tests
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 5s
+        ports:
+          - 5432:5432
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Checkout PostgreSQL regression test files (sparse)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: postgres/postgres
+          ref: af04b04f2f7a54ba4a4418a814f57b27d8e0d10c  # REL_18_STABLE @ 2026-04-06
+          sparse-checkout: |
+            src/test/regress/sql
+            src/test/regress/expected
+            src/test/regress/parallel_schedule
+          sparse-checkout-cone-mode: false
+          path: pg-src
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: psql-regress-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            psql-regress-${{ runner.os }}-cargo-
+
+      - name: Install psql 18
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -sSf -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          sudo sh -c "echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main' > /etc/apt/sources.list.d/pgdg.list"
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-18
+          sudo update-alternatives --install /usr/bin/psql psql /usr/lib/postgresql/18/bin/psql 200
+          psql --version
+
+      - name: Build rpg
+        run: cargo build --release
+
+      - name: Run PostgreSQL regression tests
+        env:
+          KEEP_RESULTS: "1"
+          RESULTS_DIR: /tmp/rpg-regress
+          # Skip tests with known rpg gaps:
+          #   psql         - output formatting edge cases (~1600 line diff remaining)
+          #   strings      - standard_conforming_strings=off backslash parsing
+          #   plpgsql      - CONTEXT line ordering differs in CI Docker environment
+          #   copydml      - AFTER trigger NOTICE ordering (async timing in Docker)
+          #   transactions - WARNING ordering shift in Docker (passes locally)
+          REGRESS_SKIP: "psql strings plpgsql copydml transactions"
+        run: |
+          bash tests/compat/test-psql-regress.sh \
+            target/release/rpg \
+            pg-src
+
+      - name: Upload regression diff artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: regress-diffs
+          path: /tmp/rpg-regress/
+          retention-days: 7
 
   connection-tests:
     name: Connection Tests

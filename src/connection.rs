@@ -1242,8 +1242,18 @@ fn percent_decode(input: &str) -> String {
     let mut chars = input.as_bytes().iter();
     while let Some(&b) = chars.next() {
         if b == b'%' {
-            let hi = chars.next().copied().unwrap_or(b'0');
-            let lo = chars.next().copied().unwrap_or(b'0');
+            // A valid percent-encoded triplet requires exactly two hex digits
+            // after the `%`. If fewer remain, pass the `%` through literally
+            // instead of substituting NUL bytes.
+            let Some(hi) = chars.next().copied() else {
+                out.push('%');
+                continue;
+            };
+            let Some(lo) = chars.next().copied() else {
+                out.push('%');
+                out.push(char::from(hi));
+                continue;
+            };
             let hex = [hi, lo];
             if let Ok(s) = std::str::from_utf8(&hex) {
                 if let Ok(byte) = u8::from_str_radix(s, 16) {
@@ -1251,7 +1261,7 @@ fn percent_decode(input: &str) -> String {
                     continue;
                 }
             }
-            // Malformed; pass through.
+            // Malformed hex digits; pass through literally.
             out.push('%');
             out.push(char::from(hi));
             out.push(char::from(lo));
@@ -2351,6 +2361,7 @@ where
 /// until one accepts a connection that satisfies `params.target_session_attrs`.
 /// For `prefer-standby` the entire list is tried for standbys first; if none
 /// qualify, the list is retried accepting any host.
+#[allow(clippy::too_many_lines)]
 pub async fn connect(
     mut params: ConnParams,
     opts: &CliConnOpts,
@@ -2407,8 +2418,51 @@ pub async fn connect(
             let (client, tls_info) = match result {
                 Ok(pair) => pair,
                 Err(e) => {
-                    last_err = Some(e);
-                    continue;
+                    // When the kernel does not support IPv6 (EAFNOSUPPORT /
+                    // os error 97) tokio may fail without falling back to the
+                    // IPv4 address that the same hostname also resolves to.
+                    // Retry with an explicit IPv4 address so that connecting
+                    // to "localhost" works even when IPv6 is not available.
+                    if is_af_not_supported_err(&e)
+                        && !host.starts_with('/')
+                        && !is_numeric_addr(host)
+                    {
+                        let addr_str = format!("{host}:{port}");
+                        let ipv4 = std::net::ToSocketAddrs::to_socket_addrs(&addr_str.as_str())
+                            .ok()
+                            .and_then(|mut it| {
+                                it.find(std::net::SocketAddr::is_ipv4)
+                                    .map(|a| a.ip().to_string())
+                            });
+
+                        if let Some(ip4) = ipv4 {
+                            let mut pg4 = pg_config.clone();
+                            pg4.host(&ip4);
+                            // Keep params.host as the original hostname so
+                            // that TLS hostname verification (verify-full)
+                            // still checks the certificate against the DNS
+                            // name, not the resolved IP literal.  Only the
+                            // dial address (pg4) changes to IPv4.
+                            match connect_one(&pg4, &params).await {
+                                Ok(pair) => {
+                                    // Record the resolved IP for \conninfo
+                                    // display without overwriting the hostname.
+                                    params.resolved_addr = Some(ip4);
+                                    pair
+                                }
+                                Err(e2) => {
+                                    last_err = Some(e2);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            last_err = Some(e);
+                            continue;
+                        }
+                    } else {
+                        last_err = Some(e);
+                        continue;
+                    }
                 }
             };
 
@@ -2697,6 +2751,19 @@ async fn connect_tls_with_config(
     });
 
     Ok((client, info))
+}
+
+/// Returns `true` if `e` is an "address family not supported" OS error
+/// (EAFNOSUPPORT / errno 97).  This happens when the kernel has IPv6
+/// disabled and tokio resolves a hostname to an IPv6 address first.
+fn is_af_not_supported_err(e: &ConnectionError) -> bool {
+    match e {
+        ConnectionError::ConnectionFailed { reason, .. } => {
+            let r = reason.to_lowercase();
+            r.contains("address family not supported") || r.contains("os error 97")
+        }
+        _ => false,
+    }
 }
 
 /// Returns `true` if `e` represents a connection timeout.

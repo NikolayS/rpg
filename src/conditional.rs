@@ -38,11 +38,25 @@ pub fn eval_bool(expr: &str) -> bool {
     )
 }
 
+/// Like `eval_bool` but distinguishes invalid expressions from valid false.
+///
+/// Returns `Some(true)` for recognised truthy values, `Some(false)` for
+/// recognised falsy values (`false`, `off`, `0`, `no`, `f`, `n`, ``),
+/// and `None` for anything that is not a recognised boolean.
+pub fn eval_bool_strict(expr: &str) -> Option<bool> {
+    match expr.trim().to_lowercase().as_str() {
+        "true" | "on" | "1" | "yes" | "t" | "y" => Some(true),
+        "false" | "off" | "0" | "no" | "f" | "n" | "" => Some(false),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CondBlock
 // ---------------------------------------------------------------------------
 
 /// One level of a conditional block (`\if` … `\endif`).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CondBlock {
     /// Has any branch in this `\if`/`\elif`/`\else` chain already been true?
@@ -53,6 +67,11 @@ struct CondBlock {
     ///
     /// Used to detect an erroneous second `\else` or an `\elif` after `\else`.
     seen_else: bool,
+    /// Was this block opened with an invalid boolean expression?
+    ///
+    /// When true, psql echoes (but does not execute) the lines inside the
+    /// suppressed branch — mirroring psql's error-conditional behaviour.
+    error: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +108,23 @@ impl ConditionalState {
         self.stack.len()
     }
 
+    /// Discard all open blocks, resetting to the unconstrained state.
+    ///
+    /// Used when `\quit` fires inside a conditional block: psql does not
+    /// emit "unterminated \\if" warnings when the script exits via `\quit`.
+    pub fn reset(&mut self) {
+        self.stack.clear();
+    }
+
+    /// Return `true` when at least one currently-open block was opened with
+    /// an invalid boolean expression (psql error-conditional mode).
+    ///
+    /// In this mode the REPL echoes (but does not execute) SQL lines inside
+    /// the suppressed block, matching psql's `-a` behaviour.
+    pub fn is_error_conditional(&self) -> bool {
+        self.stack.iter().any(|b| b.error)
+    }
+
     /// Process `\if <condition>`.
     ///
     /// Pushes a new block.  The block is active only when the condition is
@@ -101,6 +137,23 @@ impl ConditionalState {
             any_true: active,
             active,
             seen_else: false,
+            error: false,
+        });
+    }
+
+    /// Like `push_if(false)` but marks the block as an error-conditional.
+    ///
+    /// Called when `\if` receives an expression that is not a recognised
+    /// boolean value.  The block behaves as `\if false` but the caller is
+    /// responsible for printing the appropriate error message, and the REPL
+    /// will echo (without executing) SQL inside the suppressed branch.
+    pub fn push_if_error(&mut self) {
+        let outer_active = self.is_active();
+        self.stack.push(CondBlock {
+            any_true: false,
+            active: false,
+            seen_else: false,
+            error: outer_active, // only track error when outer is active
         });
     }
 
@@ -418,5 +471,136 @@ mod tests {
         assert!(s.is_active()); // \else taken
         s.pop_endif().unwrap();
         assert!(s.is_active());
+    }
+
+    // -- eval_bool_strict ------------------------------------------------------
+
+    #[test]
+    fn eval_bool_strict_truthy() {
+        for val in &["true", "True", "TRUE", "on", "1", "yes", "t", "y"] {
+            assert_eq!(
+                eval_bool_strict(val),
+                Some(true),
+                "{val} should be Some(true)"
+            );
+        }
+    }
+
+    #[test]
+    fn eval_bool_strict_falsy() {
+        for val in &["false", "False", "off", "0", "no", "f", "n", ""] {
+            assert_eq!(
+                eval_bool_strict(val),
+                Some(false),
+                "{val} should be Some(false)"
+            );
+        }
+    }
+
+    #[test]
+    fn eval_bool_strict_unrecognised_is_none() {
+        assert_eq!(eval_bool_strict("maybe"), None);
+        assert_eq!(eval_bool_strict("2"), None);
+        assert_eq!(eval_bool_strict("yes_please"), None);
+    }
+
+    #[test]
+    fn eval_bool_strict_trims_whitespace() {
+        assert_eq!(eval_bool_strict("  true  "), Some(true));
+        assert_eq!(eval_bool_strict("  false  "), Some(false));
+        assert_eq!(eval_bool_strict("  maybe  "), None);
+    }
+
+    // -- push_if_error / is_error_conditional ----------------------------------
+
+    #[test]
+    fn empty_stack_is_not_error_conditional() {
+        let s = ConditionalState::new();
+        assert!(!s.is_error_conditional());
+    }
+
+    #[test]
+    fn push_if_error_sets_error_conditional() {
+        let mut s = ConditionalState::new();
+        s.push_if_error();
+        assert!(s.is_error_conditional());
+        // The block should be inactive (like \if false).
+        assert!(!s.is_active());
+        assert_eq!(s.depth(), 1);
+    }
+
+    #[test]
+    fn pop_endif_after_push_if_error_clears_error() {
+        let mut s = ConditionalState::new();
+        s.push_if_error();
+        assert!(s.is_error_conditional());
+        s.pop_endif().unwrap();
+        assert!(!s.is_error_conditional());
+        assert!(s.is_active());
+        assert_eq!(s.depth(), 0);
+    }
+
+    #[test]
+    fn push_if_error_nested_in_inactive_outer_not_error() {
+        // When outer block is inactive, push_if_error should NOT set error
+        // flag (because the outer block suppresses everything).
+        let mut s = ConditionalState::new();
+        s.push_if(false); // outer: inactive
+        s.push_if_error(); // inner: error-conditional but outer is suppressed
+                           // error flag should be false because outer_active was false
+        assert!(!s.is_error_conditional());
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn push_if_error_nested_in_active_outer_is_error() {
+        let mut s = ConditionalState::new();
+        s.push_if(true); // outer: active
+        s.push_if_error(); // inner: error-conditional
+        assert!(s.is_error_conditional());
+        assert!(!s.is_active());
+        // Pop the error block — error should clear.
+        s.pop_endif().unwrap();
+        assert!(!s.is_error_conditional());
+        assert!(s.is_active());
+    }
+
+    #[test]
+    fn push_if_error_else_branch_not_taken() {
+        // After push_if_error, \else should not activate (any_true is false
+        // but the block is in error mode, which acts like \if false).
+        let mut s = ConditionalState::new();
+        s.push_if_error();
+        s.handle_else().unwrap();
+        // \else after \if false would normally activate, and it does here too
+        // because push_if_error sets any_true=false. The error flag is
+        // orthogonal to activation.
+        assert!(s.is_active());
+        s.pop_endif().unwrap();
+        assert!(s.is_active());
+    }
+
+    #[test]
+    fn normal_push_if_is_not_error_conditional() {
+        let mut s = ConditionalState::new();
+        s.push_if(false);
+        assert!(!s.is_error_conditional());
+        s.push_if(true);
+        assert!(!s.is_error_conditional());
+    }
+
+    // -- reset -----------------------------------------------------------------
+
+    #[test]
+    fn reset_clears_all_blocks() {
+        let mut s = ConditionalState::new();
+        s.push_if(true);
+        s.push_if_error(); // outer is active, so error flag is set
+        assert_eq!(s.depth(), 2);
+        assert!(s.is_error_conditional());
+        s.reset();
+        assert_eq!(s.depth(), 0);
+        assert!(s.is_active());
+        assert!(!s.is_error_conditional());
     }
 }

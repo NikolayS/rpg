@@ -188,12 +188,91 @@ fn build_name_clause(pattern: &str, column: &str) -> String {
         return String::new();
     }
 
+    // psql lowercases unquoted identifier patterns before matching,
+    // because catalog names are stored lowercase (unless double-quoted).
+    let lower = pattern.to_lowercase();
+
     if has_wildcards(pattern) {
-        let like_val = to_like(pattern);
+        let like_val = to_like(&lower);
         format!("{column} LIKE '{like_val}' ESCAPE '\\'")
     } else {
-        let escaped = sql_escape(pattern);
+        let escaped = sql_escape(&lower);
         format!("{column} = '{escaped}'")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-part name validation (cross-database / too-many-parts checks)
+// ---------------------------------------------------------------------------
+
+/// Count the number of dot-separated identifier parts in a psql-style pattern,
+/// respecting double-quoted strings (dots inside `"…"` are not separators).
+///
+/// Examples:
+/// - `"users"` → 1
+/// - `"public.users"` → 2
+/// - `"nonesuch.public.users"` → 3
+/// - `"host.db.schema.tbl"` → 4
+/// - `"\"no.such.schema\".\"no.such.table\""` → 2  (dots inside quotes)
+/// - `"\"no.such.database\".\"no.such.schema\".\"no.such.table\""` → 3
+pub fn count_identifier_parts(pattern: &str) -> usize {
+    let mut parts = 1usize;
+    let mut in_quotes = false;
+
+    for ch in pattern.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            '.' if !in_quotes => {
+                parts += 1;
+            }
+            _ => {}
+        }
+    }
+    parts
+}
+
+/// Outcome of validating a multi-part qualified name.
+pub enum QualifiedNameCheck {
+    /// The name is valid — proceed with the (possibly stripped) pattern.
+    Ok,
+    /// Too many dotted names — print the error and abort the command.
+    TooManyDots,
+    /// Cross-database reference — print the error and abort the command.
+    CrossDatabase,
+}
+
+/// Validate a pattern's dot-separated part count against the maximum the
+/// command supports.
+///
+/// - `max_parts` is `1` for name-only commands, `2` for commands that accept
+///   `schema.name` (or `database.name` where the extra part would be a DB),
+///   and `3` for commands that accept `database.schema.name`.
+///
+/// - `db_name` is the current database name, used to detect cross-database
+///   references (psql always rejects them).
+///
+/// Returns `QualifiedNameCheck::Ok` if the name is acceptable,
+/// `TooManyDots` if there are more parts than the command allows, or
+/// `CrossDatabase` if the leading part is a database that differs from the
+/// current connection.
+pub fn validate_qualified_name(
+    pattern: &str,
+    max_parts: usize,
+    _db_name: &str,
+) -> QualifiedNameCheck {
+    let parts = count_identifier_parts(pattern);
+
+    if parts > max_parts {
+        QualifiedNameCheck::TooManyDots
+    } else if parts == max_parts && max_parts > 1 {
+        // The first part would be a database name — in PostgreSQL this is
+        // always a cross-database reference error even if the name matches
+        // the current database.
+        QualifiedNameCheck::CrossDatabase
+    } else {
+        QualifiedNameCheck::Ok
     }
 }
 
@@ -430,5 +509,116 @@ mod tests {
     #[test]
     fn to_regex_escapes_regex_metacharacters() {
         assert_eq!(to_regex("a(b)"), "^(a\\(b\\))$");
+    }
+
+    // -- count_identifier_parts -----------------------------------------------
+
+    #[test]
+    fn count_parts_simple_name() {
+        assert_eq!(count_identifier_parts("users"), 1);
+    }
+
+    #[test]
+    fn count_parts_schema_qualified() {
+        assert_eq!(count_identifier_parts("public.users"), 2);
+    }
+
+    #[test]
+    fn count_parts_database_qualified() {
+        assert_eq!(count_identifier_parts("nonesuch.public.users"), 3);
+    }
+
+    #[test]
+    fn count_parts_four_part() {
+        assert_eq!(count_identifier_parts("host.db.schema.tbl"), 4);
+    }
+
+    #[test]
+    fn count_parts_quoted_dots_single() {
+        // "no.such.table" is ONE identifier — dots inside quotes don't count.
+        assert_eq!(count_identifier_parts("\"no.such.table\""), 1);
+    }
+
+    #[test]
+    fn count_parts_quoted_dots_two_parts() {
+        // "no.such.schema"."no.such.table" is TWO identifiers.
+        assert_eq!(
+            count_identifier_parts("\"no.such.schema\".\"no.such.table\""),
+            2
+        );
+    }
+
+    #[test]
+    fn count_parts_quoted_dots_three_parts() {
+        assert_eq!(
+            count_identifier_parts("\"no.such.db\".\"no.such.schema\".\"no.such.table\""),
+            3
+        );
+    }
+
+    #[test]
+    fn count_parts_mixed_quoted_unquoted() {
+        // regression."no.such.schema"."no.such.table" → 3 parts
+        assert_eq!(
+            count_identifier_parts("regression.\"no.such.schema\".\"no.such.table\""),
+            3
+        );
+    }
+
+    #[test]
+    fn count_parts_empty_first_part() {
+        // "..public.tenk1_hundred" → empty first part counts: "", "", "public", "tenk1_hundred" = 4 parts
+        assert_eq!(count_identifier_parts("..public.tenk1_hundred"), 4);
+    }
+
+    // -- validate_qualified_name ---------------------------------------------
+
+    #[test]
+    fn validate_simple_name_max1() {
+        assert!(matches!(
+            validate_qualified_name("users", 1, "regression"),
+            QualifiedNameCheck::Ok
+        ));
+    }
+
+    #[test]
+    fn validate_two_parts_max1() {
+        assert!(matches!(
+            validate_qualified_name("regression.heap", 1, "regression"),
+            QualifiedNameCheck::TooManyDots
+        ));
+    }
+
+    #[test]
+    fn validate_three_parts_max3_cross_db() {
+        assert!(matches!(
+            validate_qualified_name("nonesuch.public.users", 3, "regression"),
+            QualifiedNameCheck::CrossDatabase
+        ));
+    }
+
+    #[test]
+    fn validate_three_parts_max3_same_db() {
+        // Even when the database name matches, psql still returns cross-database error.
+        assert!(matches!(
+            validate_qualified_name("regression.public.users", 3, "regression"),
+            QualifiedNameCheck::CrossDatabase
+        ));
+    }
+
+    #[test]
+    fn validate_four_parts_max3() {
+        assert!(matches!(
+            validate_qualified_name("host.db.schema.tbl", 3, "regression"),
+            QualifiedNameCheck::TooManyDots
+        ));
+    }
+
+    #[test]
+    fn validate_two_parts_max2_cross_db() {
+        assert!(matches!(
+            validate_qualified_name("nonesuch.plpgsql", 2, "regression"),
+            QualifiedNameCheck::CrossDatabase
+        ));
     }
 }
