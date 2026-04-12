@@ -1077,25 +1077,49 @@ async fn list_role_grants(
         format!("where {}", where_parts.join("\n    and "))
     };
 
+    let pg_ver = settings.db_capabilities.pg_major_version();
+
+    // PG16+ added inherit_option, set_option columns to pg_auth_members and
+    // we also show the Grantor column.  On PG<16 only admin_option exists.
+    let (options_expr, grantor_col, order_tail) = if pg_ver.is_some_and(|v| v >= 16) {
+        (
+            "pg_catalog.concat_ws(', ',
+        case when pam.admin_option then 'ADMIN' end,
+        case when pam.inherit_option then 'INHERIT' end,
+        case when pam.set_option then 'SET' end
+    ) as \"Options\",",
+            "g.rolname as \"Grantor\"",
+            "order by 1, 2, 4",
+        )
+    } else {
+        (
+            "case when pam.admin_option then 'ADMIN' else '' end as \"Options\"",
+            "",
+            "order by 1, 2",
+        )
+    };
+
+    let grantor_join = if pg_ver.is_some_and(|v| v >= 16) {
+        "left join pg_catalog.pg_roles as g
+    on pam.grantor = g.oid"
+    } else {
+        ""
+    };
+
     let sql = format!(
         "select
     m.rolname as \"Role name\",
     r.rolname as \"Member of\",
-    pg_catalog.concat_ws(', ',
-        case when pam.admin_option then 'ADMIN' end,
-        case when pam.inherit_option then 'INHERIT' end,
-        case when pam.set_option then 'SET' end
-    ) as \"Options\",
-    g.rolname as \"Grantor\"
+    {options_expr}
+    {grantor_col}
 from pg_catalog.pg_roles as m
 join pg_catalog.pg_auth_members as pam
     on pam.member = m.oid
 left join pg_catalog.pg_roles as r
     on pam.roleid = r.oid
-left join pg_catalog.pg_roles as g
-    on pam.grantor = g.oid
+{grantor_join}
 {where_clause}
-order by 1, 2, 4"
+{order_tail}"
     );
 
     run_and_print_titled(
@@ -2509,6 +2533,17 @@ async fn list_publications(
         return list_publications_verbose(client, meta, &where_clause, settings).await;
     }
 
+    let pg_ver = settings.db_capabilities.pg_major_version();
+    let gencols_col = if pg_ver.is_some_and(|v| v >= 18) {
+        "case p.pubgencols
+        when 'n' then 'none'
+        when 's' then 'stored'
+        else p.pubgencols::text
+    end as \"Generated columns\","
+    } else {
+        ""
+    };
+
     let sql = format!(
         "select
     p.pubname as \"Name\",
@@ -2518,11 +2553,7 @@ async fn list_publications(
     p.pubupdate as \"Updates\",
     p.pubdelete as \"Deletes\",
     p.pubtruncate as \"Truncates\",
-    case p.pubgencols
-        when 'n' then 'none'
-        when 's' then 'stored'
-        else p.pubgencols::text
-    end as \"Generated columns\",
+    {gencols_col}
     p.pubviaroot as \"Via root\"
 from pg_catalog.pg_publication as p
 {where_clause}
@@ -2554,6 +2585,17 @@ async fn list_publications_verbose(
     use tokio_postgres::SimpleQueryMessage;
 
     // Fetch all matching publications.
+    let pg_ver = settings.db_capabilities.pg_major_version();
+    let gencols_col = if pg_ver.is_some_and(|v| v >= 18) {
+        "case p.pubgencols
+        when 'n' then 'none'
+        when 's' then 'stored'
+        else p.pubgencols::text
+    end as pubgencols,"
+    } else {
+        ""
+    };
+
     let pubs_sql = format!(
         "select
     p.oid,
@@ -2564,11 +2606,7 @@ async fn list_publications_verbose(
     p.pubupdate,
     p.pubdelete,
     p.pubtruncate,
-    case p.pubgencols
-        when 'n' then 'none'
-        when 's' then 'stored'
-        else p.pubgencols::text
-    end as pubgencols,
+    {gencols_col}
     p.pubviaroot
 from pg_catalog.pg_publication as p
 {where_clause}
@@ -2579,6 +2617,10 @@ order by 1"
         eprintln!("/******** QUERY *********/\n{pubs_sql}\n/************************/");
     }
 
+    let has_gencols = pg_ver.is_some_and(|v| v >= 18);
+
+    // Each row: (oid, pubname, owner, puballtables, pubinsert, pubupdate,
+    //            pubdelete, pubtruncate, Option<pubgencols>, pubviaroot)
     let pub_rows: Vec<(
         String,
         String,
@@ -2588,13 +2630,19 @@ order by 1"
         String,
         String,
         String,
-        String,
+        Option<String>,
         String,
     )> = match client.simple_query(&pubs_sql).await {
         Ok(msgs) => msgs
             .into_iter()
             .filter_map(|m| {
                 if let SimpleQueryMessage::Row(row) = m {
+                    // When pubgencols is present the viaroot column shifts by 1.
+                    let (gc, viaroot_idx) = if has_gencols {
+                        (Some(row.get(8).unwrap_or("").to_owned()), 9)
+                    } else {
+                        (None, 8)
+                    };
                     Some((
                         row.get(0).unwrap_or("").to_owned(), // oid
                         row.get(1).unwrap_or("").to_owned(), // pubname
@@ -2604,8 +2652,8 @@ order by 1"
                         row.get(5).unwrap_or("").to_owned(), // pubupdate
                         row.get(6).unwrap_or("").to_owned(), // pubdelete
                         row.get(7).unwrap_or("").to_owned(), // pubtruncate
-                        row.get(8).unwrap_or("").to_owned(), // pubgencols
-                        row.get(9).unwrap_or("").to_owned(), // pubviaroot
+                        gc,
+                        row.get(viaroot_idx).unwrap_or("").to_owned(), // pubviaroot
                     ))
                 } else {
                     None
@@ -2634,26 +2682,29 @@ order by 1"
     ) in &pub_rows
     {
         // Build the attribute rows for this publication.
-        let col_names: Vec<String> = vec![
+        let mut col_names: Vec<String> = vec![
             "Owner".to_owned(),
             "All tables".to_owned(),
             "Inserts".to_owned(),
             "Updates".to_owned(),
             "Deletes".to_owned(),
             "Truncates".to_owned(),
-            "Generated columns".to_owned(),
-            "Via root".to_owned(),
         ];
-        let data_rows: Vec<Vec<String>> = vec![vec![
+        let mut data_row: Vec<String> = vec![
             owner.clone(),
             puballtables.clone(),
             pubinsert.clone(),
             pubupdate.clone(),
             pubdelete.clone(),
             pubtruncate.clone(),
-            pubgencols.clone(),
-            pubviaroot.clone(),
-        ]];
+        ];
+        if let Some(gc) = pubgencols {
+            col_names.push("Generated columns".to_owned());
+            data_row.push(gc.clone());
+        }
+        col_names.push("Via root".to_owned());
+        data_row.push(pubviaroot.clone());
+        let data_rows: Vec<Vec<String>> = vec![data_row];
         // Fetch tables covered by this publication.
         // Returns (table_name, col_list, where_clause) for each table.
         let tables_sql = format!(
@@ -2785,7 +2836,48 @@ async fn list_subscriptions(
         format!("where {name_filter}")
     };
 
+    let pg_ver = settings.db_capabilities.pg_major_version();
+
     let sql = if meta.plus {
+        // PG15+: subtwophasestate, subdisableonerr, subskiplsn
+        let pg15_cols = if pg_ver.is_some_and(|v| v >= 15) {
+            "case s.subtwophasestate
+        when 'd' then 'd'
+        when 'p' then 'p'
+        when 'e' then 'e'
+        else s.subtwophasestate::text
+    end as \"Two-phase commit\",
+    s.subdisableonerr as \"Disable on error\","
+        } else {
+            ""
+        };
+        // PG16+: suborigin, subpasswordrequired, subrunasowner
+        let pg16_cols = if pg_ver.is_some_and(|v| v >= 16) {
+            "s.suborigin as \"Origin\",
+    s.subpasswordrequired as \"Password required\",
+    s.subrunasowner as \"Run as owner?\","
+        } else {
+            ""
+        };
+        // PG17+: subfailover
+        let pg17_cols = if pg_ver.is_some_and(|v| v >= 17) {
+            "s.subfailover as \"Failover\","
+        } else {
+            ""
+        };
+        // PG15+: subskiplsn (at end, after conninfo)
+        let pg15_skiplsn = if pg_ver.is_some_and(|v| v >= 15) {
+            "s.subskiplsn as \"Skip LSN\""
+        } else {
+            ""
+        };
+        // When subskiplsn is present, conninfo needs a trailing comma;
+        // when absent, conninfo is the last column (no trailing comma).
+        let conninfo_col = if pg_ver.is_some_and(|v| v >= 15) {
+            "s.subconninfo as \"Conninfo\","
+        } else {
+            "s.subconninfo as \"Conninfo\""
+        };
         format!(
             "select
     s.subname as \"Name\",
@@ -2799,20 +2891,12 @@ async fn list_subscriptions(
         when 'p' then 'parallel'
         else s.substream::text
     end as \"Streaming\",
-    case s.subtwophasestate
-        when 'd' then 'd'
-        when 'p' then 'p'
-        when 'e' then 'e'
-        else s.subtwophasestate::text
-    end as \"Two-phase commit\",
-    s.subdisableonerr as \"Disable on error\",
-    s.suborigin as \"Origin\",
-    s.subpasswordrequired as \"Password required\",
-    s.subrunasowner as \"Run as owner?\",
-    s.subfailover as \"Failover\",
+    {pg15_cols}
+    {pg16_cols}
+    {pg17_cols}
     s.subsynccommit as \"Synchronous commit\",
-    s.subconninfo as \"Conninfo\",
-    s.subskiplsn as \"Skip LSN\"
+    {conninfo_col}
+    {pg15_skiplsn}
 from pg_catalog.pg_subscription as s
 {where_clause}
 order by 1"
@@ -3412,12 +3496,18 @@ where c.relispartition = true
         }
 
         // Footer: "amname, for table \"schema.table\""
+        let pg_ver = settings.db_capabilities.pg_major_version();
+        let nullsnotdistinct_col = if pg_ver.is_some_and(|v| v >= 15) {
+            "ix.indnullsnotdistinct,"
+        } else {
+            ""
+        };
         let idx_footer_sql = format!(
             "select am.amname,
     tn.nspname || '.' || tc.relname as table_name,
     ix.indisprimary, ix.indisunique,
     pg_catalog.pg_get_expr(ix.indpred, ix.indrelid, true) as predicate,
-    ix.indnullsnotdistinct,
+    {nullsnotdistinct_col}
     c.reloptions,
     coalesce(spc.spcname, '') as idx_tablespace
 from pg_catalog.pg_class as c
@@ -3442,9 +3532,17 @@ where c.oid = (
                     let is_primary = row.get(2).is_some_and(|v| v == "t");
                     let is_unique = row.get(3).is_some_and(|v| v == "t");
                     let pred = row.get(4).unwrap_or("");
-                    let nulls_not_distinct = row.get(5).is_some_and(|v| v == "t");
-                    let reloptions = row.get(6).unwrap_or("");
-                    let idx_tablespace = row.get(7).unwrap_or("");
+                    // On PG15+, indnullsnotdistinct is col 5, shifting
+                    // reloptions and tablespace to 6/7.
+                    // On PG14, those are at 5/6.
+                    let (nulls_not_distinct, relopts_idx, tblspc_idx) =
+                        if pg_ver.is_some_and(|v| v >= 15) {
+                            (row.get(5).is_some_and(|v| v == "t"), 6, 7)
+                        } else {
+                            (false, 5, 6)
+                        };
+                    let reloptions = row.get(relopts_idx).unwrap_or("");
+                    let idx_tablespace = row.get(tblspc_idx).unwrap_or("");
                     let mut parts = Vec::new();
                     if is_primary {
                         parts.push("primary key".to_owned());
@@ -3737,6 +3835,12 @@ limit 1"
     // 2. Indexes — query returns raw fields; we format as psql indented text.
     // psql format: "name" PRIMARY KEY, btree (cols)  or  "name" btree (cols)
     // col 6: pg_get_expr(indpred) is non-NULL for partial indexes (WHERE clause)
+    let pg_ver = settings.db_capabilities.pg_major_version();
+    let idx_nullsnotdistinct = if pg_ver.is_some_and(|v| v >= 15) {
+        "ix.indnullsnotdistinct,"
+    } else {
+        ""
+    };
     let idx_sql = format!(
         "select
     i.relname as idx_name,
@@ -3762,7 +3866,7 @@ limit 1"
      where conrelid = ix.indrelid
        and conindid = i.oid
      limit 1) as con_oid,
-    ix.indnullsnotdistinct,
+    {idx_nullsnotdistinct}
     (select condeferrable
      from pg_catalog.pg_constraint
      where conrelid = ix.indrelid
@@ -3997,16 +4101,18 @@ where {name_cond} limit 1"
                 let con_type = row.get(8).unwrap_or("").to_owned();
                 // col 9 = con_oid: OID of the backing constraint (for pg_get_constraintdef)
                 let con_oid = row.get(9).unwrap_or("").to_owned();
-                // col 10 = indnullsnotdistinct: NULLS NOT DISTINCT for unique indexes (PG15+)
-                let nulls_not_distinct = row.get(10).unwrap_or("f") == "t";
-                // col 11 = condeferrable: true when the backing constraint is deferrable
-                let is_deferrable = row.get(11).is_some_and(|v| v == "t");
-                // col 12 = indisreplident: true when this index is the replica identity index
-                let is_replident = row.get(12).is_some_and(|v| v == "t");
-                // col 13 = idx_tablespace: non-empty when index is in non-default tablespace
-                let idx_tablespace = row.get(13).unwrap_or("").to_owned();
-                // col 14 = condeferred: true when the constraint is INITIALLY DEFERRED
-                let is_deferred = row.get(14).is_some_and(|v| v == "t");
+                // On PG15+, col 10 = indnullsnotdistinct; on PG14, it is
+                // omitted and subsequent columns shift down by one.
+                let (nulls_not_distinct, deferrable_idx, replident_idx, tblspc_idx, deferred_idx) =
+                    if pg_ver.is_some_and(|v| v >= 15) {
+                        (row.get(10).unwrap_or("f") == "t", 11, 12, 13, 14)
+                    } else {
+                        (false, 10, 11, 12, 13)
+                    };
+                let is_deferrable = row.get(deferrable_idx).is_some_and(|v| v == "t");
+                let is_replident = row.get(replident_idx).is_some_and(|v| v == "t");
+                let idx_tablespace = row.get(tblspc_idx).unwrap_or("").to_owned();
+                let is_deferred = row.get(deferred_idx).is_some_and(|v| v == "t");
                 index_rows.push((
                     idx_name,
                     is_primary,
