@@ -763,6 +763,18 @@ pub async fn execute_query(
                         settings.quiet,
                     );
 
+                    // Flush buffered notices (NOTICE, WARNING, etc.) so they
+                    // appear deterministically *before* each statement's
+                    // result output, matching psql's synchronous ordering
+                    // where libpq delivers notices inline before the result.
+                    // The yield gives the connection-driving task a chance to
+                    // buffer any notices that arrived during execution.
+                    // Flush stdout first so any preceding echo-all output is
+                    // committed before notice lines appear on stderr.
+                    let _ = io::stdout().flush();
+                    tokio::task::yield_now().await;
+                    crate::output::flush_notices();
+
                     // Mirror output to log file if active.
                     if let Some(ref mut lf) = settings.log_file {
                         let _ = lf.write_all(&out_buf);
@@ -774,14 +786,6 @@ pub async fn execute_query(
                     } else {
                         let _ = io::stdout().write_all(&out_buf);
                     }
-
-                    // Flush buffered notices (NOTICE, WARNING, etc.) so they
-                    // appear deterministically after each statement's output,
-                    // matching psql's synchronous ordering.  The yield gives
-                    // the connection-driving task a chance to buffer any
-                    // notices that arrived just before CommandComplete.
-                    tokio::task::yield_now().await;
-                    crate::output::flush_notices();
 
                     // Store row count for audit log entry.
                     if result_set_index == 0 {
@@ -1191,6 +1195,12 @@ pub async fn execute_query_extended(
                 }
             }
 
+            // Flush buffered notices before printing results, matching
+            // psql's synchronous notice delivery order.
+            let _ = io::stdout().flush();
+            tokio::task::yield_now().await;
+            crate::output::flush_notices();
+
             if !col_names.is_empty() || !row_data.is_empty() {
                 let columns: Vec<ColumnMeta> = col_names
                     .iter()
@@ -1224,10 +1234,6 @@ pub async fn execute_query_extended(
                     let _ = io::stdout().write_all(out_bytes);
                 }
             }
-
-            // Flush buffered notices after extended query results.
-            tokio::task::yield_now().await;
-            crate::output::flush_notices();
 
             // ON_ERROR_ROLLBACK: release the implicit savepoint on success.
             if use_implicit_savepoint_ext {

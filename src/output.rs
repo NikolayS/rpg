@@ -56,9 +56,10 @@ pub fn push_notice(formatted: String) {
 
 /// Drain all buffered notices and print them to stderr.
 ///
-/// Called by query-execution code at statement boundaries (after
-/// `CommandComplete` or after an error) so that notices appear in the
-/// same position relative to query output as they do in psql.
+/// Called by query-execution code at statement boundaries (*before*
+/// printing the result) so that notices appear in the same position
+/// relative to query output as they do in psql (where libpq delivers
+/// them inline before the result).
 pub fn flush_notices() {
     let notices: Vec<String> = {
         match NOTICE_BUF.lock() {
@@ -66,9 +67,18 @@ pub fn flush_notices() {
             Err(_) => return,
         }
     };
-    for n in notices {
+    if notices.is_empty() {
+        return;
+    }
+    for n in &notices {
         eprint!("{n}");
     }
+    // Explicitly flush stderr so that notices are committed to the
+    // output stream before any subsequent stdout writes.  This is
+    // important when stderr is redirected to stdout (e.g. `2>&1` in
+    // the regression test harness) and both are piped — without the
+    // flush, fully-buffered stderr may reorder relative to stdout.
+    let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
 // ---------------------------------------------------------------------------
