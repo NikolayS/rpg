@@ -816,10 +816,14 @@ pub async fn execute_query(
 
     let success = if let Some(e) = stream_error {
         // ON_ERROR_ROLLBACK: roll back to the implicit savepoint so
-        // the transaction stays alive (not aborted).
+        // the transaction stays alive (not aborted), then release it
+        // to avoid accumulating savepoints — matching psql behaviour.
         if use_implicit_savepoint {
             let _ = client
                 .simple_query("ROLLBACK TO SAVEPOINT pg_psql_savepoint")
+                .await;
+            let _ = client
+                .simple_query("RELEASE SAVEPOINT pg_psql_savepoint")
                 .await;
         }
 
@@ -1086,10 +1090,14 @@ pub async fn execute_query_extended(
     let stmt = match client.prepare(sql_to_send).await {
         Ok(s) => s,
         Err(e) => {
-            // ON_ERROR_ROLLBACK: roll back to the implicit savepoint.
+            // ON_ERROR_ROLLBACK: roll back to the implicit savepoint
+            // then release it to avoid accumulating savepoints.
             if use_implicit_savepoint_ext {
                 let _ = client
                     .simple_query("ROLLBACK TO SAVEPOINT pg_psql_savepoint")
+                    .await;
+                let _ = client
+                    .simple_query("RELEASE SAVEPOINT pg_psql_savepoint")
                     .await;
             }
 
@@ -1204,10 +1212,14 @@ pub async fn execute_query_extended(
             true
         }
         Err(e) => {
-            // ON_ERROR_ROLLBACK: roll back to the implicit savepoint.
+            // ON_ERROR_ROLLBACK: roll back to the implicit savepoint
+            // then release it to avoid accumulating savepoints.
             if use_implicit_savepoint_ext {
                 let _ = client
                     .simple_query("ROLLBACK TO SAVEPOINT pg_psql_savepoint")
+                    .await;
+                let _ = client
+                    .simple_query("RELEASE SAVEPOINT pg_psql_savepoint")
                     .await;
             }
 
@@ -2295,10 +2307,10 @@ pub(super) async fn execute_gset(
 /// Substitute `$N` positional parameters in `sql` with their quoted literal
 /// values from `params`, producing a plain SQL string safe for `simple_query`.
 ///
-/// Each parameter value is wrapped in dollar-quoting (`$param_N$...$param_N$`)
+/// Each parameter value is wrapped in dollar-quoting (`$param$...$param$`)
 /// so that any embedded single quotes or backslashes are handled correctly.
-/// If the parameter appears to be NULL (the value is literally `\N` per psql
-/// convention), it is substituted as the SQL keyword `NULL`.
+/// Parameters inside single-quoted strings, dollar-quoted strings, or
+/// comments are left untouched.
 #[allow(clippy::too_many_lines)]
 fn substitute_bind_params(sql: &str, params: &[String]) -> String {
     if params.is_empty() {
@@ -2470,7 +2482,18 @@ fn find_dollar_quote_tag(val: &str) -> String {
             return tag;
         }
     }
-    "$p$".to_owned()
+    // Final fallback: check "$p$" first, then try "$pN$" variants.
+    if !val.contains("$p$") {
+        return "$p$".to_owned();
+    }
+    for n in 0..1000 {
+        let tag = format!("$p{n}$");
+        if !val.contains(&tag) {
+            return tag;
+        }
+    }
+    // Practically unreachable: value contains $param0$–$param99$, $p$, and $p0$–$p999$.
+    "$rpg_param$".to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -3235,5 +3258,208 @@ mod tests {
             "separator with '+' must be stripped: {result:?}"
         );
         assert!(result.contains("Seq Scan"));
+    }
+
+    // -- is_transaction_control_command ----------------------------------------
+
+    #[test]
+    fn tx_ctrl_begin() {
+        assert!(super::is_transaction_control_command("BEGIN"));
+    }
+
+    #[test]
+    fn tx_ctrl_begin_lowercase() {
+        assert!(super::is_transaction_control_command("begin"));
+    }
+
+    #[test]
+    fn tx_ctrl_commit() {
+        assert!(super::is_transaction_control_command("COMMIT"));
+    }
+
+    #[test]
+    fn tx_ctrl_rollback() {
+        assert!(super::is_transaction_control_command("ROLLBACK"));
+    }
+
+    #[test]
+    fn tx_ctrl_rollback_to_savepoint() {
+        assert!(super::is_transaction_control_command(
+            "ROLLBACK TO SAVEPOINT sp1"
+        ));
+    }
+
+    #[test]
+    fn tx_ctrl_savepoint() {
+        assert!(super::is_transaction_control_command("SAVEPOINT sp1"));
+    }
+
+    #[test]
+    fn tx_ctrl_release() {
+        assert!(super::is_transaction_control_command(
+            "RELEASE SAVEPOINT sp1"
+        ));
+    }
+
+    #[test]
+    fn tx_ctrl_end() {
+        assert!(super::is_transaction_control_command("END"));
+    }
+
+    #[test]
+    fn tx_ctrl_abort() {
+        assert!(super::is_transaction_control_command("ABORT"));
+    }
+
+    #[test]
+    fn tx_ctrl_start_transaction() {
+        assert!(super::is_transaction_control_command("START TRANSACTION"));
+    }
+
+    #[test]
+    fn tx_ctrl_prepare_transaction() {
+        assert!(super::is_transaction_control_command(
+            "PREPARE TRANSACTION 'tx1'"
+        ));
+    }
+
+    #[test]
+    fn tx_ctrl_leading_whitespace() {
+        assert!(super::is_transaction_control_command("  BEGIN"));
+    }
+
+    #[test]
+    fn tx_ctrl_negative_select() {
+        assert!(!super::is_transaction_control_command("SELECT 1"));
+    }
+
+    #[test]
+    fn tx_ctrl_negative_insert() {
+        assert!(!super::is_transaction_control_command(
+            "INSERT INTO t VALUES (1)"
+        ));
+    }
+
+    #[test]
+    fn tx_ctrl_negative_prepare_stmt() {
+        // PREPARE (without TRANSACTION) is a prepared statement, not tx control.
+        assert!(!super::is_transaction_control_command(
+            "PREPARE stmt AS SELECT 1"
+        ));
+    }
+
+    // -- substitute_bind_params ------------------------------------------------
+
+    #[test]
+    fn bind_plain_substitution() {
+        let result = super::substitute_bind_params(
+            "SELECT $1, $2",
+            &["hello".to_owned(), "world".to_owned()],
+        );
+        assert!(
+            result.contains("hello"),
+            "param $1 should be substituted: {result:?}"
+        );
+        assert!(
+            result.contains("world"),
+            "param $2 should be substituted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_inside_single_quoted_string_no_sub() {
+        let result =
+            super::substitute_bind_params("SELECT '$1'", &["should_not_appear".to_owned()]);
+        assert!(
+            !result.contains("should_not_appear"),
+            "$1 inside single quotes must not be substituted: {result:?}"
+        );
+        assert!(
+            result.contains("'$1'"),
+            "single-quoted $1 must be preserved: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_inside_dollar_quoted_body_no_sub() {
+        let result =
+            super::substitute_bind_params("SELECT $$ $1 $$", &["should_not_appear".to_owned()]);
+        assert!(
+            !result.contains("should_not_appear"),
+            "$1 inside $$ body must not be substituted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_inside_line_comment_no_sub() {
+        let result =
+            super::substitute_bind_params("SELECT 1 -- $1\n", &["should_not_appear".to_owned()]);
+        assert!(
+            !result.contains("should_not_appear"),
+            "$1 inside line comment must not be substituted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_inside_block_comment_no_sub() {
+        let result =
+            super::substitute_bind_params("SELECT /* $1 */ 1", &["should_not_appear".to_owned()]);
+        assert!(
+            !result.contains("should_not_appear"),
+            "$1 inside block comment must not be substituted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_out_of_range_param_left_as_is() {
+        // $2 when only 1 param is provided should be left as-is.
+        let result = super::substitute_bind_params("SELECT $2", &["only_one".to_owned()]);
+        assert!(
+            result.contains("$2"),
+            "out-of-range param must be left as-is: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_empty_params_returns_original() {
+        let sql = "SELECT $1";
+        let result = super::substitute_bind_params(sql, &[]);
+        assert_eq!(result, sql, "empty params must return original SQL");
+    }
+
+    // -- find_dollar_quote_tag -------------------------------------------------
+
+    #[test]
+    fn dollar_tag_base_case() {
+        let tag = super::find_dollar_quote_tag("hello world");
+        assert_eq!(tag, "$param$");
+    }
+
+    #[test]
+    fn dollar_tag_contains_base() {
+        let tag = super::find_dollar_quote_tag("contains $param$ inside");
+        assert_ne!(
+            tag, "$param$",
+            "must not use base tag when value contains it"
+        );
+        assert!(!tag.is_empty(), "must return a non-empty tag");
+        assert!(
+            !"contains $param$ inside".contains(&tag),
+            "returned tag must not appear in value"
+        );
+    }
+
+    #[test]
+    fn dollar_tag_fallback_checked() {
+        // Build a pathological value that contains $param$, $param0$–$param99$, and $p$.
+        let mut evil = String::from("$param$ $p$");
+        for n in 0..100 {
+            evil.push_str(&format!(" $param{n}$"));
+        }
+        let tag = super::find_dollar_quote_tag(&evil);
+        assert!(
+            !evil.contains(&tag),
+            "tag must not appear in value even for pathological input: tag={tag:?}"
+        );
     }
 }

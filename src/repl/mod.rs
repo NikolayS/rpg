@@ -5518,6 +5518,7 @@ async fn dispatch_meta(
                     | MetaCmd::ListFunctions
                     | MetaCmd::ListSchemas
                     | MetaCmd::ListRoles
+                    | MetaCmd::ListRoleGrants
                     | MetaCmd::ListDatabases
                     | MetaCmd::ListExtensions
                     | MetaCmd::ListTablespaces
@@ -5525,6 +5526,7 @@ async fn dispatch_meta(
                     | MetaCmd::ListDomains
                     | MetaCmd::ListEventTriggers
                     | MetaCmd::ListPrivileges
+                    | MetaCmd::ListDefaultPrivileges
                     | MetaCmd::ListConversions
                     | MetaCmd::ListCasts
                     | MetaCmd::ListComments

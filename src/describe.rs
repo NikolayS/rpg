@@ -54,7 +54,17 @@ pub async fn execute(
         }
     }
 
-    match &meta.cmd {
+    // When the `expanded` modifier is set (e.g. `\zx`), temporarily switch to
+    // expanded output mode for this command, restoring the original afterwards.
+    let saved_expanded = if meta.expanded {
+        let prev = settings.pset.expanded;
+        settings.pset.expanded = crate::output::ExpandedMode::On;
+        Some(prev)
+    } else {
+        None
+    };
+
+    let result = match &meta.cmd {
         MetaCmd::DescribeObject => describe_object(client, meta, settings).await,
         MetaCmd::ListTables => list_relations(client, meta, &["r", "p"], settings).await,
         MetaCmd::ListIndexes => list_relations(client, meta, &["i"], settings).await,
@@ -65,12 +75,14 @@ pub async fn execute(
         MetaCmd::ListFunctions => list_functions(client, meta, settings).await,
         MetaCmd::ListSchemas => list_schemas(client, meta, settings).await,
         MetaCmd::ListRoles => list_roles(client, meta, settings).await,
+        MetaCmd::ListRoleGrants => list_role_grants(client, meta, settings).await,
         MetaCmd::ListDatabases => list_databases(client, meta, pg_major_version, settings).await,
         MetaCmd::ListExtensions => list_extensions(client, meta, settings).await,
         MetaCmd::ListTablespaces => list_tablespaces(client, meta, settings).await,
         MetaCmd::ListTypes => list_types(client, meta, settings).await,
         MetaCmd::ListDomains => list_domains(client, meta, settings).await,
         MetaCmd::ListPrivileges => list_privileges(client, meta, settings).await,
+        MetaCmd::ListDefaultPrivileges => list_default_privileges(client, meta, settings).await,
         MetaCmd::ListConversions => list_conversions(client, meta, settings).await,
         MetaCmd::ListCasts => list_casts(client, meta, settings).await,
         MetaCmd::ListComments => list_comments(client, meta, settings).await,
@@ -87,7 +99,14 @@ pub async fn execute(
         MetaCmd::ListSubscriptions => list_subscriptions(client, meta, settings).await,
         // Non-describe commands should never reach this function.
         _ => false,
+    };
+
+    // Restore expanded mode if we overrode it.
+    if let Some(prev) = saved_expanded {
+        settings.pset.expanded = prev;
     }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +159,7 @@ async fn run_and_print_full(
             use tokio_postgres::SimpleQueryMessage;
 
             let mut col_names: Vec<String> = Vec::new();
-            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut opt_rows: Vec<Vec<Option<String>>> = Vec::new();
 
             for msg in messages {
                 match msg {
@@ -159,14 +178,16 @@ async fn run_and_print_full(
                                 })
                                 .collect();
                         }
-                        let vals: Vec<String> = (0..row.len())
-                            .map(|i| row.get(i).unwrap_or("").to_owned())
+                        let vals: Vec<Option<String>> = (0..row.len())
+                            .map(|i| row.get(i).map(ToOwned::to_owned))
                             .collect();
-                        rows.push(vals);
+                        opt_rows.push(vals);
                     }
                     _ => {}
                 }
             }
+
+            let null_str = &settings.pset.null_display;
 
             let fmt = &settings.pset.format;
             // Use format_rowset_pset for HTML/non-aligned formats to respect pset settings.
@@ -176,6 +197,15 @@ async fn run_and_print_full(
                 && !settings.pset.tuples_only
                 && settings.pset.expanded == crate::output::ExpandedMode::Off
             {
+                // Substitute NULLs with the null_display string for the aligned path.
+                let rows: Vec<Vec<String>> = opt_rows
+                    .iter()
+                    .map(|r| {
+                        r.iter()
+                            .map(|v| v.as_deref().unwrap_or(null_str).to_owned())
+                            .collect()
+                    })
+                    .collect();
                 format_table_inner(&col_names, &rows, title, show_row_count)
             } else {
                 // Build a RowSet and use pset-aware formatting.
@@ -187,13 +217,9 @@ async fn run_and_print_full(
                         is_numeric: false,
                     })
                     .collect();
-                let rs_rows: Vec<Vec<Option<String>>> = rows
-                    .iter()
-                    .map(|r| r.iter().map(|v| Some(v.clone())).collect())
-                    .collect();
                 let rs = RowSet {
                     columns,
-                    rows: rs_rows,
+                    rows: opt_rows,
                 };
                 // Apply title to pset config temporarily.
                 let mut cfg = settings.pset.clone();
@@ -784,7 +810,12 @@ async fn list_functions(
     end as \"Parallel\",
     pg_catalog.pg_get_userbyid(p.proowner) as \"Owner\",
     case when p.prosecdef then 'definer' else 'invoker' end as \"Security\",
-    pg_catalog.array_to_string(p.proacl, E'\\n') as \"Access privileges\",
+    case when p.proleakproof then 'yes' else 'no' end as \"Leakproof?\",
+    case
+        when p.proacl is null then null
+        when pg_catalog.array_length(p.proacl, 1) = 0 then '(none)'
+        else pg_catalog.array_to_string(p.proacl, E'\\n')
+    end as \"Access privileges\",
     l.lanname as \"Language\",
     case when l.lanname in ('internal', 'c') then p.prosrc end as \"Internal name\",
     pg_catalog.obj_description(p.oid, 'pg_proc') as \"Description\"
@@ -992,6 +1023,77 @@ order by 1"
         &sql,
         meta.echo_hidden,
         Some("List of roles"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \drg — list role grants
+// ---------------------------------------------------------------------------
+
+async fn list_role_grants(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "m.rolname", None);
+
+    // When no pattern is given, exclude pg_* system roles (matches psql).
+    let sys_role_filter = if meta.pattern.is_none() {
+        "m.rolname !~ '^pg_'"
+    } else {
+        ""
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_role_filter.is_empty() {
+            None
+        } else {
+            Some(sys_role_filter)
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    m.rolname as \"Role name\",
+    r.rolname as \"Member of\",
+    pg_catalog.concat_ws(', ',
+        case when pam.admin_option then 'ADMIN' end,
+        case when pam.inherit_option then 'INHERIT' end,
+        case when pam.set_option then 'SET' end
+    ) as \"Options\",
+    g.rolname as \"Grantor\"
+from pg_catalog.pg_roles as m
+join pg_catalog.pg_auth_members as pam
+    on pam.member = m.oid
+left join pg_catalog.pg_roles as r
+    on pam.roleid = r.oid
+left join pg_catalog.pg_roles as g
+    on pam.grantor = g.oid
+{where_clause}
+order by 1, 2, 4"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of role grants"),
         settings,
     )
     .await
@@ -1489,8 +1591,9 @@ async fn list_privileges(
         when 'f' then 'foreign table'
         when 'p' then 'partitioned table'
     end as \"Type\",
-    case when pg_catalog.array_length(c.relacl, 1) = 0
-        then '(none)'
+    case
+        when c.relacl is null then null
+        when pg_catalog.array_length(c.relacl, 1) = 0 then '(none)'
         else pg_catalog.array_to_string(c.relacl, E'\\n')
     end as \"Access privileges\",
     pg_catalog.array_to_string(array(
@@ -1543,6 +1646,56 @@ order by 1, 2"
         &sql,
         meta.echo_hidden,
         Some("Access privileges"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \ddp — list default access privileges
+// ---------------------------------------------------------------------------
+
+async fn list_default_privileges(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "n.nspname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let sql = format!(
+        "select
+    pg_catalog.pg_get_userbyid(d.defaclrole) as \"Owner\",
+    n.nspname as \"Schema\",
+    case d.defaclobjtype
+        when 'r' then 'table'
+        when 'S' then 'sequence'
+        when 'f' then 'function'
+        when 'T' then 'type'
+        when 'n' then 'schema'
+        when 'L' then 'large object'
+    end as \"Type\",
+    case
+        when pg_catalog.array_length(d.defaclacl, 1) = 0 then '(none)'
+        else pg_catalog.array_to_string(d.defaclacl, E'\\n')
+    end as \"Access privileges\"
+from pg_catalog.pg_default_acl as d
+left join pg_catalog.pg_namespace as n
+    on n.oid = d.defaclnamespace
+{where_clause}
+order by 1, 2, 3"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("Default access privileges"),
         settings,
     )
     .await
@@ -4842,6 +4995,7 @@ mod tests {
             echo_hidden: false,
             kind_filter: None,
             continuation: None,
+            expanded: false,
         }
     }
 

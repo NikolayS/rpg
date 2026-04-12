@@ -27,13 +27,12 @@ Test files are fetched at CI runtime from [`postgres/postgres`](https://github.c
 | Status | Count | Tests |
 |--------|-------|-------|
 | ✅ PASS | **230+** | boolean, char, name, varchar, text, int2–int8, float4/8, numeric, uuid, enum, money, rangetypes, date, time, timestamp, interval, inet, geometry types, JSON, XML, arrays, inheritance, triggers, views, indexes, sequences, roles, privileges, partitioning, generated columns, statistics, foreign data, publication, row security, … |
-| ⏭ SKIP — CI infrastructure | 2 | `misc_functions` (pg_replication_origin state leak between tests), `tablespace` (tablespace directory not set up in CI) |
-| ⏭ SKIP — needs C extension | 1 | `regproc` (requires `regress.so` built from C) |
-| ⏭ SKIP — schema init | 1 | `test_setup` (runs as setup before tests, not a test itself) |
-| ⏭ SKIP — known rpg gaps | 7 | `psql` (`\parse`/`\bind` not yet implemented), `transactions` (`\;` implicit-txn semantics), `copydml` (non-deterministic NOTICE ordering), `strings`/`copy`/`copy2` (backslash parsing with `standard_conforming_strings=off`), `domain` (CHECK ordering in `\dD`) |
+| ⏭ SKIP — CI infrastructure | 8 | `regproc` (requires `regress.so` C extension), `wal_consistency_checking` (requires WAL config), `collate`/`collate.icu.utf8`/`collate.linux.utf8`/`collate.windows.win1252`/`collate.utf8` (platform-specific locale), `char_1`/`char_2` (requires specific locale) |
+| ⏭ SKIP — pg_regress infra | 2 | `sqljson_jsontable` (requires pg_regress C library), `psql_pipeline` (libpq pipeline mode not available in non-interactive execution) |
+| ⏭ SKIP — known rpg gaps | 3 | `psql` (`\parse`/`\bind` not yet implemented, cross-database `\d` refs, wrapped format edge cases), `strings` (backslash parsing with `standard_conforming_strings=off`), `plpgsql` (CONTEXT line ordering differs in CI Docker environment) |
 | **TOTAL** | **250+** | |
 
-CI server: `postgres:18`. CI test files: REL_18_STABLE. Skips are infrastructure limits, C extensions, or known gaps — not core functionality issues.
+CI server: `postgres:18`. CI test files: REL_18_STABLE. The `SKIP_ALWAYS` list in `tests/compat/test-psql-regress.sh` and `REGRESS_SKIP` in `.github/workflows/checks.yml` are the authoritative skip lists. Skips are infrastructure limits, C extensions, or known gaps — not core functionality issues.
 
 ---
 

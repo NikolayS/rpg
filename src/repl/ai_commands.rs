@@ -625,6 +625,7 @@ pub(super) async fn dispatch_ai_command(
             echo_hidden: false,
             kind_filter: None,
             continuation: None,
+            expanded: false,
         };
         dispatch_io(&parsed, client, params, settings, tx).await;
 

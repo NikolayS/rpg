@@ -86,6 +86,10 @@ pub enum MetaCmd {
     ListPublications,
     /// `\dRs [pattern]` — list subscriptions.
     ListSubscriptions,
+    /// `\drg [pattern]` — list role grants.
+    ListRoleGrants,
+    /// `\ddp [pattern]` — list default access privileges.
+    ListDefaultPrivileges,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -501,6 +505,7 @@ impl MetaCmd {
             | Self::ListFdws             // \dew
             | Self::ListUserMappings     // \deu
             | Self::ListRoles            // \dg / \du
+            | Self::ListRoleGrants       // \drg
             | Self::ListDatabases        // \l
             => 1,
 
@@ -525,6 +530,7 @@ impl MetaCmd {
             | Self::ListConversions       // \dc
             | Self::ListCasts             // \dC
             | Self::ListComments          // \dd
+            | Self::ListDefaultPrivileges // \ddp
             | Self::ListOperators         // \do
             | Self::ListExtStatistics     // \dX
             | Self::ListForeignTablesViaFdw // \det
@@ -542,6 +548,7 @@ impl MetaCmd {
 
 /// A fully parsed backslash meta-command.
 #[derive(Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ParsedMeta {
     /// The recognised command type.
     pub cmd: MetaCmd,
@@ -565,6 +572,8 @@ pub struct ParsedMeta {
     /// `\a\t`), this holds the remaining text (starting with `\`) after the
     /// current command was consumed.  The caller must parse and dispatch it.
     pub continuation: Option<String>,
+    /// `x` modifier — force expanded output for this command (e.g. `\zx`).
+    pub expanded: bool,
 }
 
 impl ParsedMeta {
@@ -578,6 +587,7 @@ impl ParsedMeta {
             echo_hidden: false,
             kind_filter: None,
             continuation: None,
+            expanded: false,
         }
     }
 }
@@ -638,6 +648,7 @@ pub fn parse(input: &str) -> ParsedMeta {
                         echo_hidden: false,
                         kind_filter: None,
                         continuation: None,
+                        expanded: false,
                     };
                 }
             }
@@ -705,6 +716,7 @@ fn parse_simple_or_unknown(input: &str, token: &str, cmd: MetaCmd) -> ParsedMeta
             echo_hidden: false,
             kind_filter: None,
             continuation: Some(rest.to_owned()),
+            expanded: false,
         }
     } else {
         ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1163,7 +1175,13 @@ fn parse_m_family(input: &str) -> ParsedMeta {
 /// Parse `\z [pattern]` — alias for `\dp` (list access privileges).
 fn parse_z(input: &str) -> ParsedMeta {
     let rest = input.strip_prefix('z').unwrap_or("");
-    let (plus, system, pattern) = parse_modifiers_and_pattern(rest);
+    // `\zx` — expanded mode for privilege listing (psql compatibility).
+    let (expanded, rest2) = if let Some(r) = rest.strip_prefix('x') {
+        (true, r)
+    } else {
+        (false, rest)
+    };
+    let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
     ParsedMeta {
         cmd: MetaCmd::ListPrivileges,
         plus,
@@ -1172,6 +1190,7 @@ fn parse_z(input: &str) -> ParsedMeta {
         echo_hidden: false,
         kind_filter: None,
         continuation: None,
+        expanded,
     }
 }
 
@@ -1278,6 +1297,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                     echo_hidden: false,
                     kind_filter: None,
                     continuation: None,
+                    expanded: false,
                 };
             }
         }
@@ -1337,6 +1357,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1356,6 +1377,7 @@ fn parse_c_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1384,6 +1406,7 @@ fn parse_h(input: &str) -> ParsedMeta {
         echo_hidden: false,
         kind_filter: None,
         continuation: None,
+        expanded: false,
     }
 }
 
@@ -1401,6 +1424,7 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             echo_hidden: false,
             kind_filter: None,
             continuation: None,
+            expanded: false,
         };
     }
     if let Some(rest) = input.strip_prefix("sf") {
@@ -1413,6 +1437,7 @@ fn parse_sf_sv(input: &str) -> ParsedMeta {
             echo_hidden: false,
             kind_filter: None,
             continuation: None,
+            expanded: false,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1459,6 +1484,7 @@ fn parse_l(input: &str) -> ParsedMeta {
         echo_hidden: false,
         kind_filter: None,
         continuation: None,
+        expanded: false,
     }
 }
 
@@ -1595,6 +1621,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1614,6 +1641,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: cont,
+                expanded: false,
             };
             // Restore single-quoted text that was split — actually, for \echo
             // we want the raw text between cmd boundaries, not tokenized.
@@ -1670,6 +1698,7 @@ fn parse_e_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1708,6 +1737,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1726,6 +1756,7 @@ fn parse_i_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1751,6 +1782,7 @@ fn parse_o(input: &str) -> ParsedMeta {
             echo_hidden: false,
             kind_filter: None,
             continuation: None,
+            expanded: false,
         };
     }
     ParsedMeta::simple(MetaCmd::Unknown(input.to_owned()))
@@ -1795,6 +1827,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1814,6 +1847,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1832,6 +1866,7 @@ fn parse_w(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1857,6 +1892,7 @@ fn parse_p_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -1917,6 +1953,7 @@ fn parse_shell(input: &str) -> ParsedMeta {
         echo_hidden: false,
         kind_filter: None,
         continuation: None,
+        expanded: false,
     }
 }
 
@@ -2079,6 +2116,7 @@ fn parse_b_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: cont,
+                expanded: false,
             };
         }
     }
@@ -2095,6 +2133,7 @@ fn parse_b_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: cont,
+                expanded: false,
             };
         }
     }
@@ -2257,6 +2296,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: cont,
+                expanded: false,
             };
         }
     }
@@ -2304,6 +2344,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: cont,
+                expanded: false,
             };
             // Handle inline pset opts: `\gx (key=val ...)`
             if let MetaCmd::GoExecuteExpanded(ref arg) = m.cmd {
@@ -2356,6 +2397,7 @@ fn parse_g_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: cont,
+                expanded: false,
             };
         }
     }
@@ -2377,6 +2419,8 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("des", MetaCmd::ListForeignServers),
     ("dRp", MetaCmd::ListPublications),
     ("dRs", MetaCmd::ListSubscriptions),
+    ("drg", MetaCmd::ListRoleGrants),
+    ("ddp", MetaCmd::ListDefaultPrivileges),
     ("dew", MetaCmd::ListFdws),
     ("det", MetaCmd::ListForeignTablesViaFdw),
     ("deu", MetaCmd::ListUserMappings),
@@ -2445,6 +2489,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: kind_char,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -2462,6 +2507,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: Some('a'),
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -2480,6 +2526,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
                 echo_hidden: false,
                 kind_filter: None,
                 continuation: None,
+                expanded: false,
             };
         }
     }
@@ -2495,6 +2542,7 @@ fn parse_d_family(input: &str) -> ParsedMeta {
         echo_hidden: false,
         kind_filter: None,
         continuation: None,
+        expanded: false,
     }
 }
 
