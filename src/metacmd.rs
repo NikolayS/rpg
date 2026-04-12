@@ -90,6 +90,22 @@ pub enum MetaCmd {
     ListRoleGrants,
     /// `\ddp [pattern]` — list default access privileges.
     ListDefaultPrivileges,
+    /// `\dO [pattern]` — list collations.
+    ListCollations,
+    /// `\dP [pattern]` — list partitioned relations.
+    ListPartitionedRels,
+    /// `\dA [pattern]` — list access methods.
+    ListAccessMethods,
+    /// `\dAc [pattern]` — list operator classes.
+    ListOpClasses,
+    /// `\dF [pattern]` — list text search configurations.
+    ListTSConfigs,
+    /// `\dFd [pattern]` — list text search dictionaries.
+    ListTSDicts,
+    /// `\dFp [pattern]` — list text search parsers.
+    ListTSParsers,
+    /// `\dFt [pattern]` — list text search templates.
+    ListTSTemplates,
 
     // -- Session commands (stubs; handlers will be added in #28) -----------
     /// `\sf [funcname]` — show function source.
@@ -457,6 +473,14 @@ impl MetaCmd {
             Self::ListExtStatistics => "\\dX",
             Self::ListPublications => "\\dRp",
             Self::ListSubscriptions => "\\dRs",
+            Self::ListCollations => "\\dO",
+            Self::ListPartitionedRels => "\\dP",
+            Self::ListAccessMethods => "\\dA",
+            Self::ListOpClasses => "\\dAc",
+            Self::ListTSConfigs => "\\dF",
+            Self::ListTSDicts => "\\dFd",
+            Self::ListTSParsers => "\\dFp",
+            Self::ListTSTemplates => "\\dFt",
             Self::ShowFunctionSource => "\\sf",
             Self::ShowViewDef => "\\sv",
             Self::Reconnect => "\\c",
@@ -507,6 +531,8 @@ impl MetaCmd {
             | Self::ListRoles            // \dg / \du
             | Self::ListRoleGrants       // \drg
             | Self::ListDatabases        // \l
+            | Self::ListAccessMethods    // \dA
+            | Self::ListOpClasses        // \dAc
             => 1,
 
             // Commands that accept 2 parts (database.name), where 2 parts
@@ -531,6 +557,12 @@ impl MetaCmd {
             | Self::ListCasts             // \dC
             | Self::ListComments          // \dd
             | Self::ListDefaultPrivileges // \ddp
+            | Self::ListCollations       // \dO
+            | Self::ListPartitionedRels  // \dP
+            | Self::ListTSConfigs        // \dF
+            | Self::ListTSDicts          // \dFd
+            | Self::ListTSParsers        // \dFp
+            | Self::ListTSTemplates      // \dFt
             | Self::ListOperators         // \do
             | Self::ListExtStatistics     // \dX
             | Self::ListForeignTablesViaFdw // \det
@@ -2424,12 +2456,19 @@ static D_SUBCMDS: &[(&str, MetaCmd)] = &[
     ("dew", MetaCmd::ListFdws),
     ("det", MetaCmd::ListForeignTablesViaFdw),
     ("deu", MetaCmd::ListUserMappings),
+    ("dAc", MetaCmd::ListOpClasses),
+    ("dFd", MetaCmd::ListTSDicts),
+    ("dFp", MetaCmd::ListTSParsers),
+    ("dFt", MetaCmd::ListTSTemplates),
     // 2-character sub-commands — case-sensitive where needed
     ("dl", MetaCmd::LoList),
     ("dT", MetaCmd::ListTypes),
     ("dE", MetaCmd::ListForeignTables),
     ("dD", MetaCmd::ListDomains),
     ("dC", MetaCmd::ListCasts),
+    ("dO", MetaCmd::ListCollations),
+    ("dA", MetaCmd::ListAccessMethods),
+    ("dF", MetaCmd::ListTSConfigs),
     ("dt", MetaCmd::ListTables),
     ("di", MetaCmd::ListIndexes),
     ("ds", MetaCmd::ListSequences),
@@ -2483,6 +2522,31 @@ fn parse_d_family(input: &str) -> ParsedMeta {
             let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
             return ParsedMeta {
                 cmd: MetaCmd::ListFunctions,
+                plus,
+                system,
+                pattern,
+                echo_hidden: false,
+                kind_filter: kind_char,
+                continuation: None,
+                expanded: false,
+            };
+        }
+    }
+
+    // \dPt / \dPi / \dP — partitioned relations filter variants.
+    // 't' selects partitioned tables, 'i' selects partitioned indexes.
+    if let Some(rest) = input.strip_prefix("dP") {
+        let (kind_char, rest2) = match rest.chars().next() {
+            Some(k @ ('t' | 'i')) => (Some(k), &rest[1..]),
+            _ => (None, rest),
+        };
+        if kind_char.is_some()
+            || rest2.starts_with(|c: char| c.is_whitespace() || c == '+' || c == 'S')
+            || rest2.is_empty()
+        {
+            let (plus, system, pattern) = parse_modifiers_and_pattern(rest2);
+            return ParsedMeta {
+                cmd: MetaCmd::ListPartitionedRels,
                 plus,
                 system,
                 pattern,
