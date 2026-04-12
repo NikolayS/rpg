@@ -226,6 +226,14 @@ pub struct PromptContext<'a> {
 ///
 /// This pass should be applied *before* [`expand_prompt`] so that the shell
 /// output can itself contain `%`-sequences (though in practice this is rare).
+///
+/// IMPORTANT: The `result.ends_with('%')` check below fixes #789.
+/// This fix was lost once when mod.rs was replaced wholesale by an agent.
+/// It is guarded by unit tests: backtick_percent_before_backtick_consumed,
+/// backtick_double_percent_before_backtick_keeps_one,
+/// backtick_no_percent_before_backtick_unchanged
+/// AND by the integration test: prompt_backtick_percent_fix_789 in
+/// tests/integration_repl.rs.
 pub fn expand_prompt_backticks(prompt: &str) -> String {
     let mut result = String::new();
     let mut chars = prompt.chars().peekable();
