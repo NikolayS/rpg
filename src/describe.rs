@@ -2871,6 +2871,17 @@ async fn list_subscriptions(
         } else {
             ""
         };
+        // PG14-15: substream is boolean; PG16+: char with 'f'/'t'/'p' values.
+        let streaming_col = if pg_ver.is_some_and(|v| v >= 16) {
+            "case s.substream
+        when 'f' then 'off'
+        when 't' then 'on'
+        when 'p' then 'parallel'
+        else s.substream::text
+    end as \"Streaming\","
+        } else {
+            "case when s.substream then 'on' else 'off' end as \"Streaming\","
+        };
         // When subskiplsn is present, conninfo needs a trailing comma;
         // when absent, conninfo is the last column (no trailing comma).
         let conninfo_col = if pg_ver.is_some_and(|v| v >= 15) {
@@ -2885,12 +2896,7 @@ async fn list_subscriptions(
     s.subenabled as \"Enabled\",
     s.subpublications as \"Publication\",
     s.subbinary as \"Binary\",
-    case s.substream
-        when 'f' then 'off'
-        when 't' then 'on'
-        when 'p' then 'parallel'
-        else s.substream::text
-    end as \"Streaming\",
+    {streaming_col}
     {pg15_cols}
     {pg16_cols}
     {pg17_cols}
