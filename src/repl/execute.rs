@@ -3451,6 +3451,7 @@ mod tests {
 
     #[test]
     fn dollar_tag_fallback_checked() {
+        use std::fmt::Write as _;
         // Build a pathological value that contains $param$, $param0$–$param99$, and $p$.
         let mut evil = String::from("$param$ $p$");
         for n in 0..100 {
