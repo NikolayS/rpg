@@ -810,7 +810,7 @@ async fn list_functions(
     end as \"Parallel\",
     pg_catalog.pg_get_userbyid(p.proowner) as \"Owner\",
     case when p.prosecdef then 'definer' else 'invoker' end as \"Security\",
-    case when p.proleakproof then 'yes' else 'no' end as \"Leakproof?\",
+    {leakproof}
     case
         when p.proacl is null then null
         when pg_catalog.array_length(p.proacl, 1) = 0 then '(none)'
@@ -825,7 +825,16 @@ left join pg_catalog.pg_namespace as n
 left join pg_catalog.pg_language as l
     on l.oid = p.prolang
 {where_clause}
-order by 1, 2, 4"
+order by 1, 2, 4",
+            leakproof = if settings
+                .db_capabilities
+                .pg_major_version()
+                .is_some_and(|v| v >= 18)
+            {
+                "case when p.proleakproof then 'yes' else 'no' end as \"Leakproof?\","
+            } else {
+                ""
+            },
         )
     } else if is_agg_only {
         // \da: List of aggregate functions — Description column instead of Type
