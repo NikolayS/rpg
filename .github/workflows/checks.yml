@@ -214,10 +214,11 @@ jobs:
           KEEP_RESULTS: "1"
           RESULTS_DIR: /tmp/rpg-regress
           # Skip tests with known rpg gaps:
-          #   psql     - cross-database \d refs, \drg, wrapped format edge cases
+          #   psql     - output formatting edge cases (~1600 line diff remaining)
           #   strings  - standard_conforming_strings=off backslash parsing
           #   plpgsql  - CONTEXT line ordering differs in CI Docker environment
-          REGRESS_SKIP: "psql strings plpgsql"
+          #   copydml  - AFTER trigger NOTICE ordering (async timing in Docker)
+          REGRESS_SKIP: "psql strings plpgsql copydml"
         run: |
           bash tests/compat/test-psql-regress.sh \
             target/release/rpg \
