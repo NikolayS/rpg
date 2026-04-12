@@ -9,6 +9,7 @@
 
 use std::fmt::Write as FmtWrite;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::query::{ColumnMeta, CommandTag, QueryOutcome, RowSet, StatementResult};
@@ -22,6 +23,52 @@ static TERSE_NOTICES: AtomicBool = AtomicBool::new(false);
 /// `settings.terse_errors` changes.
 pub fn set_terse_notices(terse: bool) {
     TERSE_NOTICES.store(terse, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Notice buffering
+// ---------------------------------------------------------------------------
+// PostgreSQL delivers NoticeResponse messages asynchronously via the
+// connection task (`drive_connection`).  In a synchronous client like libpq /
+// psql, notices are processed inline between protocol messages, so they
+// always appear *after* the statement that triggered them completes.  In
+// rpg's async architecture the connection task races with the query-execution
+// task, causing notices to appear at unpredictable positions relative to
+// query output.
+//
+// Solution: the connection task formats each notice into a `String` and
+// pushes it into this shared buffer.  The query-execution code drains the
+// buffer at statement boundaries (after `CommandComplete` / error), matching
+// psql's deterministic ordering.
+// ---------------------------------------------------------------------------
+
+/// Pending formatted notice strings awaiting flush.
+static NOTICE_BUF: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Buffer a pre-formatted notice string for later flushing.
+///
+/// Called from the connection-driving task instead of printing directly.
+pub fn push_notice(formatted: String) {
+    if let Ok(mut buf) = NOTICE_BUF.lock() {
+        buf.push(formatted);
+    }
+}
+
+/// Drain all buffered notices and print them to stderr.
+///
+/// Called by query-execution code at statement boundaries (after
+/// `CommandComplete` or after an error) so that notices appear in the
+/// same position relative to query output as they do in psql.
+pub fn flush_notices() {
+    let notices: Vec<String> = {
+        match NOTICE_BUF.lock() {
+            Ok(mut buf) => buf.drain(..).collect(),
+            Err(_) => return,
+        }
+    };
+    for n in notices {
+        eprint!("{n}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,13 +1847,6 @@ pub fn format_pg_notice(notice: &tokio_postgres::error::DbError) -> String {
         }
     }
     out
-}
-
-/// Print a `PostgreSQL` notice to stderr with a colored severity prefix.
-///
-/// Convenience wrapper around [`format_pg_notice`].
-pub fn eprint_pg_notice(notice: &tokio_postgres::error::DbError) {
-    eprint!("{}", format_pg_notice(notice));
 }
 
 /// Write the `LINE N: …` context and the `^` position marker.

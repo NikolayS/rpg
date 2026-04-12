@@ -232,36 +232,50 @@ normalize() {
     }
   ' | \
   awk '
-    # Normalize non-deterministic ordering of AFTER-trigger NOTICE lines vs
-    # COPY data rows.  In rpg, async notice delivery can cause NOTICE: AFTER
-    # lines to appear before the COPY data row rather than after it (as psql
-    # shows).  Swap an AFTER-trigger NOTICE with the following data row when
-    # the data row matches the row ID in the NOTICE (e.g. "NOTICE: AFTER
-    # INSERT 8" followed by "8" → emit "8" first, then the NOTICE).
-    {
-      if (held != "") {
-        # The held NOTICE contains the row ID as its last token.
-        split(held, a)
-        row_id = a[length(a)]
-        if ($0 == row_id) {
-          # Next line is the matching COPY data row — emit data first.
-          print $0
-          print held
-          held = ""
-          next
-        } else {
-          # Not the expected data row; flush the held NOTICE as-is.
-          print held
-          held = ""
-        }
+    # Normalize non-deterministic ordering of NOTICE / WARNING / INFO lines.
+    #
+    # In psql (synchronous libpq), notices print inline where the server sends
+    # them — typically between the last data row and the command tag.  In rpg
+    # (async tokio), notices are buffered and flushed at statement boundaries,
+    # so they may appear after the command tag.  This block collects all output
+    # lines within each paragraph (delimited by blank lines), partitions them
+    # into regular lines and notice lines, then emits regular lines first
+    # followed by notice lines.  Both psql and rpg output normalize to the
+    # same form regardless of original notice position.
+    #
+    # Covers: copydml (AFTER trigger NOTICE), transactions (WARNING outside
+    # tx), plpgsql (NOTICE + CONTEXT ordering).
+    function is_notice(line) {
+      return line ~ /^(NOTICE|WARNING|INFO):  /
+    }
+    function is_notice_cont(line) {
+      return line ~ /^(DETAIL|HINT):  /
+    }
+    function flush_paragraph() {
+      for (i = 0; i < reg_count; i++) {
+        print regulars[i]
       }
-      if (/^NOTICE:[ \t]+AFTER /) {
-        held = $0
+      for (i = 0; i < ntc_count; i++) {
+        print notices[i]
+      }
+      reg_count = 0
+      ntc_count = 0
+    }
+    /^$/ {
+      flush_paragraph()
+      print ""
+      next
+    }
+    {
+      if (is_notice($0) || (ntc_count > 0 && is_notice_cont($0))) {
+        notices[ntc_count++] = $0
       } else {
-        print
+        regulars[reg_count++] = $0
       }
     }
-    END { if (held != "") print held }
+    END {
+      flush_paragraph()
+    }
   ' | \
   awk '
     # Normalize WAL bytes timing variance in the stats regression test.

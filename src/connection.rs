@@ -2661,14 +2661,16 @@ async fn check_session_attrs(
     }
 }
 
-/// Drive a tokio-postgres `Connection` to completion, printing any `PostgreSQL`
-/// notice messages (`NOTICE`, `WARNING`, `INFO`, etc.) to stderr as they
-/// arrive.
+/// Drive a tokio-postgres `Connection` to completion, buffering any
+/// `PostgreSQL` notice messages (`NOTICE`, `WARNING`, `INFO`, etc.) for
+/// later flushing at statement boundaries.
 ///
 /// This replaces the simple `connection.await` pattern so that server-side
-/// notices are displayed to the user with colored severity prefixes rather
+/// notices are captured and displayed to the user with colored severity
+/// prefixes in deterministic order (after each statement completes), rather
 /// than being silently discarded (the tokio-postgres default only logs them
-/// via `tracing::info!`).
+/// via `tracing::info!`) or printed at unpredictable positions due to async
+/// task scheduling.
 async fn drive_connection<S, T>(
     mut connection: tokio_postgres::Connection<S, T>,
 ) -> Result<(), tokio_postgres::Error>
@@ -2682,7 +2684,8 @@ where
     loop {
         match poll_fn(|cx| connection.poll_message(cx)).await {
             Some(Ok(AsyncMessage::Notice(notice))) => {
-                crate::output::eprint_pg_notice(&notice);
+                let formatted = crate::output::format_pg_notice(&notice);
+                crate::output::push_notice(formatted);
             }
             Some(Ok(_)) => {
                 // Notifications (LISTEN/NOTIFY) — ignore for now.

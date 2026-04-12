@@ -606,6 +606,9 @@ pub async fn execute_query(
         Ok(s) => Box::pin(s),
         Err(e) => {
             // Connection-level error before any messages were sent.
+            // Flush any buffered notices first.
+            tokio::task::yield_now().await;
+            crate::output::flush_notices();
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
@@ -772,6 +775,14 @@ pub async fn execute_query(
                         let _ = io::stdout().write_all(&out_buf);
                     }
 
+                    // Flush buffered notices (NOTICE, WARNING, etc.) so they
+                    // appear deterministically after each statement's output,
+                    // matching psql's synchronous ordering.  The yield gives
+                    // the connection-driving task a chance to buffer any
+                    // notices that arrived just before CommandComplete.
+                    tokio::task::yield_now().await;
+                    crate::output::flush_notices();
+
                     // Store row count for audit log entry.
                     if result_set_index == 0 {
                         settings.last_row_count = Some(n);
@@ -814,6 +825,11 @@ pub async fn execute_query(
     }
     // Drop the stream so the connection is ready for the next query.
     drop(stream);
+
+    // Give the connection task a chance to deliver any remaining notices
+    // that arrived just before the stream ended, then flush them.
+    tokio::task::yield_now().await;
+    crate::output::flush_notices();
 
     let success = if let Some(e) = stream_error {
         // ON_ERROR_ROLLBACK: roll back to the implicit savepoint so
@@ -1208,6 +1224,10 @@ pub async fn execute_query_extended(
                     let _ = io::stdout().write_all(out_bytes);
                 }
             }
+
+            // Flush buffered notices after extended query results.
+            tokio::task::yield_now().await;
+            crate::output::flush_notices();
 
             // ON_ERROR_ROLLBACK: release the implicit savepoint on success.
             if use_implicit_savepoint_ext {
