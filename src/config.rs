@@ -33,6 +33,8 @@ pub struct Config {
     pub pgmustard: PgMustardConfig,
     /// Structured-log file rotation settings.
     pub logging: LoggingConfig,
+    /// Active Session History (`/ash`) settings.
+    pub ash: AshConfig,
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
@@ -456,6 +458,46 @@ impl Default for LoggingConfig {
             max_file_size_mb: 10,
             max_files: 5,
             audit_file: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASH (Active Session History) settings
+// ---------------------------------------------------------------------------
+
+/// Active Session History (`/ash`) settings.
+///
+/// Controls the behaviour of the `/ash` TUI sampler.
+///
+/// ```toml
+/// [ash]
+/// sample_timeout_ms = 500  # 0 = disabled
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AshConfig {
+    /// Maximum time in milliseconds allowed for a single `/ash` sample query
+    /// (`pg_stat_activity` or `ash.wait_timeline`).
+    ///
+    /// Matches the same guard used by `pg_ash`'s per-second `pg_cron` job —
+    /// fail fast rather than block the TUI.
+    ///
+    /// Set to `0` to disable the timeout entirely (for power users on very
+    /// large clusters where the default 500 ms is too tight).
+    ///
+    /// Default: `500`.
+    pub sample_timeout_ms: u64,
+}
+
+fn default_ash_sample_timeout_ms() -> u64 {
+    500
+}
+
+impl Default for AshConfig {
+    fn default() -> Self {
+        Self {
+            sample_timeout_ms: default_ash_sample_timeout_ms(),
         }
     }
 }
@@ -959,6 +1001,15 @@ fn merge_config(base: Config, overlay: Config) -> Config {
                 overlay.logging.max_files
             },
             audit_file: overlay.logging.audit_file.or(base.logging.audit_file),
+        },
+        ash: AshConfig {
+            sample_timeout_ms: if overlay.ash.sample_timeout_ms
+                == default_ash_sample_timeout_ms()
+            {
+                base.ash.sample_timeout_ms
+            } else {
+                overlay.ash.sample_timeout_ms
+            },
         },
         connections: {
             let mut merged = base.connections;

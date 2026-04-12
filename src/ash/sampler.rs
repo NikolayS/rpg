@@ -9,18 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 
 // ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Maximum time allowed for a single `/ash` sample query (`pg_stat_activity`
-/// or `ash.wait_timeline`).  Matches the same guard used by `pg_ash`'s
-/// per-second `pg_cron` job — fail fast rather than block the TUI.
-///
-/// Future: move to `[ash]` config section so users can tune it.
-/// See: <https://github.com/NikolayS/rpg/issues/771>
-const ASH_QUERY_TIMEOUT_MS: u64 = 500;
-
-// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -157,11 +145,17 @@ pub enum LiveSnapshotResult {
 /// (`by_type`, `by_event`, `by_query`) without additional round-trips.
 ///
 /// Observer-effect protection: `SET statement_timeout` is applied before the
-/// query (see [`ASH_QUERY_TIMEOUT_MS`], matching the same guard used by
-/// `pg_ash`'s per-second cron job) and reset to 0 afterwards.  If the query
-/// times out the tick is skipped and [`LiveSnapshotResult::Missed`] is
-/// returned instead of blocking the TUI.
-pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult> {
+/// query (matching the same guard used by `pg_ash`'s per-second cron job)
+/// and reset to 0 afterwards.  If the query times out the tick is skipped
+/// and [`LiveSnapshotResult::Missed`] is returned instead of blocking the
+/// TUI.
+///
+/// `timeout_ms` — maximum time in milliseconds for the sample query.
+/// `0` disables the timeout entirely.
+pub async fn live_snapshot(
+    client: &Client,
+    timeout_ms: u64,
+) -> anyhow::Result<LiveSnapshotResult> {
     let sql = "
         select
             case
@@ -187,18 +181,24 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult
     // one). Use SET + reset instead: set for this query, restore default after.
     // This is a session-level change but is immediately restored, so it does
     // not leak across queries in the connection pool.
-    client
-        .execute(
-            &format!("set statement_timeout = '{ASH_QUERY_TIMEOUT_MS}ms'"),
-            &[],
-        )
-        .await?;
+    //
+    // When timeout_ms is 0, skip the guard entirely (user opted out).
+    if timeout_ms > 0 {
+        client
+            .execute(
+                &format!("set statement_timeout = '{timeout_ms}ms'"),
+                &[],
+            )
+            .await?;
+    }
 
     let rows = match client.query(sql, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
             // Restore statement_timeout before returning — best-effort.
-            let _ = client.execute("set statement_timeout = 0", &[]).await;
+            if timeout_ms > 0 {
+                let _ = client.execute("set statement_timeout = 0", &[]).await;
+            }
             // statement_timeout fires as SQLSTATE 57014 (query_canceled).
             // Return Missed so the TUI can display a brief indicator and
             // continue rather than propagating an error.
@@ -210,7 +210,9 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult
     };
 
     // Restore default timeout after successful query.
-    let _ = client.execute("set statement_timeout = 0", &[]).await;
+    if timeout_ms > 0 {
+        let _ = client.execute("set statement_timeout = 0", &[]).await;
+    }
 
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -246,8 +248,15 @@ pub async fn live_snapshot(client: &Client) -> anyhow::Result<LiveSnapshotResult
 /// - `pg_ash` is not installed (graceful degradation)
 /// - the query fails (transient error, permission issue, etc.)
 /// - no historical data exists for the requested window
-pub async fn query_ash_history(client: &Client, window_secs: u64) -> Vec<AshSnapshot> {
-    query_ash_history_inner(client, window_secs)
+///
+/// `timeout_ms` — maximum time in milliseconds for the history query.
+/// `0` disables the timeout entirely.
+pub async fn query_ash_history(
+    client: &Client,
+    window_secs: u64,
+    timeout_ms: u64,
+) -> Vec<AshSnapshot> {
+    query_ash_history_inner(client, window_secs, timeout_ms)
         .await
         .unwrap_or_default()
 }
@@ -260,6 +269,7 @@ pub async fn query_ash_history(client: &Client, window_secs: u64) -> Vec<AshSnap
 async fn query_ash_history_inner(
     client: &Client,
     window_secs: u64,
+    timeout_ms: u64,
 ) -> anyhow::Result<Vec<AshSnapshot>> {
     // ash.wait_timeline returns (bucket_start, wait_event, samples).
     // wait_event format: "Type:Event" or just "Type" when type == event
@@ -281,20 +291,27 @@ async fn query_ash_history_inner(
     );
 
     // Same observer-effect guard as live_snapshot.
-    let _ = client
-        .execute(
-            &format!("set statement_timeout = '{ASH_QUERY_TIMEOUT_MS}ms'"),
-            &[],
-        )
-        .await;
+    // When timeout_ms is 0, skip the guard entirely (user opted out).
+    if timeout_ms > 0 {
+        let _ = client
+            .execute(
+                &format!("set statement_timeout = '{timeout_ms}ms'"),
+                &[],
+            )
+            .await;
+    }
 
     let rows = match client.query(sql.as_str(), &[]).await {
         Ok(r) => {
-            let _ = client.execute("set statement_timeout = 0", &[]).await;
+            if timeout_ms > 0 {
+                let _ = client.execute("set statement_timeout = 0", &[]).await;
+            }
             r
         }
         Err(e) => {
-            let _ = client.execute("set statement_timeout = 0", &[]).await;
+            if timeout_ms > 0 {
+                let _ = client.execute("set statement_timeout = 0", &[]).await;
+            }
             return Err(anyhow::anyhow!("ash.wait_timeline query failed: {e}"));
         }
     };
@@ -624,7 +641,7 @@ mod tests {
             return;
         }
 
-        let history = query_ash_history(&client, 60).await;
+        let history = query_ash_history(&client, 60, 500).await;
         eprintln!(
             "test_pg_ash_history_live: {} snapshots returned",
             history.len()
@@ -661,7 +678,7 @@ mod tests {
         let _ = client.execute("drop extension if exists pg_ash", &[]).await;
 
         // Must return empty vec, not panic or propagate error.
-        let history = query_ash_history(&client, 60).await;
+        let history = query_ash_history(&client, 60, 500).await;
         assert!(
             history.is_empty(),
             "expected empty vec when pg_ash not installed"
