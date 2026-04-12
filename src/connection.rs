@@ -893,7 +893,7 @@ fn resolve_hosts(
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| {
                         s.trim().parse::<u16>().unwrap_or_else(|_| {
-                            eprintln!("rpg: invalid port value '{}' in -p", s.trim());
+                            rpg_eprintln!("rpg: invalid port value '{}' in -p", s.trim());
                             port_parse_ok = false;
                             0
                         })
@@ -1514,7 +1514,7 @@ pub fn pgpass_lookup(params: &ConnParams) -> Result<Option<String>, ConnectionEr
         })?;
         let mode = meta.mode() & 0o777;
         if mode & 0o077 != 0 {
-            eprintln!(
+            rpg_eprintln!(
                 "WARNING: password file \"{}\" has group or world access; \
                  permissions should be u=rw (0600) or less",
                 path.display()
@@ -1726,7 +1726,7 @@ fn make_tls_config_require(params: &ConnParams) -> Result<ClientConfig, Connecti
                 })?)
         }
         (Some(_), None) | (None, Some(_)) => {
-            eprintln!(
+            rpg_eprintln!(
                 "WARNING: both sslcert and sslkey must be set for \
                  client certificate authentication; ignoring"
             );
@@ -1852,7 +1852,7 @@ fn make_tls_config_verify_ca(params: &ConnParams) -> Result<ClientConfig, Connec
                 })?)
         }
         (Some(_), None) | (None, Some(_)) => {
-            eprintln!(
+            rpg_eprintln!(
                 "WARNING: both sslcert and sslkey must be set for \
                  client certificate authentication; ignoring"
             );
@@ -1890,7 +1890,7 @@ fn make_tls_config_verify_full(params: &ConnParams) -> Result<ClientConfig, Conn
                 })?)
         }
         (Some(_), None) | (None, Some(_)) => {
-            eprintln!(
+            rpg_eprintln!(
                 "WARNING: both sslcert and sslkey must be set for \
                  client certificate authentication; ignoring"
             );
@@ -2746,7 +2746,7 @@ async fn connect_plain(
 
     tokio::spawn(async move {
         if let Err(e) = drive_connection(connection).await {
-            eprintln!("rpg: connection error: {e}");
+            rpg_eprintln!("rpg: connection error: {e}");
         }
     });
 
@@ -2782,7 +2782,7 @@ async fn connect_tls_with_config(
 
     tokio::spawn(async move {
         if let Err(e) = drive_connection(connection).await {
-            eprintln!("rpg: connection error: {e}");
+            rpg_eprintln!("rpg: connection error: {e}");
         }
     });
 

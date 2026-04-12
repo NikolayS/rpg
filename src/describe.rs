@@ -101,12 +101,12 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
         if let Some(ref cmd) = settings.pager_command.clone() {
             if let Err(e) = crate::pager::run_pager_external(cmd, text) {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!(
+                    rpg_eprintln!(
                         "rpg: pager '{cmd}' not found — check your PAGER setting \
                          (\\set PAGER off to disable)"
                     );
                 } else {
-                    eprintln!("rpg: pager error: {e}");
+                    rpg_eprintln!("rpg: pager error: {e}");
                 }
                 let _ = std::io::stdout().write_all(text.as_bytes());
             }
@@ -114,7 +114,7 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
             // Unsupported means no TTY available (piped/non-interactive).
             // Fall back silently — no error message, just print.
             if e.kind() != std::io::ErrorKind::Unsupported {
-                eprintln!("rpg: pager error: {e}");
+                rpg_eprintln!("rpg: pager error: {e}");
             }
             let _ = std::io::stdout().write_all(text.as_bytes());
         }
@@ -124,7 +124,7 @@ fn maybe_page(settings: &mut crate::repl::ReplSettings, text: &str) {
             sl.render();
         }
     } else {
-        print!("{text}");
+        rpg_print!("{text}");
     }
 }
 
@@ -167,7 +167,7 @@ async fn run_and_print_full(
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
     if echo_hidden {
-        eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
     }
 
     match client.simple_query(sql).await {
@@ -2155,12 +2155,12 @@ order by 2, 3"
             );
 
             if meta.echo_hidden {
-                eprintln!("/******** QUERY *********/\n{lookup_sql}\n/************************/");
+                rpg_eprintln!("/******** QUERY *********/\n{lookup_sql}\n/************************/");
             }
 
             let matches: Vec<(String, String)> = match client.simple_query(&lookup_sql).await {
                 Err(e) => {
-                    eprintln!("ERROR: {e}");
+                    rpg_eprintln!("ERROR: {e}");
                     return false;
                 }
                 Ok(msgs) => {
@@ -2180,14 +2180,14 @@ order by 2, 3"
             };
 
             if matches.is_empty() {
-                eprintln!("Did not find any relation named \"{pattern}\".");
+                rpg_eprintln!("Did not find any relation named \"{pattern}\".");
                 return false;
             }
 
             for (i, (schema, name)) in matches.into_iter().enumerate() {
                 // Separate consecutive describes with a blank line (psql does this).
                 if i > 0 {
-                    println!();
+                    rpg_println!();
                 }
                 // Use the exact schema-qualified name so describe_table resolves
                 // to exactly one object.
@@ -2604,7 +2604,7 @@ order by 1, 2"
 
     // Indexes — print as indented text lines (psql format), not a table.
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{idx_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{idx_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -2631,7 +2631,7 @@ order by 1, 2"
             }
         }
         if !index_rows.is_empty() {
-            println!("Indexes:");
+            rpg_println!("Indexes:");
             for (idx_name, is_primary, is_unique, amname, idx_oid_str, idx_pred) in &index_rows {
                 // Extract column list from pg_get_indexdef (the part inside parens).
                 let indexdef_sql =
@@ -2671,14 +2671,14 @@ order by 1, 2"
                     format!(" WHERE {pred}")
                 };
 
-                println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}");
+                rpg_println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{pred_suffix}");
             }
         }
     }
 
     // Check constraints — print as indented text lines.
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{chk_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{chk_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&chk_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -2691,16 +2691,16 @@ order by 1, 2"
             }
         }
         if !lines.is_empty() {
-            println!("Check constraints:");
+            rpg_println!("Check constraints:");
             for (name, def) in &lines {
-                println!("    \"{name}\" {def}");
+                rpg_println!("    \"{name}\" {def}");
             }
         }
     }
 
     // Foreign-key constraints — print as indented text lines.
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{fk_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{fk_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&fk_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -2713,16 +2713,16 @@ order by 1, 2"
             }
         }
         if !lines.is_empty() {
-            println!("Foreign-key constraints:");
+            rpg_println!("Foreign-key constraints:");
             for (name, def) in &lines {
-                println!("    \"{name}\" {def}");
+                rpg_println!("    \"{name}\" {def}");
             }
         }
     }
 
     // Referenced by — print as indented text lines (psql format).
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{ref_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{ref_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&ref_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -2736,9 +2736,9 @@ order by 1, 2"
             }
         }
         if !lines.is_empty() {
-            println!("Referenced by:");
+            rpg_println!("Referenced by:");
             for (from_table, name, def) in &lines {
-                println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
+                rpg_println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
             }
         }
     }
@@ -2757,7 +2757,7 @@ where c.relkind in ('r','p','m')
 limit 1"
         );
         if meta.echo_hidden {
-            eprintln!("/******** QUERY *********/\n{am_sql}\n/************************/");
+            rpg_eprintln!("/******** QUERY *********/\n{am_sql}\n/************************/");
         }
         if let Ok(msgs) = client.simple_query(&am_sql).await {
             use tokio_postgres::SimpleQueryMessage;
@@ -2765,7 +2765,7 @@ limit 1"
                 if let SimpleQueryMessage::Row(row) = msg {
                     let amname = row.get(0).unwrap_or("");
                     if !amname.is_empty() {
-                        println!("Access method: {amname}");
+                        rpg_println!("Access method: {amname}");
                     }
                     break;
                 }

@@ -241,7 +241,7 @@ pub fn init_rotating(level: Level, log_path: PathBuf, rotation: RotationConfig) 
             let _ = LOGGER.set(Arc::new(Mutex::new(logger)));
         }
         Err(e) => {
-            eprintln!("rpg: --log-file: {e}");
+            rpg_eprintln!("rpg: --log-file: {e}");
             std::process::exit(2);
         }
     }

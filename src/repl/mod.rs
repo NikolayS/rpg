@@ -1446,13 +1446,13 @@ pub async fn exec_command(
                     ExecMode::Plan => "plan",
                     ExecMode::Yolo => "yolo",
                 };
-                eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+                rpg_eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             }
             result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
                 let label = apply_mode_change(&result, settings);
                 match result {
-                    MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
-                    _ => eprintln!("Execution mode: {label}"),
+                    MetaResult::SetInputMode(_) => rpg_eprintln!("Input mode: {label}"),
+                    _ => rpg_eprintln!("Execution mode: {label}"),
                 }
             }
             _ => {}
@@ -1485,7 +1485,7 @@ pub async fn exec_file(
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("rpg: could not read file \"{path}\": {e}");
+            rpg_eprintln!("rpg: could not read file \"{path}\": {e}");
             return 1;
         }
     };
@@ -1496,7 +1496,7 @@ pub async fn exec_file(
     // logged, or prompted (they are internal bookkeeping, not user SQL).
     if settings.single_transaction {
         if let Err(e) = client.simple_query("begin").await {
-            eprintln!("rpg: could not begin transaction: {e}");
+            rpg_eprintln!("rpg: could not begin transaction: {e}");
             return 1;
         }
         tx.update_from_sql("begin");
@@ -1512,7 +1512,7 @@ pub async fn exec_file(
     .await;
 
     if settings.cond.depth() > 0 {
-        eprintln!(
+        rpg_eprintln!(
             "rpg: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
             settings.cond.depth()
         );
@@ -1522,7 +1522,7 @@ pub async fn exec_file(
     if settings.single_transaction {
         if exit_code == 0 {
             if let Err(e) = client.simple_query("commit").await {
-                eprintln!("rpg: could not commit transaction: {e}");
+                rpg_eprintln!("rpg: could not commit transaction: {e}");
                 exit_code = 1;
             } else {
                 tx.update_from_sql("commit");
@@ -1542,7 +1542,7 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     let lines = stdin.lock().lines().map_while(|l| match l {
         Ok(line) => Some(line),
         Err(e) => {
-            eprintln!("rpg: read error: {e}");
+            rpg_eprintln!("rpg: read error: {e}");
             None
         }
     });
@@ -1550,7 +1550,7 @@ pub async fn exec_stdin(client: &Client, settings: &mut ReplSettings, params: &C
     let exit_code = exec_lines(client, lines, settings, params, &mut tx).await;
 
     if settings.cond.depth() > 0 {
-        eprintln!(
+        rpg_eprintln!(
             "rpg: warning: {} unterminated \\if block(s) at end of input",
             settings.cond.depth()
         );
@@ -1627,7 +1627,7 @@ pub(crate) async fn exec_lines(
                 MetaResult::ParseStatement(name) => {
                     let sql = buf.trim().to_owned();
                     if sql.is_empty() {
-                        eprintln!("\\parse: query buffer is empty");
+                        rpg_eprintln!("\\parse: query buffer is empty");
                     } else {
                         match client.prepare(&sql).await {
                             Ok(stmt) => {
@@ -1665,7 +1665,7 @@ pub(crate) async fn exec_lines(
                             }
                         }
                     } else {
-                        eprintln!(
+                        rpg_eprintln!(
                             "\\close_prepared: prepared statement \
                              \"{name}\" does not exist"
                         );
@@ -1934,8 +1934,8 @@ Deprecated (still work, prefer / equivalents above):
 /// ```
 pub(super) fn print_profiles(config: &crate::config::Config) {
     if config.connections.is_empty() {
-        println!("No connection profiles configured.");
-        println!("Add profiles to ~/.config/rpg/config.toml under [connections.<name>].");
+        rpg_println!("No connection profiles configured.");
+        rpg_println!("Add profiles to ~/.config/rpg/config.toml under [connections.<name>].");
         return;
     }
 
@@ -1978,7 +1978,7 @@ pub(super) fn print_profiles(config: &crate::config::Config) {
     let sep_dbname = "-".repeat(w_dbname);
 
     // Header.
-    println!(
+    rpg_println!(
         " {v_name:<w_name$} | {v_host:<w_host$} | {v_port:<w_port$} | {v_user:<w_user$} | {v_dbname:<w_dbname$}",
         v_name = "name",
         v_host = "host",
@@ -1986,14 +1986,14 @@ pub(super) fn print_profiles(config: &crate::config::Config) {
         v_user = "user",
         v_dbname = "dbname",
     );
-    println!("-{sep_name}-+-{sep_host}-+-{sep_port}-+-{sep_user}-+-{sep_dbname}-");
+    rpg_println!("-{sep_name}-+-{sep_host}-+-{sep_port}-+-{sep_user}-+-{sep_dbname}-");
 
     for (name, profile) in &profiles {
         let host = profile.host.as_deref().unwrap_or("");
         let port = profile.port.map_or_else(String::new, |p| p.to_string());
         let user = profile.username.as_deref().unwrap_or("");
         let dbname = profile.dbname.as_deref().unwrap_or("");
-        println!(
+        rpg_println!(
             " {name:<w_name$} | {host:<w_host$} | {port:<w_port$} | {user:<w_user$} | {dbname:<w_dbname$}",
         );
     }
@@ -2001,7 +2001,7 @@ pub(super) fn print_profiles(config: &crate::config::Config) {
 
 /// Print rpg copyright notice, including a pointer to the `PostgreSQL` license.
 fn print_copyright(server_version: Option<&str>) {
-    println!(
+    rpg_println!(
         "rpg — modern Postgres terminal
 Copyright (c) 2026, Nikolay Samokhvalov and contributors
 https://github.com/NikolayS/rpg
@@ -2009,11 +2009,11 @@ https://github.com/NikolayS/rpg
 Licensed under the Apache License, Version 2.0."
     );
     if let Some(ver) = server_version {
-        println!();
-        println!("Connected to: {ver}");
+        rpg_println!();
+        rpg_println!("Connected to: {ver}");
     }
-    println!();
-    println!(
+    rpg_println!();
+    rpg_println!(
         "rpg is a PostgreSQL client. It is not part of the PostgreSQL project.
 PostgreSQL is Copyright (c) 1996-2026, PostgreSQL Global Development Group.
 See https://www.postgresql.org/about/licence/"
@@ -2033,7 +2033,7 @@ fn expanded_mode_str(mode: ExpandedMode) -> &'static str {
 fn apply_timing(settings: &mut ReplSettings, mode: Option<bool>) {
     settings.timing = mode.unwrap_or(!settings.timing);
     let state = if settings.timing { "on" } else { "off" };
-    println!("Timing is {state}.");
+    rpg_println!("Timing is {state}.");
 }
 
 /// Apply an expanded-display mode change and print the new state.
@@ -2054,7 +2054,7 @@ fn apply_expanded(settings: &mut ReplSettings, mode: ExpandedMode) {
     };
     // Keep pset in sync so -c and -f paths see the updated setting.
     settings.pset.expanded = settings.expanded;
-    println!(
+    rpg_println!(
         "Expanded display is {}.",
         expanded_mode_str(settings.expanded)
     );
@@ -2095,7 +2095,7 @@ pub(super) fn maybe_page(settings: &mut ReplSettings, text: &str) {
             sl.render();
         }
     } else {
-        print!("{text}");
+        rpg_print!("{text}");
     }
 }
 
@@ -2123,13 +2123,13 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if value.is_empty() {
         // Synthetic settings: show current state rather than the vars store.
         if name == "EXPLAIN" {
-            println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+            rpg_println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
             return;
         }
         // Display one variable.
         match settings.vars.get(name) {
-            Some(v) => println!("{name} = '{v}'"),
-            None => eprintln!("{name} is not set"),
+            Some(v) => rpg_println!("{name} = '{v}'"),
+            None => rpg_eprintln!("{name} is not set"),
         }
         return;
     }
@@ -2186,14 +2186,14 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             "verbose" => AutoExplain::Verbose,
             "off" | "false" | "0" => AutoExplain::Off,
             other => {
-                eprintln!(
+                rpg_eprintln!(
                     "\\set EXPLAIN: unknown value \"{other}\"\n\
                      Valid: on, analyze, verbose, off"
                 );
                 return;
             }
         };
-        println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+        rpg_println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
     }
     // Mirror AI_SHOW_SQL into config.ai.show_sql.
     if name == "AI_SHOW_SQL" {
@@ -2207,18 +2207,18 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
     if name == "AI_PROVIDER" {
         const KNOWN_PROVIDERS: &[&str] = &["anthropic", "claude", "openai", "ollama"];
         if !KNOWN_PROVIDERS.contains(&value) {
-            eprintln!(
+            rpg_eprintln!(
                 "warning: unknown AI provider \"{value}\"; \
                  known providers: anthropic, openai, ollama"
             );
         }
         settings.config.ai.provider = Some(value.to_owned());
-        println!("AI provider set to: {value}");
+        rpg_println!("AI provider set to: {value}");
     }
     // Mirror AI_MODEL into config.ai.model.
     if name == "AI_MODEL" {
         settings.config.ai.model = Some(value.to_owned());
-        println!("AI model set to: {value}");
+        rpg_println!("AI model set to: {value}");
     }
     // Mirror TOKEN_BUDGET into config.ai.token_budget.
     //
@@ -2228,13 +2228,13 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             Ok(n) => {
                 settings.config.ai.token_budget = n;
                 if n == 0 {
-                    println!("AI token budget: unlimited");
+                    rpg_println!("AI token budget: unlimited");
                 } else {
-                    println!("AI token budget set to: {n} tokens");
+                    rpg_println!("AI token budget set to: {n} tokens");
                 }
             }
             Err(_) => {
-                eprintln!(
+                rpg_eprintln!(
                     "\\set TOKEN_BUDGET: invalid value \"{value}\"\n\
                      Expected a non-negative integer (0 = unlimited)."
                 );
@@ -2251,9 +2251,9 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         settings.vi_mode = on;
         settings.config.display.vi_mode = on;
         if on {
-            println!("Vi mode enabled. Takes effect on next session.");
+            rpg_println!("Vi mode enabled. Takes effect on next session.");
         } else {
-            println!("Emacs mode (default). Takes effect on next session.");
+            rpg_println!("Emacs mode (default). Takes effect on next session.");
         }
     }
     // Mirror AUTO_SUGGEST into auto_suggest_fix.
@@ -2261,9 +2261,9 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
         let on = value != "off" && value != "false" && value != "0";
         settings.auto_suggest_fix = on;
         if on {
-            println!("Auto-suggest /fix hint enabled.");
+            rpg_println!("Auto-suggest /fix hint enabled.");
         } else {
-            println!("Auto-suggest /fix hint disabled.");
+            rpg_println!("Auto-suggest /fix hint disabled.");
         }
     }
     // Mirror STATUSLINE into the status bar enabled flag.
@@ -2281,9 +2281,9 @@ fn apply_set(settings: &mut ReplSettings, name: &str, value: &str) {
             }
         }
         if on {
-            println!("Status bar enabled.");
+            rpg_println!("Status bar enabled.");
         } else {
-            println!("Status bar disabled.");
+            rpg_println!("Status bar disabled.");
         }
     }
 }
@@ -2317,7 +2317,7 @@ fn apply_unset(settings: &mut ReplSettings, name: &str) {
             settings.pset.no_highlight = false;
         }
     } else {
-        eprintln!("\\unset: variable {name} was not set");
+        rpg_eprintln!("\\unset: variable {name} was not set");
     }
 }
 
@@ -2330,25 +2330,25 @@ pub(super) fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings)
         FKeyAction::Completion => {
             settings.no_completion = !settings.no_completion;
             let state = if settings.no_completion { "off" } else { "on" };
-            println!("Completion is {state}.");
+            rpg_println!("Completion is {state}.");
         }
         FKeyAction::SingleLine => {
             settings.single_line = !settings.single_line;
             let state = if settings.single_line { "on" } else { "off" };
-            println!("Single-line mode is {state}.");
+            rpg_println!("Single-line mode is {state}.");
         }
         FKeyAction::ViEmacs => {
             settings.vi_mode = !settings.vi_mode;
             settings.config.display.vi_mode = settings.vi_mode;
             if settings.vi_mode {
-                eprintln!("Vi mode enabled. Takes effect on next session.");
+                rpg_eprintln!("Vi mode enabled. Takes effect on next session.");
             } else {
-                eprintln!("Emacs mode (default). Takes effect on next session.");
+                rpg_eprintln!("Emacs mode (default). Takes effect on next session.");
             }
         }
         FKeyAction::AutoExplain => {
             settings.auto_explain = settings.auto_explain.cycle();
-            println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
+            rpg_println!("Auto-EXPLAIN is {}.", settings.auto_explain.label());
         }
         FKeyAction::Text2Sql => {
             settings.input_mode = if settings.input_mode == InputMode::Text2Sql {
@@ -2360,7 +2360,7 @@ pub(super) fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings)
                 InputMode::Sql => "sql",
                 InputMode::Text2Sql => "text2sql",
             };
-            eprintln!("Input mode: {label}");
+            rpg_eprintln!("Input mode: {label}");
         }
     }
 }
@@ -2393,7 +2393,7 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
             use crossterm::terminal;
 
             if !prompt_text.is_empty() {
-                eprint!("{prompt_text}");
+                rpg_eprint!("{prompt_text}");
                 let _ = io::stderr().flush();
             }
 
@@ -2461,7 +2461,7 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
                 settings.vars.set(var_name, trimmed);
             }
             Err(e) => {
-                eprintln!("\\prompt: {e}");
+                rpg_eprintln!("\\prompt: {e}");
             }
         }
     }
@@ -2483,7 +2483,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         "format" => {
             if value.is_none_or(str::is_empty) {
                 // \pset format (no value) — show current setting.
-                println!("Output format is {}.", format_name(&settings.pset.format));
+                rpg_println!("Output format is {}.", format_name(&settings.pset.format));
                 return;
             }
             let fmt = match value.unwrap_or("") {
@@ -2495,35 +2495,35 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 "wrapped" => OutputFormat::Wrapped,
                 "markdown" => OutputFormat::Markdown,
                 other => {
-                    eprintln!("\\pset: unknown format \"{other}\"");
+                    rpg_eprintln!("\\pset: unknown format \"{other}\"");
                     return;
                 }
             };
             settings.pset.format = fmt;
-            println!("Output format is {}.", format_name(&settings.pset.format));
+            rpg_println!("Output format is {}.", format_name(&settings.pset.format));
         }
         "border" => {
             if let Some(v) = value.and_then(|s| s.parse::<u8>().ok()) {
                 settings.pset.border = v.min(2);
-                println!("Border style is {}.", settings.pset.border);
+                rpg_println!("Border style is {}.", settings.pset.border);
             } else {
-                eprintln!("\\pset: invalid border value");
+                rpg_eprintln!("\\pset: invalid border value");
             }
         }
         "null" => {
             let display = value.unwrap_or("").to_owned();
-            println!("Null display is \"{display}\".");
+            rpg_println!("Null display is \"{display}\".");
             settings.pset.null_display = display;
         }
         "fieldsep" => {
             let sep = value.unwrap_or("|").to_owned();
-            println!("Field separator is \"{sep}\".");
+            rpg_println!("Field separator is \"{sep}\".");
             settings.pset.field_sep = sep;
         }
         "recordsep" => {
             let sep = value.unwrap_or("\n").to_owned();
             settings.pset.record_sep = sep;
-            println!("Record separator is set.");
+            rpg_println!("Record separator is set.");
         }
         "tuples_only" | "t" => {
             // psql does not print a confirmation message for tuples_only.
@@ -2536,8 +2536,8 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         "title" => {
             settings.pset.title = value.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
             match &settings.pset.title {
-                Some(t) => println!("Title is \"{t}\"."),
-                None => println!("Title is not set."),
+                Some(t) => rpg_println!("Title is \"{t}\"."),
+                None => rpg_println!("Title is not set."),
             }
         }
         "expanded" | "x" => {
@@ -2555,7 +2555,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.pset.expanded = mode;
-            println!(
+            rpg_println!(
                 "Expanded display is {}.",
                 expanded_mode_str(settings.pset.expanded)
             );
@@ -2563,9 +2563,9 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         "pager_min_lines" => {
             if let Some(n) = value.and_then(|s| s.parse::<usize>().ok()) {
                 settings.pager_min_lines = n;
-                println!("Pager minimum lines is {n}.");
+                rpg_println!("Pager minimum lines is {n}.");
             } else {
-                eprintln!("\\pset: invalid pager_min_lines value");
+                rpg_eprintln!("\\pset: invalid pager_min_lines value");
             }
         }
         "explain_format" => {
@@ -2575,7 +2575,7 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 "raw" => ExplainFormat::Raw,
                 "compact" => ExplainFormat::Compact,
                 other => {
-                    eprintln!(
+                    rpg_eprintln!(
                         "\\pset: unknown explain_format \"{other}\"\n\
                          Valid: enhanced, raw, compact"
                     );
@@ -2583,10 +2583,10 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
             };
             settings.explain_format = fmt;
-            println!("EXPLAIN format is {}.", fmt.as_str());
+            rpg_println!("EXPLAIN format is {}.", fmt.as_str());
         }
         other => {
-            eprintln!("\\pset: unknown option \"{other}\"");
+            rpg_eprintln!("\\pset: unknown option \"{other}\"");
         }
     }
 
@@ -2664,7 +2664,7 @@ fn apply_toggle_align(settings: &mut ReplSettings) {
         OutputFormat::Aligned => OutputFormat::Unaligned,
         _ => OutputFormat::Aligned,
     };
-    println!("Output format is {}.", format_name(&settings.pset.format));
+    rpg_println!("Output format is {}.", format_name(&settings.pset.format));
 }
 
 /// Apply `\t [on|off]` — tuples-only mode.
@@ -2675,13 +2675,13 @@ fn apply_tuples_only(settings: &mut ReplSettings, mode: Option<bool>) {
     } else {
         "off"
     };
-    println!("Tuples only is {state}.");
+    rpg_println!("Tuples only is {state}.");
 }
 
 /// Apply `\f [sep]` — field separator.
 fn apply_field_sep(settings: &mut ReplSettings, sep: Option<&str>) {
     let new_sep = sep.unwrap_or("|").to_owned();
-    println!("Field separator is \"{new_sep}\".");
+    rpg_println!("Field separator is \"{new_sep}\".");
     settings.pset.field_sep = new_sep;
 }
 
@@ -2692,15 +2692,15 @@ fn apply_toggle_html(settings: &mut ReplSettings) {
         OutputFormat::Html => OutputFormat::Aligned,
         _ => OutputFormat::Html,
     };
-    println!("Output format is {}.", format_name(&settings.pset.format));
+    rpg_println!("Output format is {}.", format_name(&settings.pset.format));
 }
 
 /// Apply `\C [title]` — set or clear table title.
 fn apply_set_title(settings: &mut ReplSettings, title: Option<&str>) {
     settings.pset.title = title.filter(|s| !s.is_empty()).map(ToOwned::to_owned);
     match &settings.pset.title {
-        Some(t) => println!("Title is \"{t}\"."),
-        None => println!("Title is not set."),
+        Some(t) => rpg_println!("Title is \"{t}\"."),
+        None => rpg_println!("Title is not set."),
     }
 }
 
@@ -2843,7 +2843,7 @@ pub(super) async fn dispatch_io(
                 Some(path) => {
                     crate::io::include_file(client, path, settings, tx, params).await;
                 }
-                None => eprintln!("\\i: file name required"),
+                None => rpg_eprintln!("\\i: file name required"),
             }
             Some(MetaResult::Continue)
         }
@@ -2860,7 +2860,7 @@ pub(super) async fn dispatch_io(
                     );
                     crate::io::include_file(client, &resolved, settings, tx, params).await;
                 }
-                None => eprintln!("\\ir: file name required"),
+                None => rpg_eprintln!("\\ir: file name required"),
             }
             Some(MetaResult::Continue)
         }
@@ -2869,7 +2869,7 @@ pub(super) async fn dispatch_io(
                 Ok(target) => {
                     settings.output_target = target;
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => rpg_eprintln!("{e}"),
             }
             Some(MetaResult::Continue)
         }
@@ -2878,7 +2878,7 @@ pub(super) async fn dispatch_io(
         MetaCmd::WriteBuffer => {
             match parsed.pattern.as_deref() {
                 Some(path) => return Some(MetaResult::WriteBufferToFile(path.to_owned())),
-                None => eprintln!("\\w: file name required"),
+                None => rpg_eprintln!("\\w: file name required"),
             }
             Some(MetaResult::Continue)
         }
@@ -2901,7 +2901,7 @@ pub(super) async fn dispatch_io(
         }
         MetaCmd::Chdir => {
             if let Err(e) = crate::io::change_dir(parsed.pattern.as_deref()) {
-                eprintln!("{e}");
+                rpg_eprintln!("{e}");
             }
             Some(MetaResult::Continue)
         }
@@ -2913,7 +2913,7 @@ pub(super) async fn dispatch_io(
             // \echo behaviour so that e.g. `\echo '\033[1;35mMenu:\033[0m'`
             // emits an ANSI-coloured string.
             let joined = crate::metacmd::split_params(raw).join(" ");
-            println!("{}", unescape_echo(&joined));
+            rpg_println!("{}", unescape_echo(&joined));
             Some(MetaResult::Continue)
         }
         MetaCmd::QEcho => {
@@ -2922,13 +2922,13 @@ pub(super) async fn dispatch_io(
             if let Some(ref mut w) = settings.output_target {
                 let _ = writeln!(w, "{text}");
             } else {
-                println!("{text}");
+                rpg_println!("{text}");
             }
             Some(MetaResult::Continue)
         }
         MetaCmd::Warn => {
             let raw = parsed.pattern.as_deref().unwrap_or("");
-            eprintln!(
+            rpg_eprintln!(
                 "{}",
                 unescape_echo(&crate::metacmd::split_params(raw).join(" "))
             );
@@ -2965,10 +2965,10 @@ pub(super) async fn dispatch_io(
             match crate::copy::parse_copy_args(&args) {
                 Ok(spec) => {
                     if let Err(e) = crate::copy::execute_copy(client, &spec).await {
-                        eprintln!("{e}");
+                        rpg_eprintln!("{e}");
                     }
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => rpg_eprintln!("{e}"),
             }
             Some(MetaResult::Continue)
         }
@@ -2983,7 +2983,7 @@ pub(super) async fn dispatch_io(
         MetaCmd::ClosePrepared(ref name) => Some(MetaResult::ClosePrepared(name.clone())),
 
         MetaCmd::LogFile(ref path) => {
-            eprintln!("\\log-file is deprecated; use /log-file instead.");
+            rpg_eprintln!("\\log-file is deprecated; use /log-file instead.");
             if let Some(raw_path) = path.as_deref() {
                 // Expand leading `~` to the home directory.
                 let expanded = expand_tilde(raw_path);
@@ -2992,7 +2992,7 @@ pub(super) async fn dispatch_io(
                 if let Some(parent) = expanded.parent() {
                     if !parent.as_os_str().is_empty() {
                         if let Err(e) = std::fs::create_dir_all(parent) {
-                            eprintln!("\\log-file: cannot create directory: {e}");
+                            rpg_eprintln!("\\log-file: cannot create directory: {e}");
                             return Some(MetaResult::Continue);
                         }
                     }
@@ -3007,18 +3007,18 @@ pub(super) async fn dispatch_io(
                         settings.audit_log_file = Some(std::io::BufWriter::new(file));
                         settings.audit_log_path = Some(expanded.clone());
                         if !settings.quiet {
-                            println!("Logging queries to \"{}\".", expanded.display());
+                            rpg_println!("Logging queries to \"{}\".", expanded.display());
                         }
                     }
                     Err(e) => {
-                        eprintln!("\\log-file: cannot open \"{}\": {e}", expanded.display());
+                        rpg_eprintln!("\\log-file: cannot open \"{}\": {e}", expanded.display());
                     }
                 }
             } else {
                 // No path — close the current log file.
                 if let Some(ref path) = settings.audit_log_path.take() {
                     if !settings.quiet {
-                        println!("Stopped logging to \"{}\".", path.display());
+                        rpg_println!("Stopped logging to \"{}\".", path.display());
                     }
                 }
                 settings.audit_log_file = None;
@@ -3061,12 +3061,12 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
                 if let Some(n) = name {
                     n
                 } else {
-                    eprintln!("\\password: could not determine current user");
+                    rpg_eprintln!("\\password: could not determine current user");
                     return;
                 }
             }
             Err(e) => {
-                eprintln!("\\password: {e}");
+                rpg_eprintln!("\\password: {e}");
                 return;
             }
         },
@@ -3078,7 +3078,7 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = prompt;
-        eprintln!("\\password: not supported in browser");
+        rpg_eprintln!("\\password: not supported in browser");
         return;
     }
 
@@ -3087,7 +3087,7 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
         let pw = match rpassword::prompt_password(&prompt) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("\\password: {e}");
+                rpg_eprintln!("\\password: {e}");
                 return;
             }
         };
@@ -3095,13 +3095,13 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
         let confirm = match rpassword::prompt_password("Enter it again: ") {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("\\password: {e}");
+                rpg_eprintln!("\\password: {e}");
                 return;
             }
         };
 
         if pw != confirm {
-            eprintln!("Passwords didn't match.");
+            rpg_eprintln!("Passwords didn't match.");
             return;
         }
 
@@ -3114,7 +3114,7 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
 
         match client.simple_query(&sql).await {
             Ok(_) => {}
-            Err(e) => eprintln!("{e}"),
+            Err(e) => rpg_eprintln!("{e}"),
         }
     }
 }
@@ -3259,7 +3259,7 @@ async fn dispatch_meta(
     match &parsed.cmd {
         MetaCmd::If(expr) => {
             if expr.trim().is_empty() {
-                eprintln!("\\if: missing expression");
+                rpg_eprintln!("\\if: missing expression");
             }
             let condition = eval_bool(expr);
             settings.cond.push_if(condition);
@@ -3267,23 +3267,23 @@ async fn dispatch_meta(
         }
         MetaCmd::Elif(expr) => {
             if expr.trim().is_empty() {
-                eprintln!("\\elif: missing expression");
+                rpg_eprintln!("\\elif: missing expression");
             }
             let condition = eval_bool(expr);
             if let Err(e) = settings.cond.handle_elif(condition) {
-                eprintln!("{e}");
+                rpg_eprintln!("{e}");
             }
             return MetaResult::Continue;
         }
         MetaCmd::Else => {
             if let Err(e) = settings.cond.handle_else() {
-                eprintln!("{e}");
+                rpg_eprintln!("{e}");
             }
             return MetaResult::Continue;
         }
         MetaCmd::Endif => {
             if let Err(e) = settings.cond.pop_endif() {
-                eprintln!("{e}");
+                rpg_eprintln!("{e}");
             }
             return MetaResult::Continue;
         }
@@ -3310,124 +3310,124 @@ async fn dispatch_meta(
         MetaCmd::ConnInfo => {
             // `\conninfo`   — psql-compatible single line (always shown).
             // `\conninfo+`  — additionally show pooler / provider details.
-            println!("{}", crate::connection::connection_info(params));
+            rpg_println!("{}", crate::connection::connection_info(params));
             if parsed.plus {
                 let caps = &settings.db_capabilities;
                 match &caps.pooler {
                     crate::capabilities::PoolerType::None => {}
                     crate::capabilities::PoolerType::PgBouncer { pool_mode } => {
-                        println!("Pooler: PgBouncer (pool_mode={pool_mode})");
+                        rpg_println!("Pooler: PgBouncer (pool_mode={pool_mode})");
                     }
                     crate::capabilities::PoolerType::Supavisor => {
-                        println!("Pooler: Supavisor");
+                        rpg_println!("Pooler: Supavisor");
                     }
                     crate::capabilities::PoolerType::PgCat => {
-                        println!("Pooler: PgCat");
+                        rpg_println!("Pooler: PgCat");
                     }
                 }
                 match caps.managed_provider {
                     crate::capabilities::ManagedProvider::None => {}
                     crate::capabilities::ManagedProvider::Rds => {
-                        println!("Provider: Amazon RDS");
+                        rpg_println!("Provider: Amazon RDS");
                     }
                     crate::capabilities::ManagedProvider::CloudSql => {
-                        println!("Provider: Google Cloud SQL");
+                        rpg_println!("Provider: Google Cloud SQL");
                     }
                     crate::capabilities::ManagedProvider::Supabase => {
-                        println!("Provider: Supabase");
+                        rpg_println!("Provider: Supabase");
                     }
                     crate::capabilities::ManagedProvider::Neon => {
-                        println!("Provider: Neon");
+                        rpg_println!("Provider: Neon");
                     }
                 }
                 if let Some(warning) = caps.pooler_warning() {
-                    eprintln!("WARNING: {warning}");
+                    rpg_eprintln!("WARNING: {warning}");
                 }
             }
         }
         MetaCmd::ListProfiles => {
-            eprintln!("\\profiles is deprecated; use /profiles instead.");
+            rpg_eprintln!("\\profiles is deprecated; use /profiles instead.");
             print_profiles(&settings.config);
         }
         MetaCmd::Copyright => {
             print_copyright(settings.db_capabilities.server_version.as_deref());
         }
         MetaCmd::Version => {
-            eprintln!("\\version is deprecated; use /version instead.");
-            println!("{}", crate::version_string());
+            rpg_eprintln!("\\version is deprecated; use /version instead.");
+            rpg_println!("{}", crate::version_string());
             if let Some(ref sv) = settings.db_capabilities.server_version {
-                println!("Server: PostgreSQL {sv}");
+                rpg_println!("Server: PostgreSQL {sv}");
             }
         }
         MetaCmd::SqlMode => {
-            eprintln!("\\sql is deprecated; use /sql instead.");
+            rpg_eprintln!("\\sql is deprecated; use /sql instead.");
             return MetaResult::SetInputMode(InputMode::Sql);
         }
         MetaCmd::Text2SqlMode => {
-            eprintln!("\\text2sql / \\t2s is deprecated; use /text2sql or /t2s instead.");
+            rpg_eprintln!("\\text2sql / \\t2s is deprecated; use /text2sql or /t2s instead.");
             return MetaResult::SetInputMode(InputMode::Text2Sql);
         }
         MetaCmd::ShowMode => {
-            eprintln!("\\mode is deprecated; use /mode instead.");
+            rpg_eprintln!("\\mode is deprecated; use /mode instead.");
             return MetaResult::ShowMode;
         }
         MetaCmd::PlanMode => {
-            eprintln!("\\plan is deprecated; use /plan instead.");
+            rpg_eprintln!("\\plan is deprecated; use /plan instead.");
             return MetaResult::SetExecMode(ExecMode::Plan);
         }
         MetaCmd::YoloMode => {
-            eprintln!("\\yolo is deprecated; use /yolo instead.");
+            rpg_eprintln!("\\yolo is deprecated; use /yolo instead.");
             return MetaResult::SetExecMode(ExecMode::Yolo);
         }
         MetaCmd::InteractiveMode => {
-            eprintln!("\\interactive is deprecated; use /interactive instead.");
+            rpg_eprintln!("\\interactive is deprecated; use /interactive instead.");
             return MetaResult::SetExecMode(ExecMode::Interactive);
         }
         MetaCmd::RefreshSchema => {
-            eprintln!("\\refresh is deprecated; use /refresh instead.");
+            rpg_eprintln!("\\refresh is deprecated; use /refresh instead.");
             #[cfg(not(target_arch = "wasm32"))]
             match &settings.schema_cache {
                 None => {
-                    eprintln!("\\refresh: no active connection or not in interactive mode");
+                    rpg_eprintln!("\\refresh: no active connection or not in interactive mode");
                 }
                 Some(cache) => match load_schema_cache(client).await {
                     Ok(loaded) => {
                         *cache.write().unwrap() = loaded;
-                        println!("Schema cache refreshed.");
+                        rpg_println!("Schema cache refreshed.");
                     }
                     Err(e) => {
-                        eprintln!("\\refresh: failed to reload schema cache: {e}");
+                        rpg_eprintln!("\\refresh: failed to reload schema cache: {e}");
                     }
                 },
             }
             #[cfg(target_arch = "wasm32")]
             {
-                eprintln!("\\refresh: schema completion not available on this platform");
+                rpg_eprintln!("\\refresh: schema completion not available on this platform");
             }
         }
         // Function-key toggle metacommands (#321, #324, #325).
         MetaCmd::ToggleCompletion => {
-            eprintln!("\\f2 is deprecated; use /f2 instead.");
+            rpg_eprintln!("\\f2 is deprecated; use /f2 instead.");
             apply_fkey_toggle(FKeyAction::Completion, settings);
         }
         MetaCmd::ToggleSingleLine => {
-            eprintln!("\\f3 is deprecated; use /f3 instead.");
+            rpg_eprintln!("\\f3 is deprecated; use /f3 instead.");
             apply_fkey_toggle(FKeyAction::SingleLine, settings);
         }
         MetaCmd::ToggleViEmacs => {
-            eprintln!("\\f4 is deprecated; use /f4 instead.");
+            rpg_eprintln!("\\f4 is deprecated; use /f4 instead.");
             apply_fkey_toggle(FKeyAction::ViEmacs, settings);
         }
         MetaCmd::ToggleAutoExplain => {
-            eprintln!("\\f5 is deprecated; use /f5 instead.");
+            rpg_eprintln!("\\f5 is deprecated; use /f5 instead.");
             apply_fkey_toggle(FKeyAction::AutoExplain, settings);
         }
         // Custom Lua commands (#659).
         MetaCmd::ListCustomCommands => {
-            eprintln!("\\commands is deprecated; use /commands instead.");
+            rpg_eprintln!("\\commands is deprecated; use /commands instead.");
             let cmds = &settings.lua_registry.commands;
             if cmds.is_empty() {
-                println!(
+                rpg_println!(
                     "No custom commands loaded.\n\
                      Add Lua scripts to ~/.config/rpg/commands/*.lua"
                 );
@@ -3470,17 +3470,17 @@ async fn dispatch_meta(
                     client,
                 );
                 if let Err(e) = result {
-                    eprintln!("{e}");
+                    rpg_eprintln!("{e}");
                 }
             } else {
-                eprintln!("Invalid command \\{name}. Try \\? for help.");
+                rpg_eprintln!("Invalid command \\{name}. Try \\? for help.");
             }
         }
         MetaCmd::SqlHelp => match crate::session::sql_help_text(parsed.pattern.as_deref()) {
             Ok(text) => maybe_page(settings, &text),
             Err(t) => {
-                eprintln!("No help available for \"{t}\".");
-                eprintln!("Try \\h with no argument to list available topics.");
+                rpg_eprintln!("No help available for \"{t}\".");
+                rpg_eprintln!("Try \\h with no argument to list available topics.");
             }
         },
         MetaCmd::ShowFunctionSource => match parsed.pattern.as_deref() {
@@ -3488,13 +3488,13 @@ async fn dispatch_meta(
                 crate::session::show_function_source(client, name, parsed.plus, parsed.echo_hidden)
                     .await;
             }
-            None => eprintln!("\\sf: function name required"),
+            None => rpg_eprintln!("\\sf: function name required"),
         },
         MetaCmd::ShowViewDef => match parsed.pattern.as_deref() {
             Some(name) => {
                 crate::session::show_view_def(client, name, parsed.plus, parsed.echo_hidden).await;
             }
-            None => eprintln!("\\sv: view name required"),
+            None => rpg_eprintln!("\\sv: view name required"),
         },
         MetaCmd::Reconnect => {
             // Detect `\c @profile` — look up profile from loaded config.
@@ -3521,8 +3521,8 @@ async fn dispatch_meta(
                             "{db} {user} {host} {port}"
                         )))
                     } else {
-                        eprintln!("\\c: unknown profile \"@{name}\"");
-                        eprintln!(
+                        rpg_eprintln!("\\c: unknown profile \"@{name}\"");
+                        rpg_eprintln!(
                             "Configure profiles in {} under [connections.{name}]",
                             crate::config::user_config_path_display()
                         );
@@ -3561,10 +3561,10 @@ async fn dispatch_meta(
                         server_ver.as_deref(),
                         &new_params,
                     );
-                    println!("{msg}");
+                    rpg_println!("{msg}");
                     return MetaResult::Reconnected(Box::new(new_client), Box::new(new_params));
                 }
-                Err(e) => eprintln!("\\c: {e}"),
+                Err(e) => rpg_eprintln!("\\c: {e}"),
             }
         }
         // Variable commands (issue #32).
@@ -3605,13 +3605,13 @@ async fn dispatch_meta(
                     watch_query(client, q, interval, settings).await;
                 }
                 None => {
-                    eprintln!("\\watch cannot be used with an empty query");
+                    rpg_eprintln!("\\watch cannot be used with an empty query");
                 }
             }
         }
         // Diagnostic commands — delegate to the dba module.
         MetaCmd::Dba => {
-            eprintln!("\\dba is deprecated; use /dba instead.");
+            rpg_eprintln!("\\dba is deprecated; use /dba instead.");
             let subcommand = parsed.pattern.as_deref().unwrap_or("");
             let caps = settings.db_capabilities.clone();
             let ai_context =
@@ -3623,27 +3623,27 @@ async fn dispatch_meta(
         }
         // Named queries (#69). Deprecated in favour of /ns, /n, /n+, /nd, /np.
         MetaCmd::NamedSave(ref name, ref query) => {
-            eprintln!("\\ns is deprecated; use /ns instead.");
+            rpg_eprintln!("\\ns is deprecated; use /ns instead.");
             if crate::named::NamedQueries::is_valid_name(name) {
                 let mut nq = crate::named::NamedQueries::load();
                 nq.set(name, query);
                 match nq.save() {
                     Ok(()) => {
                         if !settings.quiet {
-                            eprintln!("Saved query \"{name}\".");
+                            rpg_eprintln!("Saved query \"{name}\".");
                         }
                     }
-                    Err(e) => eprintln!("\\ns: {e}"),
+                    Err(e) => rpg_eprintln!("\\ns: {e}"),
                 }
             } else {
-                eprintln!(
+                rpg_eprintln!(
                     "\\ns: invalid query name \"{name}\": \
                      names must contain only alphanumerics and underscores"
                 );
             }
         }
         MetaCmd::NamedExec(ref name, ref args) => {
-            eprintln!("\\n is deprecated; use /n instead.");
+            rpg_eprintln!("\\n is deprecated; use /n instead.");
             let nq = crate::named::NamedQueries::load();
             match nq.get(name) {
                 Some(query) => {
@@ -3651,15 +3651,15 @@ async fn dispatch_meta(
                     let sql = crate::named::NamedQueries::substitute(query, &arg_refs);
                     execute_query(client, &sql, settings, tx).await;
                 }
-                None => eprintln!("\\n: unknown query \"{name}\""),
+                None => rpg_eprintln!("\\n: unknown query \"{name}\""),
             }
         }
         MetaCmd::NamedList => {
-            eprintln!("\\n+ is deprecated; use /n+ instead.");
+            rpg_eprintln!("\\n+ is deprecated; use /n+ instead.");
             let nq = crate::named::NamedQueries::load();
             let queries = nq.list();
             if queries.is_empty() {
-                println!("No named queries saved.");
+                rpg_println!("No named queries saved.");
             } else {
                 let mut out = String::new();
                 for (name, query) in queries {
@@ -3670,27 +3670,27 @@ async fn dispatch_meta(
             }
         }
         MetaCmd::NamedDelete(ref name) => {
-            eprintln!("\\nd is deprecated; use /nd instead.");
+            rpg_eprintln!("\\nd is deprecated; use /nd instead.");
             let mut nq = crate::named::NamedQueries::load();
             if nq.delete(name) {
                 match nq.save() {
                     Ok(()) => {
                         if !settings.quiet {
-                            eprintln!("Deleted query \"{name}\".");
+                            rpg_eprintln!("Deleted query \"{name}\".");
                         }
                     }
-                    Err(e) => eprintln!("\\nd: {e}"),
+                    Err(e) => rpg_eprintln!("\\nd: {e}"),
                 }
             } else {
-                eprintln!("\\nd: unknown query \"{name}\"");
+                rpg_eprintln!("\\nd: unknown query \"{name}\"");
             }
         }
         MetaCmd::NamedPrint(ref name) => {
-            eprintln!("\\np is deprecated; use /np instead.");
+            rpg_eprintln!("\\np is deprecated; use /np instead.");
             let nq = crate::named::NamedQueries::load();
             match nq.get(name) {
-                Some(query) => println!("{query}"),
-                None => eprintln!("\\np: unknown query \"{name}\""),
+                Some(query) => rpg_println!("{query}"),
+                None => rpg_eprintln!("\\np: unknown query \"{name}\""),
             }
         }
         // Describe-family commands — delegate to the describe module.
@@ -3734,11 +3734,11 @@ async fn dispatch_meta(
         }
         // Session persistence meta-commands (#247). Deprecated in favour of /session.
         MetaCmd::SessionList => {
-            eprintln!("\\session is deprecated; use /session instead.");
+            rpg_eprintln!("\\session is deprecated; use /session instead.");
             dispatch_session_list();
         }
         MetaCmd::SessionSave(ref name) => {
-            eprintln!("\\session save is deprecated; use /session save instead.");
+            rpg_eprintln!("\\session save is deprecated; use /session save instead.");
             dispatch_session_save(
                 params,
                 &settings.session_id,
@@ -3747,18 +3747,18 @@ async fn dispatch_meta(
             );
         }
         MetaCmd::SessionDelete(ref id) => {
-            eprintln!("\\session delete is deprecated; use /session delete instead.");
+            rpg_eprintln!("\\session delete is deprecated; use /session delete instead.");
             dispatch_session_delete(id);
         }
         MetaCmd::SessionResume(ref id) => {
-            eprintln!("\\session resume is deprecated; use /session resume instead.");
+            rpg_eprintln!("\\session resume is deprecated; use /session resume instead.");
             if let Some(result) = dispatch_session_resume(id).await {
                 return result;
             }
         }
         // Explain share (#655). Deprecated in favour of /explain-share.
         MetaCmd::ExplainShare(ref service) => {
-            eprintln!("\\explain share is deprecated; use /explain-share instead.");
+            rpg_eprintln!("\\explain share is deprecated; use /explain-share instead.");
             dispatch_explain_share(client, settings, service).await;
         }
         // Large object commands (#400).
@@ -3784,7 +3784,7 @@ async fn dispatch_meta(
             dispatch_history(settings, arg.as_deref());
         }
         ref stub => {
-            eprintln!("{}: not yet implemented (see #27)", stub.label());
+            rpg_eprintln!("{}: not yet implemented (see #27)", stub.label());
         }
     }
 
@@ -3849,12 +3849,12 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
                     settings.initial_input = Some(query);
                 }
                 Ok(None) => {} // user cancelled
-                Err(e) => eprintln!("\\s: {e}"),
+                Err(e) => rpg_eprintln!("\\s: {e}"),
             }
             #[cfg(target_arch = "wasm32")]
             {
                 let _ = entries;
-                eprintln!("\\s: interactive history picker not available on this platform");
+                rpg_eprintln!("\\s: interactive history picker not available on this platform");
             }
         }
 
@@ -3866,10 +3866,10 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
             match std::fs::write(&resolved, entries.join("\n") + "\n") {
                 Ok(()) => {
                     if !settings.quiet {
-                        eprintln!("History saved to {}.", resolved.display());
+                        rpg_eprintln!("History saved to {}.", resolved.display());
                     }
                 }
-                Err(e) => eprintln!("\\s: {e}"),
+                Err(e) => rpg_eprintln!("\\s: {e}"),
             }
         }
 
@@ -3884,7 +3884,7 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
                 .collect();
 
             if filtered.is_empty() {
-                eprintln!("\\s: no history entries match \"{pattern}\"");
+                rpg_eprintln!("\\s: no history entries match \"{pattern}\"");
                 return;
             }
 
@@ -3940,7 +3940,7 @@ pub(super) async fn dispatch_explain_share(
     let plan_text = match settings.last_explain_text.as_deref() {
         Some(t) if !t.is_empty() => t.to_owned(),
         _ => {
-            eprintln!(
+            rpg_eprintln!(
                 "\\explain share: no EXPLAIN plan available.\n\
                  Run an EXPLAIN query first, then use \\explain share."
             );
@@ -3949,7 +3949,7 @@ pub(super) async fn dispatch_explain_share(
     };
 
     if service.is_empty() {
-        eprintln!(
+        rpg_eprintln!(
             "\\explain share: service name required.\n\
              Usage: \\explain share depesz\n\
              Usage: \\explain share dalibo\n\
@@ -3958,7 +3958,7 @@ pub(super) async fn dispatch_explain_share(
         return;
     }
 
-    println!("Uploading EXPLAIN plan to {service}…");
+    rpg_println!("Uploading EXPLAIN plan to {service}…");
 
     // For pgMustard we need the plan as a JSON array and the original query.
     let mut plan_json: Option<serde_json::Value> = None;
@@ -3970,7 +3970,7 @@ pub(super) async fn dispatch_explain_share(
             .as_deref()
             .and_then(strip_explain_prefix)
         else {
-            eprintln!(
+            rpg_eprintln!(
                 "\\explain share: cannot determine the inner query.\n\
                  Run an EXPLAIN query first, then use \\explain share pgmustard."
             );
@@ -3993,13 +3993,13 @@ pub(super) async fn dispatch_explain_share(
                 match serde_json::from_str::<serde_json::Value>(&json_text) {
                     Ok(val) => plan_json = Some(val),
                     Err(e) => {
-                        eprintln!("\\explain share: failed to parse JSON EXPLAIN output: {e}");
+                        rpg_eprintln!("\\explain share: failed to parse JSON EXPLAIN output: {e}");
                         return;
                     }
                 }
             }
             Err(e) => {
-                eprintln!("\\explain share: failed to re-run EXPLAIN with FORMAT JSON: {e}");
+                rpg_eprintln!("\\explain share: failed to re-run EXPLAIN with FORMAT JSON: {e}");
                 return;
             }
         }
@@ -4016,12 +4016,12 @@ pub(super) async fn dispatch_explain_share(
     .await
     {
         Ok(url) => {
-            println!("Plan URL: {url}");
+            rpg_println!("Plan URL: {url}");
             crate::explain::share::copy_to_clipboard(&url);
-            println!("(URL copied to clipboard)");
+            rpg_println!("(URL copied to clipboard)");
         }
         Err(e) => {
-            eprintln!("\\explain share: {e}");
+            rpg_eprintln!("\\explain share: {e}");
         }
     }
 }
@@ -4102,32 +4102,32 @@ pub(super) fn dispatch_session_list() {
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("\\session list: {e}");
+            rpg_eprintln!("\\session list: {e}");
             return;
         }
     };
     let sessions = match store.list() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("\\session list: {e}");
+            rpg_eprintln!("\\session list: {e}");
             return;
         }
     };
     if sessions.is_empty() {
-        println!("No saved sessions.");
+        rpg_println!("No saved sessions.");
         return;
     }
-    println!(
+    rpg_println!(
         "{:<16}  {:<20}  {:<5}  {:<16}  {:<24}  name",
         "id", "host", "port", "dbname", "last_used"
     );
-    println!("{}", "-".repeat(100));
+    rpg_println!("{}", "-".repeat(100));
     for s in &sessions {
         let host = s.host.as_deref().unwrap_or("-");
         let port = s.port.map_or_else(|| "-".to_owned(), |p| p.to_string());
         let dbname = s.dbname.as_deref().unwrap_or("-");
         let name = s.name.as_deref().unwrap_or("");
-        println!(
+        rpg_println!(
             "{:<16}  {:<20}  {:<5}  {:<16}  {:<24}  {}",
             s.id, host, port, dbname, s.last_used, name
         );
@@ -4144,7 +4144,7 @@ pub(super) fn dispatch_session_save(
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("\\session save: {e}");
+            rpg_eprintln!("\\session save: {e}");
             return;
         }
     };
@@ -4161,13 +4161,13 @@ pub(super) fn dispatch_session_save(
         name: name.map(str::to_owned),
     };
     if let Err(e) = store.upsert(&rec) {
-        eprintln!("\\session save: {e}");
+        rpg_eprintln!("\\session save: {e}");
         return;
     }
     if let Some(n) = name {
-        println!("Session saved as \"{n}\" (id: {sid}).", sid = rec.id);
+        rpg_println!("Session saved as \"{n}\" (id: {sid}).", sid = rec.id);
     } else {
-        println!("Session saved (id: {sid}).", sid = rec.id);
+        rpg_println!("Session saved (id: {sid}).", sid = rec.id);
     }
 }
 
@@ -4176,14 +4176,14 @@ pub(super) fn dispatch_session_delete(id: &str) {
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("\\session delete: {e}");
+            rpg_eprintln!("\\session delete: {e}");
             return;
         }
     };
     match store.delete(id) {
-        Ok(true) => println!("Session {id} deleted."),
-        Ok(false) => eprintln!("\\session delete: no session with id \"{id}\""),
-        Err(e) => eprintln!("\\session delete: {e}"),
+        Ok(true) => rpg_println!("Session {id} deleted."),
+        Ok(false) => rpg_eprintln!("\\session delete: no session with id \"{id}\""),
+        Err(e) => rpg_eprintln!("\\session delete: {e}"),
     }
 }
 
@@ -4195,18 +4195,18 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
     let store = match crate::session_store::SessionStore::open() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("\\session resume: {e}");
+            rpg_eprintln!("\\session resume: {e}");
             return None;
         }
     };
     let rec = match store.get(id) {
         Ok(Some(r)) => r,
         Ok(None) => {
-            eprintln!("\\session resume: no session with id \"{id}\"");
+            rpg_eprintln!("\\session resume: no session with id \"{id}\"");
             return None;
         }
         Err(e) => {
-            eprintln!("\\session resume: {e}");
+            rpg_eprintln!("\\session resume: {e}");
             return None;
         }
     };
@@ -4229,14 +4229,14 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
                 server_ver.as_deref(),
                 &new_params,
             );
-            println!("{msg}");
+            rpg_println!("{msg}");
             Some(MetaResult::Reconnected(
                 Box::new(new_client),
                 Box::new(new_params),
             ))
         }
         Err(e) => {
-            eprintln!("\\session resume: {e}");
+            rpg_eprintln!("\\session resume: {e}");
             None
         }
     }
@@ -4308,7 +4308,7 @@ pub async fn run_repl(
 
     // Clear terminal so the REPL starts with a clean screen.
     if use_readline {
-        print!("\x1b[2J\x1b[H");
+        rpg_print!("\x1b[2J\x1b[H");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
@@ -4441,7 +4441,7 @@ async fn run_readline_loop(
         }
         Err(e) => {
             if settings.debug {
-                eprintln!("rpg: schema cache load failed: {e}");
+                rpg_eprintln!("rpg: schema cache load failed: {e}");
             }
         }
     }
@@ -4461,7 +4461,7 @@ async fn run_readline_loop(
     let mut rl: Editor<RpgHelper, FileHistory> = match Editor::with_config(config) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("rpg: readline init failed: {e}");
+            rpg_eprintln!("rpg: readline init failed: {e}");
             return 1;
         }
     };
@@ -4692,7 +4692,7 @@ async fn run_readline_loop(
                 // Ctrl-C at idle prompt: psql prints a blank line and
                 // re-prompts.  Clear any partial multi-line buffer so the
                 // user gets a clean slate.
-                println!();
+                rpg_println!();
                 if !buf.is_empty() {
                     buf.clear();
                     stmt_buf.clear();
@@ -4703,7 +4703,7 @@ async fn run_readline_loop(
                 break;
             }
             Err(e) => {
-                eprintln!("rpg: readline error: {e}");
+                rpg_eprintln!("rpg: readline error: {e}");
                 break;
             }
         }
@@ -4714,7 +4714,7 @@ async fn run_readline_loop(
     }
 
     if settings.cond.depth() > 0 {
-        eprintln!(
+        rpg_eprintln!(
             "rpg: warning: {} unterminated \\if block(s) at end of session",
             settings.cond.depth()
         );
@@ -4743,7 +4743,7 @@ async fn run_dumb_loop(
 
         // Print prompt to stderr (so it doesn't mix with redirected output).
         let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
-        eprint!("{prompt}");
+        rpg_eprint!("{prompt}");
         let _ = io::stderr().flush();
 
         let mut line = String::new();
@@ -4833,14 +4833,14 @@ async fn run_dumb_loop(
                 }
             }
             Err(e) => {
-                eprintln!("rpg: read error: {e}");
+                rpg_eprintln!("rpg: read error: {e}");
                 return 1;
             }
         }
     }
 
     if settings.cond.depth() > 0 {
-        eprintln!(
+        rpg_eprintln!(
             "rpg: warning: {} unterminated \\if block(s) at end of input",
             settings.cond.depth()
         );
@@ -4960,7 +4960,7 @@ async fn run_wasm_loop(
     }
 
     if settings.cond.depth() > 0 {
-        eprintln!(
+        rpg_eprintln!(
             "rpg: warning: {} unterminated \\if block(s) at end of input",
             settings.cond.depth()
         );
@@ -5109,20 +5109,20 @@ async fn handle_backslash_dumb(
         MetaResult::Reconnected(c, p) => HandleLineResult::Reconnected(c, p),
         MetaResult::ClearBuffer => {
             buf.clear();
-            println!("Query buffer reset (empty).");
+            rpg_println!("Query buffer reset (empty).");
             HandleLineResult::BufferUpdated
         }
         MetaResult::PrintBuffer => {
             if buf.is_empty() {
-                println!("Query buffer is empty.");
+                rpg_println!("Query buffer is empty.");
             } else {
-                println!("{buf}");
+                rpg_println!("{buf}");
             }
             HandleLineResult::Continue
         }
         MetaResult::WriteBufferToFile(path) => {
             if let Err(e) = crate::io::write_buffer(buf, &path) {
-                eprintln!("{e}");
+                rpg_eprintln!("{e}");
             }
             HandleLineResult::Continue
         }
@@ -5135,7 +5135,7 @@ async fn handle_backslash_dumb(
                     }
                     buf.clear();
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => rpg_eprintln!("{e}"),
             }
             HandleLineResult::BufferUpdated
         }
@@ -5236,7 +5236,7 @@ async fn handle_backslash_dumb(
         MetaResult::ParseStatement(name) => {
             let sql = buf.trim().to_owned();
             if sql.is_empty() {
-                eprintln!("\\parse: query buffer is empty");
+                rpg_eprintln!("\\parse: query buffer is empty");
             } else {
                 match client.prepare(&sql).await {
                     Ok(stmt) => {
@@ -5258,15 +5258,15 @@ async fn handle_backslash_dumb(
                 let deallocate = format!("deallocate {name}");
                 execute_query_interactive(client, &deallocate, settings, tx).await;
             } else {
-                eprintln!("\\close_prepared: prepared statement \"{name}\" does not exist");
+                rpg_eprintln!("\\close_prepared: prepared statement \"{name}\" does not exist");
             }
             HandleLineResult::Continue
         }
         result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
             let label = apply_mode_change(&result, settings);
             match result {
-                MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
-                _ => eprintln!("Execution mode: {label}"),
+                MetaResult::SetInputMode(_) => rpg_eprintln!("Input mode: {label}"),
+                _ => rpg_eprintln!("Execution mode: {label}"),
             }
             HandleLineResult::Continue
         }
@@ -5280,7 +5280,7 @@ async fn handle_backslash_dumb(
                 ExecMode::Plan => "plan",
                 ExecMode::Yolo => "yolo",
             };
-            eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+            rpg_eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
             HandleLineResult::Continue
         }
         MetaResult::Continue => HandleLineResult::Continue,
@@ -5292,7 +5292,7 @@ async fn handle_backslash_dumb(
 /// Shown when the user types `help` at an empty prompt, directing them to
 /// the standard backslash commands for further assistance.
 fn print_bare_help() {
-    println!(
+    rpg_println!(
         "You are using rpg, the command-line interface to PostgreSQL.\n\
          Type:  \\copyright for distribution terms\n       \
                 \\h for help with SQL commands\n       \
@@ -5340,7 +5340,7 @@ async fn auto_rollback_stale_tx(
     settings: &mut ReplSettings,
 ) -> bool {
     if settings.internal_tx && matches!(*tx, TxState::InTransaction | TxState::Failed) {
-        eprintln!("-- auto-rolled back stale transaction");
+        rpg_eprintln!("-- auto-rolled back stale transaction");
         let _ = client.simple_query("rollback").await;
         *tx = TxState::Idle;
         settings.internal_tx = false;
@@ -5438,20 +5438,20 @@ async fn handle_line(
             MetaResult::ClearBuffer => {
                 buf.clear();
                 stmt_buf.clear();
-                println!("Query buffer reset (empty).");
+                rpg_println!("Query buffer reset (empty).");
                 HandleLineResult::BufferUpdated
             }
             MetaResult::PrintBuffer => {
                 if buf.is_empty() {
-                    println!("Query buffer is empty.");
+                    rpg_println!("Query buffer is empty.");
                 } else {
-                    println!("{buf}");
+                    rpg_println!("{buf}");
                 }
                 HandleLineResult::Continue
             }
             MetaResult::WriteBufferToFile(path) => {
                 if let Err(e) = crate::io::write_buffer(buf, &path) {
-                    eprintln!("{e}");
+                    rpg_eprintln!("{e}");
                 }
                 HandleLineResult::Continue
             }
@@ -5466,7 +5466,7 @@ async fn handle_line(
                         buf.clear();
                         stmt_buf.clear();
                     }
-                    Err(e) => eprintln!("{e}"),
+                    Err(e) => rpg_eprintln!("{e}"),
                 }
                 HandleLineResult::BufferUpdated
             }
@@ -5587,7 +5587,7 @@ async fn handle_line(
             MetaResult::ParseStatement(name) => {
                 let sql = buf.trim().to_owned();
                 if sql.is_empty() {
-                    eprintln!("\\parse: query buffer is empty");
+                    rpg_eprintln!("\\parse: query buffer is empty");
                 } else {
                     match client.prepare(&sql).await {
                         Ok(stmt) => {
@@ -5609,7 +5609,7 @@ async fn handle_line(
                     let deallocate = format!("deallocate {name}");
                     execute_query_interactive(client, &deallocate, settings, tx).await;
                 } else {
-                    eprintln!(
+                    rpg_eprintln!(
                         "\\close_prepared: prepared statement \"{name}\" \
                          does not exist"
                     );
@@ -5619,8 +5619,8 @@ async fn handle_line(
             result @ (MetaResult::SetInputMode(_) | MetaResult::SetExecMode(_)) => {
                 let label = apply_mode_change(&result, settings);
                 match result {
-                    MetaResult::SetInputMode(_) => eprintln!("Input mode: {label}"),
-                    _ => eprintln!("Execution mode: {label}"),
+                    MetaResult::SetInputMode(_) => rpg_eprintln!("Input mode: {label}"),
+                    _ => rpg_eprintln!("Execution mode: {label}"),
                 }
                 HandleLineResult::Continue
             }
@@ -5634,7 +5634,7 @@ async fn handle_line(
                     ExecMode::Plan => "plan",
                     ExecMode::Yolo => "yolo",
                 };
-                eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+                rpg_eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
                 HandleLineResult::Continue
             }
             MetaResult::Continue => HandleLineResult::Continue,

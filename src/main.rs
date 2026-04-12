@@ -5,6 +5,10 @@
 
 use clap::Parser;
 
+// Output macros — must be declared before all other modules so they are in scope.
+#[macro_use]
+mod macros;
+
 // Core modules.
 mod ai;
 #[cfg(not(target_arch = "wasm32"))]

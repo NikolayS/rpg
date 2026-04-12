@@ -47,13 +47,13 @@ pub async fn lo_import(client: &Client, filename: &str, comment: &str) {
     let data = match read_file(filename) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("\\lo_import: {e}");
+            rpg_eprintln!("\\lo_import: {e}");
             return;
         }
     };
 
     if let Err(e) = run_lo_import(client, filename, comment, &data).await {
-        eprintln!("\\lo_import: {e}");
+        rpg_eprintln!("\\lo_import: {e}");
     }
 }
 
@@ -95,7 +95,7 @@ async fn run_lo_import(
     // Commit.
     simple_exec(client, "commit").await?;
 
-    println!("lo_import {oid}");
+    rpg_println!("lo_import {oid}");
     Ok(())
 }
 
@@ -115,13 +115,13 @@ async fn run_lo_import(
 /// 7. Print `lo_export`.
 pub async fn lo_export(client: &Client, loid: &str, filename: &str) {
     let Ok(loid_parsed) = loid.trim().parse::<u32>() else {
-        eprintln!("\\lo_export: invalid OID \"{loid}\"");
+        rpg_eprintln!("\\lo_export: invalid OID \"{loid}\"");
         return;
     };
 
     match run_lo_export(client, loid_parsed, filename).await {
-        Ok(()) => println!("lo_export"),
-        Err(e) => eprintln!("\\lo_export: {e}"),
+        Ok(()) => rpg_println!("lo_export"),
+        Err(e) => rpg_eprintln!("\\lo_export: {e}"),
     }
 }
 
@@ -174,13 +174,13 @@ pub async fn lo_list(client: &Client) {
 /// Implement `\lo_unlink <loid>`.
 pub async fn lo_unlink(client: &Client, loid: &str) {
     let Ok(loid_parsed) = loid.trim().parse::<u32>() else {
-        eprintln!("\\lo_unlink: invalid OID \"{loid}\"");
+        rpg_eprintln!("\\lo_unlink: invalid OID \"{loid}\"");
         return;
     };
 
     match simple_exec(client, &format!("select lo_unlink({loid_parsed})")).await {
-        Ok(()) => println!("lo_unlink {loid_parsed}"),
-        Err(e) => eprintln!("\\lo_unlink: {e}"),
+        Ok(()) => rpg_println!("lo_unlink {loid_parsed}"),
+        Err(e) => rpg_eprintln!("\\lo_unlink: {e}"),
     }
 }
 
@@ -266,7 +266,7 @@ async fn run_and_print(client: &Client, sql: &str, title: Option<&str>) {
             print_table(&col_names, &rows, title);
         }
         Err(e) => {
-            eprintln!("{e}");
+            rpg_eprintln!("{e}");
         }
     }
 }
@@ -276,7 +276,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     if col_names.is_empty() {
         let n = rows.len();
         let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})");
+        rpg_println!("({n} {word})");
         return;
     }
 
@@ -296,10 +296,10 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     if let Some(t) = title {
         let tlen = t.len();
         if tlen >= table_width {
-            println!("{t}");
+            rpg_println!("{t}");
         } else {
             let pad = (table_width - tlen) / 2;
-            println!("{:pad$}{t}", "");
+            rpg_println!("{:pad$}{t}", "");
         }
     }
 
@@ -310,7 +310,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         .map(|(i, name)| format!(" {name:<w$}", w = widths[i]))
         .collect::<Vec<_>>()
         .join(" |");
-    println!("{header}");
+    rpg_println!("{header}");
 
     // Separator.
     let sep: String = widths
@@ -318,7 +318,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         .map(|&w| "-".repeat(w + 2))
         .collect::<Vec<_>>()
         .join("+");
-    println!("{sep}");
+    rpg_println!("{sep}");
 
     // Data rows.
     for row in rows {
@@ -331,12 +331,12 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
             })
             .collect::<Vec<_>>()
             .join(" |");
-        println!("{line}");
+        rpg_println!("{line}");
     }
 
     let n = rows.len();
     let word = if n == 1 { "row" } else { "rows" };
-    println!("({n} {word})");
+    rpg_println!("({n} {word})");
 }
 
 /// Read the entire contents of a local file.

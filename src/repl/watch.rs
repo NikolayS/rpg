@@ -139,7 +139,7 @@ pub(super) async fn watch_query(
     loop {
         // Print timestamp header matching psql's ctime-like format.
         let ts = format_system_time(std::time::SystemTime::now());
-        println!("{ts} (every {interval_secs}s)\n");
+        rpg_println!("{ts} (every {interval_secs}s)\n");
 
         // Execute the stored query.  Use a fresh TxState so that
         // transaction state changes inside the loop are not persisted.

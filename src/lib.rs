@@ -11,6 +11,10 @@
 // On native targets nothing is compiled from the library crate — the binary
 // crate (main.rs) is the only artefact that matters.
 
+// Output macros — must be declared before all other modules so they are in scope.
+#[macro_use]
+mod macros;
+
 // ---------------------------------------------------------------------------
 // Build-time constants and version string (mirrored from main.rs)
 // ---------------------------------------------------------------------------

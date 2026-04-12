@@ -398,7 +398,7 @@ async fn execute_copy_from(client: &tokio_postgres::Client, spec: &CopySpec) -> 
     // finish() flushes, sends CopyDone, and returns the number of rows copied.
     let rows = sink.finish().await.map_err(|e| format!("\\copy: {e}"))?;
 
-    println!("COPY {rows}");
+    rpg_println!("COPY {rows}");
     Ok(())
 }
 
@@ -428,7 +428,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
                 file.write_all(&chunk)
                     .map_err(|e| format!("\\copy: write error: {e}"))?;
             }
-            println!("COPY {row_count}");
+            rpg_println!("COPY {row_count}");
         }
         CopySource::Stdout => {
             let stdout = io::stdout();
@@ -440,7 +440,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
                 out.write_all(&chunk)
                     .map_err(|e| format!("\\copy: write error: {e}"))?;
             }
-            println!("COPY {row_count}");
+            rpg_println!("COPY {row_count}");
         }
         CopySource::Stdin => {
             // Validated earlier; this branch is unreachable in practice.
@@ -488,7 +488,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
                         .map_or_else(|| "signal".to_owned(), |c| c.to_string());
                     return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
                 }
-                println!("COPY {row_count}");
+                rpg_println!("COPY {row_count}");
             } // end #[cfg(not(target_arch = "wasm32"))]
         }
     }

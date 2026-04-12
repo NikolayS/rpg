@@ -55,7 +55,7 @@ pub fn include_file<'a>(
                 let msg = full
                     .find(" (os error ")
                     .map_or(full.as_str(), |pos| &full[..pos]);
-                eprintln!("{path}: {msg}");
+                rpg_eprintln!("{path}: {msg}");
                 return 1;
             }
         };
@@ -81,7 +81,7 @@ pub fn include_file<'a>(
 
         let end_depth = settings.cond.depth();
         if end_depth > start_depth {
-            eprintln!(
+            rpg_eprintln!(
                 "rpg: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
                 end_depth - start_depth
             );
@@ -206,7 +206,7 @@ pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<St
         .map_err(|e| format!("\\e: could not launch editor \"{editor}\": {e}"))?;
 
     if !status.success() {
-        eprintln!("\\e: editor exited with status {status}");
+        rpg_eprintln!("\\e: editor exited with status {status}");
     }
 
     // Read back the (possibly modified) file.
@@ -262,7 +262,7 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
     match status {
         Ok(s) => s.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("\\!: could not launch shell \"{shell}\": {e}");
+            rpg_eprintln!("\\!: could not launch shell \"{shell}\": {e}");
             1
         }
     }
@@ -271,7 +271,7 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
 /// WASM stub: shell command spawning is not supported in a browser context.
 #[cfg(target_arch = "wasm32")]
 pub fn shell_command(_cmd: Option<&str>) -> i32 {
-    eprintln!("\\!: shell commands not available in browser");
+    rpg_eprintln!("\\!: shell commands not available in browser");
     1
 }
 
@@ -319,12 +319,12 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
 /// is limited.
 pub fn encoding(enc: Option<&str>) {
     match enc {
-        None => println!("UTF8"),
+        None => rpg_println!("UTF8"),
         Some(e) => {
             if e.to_uppercase() == "UTF8" || e.to_uppercase() == "UTF-8" {
-                println!("UTF8");
+                rpg_println!("UTF8");
             } else {
-                eprintln!("\\encoding: encoding \"{e}\" is not yet supported (only UTF8)");
+                rpg_eprintln!("\\encoding: encoding \"{e}\" is not yet supported (only UTF8)");
             }
         }
     }
