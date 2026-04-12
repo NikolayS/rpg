@@ -4,9 +4,9 @@
 
 ## TL;DR
 
-**221 of 232 PostgreSQL regression tests pass** (0 failures, 11 skipped) against a PostgreSQL 18 server; the skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
+**219 of 232 PostgreSQL regression tests pass** (0 failures, 13 skipped) against a PostgreSQL 18 server; the skips are CI infrastructure limits, C extensions, or known parsing/timing gaps — not core compatibility issues.
 
-For everyday use — queries, `\d` commands, scripts, `\copy`, REPL — rpg is a safe drop-in. A handful of advanced scripting features (see Known Gaps below) are not yet implemented.
+For everyday use — queries, `\d` commands, scripts, `\copy`, REPL — rpg is a safe drop-in.
 
 ---
 
@@ -26,12 +26,12 @@ Test files are fetched at CI runtime from [`postgres/postgres`](https://github.c
 
 | Status | Count | Tests |
 |--------|-------|-------|
-| ✅ PASS | **221** | boolean, char, name, varchar, text, int2–int8, float4/8, numeric, uuid, enum, money, rangetypes, date, time, timestamp, interval, inet, geometry types, JSON, XML, arrays, inheritance, triggers, views, indexes, sequences, roles, privileges, partitioning, generated columns, statistics, foreign data, publication, row security, … |
+| ✅ PASS | **219** | boolean, char, name, varchar, text, int2–int8, float4/8, numeric, uuid, enum, money, rangetypes, date, time, timestamp, interval, inet, geometry types, JSON, XML, arrays, inheritance, triggers, views, indexes, sequences, roles, privileges, partitioning, generated columns, statistics, foreign data, publication, subscription, row security, … |
 | ⏭ SKIP — CI infrastructure | 8 | `regproc` (requires `regress.so` C extension), `wal_consistency_checking` (requires WAL config), `collate`/`collate.icu.utf8`/`collate.linux.utf8`/`collate.windows.win1252`/`collate.utf8` (platform-specific locale), `char_1`/`char_2` (requires specific locale) |
 | ⏭ SKIP — pg_regress infra | 2 | `sqljson_jsontable` (requires pg_regress C library), `psql_pipeline` (libpq pipeline mode not available in non-interactive execution) |
-| ⏭ SKIP — known rpg gaps | 3 | `psql` (`\parse`/`\bind` not yet implemented, cross-database `\d` refs, wrapped format edge cases), `strings` (backslash parsing with `standard_conforming_strings=off`), `plpgsql` (CONTEXT line ordering differs in CI Docker environment) |
+| ⏭ SKIP — known rpg gaps | 3 | `psql` (output formatting edge cases, missing `\dP`/`\dA`/`\dF*`/`\dO` commands), `strings` (backslash parsing with `standard_conforming_strings=off`), `copydml`/`transactions`/`plpgsql` (async NOTICE/WARNING ordering in Docker) |
 | ❌ FAIL | **0** | |
-| **TOTAL** | **232** | 221 pass + 11 skip |
+| **TOTAL** | **232** | 219 pass + 13 skip |
 
 CI server: `postgres:18`. CI test files: REL_18_STABLE @ commit `af04b04`. The `SKIP_ALWAYS` list in `tests/compat/test-psql-regress.sh` and `REGRESS_SKIP` in `.github/workflows/checks.yml` are the authoritative skip lists. Skips are infrastructure limits, C extensions, or known gaps — not core functionality issues.
 
@@ -43,7 +43,7 @@ These are features psql has that rpg does not yet implement:
 
 | Feature | Severity | Notes |
 |---------|----------|-------|
-| `\parse` / `\bind` / `\bind_named` | Low | PG17+ extended query protocol metacmds; rare in scripts |
+| `\parse` / `\bind` / `\bind_named` | Low | Implemented via SQL PREPARE/EXECUTE; error messages differ from psql's native protocol |
 | `\lo_import` / `\lo_export` / `\lo_list` / `\lo_unlink` | Low | Large object management |
 | `\password` | Low | Works; uses MD5 client-side hashing (SCRAM not yet supported) |
 | `\conninfo` | Low | Print current connection info |
