@@ -247,6 +247,16 @@ pub fn expand_prompt_backticks(prompt: &str) -> String {
                 result.push_str(&cmd);
                 continue;
             }
+            // psql processes backtick substitution during its single-pass
+            // %-code expansion.  When `%` immediately precedes a backtick,
+            // psql consumes the `%` as part of the backtick handling (it
+            // never becomes a literal or an escape prefix).  Since rpg
+            // runs backtick expansion as a separate pass *before*
+            // %-expansion, we must strip a trailing `%` from the result
+            // buffer to match psql behaviour.  (Fixes #789.)
+            if result.ends_with('%') {
+                result.pop();
+            }
             // Execute the command and capture stdout.
             let output = std::process::Command::new("sh")
                 .arg("-c")
@@ -8710,6 +8720,26 @@ mod tests {
         // Both echo commands should expand.
         let result = expand_prompt_backticks("`echo a`-`echo b`");
         assert_eq!(result, "a-b");
+    }
+
+    #[test]
+    fn backtick_percent_before_backtick_consumed() {
+        // Regression test for #789: psql consumes a `%` that immediately
+        // precedes a backtick command.
+        let result = expand_prompt_backticks("(%`echo hi`) rest");
+        assert_eq!(result, "(hi) rest");
+    }
+
+    #[test]
+    fn backtick_double_percent_before_backtick_keeps_one() {
+        let result = expand_prompt_backticks("(%%`echo hi`) rest");
+        assert_eq!(result, "(%hi) rest");
+    }
+
+    #[test]
+    fn backtick_no_percent_before_backtick_unchanged() {
+        let result = expand_prompt_backticks("(`echo hi`) rest");
+        assert_eq!(result, "(hi) rest");
     }
 
     #[test]
