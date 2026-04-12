@@ -1008,7 +1008,7 @@ async fn prompt_backtick_percent_fix_789() {
         // A stray `%` on any other line signals a regression in prompt handling.
         // (The __END_MARKER__ line should not contain `%` either.)
         if line.trim() == "__END_MARKER__" {
-            continue;
+            // Last line — no further checks needed.
         }
     }
 }
