@@ -1063,17 +1063,15 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                 }
             }
             1 => {
+                let val_part = if wrap_w > 0 {
+                    wrap_w.min(max_value_width)
+                } else {
+                    max_value_width
+                };
+                let pipe_pos = max_name_width + 1;
                 if !tuples_only {
                     let label = format!("-[ RECORD {} ]", rec_idx + 1);
                     let label_len = label.len();
-                    // The pipe position in data rows: max_name_width + 1 (name + ASCII marker).
-                    // For old-ascii: leading marker before name, but pipe at same position.
-                    let pipe_pos = max_name_width + 1;
-                    let val_part = if wrap_w > 0 {
-                        wrap_w.min(max_value_width)
-                    } else {
-                        max_value_width
-                    };
                     out.push_str(&label);
                     if label_len <= pipe_pos {
                         // label fits in name column: use '+' separator
@@ -1099,10 +1097,6 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                         }
                     } else {
                         // label overflows into value column, no '+' separator
-                        // Total header width depends on leading marker:
-                        // ASCII:     max_name_width + val_part + 3
-                        // Old-ascii (no multiline): max_name_width + val_part + 3
-                        // Old-ascii (multiline): max_name_width + val_part + 4
                         let total_header = if is_old_ascii && any_name_multiline {
                             max_name_width + val_part + 4
                         } else {
@@ -1112,6 +1106,22 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                         for _ in 0..fill {
                             out.push('-');
                         }
+                    }
+                    out.push('\n');
+                } else if rec_idx > 0 {
+                    // In tuples-only mode, psql still prints a separator
+                    // line between records (just dashes + '+', no label).
+                    for _ in 0..pipe_pos {
+                        out.push('-');
+                    }
+                    out.push('+');
+                    let right_fill = if is_old_ascii && any_name_multiline {
+                        val_part + 2
+                    } else {
+                        val_part + 1
+                    };
+                    for _ in 0..right_fill {
+                        out.push('-');
                     }
                     out.push('\n');
                 }
@@ -3633,10 +3643,8 @@ fn write_wrapped_row<F>(
                         // Extra space: for each skipped column, account for
                         // separator (3) + column width.  Plus trailing space
                         // before closing '|' for the last column.
-                        let extra: usize = (1..cols.len())
-                            .map(|c| 3 + widths[c])
-                            .sum::<usize>()
-                            + 1; // trailing space before closing |
+                        let extra: usize =
+                            (1..cols.len()).map(|c| 3 + widths[c]).sum::<usize>() + 1; // trailing space before closing |
                         for _ in 0..extra {
                             out.push(' ');
                         }
