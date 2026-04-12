@@ -2272,51 +2272,71 @@ pub(crate) async fn exec_lines(
                         } // end else (no pending_bind_named)
                     }
                     MetaResult::ExecuteBufferExpanded => {
-                        let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
-                        // Fall back to the previous query when the buffer is empty
-                        // (e.g. standalone \gx after a query already executed).
-                        let sql = if stripped.is_empty() {
-                            prev_buf.trim().to_owned()
-                        } else {
-                            stripped
-                        };
-                        buf.clear();
-                        if !sql.is_empty() {
-                            let saved_echo = settings.echo_all;
+                        // Check for pending \bind_named — execute the named
+                        // statement in expanded mode, matching \gx semantics.
+                        if let Some((ref name, ref parms)) = settings.pending_bind_named.take() {
                             let saved_expanded = settings.expanded;
-                            settings.echo_all = false;
                             settings.expanded = ExpandedMode::On;
                             settings.pset.expanded = ExpandedMode::On;
-                            // Apply any inline pset options (e.g. \gx (title='foo')).
-                            let saved_pset = if settings.pending_pset_opts.is_empty() {
-                                None
-                            } else {
-                                let saved = settings.pset.clone();
-                                let opts = std::mem::take(&mut settings.pending_pset_opts);
-                                let saved_quiet = settings.quiet;
-                                settings.quiet = true;
-                                for (opt, val) in &opts {
-                                    apply_pset(settings, opt, val.as_deref());
-                                }
-                                settings.quiet = saved_quiet;
-                                Some(saved)
-                            };
-                            let ok = execute_query(client, &sql, settings, tx).await;
-                            if let Some(saved) = saved_pset {
-                                settings.pset = saved;
-                            }
-                            // Always restore expanded mode (pset may have been saved
-                            // after setting expanded=On, so override here).
-                            settings.pset.expanded = saved_expanded;
-                            settings.expanded = saved_expanded;
-                            settings.echo_all = saved_echo;
-                            if !ok {
+                            if !execute_named_stmt(client, name, parms, settings, tx).await {
                                 exit_code = 1;
                                 if settings.single_transaction {
+                                    settings.expanded = saved_expanded;
+                                    settings.pset.expanded = saved_expanded;
                                     break 'lines;
                                 }
                             }
-                        }
+                            settings.expanded = saved_expanded;
+                            settings.pset.expanded = saved_expanded;
+                            buf.clear();
+                        } else {
+                            let stripped =
+                                crate::query::strip_leading_preamble(buf.trim()).to_owned();
+                            // Fall back to the previous query when the buffer is empty
+                            // (e.g. standalone \gx after a query already executed).
+                            let sql = if stripped.is_empty() {
+                                prev_buf.trim().to_owned()
+                            } else {
+                                stripped
+                            };
+                            buf.clear();
+                            if !sql.is_empty() {
+                                let saved_echo = settings.echo_all;
+                                let saved_expanded = settings.expanded;
+                                settings.echo_all = false;
+                                settings.expanded = ExpandedMode::On;
+                                settings.pset.expanded = ExpandedMode::On;
+                                // Apply any inline pset options (e.g. \gx (title='foo')).
+                                let saved_pset = if settings.pending_pset_opts.is_empty() {
+                                    None
+                                } else {
+                                    let saved = settings.pset.clone();
+                                    let opts = std::mem::take(&mut settings.pending_pset_opts);
+                                    let saved_quiet = settings.quiet;
+                                    settings.quiet = true;
+                                    for (opt, val) in &opts {
+                                        apply_pset(settings, opt, val.as_deref());
+                                    }
+                                    settings.quiet = saved_quiet;
+                                    Some(saved)
+                                };
+                                let ok = execute_query(client, &sql, settings, tx).await;
+                                if let Some(saved) = saved_pset {
+                                    settings.pset = saved;
+                                }
+                                // Always restore expanded mode (pset may have been saved
+                                // after setting expanded=On, so override here).
+                                settings.pset.expanded = saved_expanded;
+                                settings.expanded = saved_expanded;
+                                settings.echo_all = saved_echo;
+                                if !ok {
+                                    exit_code = 1;
+                                    if settings.single_transaction {
+                                        break 'lines;
+                                    }
+                                }
+                            }
+                        } // else (not pending_bind_named)
                     }
                     MetaResult::ExecuteBufferToFile(path) => {
                         let stripped = crate::query::strip_leading_preamble(buf.trim()).to_owned();
