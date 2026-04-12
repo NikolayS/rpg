@@ -114,7 +114,11 @@ fn categories() -> Vec<(&'static str, Vec<CompatEntry>)> {
                 CompatEntry::new(r"\dD", CompatStatus::Full, "list domains"),
                 CompatEntry::new(r"\dA", CompatStatus::Full, "list access methods"),
                 CompatEntry::new(r"\dAc", CompatStatus::Full, "list operator classes"),
-                CompatEntry::new(r"\dF", CompatStatus::Full, "list text search configurations"),
+                CompatEntry::new(
+                    r"\dF",
+                    CompatStatus::Full,
+                    "list text search configurations",
+                ),
                 CompatEntry::new(r"\dFd", CompatStatus::Full, "list text search dictionaries"),
                 CompatEntry::new(r"\dFp", CompatStatus::Full, "list text search parsers"),
                 CompatEntry::new(r"\dFt", CompatStatus::Full, "list text search templates"),

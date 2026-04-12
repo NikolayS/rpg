@@ -5141,9 +5141,35 @@ async fn list_collations(
 
     let pg_ver = settings.db_capabilities.pg_major_version();
 
+    // PG17 removed collcollate/collctype and consolidated into colllocale.
+    // PG17 also added the 'b' (builtin) collation provider.
     // PG 15 added colliculocale; PG 16 renamed it to colllocale and added
     // collicurules.  PG 10-14 have only collcollate / collctype.
-    let icu_locale_col = if pg_ver.is_some_and(|v| v >= 16) {
+    let provider_expr = if pg_ver.is_some_and(|v| v >= 17) {
+        "case c.collprovider
+        when 'd' then 'default'
+        when 'c' then 'libc'
+        when 'i' then 'icu'
+        when 'b' then 'builtin'
+    end as \"Provider\""
+    } else {
+        "case c.collprovider
+        when 'd' then 'default'
+        when 'c' then 'libc'
+        when 'i' then 'icu'
+    end as \"Provider\""
+    };
+
+    let collate_cols = if pg_ver.is_some_and(|v| v >= 17) {
+        "c.colllocale as \"Locale\""
+    } else {
+        "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\""
+    };
+
+    let icu_locale_col = if pg_ver.is_some_and(|v| v >= 17) {
+        // PG17+: colllocale already shown above; only add ICU Rules.
+        ",\n    c.collicurules as \"ICU Rules\""
+    } else if pg_ver.is_some_and(|v| v >= 16) {
         ",\n    c.colllocale as \"ICU Locale\",\n    c.collicurules as \"ICU Rules\""
     } else if pg_ver.is_some_and(|v| v >= 15) {
         ",\n    c.colliculocale as \"ICU Locale\""
@@ -5161,13 +5187,8 @@ async fn list_collations(
         "select
     n.nspname as \"Schema\",
     c.collname as \"Name\",
-    case c.collprovider
-        when 'd' then 'default'
-        when 'c' then 'libc'
-        when 'i' then 'icu'
-    end as \"Provider\",
-    c.collcollate as \"Collate\",
-    c.collctype as \"Ctype\"{icu_locale_col}{desc_col}
+    {provider_expr},
+    {collate_cols}{icu_locale_col}{desc_col}
 from pg_catalog.pg_collation as c
 join pg_catalog.pg_namespace as n
     on n.oid = c.collnamespace
@@ -5300,14 +5321,7 @@ order by 1, 2"
         )
     };
 
-    run_and_print_titled(
-        client,
-        &sql,
-        meta.echo_hidden,
-        Some(title),
-        settings,
-    )
-    .await
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some(title), settings).await
 }
 
 // ---------------------------------------------------------------------------
