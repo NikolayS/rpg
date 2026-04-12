@@ -1003,9 +1003,7 @@ fn merge_config(base: Config, overlay: Config) -> Config {
             audit_file: overlay.logging.audit_file.or(base.logging.audit_file),
         },
         ash: AshConfig {
-            sample_timeout_ms: if overlay.ash.sample_timeout_ms
-                == default_ash_sample_timeout_ms()
-            {
+            sample_timeout_ms: if overlay.ash.sample_timeout_ms == default_ash_sample_timeout_ms() {
                 base.ash.sample_timeout_ms
             } else {
                 overlay.ash.sample_timeout_ms

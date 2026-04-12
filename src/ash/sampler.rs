@@ -152,10 +152,7 @@ pub enum LiveSnapshotResult {
 ///
 /// `timeout_ms` — maximum time in milliseconds for the sample query.
 /// `0` disables the timeout entirely.
-pub async fn live_snapshot(
-    client: &Client,
-    timeout_ms: u64,
-) -> anyhow::Result<LiveSnapshotResult> {
+pub async fn live_snapshot(client: &Client, timeout_ms: u64) -> anyhow::Result<LiveSnapshotResult> {
     let sql = "
         select
             case
@@ -185,10 +182,7 @@ pub async fn live_snapshot(
     // When timeout_ms is 0, skip the guard entirely (user opted out).
     if timeout_ms > 0 {
         client
-            .execute(
-                &format!("set statement_timeout = '{timeout_ms}ms'"),
-                &[],
-            )
+            .execute(&format!("set statement_timeout = '{timeout_ms}ms'"), &[])
             .await?;
     }
 
@@ -294,10 +288,7 @@ async fn query_ash_history_inner(
     // When timeout_ms is 0, skip the guard entirely (user opted out).
     if timeout_ms > 0 {
         let _ = client
-            .execute(
-                &format!("set statement_timeout = '{timeout_ms}ms'"),
-                &[],
-            )
+            .execute(&format!("set statement_timeout = '{timeout_ms}ms'"), &[])
             .await;
     }
 
