@@ -211,7 +211,8 @@ normalize() {
     -e '/^parallel worker$/d' \
     -e '/enumtypid/s/=([0-9][0-9]*/=(OID/g' \
     -e 's/for operator [0-9][0-9]*/for operator OID/g' \
-    -e 's/ Query Identifier: [-0-9][0-9]*/ Query Identifier: 0000000000000000000/g' | \
+    -e 's/ Query Identifier: [-0-9][0-9]*/ Query Identifier: 0000000000000000000/g' \
+    -e 's/List of tables/List of relations/g' | \
   awk '
     BEGIN { after_qp = 0 }
     /^$/ { blank++; next }
