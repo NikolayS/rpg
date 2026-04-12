@@ -1513,10 +1513,10 @@ fn g4_pgpassword_overrides_pgpassfile() {
 
 /// I1: First host is unreachable, second host succeeds — connection established.
 ///
-/// Tests that `-h bad-host,goodhost -p badport,goodport` tries the first host,
-/// fails, then connects via the second.
+/// Uses `.invalid` TLD (RFC 2606 — guaranteed non-resolving) as the first host
+/// so DNS resolution fails fast.  The second host is the real Postgres instance.
 #[test]
-#[ignore = "requires live Postgres — run via connection-tests CI job"]
+#[cfg(feature = "integration")]
 fn i1_multihost_first_fails_second_succeeds() {
     // Use the trust postgres instance as the "good" second host.
     let good_host = trust_host();
@@ -1525,9 +1525,9 @@ fn i1_multihost_first_fails_second_succeeds() {
     let mut cmd = rpg();
     cmd.args([
         "-h",
-        &format!("bad-host-xyz-nonexistent,{good_host}"),
+        &format!("nonexistent-host-xyz.invalid,{good_host}"),
         "-p",
-        &format!("19997,{good_port}"),
+        &format!("5432,{good_port}"),
         "-U",
         &trust_user(),
         "-d",
@@ -1536,6 +1536,8 @@ fn i1_multihost_first_fails_second_succeeds() {
         "-c",
         "SELECT 1",
     ]);
+    // Timeout prevents CI from hanging on slow DNS resolution.
+    cmd.env("PGCONNECT_TIMEOUT", "10");
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
@@ -1557,15 +1559,18 @@ fn i1_multihost_first_fails_second_succeeds() {
 }
 
 /// I2: All hosts fail — error message must mention the attempted hosts.
+///
+/// Both hosts use `.invalid` TLD (RFC 2606) so DNS fails fast without needing
+/// any live Postgres instance.
 #[test]
-#[ignore = "requires live Postgres — run via connection-tests CI job"]
+#[cfg(feature = "integration")]
 fn i2_multihost_all_fail() {
     let mut cmd = rpg();
     cmd.args([
         "-h",
-        "bad-host-one,bad-host-two",
+        "bad-host-one.invalid,bad-host-two.invalid",
         "-p",
-        "19990,19991",
+        "5432,5432",
         "-U",
         "postgres",
         "-d",
@@ -1574,6 +1579,8 @@ fn i2_multihost_all_fail() {
         "-c",
         "SELECT 1",
     ]);
+    // Timeout prevents CI from hanging on slow DNS resolution.
+    cmd.env("PGCONNECT_TIMEOUT", "10");
     let (stdout, stderr, code) = run(cmd);
     assert_ne!(
         code, 0,
@@ -1594,7 +1601,7 @@ fn i2_multihost_all_fail() {
 
 /// I3: Single host via `-h` still works as a regression guard.
 #[test]
-#[ignore = "requires live Postgres — run via connection-tests CI job"]
+#[cfg(feature = "integration")]
 fn i3_single_host_regression() {
     let mut cmd = rpg();
     cmd.args([
