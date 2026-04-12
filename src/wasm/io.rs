@@ -10,11 +10,22 @@
 use wasm_bindgen::JsValue;
 
 /// Print to the browser console (replaces stdout in WASM).
+///
+/// Multi-line strings are split and emitted line-by-line so that
+/// xterm.js (which intercepts `console.log`) renders each line on
+/// its own row.  A single `console.log` with embedded `\n` would
+/// otherwise arrive as one blob.
 pub fn wasm_print(s: &str) {
-    web_sys::console::log_1(&JsValue::from_str(s));
+    for line in s.split('\n') {
+        web_sys::console::log_1(&JsValue::from_str(line));
+    }
 }
 
 /// Print an error to the browser console (replaces stderr in WASM).
+///
+/// Multi-line errors are split the same way as [`wasm_print`].
 pub fn wasm_eprint(s: &str) {
-    web_sys::console::error_1(&JsValue::from_str(s));
+    for line in s.split('\n') {
+        web_sys::console::error_1(&JsValue::from_str(line));
+    }
 }
