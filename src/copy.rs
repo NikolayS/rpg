@@ -652,6 +652,7 @@ fn replace_unquoted_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     let mut in_quote = false;
+    let mut paren_depth: u32 = 0;
     while let Some(ch) = chars.next() {
         match ch {
             '\'' if in_quote => {
@@ -667,7 +668,15 @@ fn replace_unquoted_commas(s: &str) -> String {
                 in_quote = true;
                 out.push('\'');
             }
-            ',' if !in_quote => {
+            '(' if !in_quote => {
+                paren_depth += 1;
+                out.push(ch);
+            }
+            ')' if !in_quote && paren_depth > 0 => {
+                paren_depth -= 1;
+                out.push(ch);
+            }
+            ',' if !in_quote && paren_depth == 0 => {
                 out.push(' ');
             }
             _ => {
@@ -1237,5 +1246,44 @@ mod tests {
             build_copy_to_sql(&spec),
             "copy y to stdout with (format csv, FORCE_QUOTE *)"
         );
+    }
+
+    // --- replace_unquoted_commas ----------------------------------------------
+
+    #[test]
+    fn test_replace_commas_outside_parens() {
+        // Top-level commas become spaces.
+        assert_eq!(replace_unquoted_commas("a,b,c"), "a b c");
+    }
+
+    #[test]
+    fn test_replace_commas_inside_parens_preserved() {
+        // Commas inside parentheses (e.g. FORCE_QUOTE (a, b)) stay intact.
+        assert_eq!(
+            replace_unquoted_commas("FORMAT CSV,FORCE_QUOTE (a, b)"),
+            "FORMAT CSV FORCE_QUOTE (a, b)"
+        );
+    }
+
+    #[test]
+    fn test_replace_commas_nested_parens() {
+        // Commas inside nested parentheses are also preserved.
+        assert_eq!(
+            replace_unquoted_commas("A,B (c, d (e, f)),G"),
+            "A B (c, d (e, f)) G"
+        );
+    }
+
+    #[test]
+    fn test_replace_commas_in_quotes_preserved() {
+        // Commas inside quoted strings are preserved.
+        assert_eq!(replace_unquoted_commas("NULL ','"), "NULL ','");
+    }
+
+    #[test]
+    fn test_force_quote_multi_column() {
+        let spec = parse_copy_args("y TO stdout (FORMAT CSV, FORCE_QUOTE (a, b))").unwrap();
+        assert_eq!(spec.format, CopyFormat::Csv);
+        assert_eq!(spec.extra_options[0], "FORCE_QUOTE (a, b)");
     }
 }

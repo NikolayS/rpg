@@ -2929,8 +2929,15 @@ order by 2, 3"
                 // to exactly one object.
                 let qualified = format!("{schema}.{name}");
                 describe_table(client, meta, &qualified, settings).await;
-                // psql always prints a blank line after each \d table description.
-                println!();
+                // psql prints a blank line after each \d table description
+                // in aligned/wrapped formats, but NOT in unaligned/CSV.
+                let is_unaligned = matches!(
+                    settings.pset.format,
+                    crate::output::OutputFormat::Unaligned | crate::output::OutputFormat::Csv
+                );
+                if !is_unaligned {
+                    println!();
+                }
             }
 
             // Return false unconditionally (only \q should exit the REPL).

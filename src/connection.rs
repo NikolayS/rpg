@@ -2428,9 +2428,18 @@ pub async fn connect(
                         if let Some(ip4) = ipv4 {
                             let mut pg4 = pg_config.clone();
                             pg4.host(&ip4);
-                            params.host = ip4;
+                            // Keep params.host as the original hostname so
+                            // that TLS hostname verification (verify-full)
+                            // still checks the certificate against the DNS
+                            // name, not the resolved IP literal.  Only the
+                            // dial address (pg4) changes to IPv4.
                             match connect_one(&pg4, &params).await {
-                                Ok(pair) => pair,
+                                Ok(pair) => {
+                                    // Record the resolved IP for \conninfo
+                                    // display without overwriting the hostname.
+                                    params.resolved_addr = Some(ip4);
+                                    pair
+                                }
                                 Err(e2) => {
                                     last_err = Some(e2);
                                     continue;

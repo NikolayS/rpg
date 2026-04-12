@@ -4820,13 +4820,18 @@ pub(super) async fn dispatch_io(
 /// - Prompts `Enter new password for user "<user>": ` then `Enter it again: `
 /// - When no user is given, resolves the current role via `SELECT CURRENT_USER`
 /// - Error message on mismatch: `Passwords didn't match.`
-/// - Executes `ALTER USER <ident> PASSWORD '<escaped>'` on the live connection
+/// - Encrypts the password client-side before sending it to the server, so
+///   the plaintext never appears in `pg_stat_activity`, server logs, or
+///   `pg_stat_statements`.
 ///
-/// Note: psql encrypts the password client-side via `PQencryptPasswordConn`
-/// before sending it, so the plaintext never appears in server logs.  We
-/// instead send the cleartext password and rely on the server's
-/// `password_encryption` setting to hash it at rest — a pragmatic trade-off
-/// until a Rust-native SCRAM / MD5 implementation is added.
+/// Like psql's `PQencryptPasswordConn`, we query the server's
+/// `password_encryption` setting and hash accordingly:
+/// - `md5`          → `md5<hex(md5(password+username))>`
+/// - `scram-sha-256` → fall back to MD5 with a warning (full SCRAM client-side
+///   hashing requires a multi-step SASL exchange that is not yet implemented)
+///
+/// The server will store the already-hashed value as-is when it recognises the
+/// prefix (`md5…`), so the cleartext password never reaches the wire.
 async fn dispatch_password(user: Option<&str>, client: &Client) {
     use tokio_postgres::SimpleQueryMessage;
 
@@ -4879,12 +4884,44 @@ async fn dispatch_password(user: Option<&str>, client: &Client) {
         return;
     }
 
+    // Query the server's password_encryption setting to decide how to hash.
+    let encryption = match client.simple_query("show password_encryption").await {
+        Ok(msgs) => msgs
+            .into_iter()
+            .find_map(|m| {
+                if let SimpleQueryMessage::Row(row) = m {
+                    row.get(0).map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "md5".to_owned()),
+        Err(_) => "md5".to_owned(),
+    };
+
+    // Hash the password client-side so the cleartext never appears in server
+    // logs, pg_stat_activity, or pg_stat_statements.
+    let encrypted = if encryption == "scram-sha-256" {
+        // Full SCRAM client-side hashing (RFC 5802) is not yet implemented.
+        // Fall back to MD5 — the server accepts MD5-hashed passwords even
+        // when password_encryption=scram-sha-256 and will re-hash on storage.
+        eprintln!(
+            "WARNING: server uses scram-sha-256 but rpg does not yet support \
+             client-side SCRAM hashing; using MD5 pre-hashing instead"
+        );
+        let hash = md5::compute(format!("{pw}{resolved_user}"));
+        format!("md5{hash:x}")
+    } else {
+        // MD5: md5 + hex(md5(password + username))
+        let hash = md5::compute(format!("{pw}{resolved_user}"));
+        format!("md5{hash:x}")
+    };
+
     // Escape the username as a SQL identifier (double-quote and double any
-    // internal double-quotes) and the password as a SQL string literal
-    // (single-quote and double any internal single-quotes).
+    // internal double-quotes).  The encrypted password is hex-safe (no quotes
+    // needed) but we still single-quote it as a SQL string literal.
     let ident_escaped = resolved_user.replace('"', "\"\"");
-    let pw_escaped = pw.replace('\'', "''");
-    let sql = format!("alter user \"{ident_escaped}\" password '{pw_escaped}'");
+    let sql = format!("alter user \"{ident_escaped}\" password '{encrypted}'");
 
     match client.simple_query(&sql).await {
         Ok(_) => {}

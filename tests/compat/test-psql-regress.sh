@@ -25,9 +25,6 @@ done
 #   3. Normalizes both outputs      (strip timing, ANSI, trailing whitespace)
 #   4. Diffs psql output vs rpg output — PASS if identical, FAIL otherwise
 #
-# Additionally, for SELECT-only tests, the script also diffs rpg output
-# against the upstream .out expected file (the gold standard).
-#
 # Environment variables (all optional, sensible defaults):
 #   PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD
 #   REGRESS_ONLY — space-separated list of test names to run (e.g. "boolean char")
@@ -40,7 +37,6 @@ RPG="${1:?Usage: test-psql-regress.sh <rpg-binary> <postgres-src-dir>}"
 PG_SRC="${2:?Usage: test-psql-regress.sh <rpg-binary> <postgres-src-dir>}"
 
 REGRESS_SQL_DIR="${PG_SRC}/src/test/regress/sql"
-REGRESS_EXP_DIR="${PG_SRC}/src/test/regress/expected"
 
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"

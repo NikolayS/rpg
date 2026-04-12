@@ -3279,6 +3279,7 @@ dependencies = [
  "dirs",
  "futures",
  "libc",
+ "md5",
  "mlua",
  "ratatui",
  "reqwest",
