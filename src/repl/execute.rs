@@ -494,13 +494,19 @@ pub async fn execute_query(
         return all_ok;
     }
 
-    // Auto-EXPLAIN: prepend EXPLAIN prefix when enabled.
-    // Skip for statements that are already EXPLAIN, or for
-    // non-query statements (SET, BEGIN, COMMIT, etc.).
+    // Auto-EXPLAIN: prepend EXPLAIN prefix when enabled or when plan
+    // execution mode is active.  Skip for statements that are already
+    // EXPLAIN, or for non-query statements (SET, BEGIN, COMMIT, etc.).
     let auto_explained;
     let mut auto_explain_active = false;
-    let auto_explain_label = settings.auto_explain.label();
-    let sql_to_send = if settings.auto_explain == AutoExplain::Off {
+    let plan_mode_active = settings.exec_mode == ExecMode::Plan;
+    let effective_auto_explain = if plan_mode_active && settings.auto_explain == AutoExplain::Off {
+        AutoExplain::On
+    } else {
+        settings.auto_explain
+    };
+    let auto_explain_label = effective_auto_explain.label();
+    let sql_to_send = if effective_auto_explain == AutoExplain::Off {
         interpolated.as_str()
     } else {
         let trimmed_upper = interpolated.trim_start().to_uppercase();
@@ -510,7 +516,7 @@ pub async fn execute_query(
             || trimmed_upper.starts_with("VALUES");
         let already_explain = trimmed_upper.starts_with("EXPLAIN");
         if is_query && !already_explain {
-            auto_explained = format!("{}{}", settings.auto_explain.prefix(), interpolated);
+            auto_explained = format!("{}{}", effective_auto_explain.prefix(), interpolated);
             auto_explain_active = true;
             auto_explained.as_str()
         } else {
@@ -744,7 +750,12 @@ pub async fn execute_query(
                     // Print "[auto-explain: <mode>]" header before the
                     // plan output so users know EXPLAIN was prepended.
                     if auto_explain_active && result_set_index == 0 {
-                        let _ = writeln!(out_buf, "[auto-explain: {auto_explain_label}]");
+                        let label = if plan_mode_active {
+                            "plan"
+                        } else {
+                            auto_explain_label
+                        };
+                        let _ = writeln!(out_buf, "[auto-explain: {label}]");
                     }
 
                     print_result_set_pset(
