@@ -1604,6 +1604,7 @@ fn i2_multihost_all_fail() {
 #[cfg(feature = "integration")]
 fn i3_single_host_regression() {
     let mut cmd = rpg();
+    cmd.env("PGCONNECT_TIMEOUT", "10");
     cmd.args([
         "-h",
         &trust_host(),
