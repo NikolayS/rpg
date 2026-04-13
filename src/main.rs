@@ -924,6 +924,8 @@ async fn async_main() {
                 println!("{}", version_string());
                 // Server version (full, including distro build info when present)
                 println!("Server: PostgreSQL {server_ver}");
+                // Connection details + SSL status — matching psql startup output.
+                println!("{}", connection::connection_info(&resolved));
 
                 // LLM status
                 let ai_status = {
@@ -949,6 +951,7 @@ async fn async_main() {
                 println!(
                     "Type \\? for help. \\-commands are psql-compatible; /-commands are rpg extensions (AI and non-AI)."
                 );
+                println!();
             }
 
             if let capabilities::PgAshStatus::Available { ref version } =
