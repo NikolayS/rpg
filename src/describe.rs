@@ -97,6 +97,14 @@ pub async fn execute(
         MetaCmd::ListExtStatistics => list_ext_statistics(client, meta, settings).await,
         MetaCmd::ListPublications => list_publications(client, meta, settings).await,
         MetaCmd::ListSubscriptions => list_subscriptions(client, meta, settings).await,
+        MetaCmd::ListCollations => list_collations(client, meta, settings).await,
+        MetaCmd::ListPartitionedRels => list_partitioned_rels(client, meta, settings).await,
+        MetaCmd::ListAccessMethods => list_access_methods(client, meta, settings).await,
+        MetaCmd::ListOpClasses => list_op_classes(client, meta, settings).await,
+        MetaCmd::ListTSConfigs => list_ts_configs(client, meta, settings).await,
+        MetaCmd::ListTSDicts => list_ts_dicts(client, meta, settings).await,
+        MetaCmd::ListTSParsers => list_ts_parsers(client, meta, settings).await,
+        MetaCmd::ListTSTemplates => list_ts_templates(client, meta, settings).await,
         // Non-describe commands should never reach this function.
         _ => false,
     };
@@ -5072,6 +5080,663 @@ limit 1"
     }
 
     false
+}
+
+// ---------------------------------------------------------------------------
+// \dO — list collations
+// ---------------------------------------------------------------------------
+
+/// List collations.
+///
+/// Matches psql's `\dO [pattern]` output: Schema, Name, Provider, Collate,
+/// Ctype, ICU Locale (PG 16+), ICU Rules (PG 16+).
+/// With `+`: also adds Description.
+async fn list_collations(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.collname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    // psql also applies a visibility filter when no schema qualifier is present.
+    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+        String::new()
+    } else {
+        "pg_catalog.pg_collation_is_visible(c.oid)".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let pg_ver = settings.db_capabilities.pg_major_version();
+
+    // PG17 removed collcollate/collctype and consolidated into colllocale.
+    // PG17 also added the 'b' (builtin) collation provider.
+    // PG 15 added colliculocale; PG 16 renamed it to colllocale and added
+    // collicurules.  PG 10-14 have only collcollate / collctype.
+    let provider_expr = if pg_ver.is_some_and(|v| v >= 17) {
+        "case c.collprovider
+        when 'd' then 'default'
+        when 'c' then 'libc'
+        when 'i' then 'icu'
+        when 'b' then 'builtin'
+    end as \"Provider\""
+    } else {
+        "case c.collprovider
+        when 'd' then 'default'
+        when 'c' then 'libc'
+        when 'i' then 'icu'
+    end as \"Provider\""
+    };
+
+    let collate_cols = if pg_ver.is_some_and(|v| v >= 17) {
+        "c.colllocale as \"Locale\""
+    } else {
+        "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\""
+    };
+
+    let icu_locale_col = if pg_ver.is_some_and(|v| v >= 17) {
+        // PG17+: colllocale already shown above; only add ICU Rules.
+        ",\n    c.collicurules as \"ICU Rules\""
+    } else if pg_ver.is_some_and(|v| v >= 16) {
+        ",\n    c.colllocale as \"ICU Locale\",\n    c.collicurules as \"ICU Rules\""
+    } else if pg_ver.is_some_and(|v| v >= 15) {
+        ",\n    c.colliculocale as \"ICU Locale\""
+    } else {
+        ""
+    };
+
+    let desc_col = if meta.plus {
+        ",\n    pg_catalog.obj_description(c.oid, 'pg_collation') as \"Description\""
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    c.collname as \"Name\",
+    {provider_expr},
+    {collate_cols}{icu_locale_col}{desc_col}
+from pg_catalog.pg_collation as c
+join pg_catalog.pg_namespace as n
+    on n.oid = c.collnamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of collations"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dP — list partitioned relations
+// ---------------------------------------------------------------------------
+
+/// List partitioned relations (tables and/or indexes).
+///
+/// Matches psql's `\dP [pattern]` output: Schema, Name, Owner, Type, Parent
+/// name, Table.  With `+`: adds Partition of, Size, Description.
+///
+/// `kind_filter`:
+/// - `None` → both partitioned tables (`p`) and partitioned indexes (`I`)
+/// - `Some('t')` → partitioned tables only
+/// - `Some('i')` → partitioned indexes only
+async fn list_partitioned_rels(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let relkinds = match meta.kind_filter {
+        Some('t') => vec!["'p'"],
+        Some('i') => vec!["'I'"],
+        _ => vec!["'p'", "'I'"],
+    };
+    let kind_in = relkinds.join(",");
+
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.relname", Some("n.nspname"));
+
+    let sys_filter = system_schema_filter(meta.system);
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter)
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("and {}", where_parts.join("\n    and "))
+    };
+
+    let type_expr = "case c.relkind
+           when 'p' then 'partitioned table'
+           when 'I' then 'partitioned index'
+       end";
+
+    let title = match meta.kind_filter {
+        Some('t') => "List of partitioned tables",
+        Some('i') => "List of partitioned indexes",
+        _ => "List of partitioned relations",
+    };
+
+    let sql = if meta.plus {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    {type_expr} as \"Type\",
+    inh.inhparent::pg_catalog.regclass as \"Parent name\",
+    case when c.relkind = 'I'
+         then (select ct.relname
+               from pg_catalog.pg_index as idx
+               join pg_catalog.pg_class as ct on ct.oid = idx.indrelid
+               where idx.indexrelid = c.oid)
+         else null
+    end as \"Table\",
+    pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as \"Size\",
+    coalesce(pg_catalog.obj_description(c.oid, 'pg_class'), '') as \"Description\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_inherits as inh
+    on c.oid = inh.inhrelid
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+        )
+    } else {
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    c.relname as \"Name\",
+    pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\",
+    {type_expr} as \"Type\",
+    inh.inhparent::pg_catalog.regclass as \"Parent name\",
+    case when c.relkind = 'I'
+         then (select ct.relname
+               from pg_catalog.pg_index as idx
+               join pg_catalog.pg_class as ct on ct.oid = idx.indrelid
+               where idx.indexrelid = c.oid)
+         else null
+    end as \"Table\"
+from pg_catalog.pg_class as c
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.relnamespace
+left join pg_catalog.pg_inherits as inh
+    on c.oid = inh.inhrelid
+where c.relkind in ({kind_in})
+    {where_clause}
+order by 1, 2"
+        )
+    };
+
+    run_and_print_titled(client, &sql, meta.echo_hidden, Some(title), settings).await
+}
+
+// ---------------------------------------------------------------------------
+// \dA — list access methods
+// ---------------------------------------------------------------------------
+
+/// List access methods.
+///
+/// Matches psql's `\dA [pattern]` output: Name, Handler, Type.
+/// With `+`: also adds Description.
+async fn list_access_methods(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter = pattern::where_clause(meta.pattern.as_deref(), "a.amname", None);
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let desc_col = if meta.plus {
+        ",\n    pg_catalog.obj_description(a.oid, 'pg_am') as \"Description\""
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        "select
+    a.amname as \"Name\",
+    a.amhandler as \"Handler\",
+    case a.amtype
+        when 'i' then 'Index'
+        when 't' then 'Table'
+    end as \"Type\"{desc_col}
+from pg_catalog.pg_am as a
+{where_clause}
+order by 1"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of access methods"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dAc — list operator classes
+// ---------------------------------------------------------------------------
+
+/// List operator classes for access methods.
+///
+/// Matches psql's `\dAc [pattern]` output: AM, Input type, Storage type,
+/// Operator family, Default.
+/// With `+`: also adds Description.
+async fn list_op_classes(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.opcname", Some("am.amname"));
+
+    let where_clause = if name_filter.is_empty() {
+        String::new()
+    } else {
+        format!("where {name_filter}")
+    };
+
+    let desc_col = if meta.plus {
+        ",\n    pg_catalog.obj_description(c.oid, 'pg_opclass') as \"Description\""
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        "select
+    am.amname as \"AM\",
+    pg_catalog.format_type(c.opcintype, null) as \"Input type\",
+    case
+        when c.opckeytype <> 0
+        then pg_catalog.format_type(c.opckeytype, null)
+        else ''
+    end as \"Storage type\",
+    of.opfname as \"Operator family\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default\"{desc_col}
+from pg_catalog.pg_opclass as c
+left join pg_catalog.pg_am as am
+    on am.oid = c.opcmethod
+left join pg_catalog.pg_namespace as n
+    on n.oid = c.opcnamespace
+left join pg_catalog.pg_opfamily as of
+    on of.oid = c.opcfamily
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of operator classes"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dF — list text search configurations
+// ---------------------------------------------------------------------------
+
+/// List text search configurations.
+///
+/// Matches psql's `\dF [pattern]` output: Schema, Name, Description.
+async fn list_ts_configs(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "c.cfgname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+        String::new()
+    } else {
+        "pg_catalog.pg_ts_config_is_visible(c.oid)".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    c.cfgname as \"Name\",
+    pg_catalog.obj_description(c.oid, 'pg_ts_config') as \"Description\"
+from pg_catalog.pg_ts_config as c
+join pg_catalog.pg_namespace as n
+    on n.oid = c.cfgnamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of text search configurations"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dFd — list text search dictionaries
+// ---------------------------------------------------------------------------
+
+/// List text search dictionaries.
+///
+/// Matches psql's `\dFd [pattern]` output: Schema, Name, Description.
+async fn list_ts_dicts(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "d.dictname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+        String::new()
+    } else {
+        "pg_catalog.pg_ts_dict_is_visible(d.oid)".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    d.dictname as \"Name\",
+    pg_catalog.obj_description(d.oid, 'pg_ts_dict') as \"Description\"
+from pg_catalog.pg_ts_dict as d
+join pg_catalog.pg_namespace as n
+    on n.oid = d.dictnamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of text search dictionaries"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dFp — list text search parsers
+// ---------------------------------------------------------------------------
+
+/// List text search parsers.
+///
+/// Matches psql's `\dFp [pattern]` output: Schema, Name, Description.
+async fn list_ts_parsers(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "p.prsname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+        String::new()
+    } else {
+        "pg_catalog.pg_ts_parser_is_visible(p.oid)".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    p.prsname as \"Name\",
+    pg_catalog.obj_description(p.oid, 'pg_ts_parser') as \"Description\"
+from pg_catalog.pg_ts_parser as p
+join pg_catalog.pg_namespace as n
+    on n.oid = p.prsnamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of text search parsers"),
+        settings,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// \dFt — list text search templates
+// ---------------------------------------------------------------------------
+
+/// List text search templates.
+///
+/// Matches psql's `\dFt [pattern]` output: Schema, Name, Description.
+async fn list_ts_templates(
+    client: &Client,
+    meta: &ParsedMeta,
+    settings: &mut crate::repl::ReplSettings,
+) -> bool {
+    let name_filter =
+        pattern::where_clause(meta.pattern.as_deref(), "t.tmplname", Some("n.nspname"));
+
+    let sys_filter = if meta.system {
+        String::new()
+    } else {
+        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+    };
+
+    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+        String::new()
+    } else {
+        "pg_catalog.pg_ts_template_is_visible(t.oid)".to_owned()
+    };
+
+    let where_parts: Vec<&str> = [
+        if sys_filter.is_empty() {
+            None
+        } else {
+            Some(sys_filter.as_str())
+        },
+        if visibility_filter.is_empty() {
+            None
+        } else {
+            Some(visibility_filter.as_str())
+        },
+        if name_filter.is_empty() {
+            None
+        } else {
+            Some(name_filter.as_str())
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let sql = format!(
+        "select
+    n.nspname as \"Schema\",
+    t.tmplname as \"Name\",
+    pg_catalog.obj_description(t.oid, 'pg_ts_template') as \"Description\"
+from pg_catalog.pg_ts_template as t
+join pg_catalog.pg_namespace as n
+    on n.oid = t.tmplnamespace
+{where_clause}
+order by 1, 2"
+    );
+
+    run_and_print_titled(
+        client,
+        &sql,
+        meta.echo_hidden,
+        Some("List of text search templates"),
+        settings,
+    )
+    .await
 }
 
 /// Collect `SimpleQueryMessage` responses into `(col_names, rows)`.

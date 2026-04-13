@@ -2432,7 +2432,8 @@ pub(crate) async fn exec_lines(
                             prev_buf = sql.clone();
                             // psql splits \; segments and opens the file for
                             // each one separately.
-                            let segments = split_on_backslash_semicolon(&sql);
+                            let scs_val = settings.db_capabilities.standard_conforming_strings;
+                            let segments = split_on_backslash_semicolon(&sql, scs_val);
                             if segments.len() > 1 {
                                 for seg in &segments {
                                     let s = seg.trim();
@@ -2615,7 +2616,9 @@ pub(crate) async fn exec_lines(
             // at the start of the line (e.g. `$$ AS qry \gset`) is handled
             // correctly — the `$$` closes the existing quote, leaving `\gset`
             // outside the string.
-            if let Some(pos) = find_inline_backslash_ctx(&line, get_open_dollar_tag(&buf)) {
+            let scs = settings.db_capabilities.standard_conforming_strings;
+            if let Some(pos) = find_inline_backslash_ctx(&line, get_open_dollar_tag(&buf, scs), scs)
+            {
                 // -a / --echo-all: echo the line (including the inline metacommand)
                 // before processing it, matching psql's echo-first-then-execute order.
                 if settings.echo_all && !line.trim().is_empty() {
@@ -2864,7 +2867,8 @@ pub(crate) async fn exec_lines(
                                 // for each one, so 3 statements produce 3
                                 // file-open attempts (and 3 errors when the
                                 // path is invalid).
-                                let segments = split_on_backslash_semicolon(&sql);
+                                let scs_val = settings.db_capabilities.standard_conforming_strings;
+                                let segments = split_on_backslash_semicolon(&sql, scs_val);
                                 if segments.len() > 1 {
                                     for seg in &segments {
                                         let s = seg.trim();
@@ -2923,7 +2927,8 @@ pub(crate) async fn exec_lines(
             } else {
                 // Split on \; separators (psql multi-command separator).
                 // Use the raw (untrimmed, interpolated) form to preserve indentation.
-                let segments = split_on_backslash_semicolon(&interpolated_raw);
+                let scs_val = settings.db_capabilities.standard_conforming_strings;
+                let segments = split_on_backslash_semicolon(&interpolated_raw, scs_val);
                 let num_segments = segments.len();
                 let has_separator = num_segments > 1;
                 let mut should_break = false;
@@ -3289,6 +3294,8 @@ Session commands:
 
 Describe commands:
   \d  [pattern]     describe objects
+  \dA [pattern]     list access methods
+  \dAc [pattern]    list operator classes
   \db [pattern]     list tablespaces
   \dc [pattern]     list conversions
   \dC [pattern]     list casts
@@ -3300,12 +3307,20 @@ Describe commands:
   \dew [pattern]    list foreign-data wrappers
   \det [pattern]    list foreign tables via FDW
   \df [pattern]     list functions
+  \dF [pattern]     list text search configurations
+  \dFd [pattern]    list text search dictionaries
+  \dFp [pattern]    list text search parsers
+  \dFt [pattern]    list text search templates
   \dg [pattern]     list roles (same as \du)
   \di [pattern]     list indexes
   \dm [pattern]     list materialised views
   \dn [pattern]     list schemas
   \do [pattern]     list operators
+  \dO [pattern]     list collations
   \dp [pattern]     list access privileges
+  \dP [pattern]     list partitioned relations
+  \dPt [pattern]    list partitioned tables
+  \dPi [pattern]    list partitioned indexes
   \ds [pattern]     list sequences
   \dt [pattern]     list tables
   \dT [pattern]     list data types
@@ -5732,6 +5747,14 @@ async fn dispatch_meta(
                     | MetaCmd::ListExtStatistics
                     | MetaCmd::ListPublications
                     | MetaCmd::ListSubscriptions
+                    | MetaCmd::ListCollations
+                    | MetaCmd::ListPartitionedRels
+                    | MetaCmd::ListAccessMethods
+                    | MetaCmd::ListOpClasses
+                    | MetaCmd::ListTSConfigs
+                    | MetaCmd::ListTSDicts
+                    | MetaCmd::ListTSParsers
+                    | MetaCmd::ListTSTemplates
             ) =>
         {
             crate::describe::execute(
@@ -6687,6 +6710,9 @@ async fn run_readline_loop(
                         !settings.no_highlight && std::env::var("TERM").as_deref() != Ok("dumb"),
                     );
                     h.set_completion(!settings.no_completion);
+                    h.set_standard_conforming_strings(
+                        settings.db_capabilities.standard_conforming_strings,
+                    );
                 }
 
                 match result {
@@ -6700,6 +6726,10 @@ async fn run_readline_loop(
                         stmt_buf.clear();
                         // Re-detect superuser status for the new connection.
                         settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+                        // Re-detect standard_conforming_strings for the new connection.
+                        settings.db_capabilities.standard_conforming_strings =
+                            crate::capabilities::detect_standard_conforming_strings_pub(client)
+                                .await;
                         // Update audit connection context for the new connection.
                         settings.audit_dbname.clone_from(&params.dbname);
                         settings.audit_user.clone_from(&params.user);
@@ -6764,6 +6794,30 @@ async fn run_readline_loop(
     0
 }
 
+/// Apply reconnect state after a `\c` command in the dumb loop.
+async fn apply_dumb_reconnect(
+    client: &mut Client,
+    params: &mut ConnParams,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+    buf: &mut String,
+    new_client: Box<tokio_postgres::Client>,
+    new_params: Box<ConnParams>,
+) {
+    *client = *new_client;
+    *params = *new_params;
+    *tx = TxState::default();
+    buf.clear();
+    // Re-detect superuser status for the new connection.
+    settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+    // Re-detect standard_conforming_strings.
+    settings.db_capabilities.standard_conforming_strings =
+        crate::capabilities::detect_standard_conforming_strings_pub(client).await;
+    // Update audit connection context for the new connection.
+    settings.audit_dbname.clone_from(&params.dbname);
+    settings.audit_user.clone_from(&params.user);
+}
+
 /// Run without readline (dumb terminal or --no-readline).
 async fn run_dumb_loop(
     client: &mut Client,
@@ -6808,22 +6862,17 @@ async fn run_dumb_loop(
                     {
                         HandleLineResult::Quit => break,
                         HandleLineResult::Reconnected(new_client, new_params) => {
-                            *client = *new_client;
-                            *params = *new_params;
-                            *tx = TxState::default();
-                            buf.clear();
-                            // Re-detect superuser status for the new connection.
-                            settings.is_superuser =
-                                crate::capabilities::detect_superuser(client).await;
-                            // Update audit connection context for the new connection.
-                            settings.audit_dbname.clone_from(&params.dbname);
-                            settings.audit_user.clone_from(&params.user);
+                            apply_dumb_reconnect(
+                                client, params, settings, tx, &mut buf, new_client, new_params,
+                            )
+                            .await;
                         }
                         HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
                 } else if settings.cond.is_active() {
                     // Check for inline backslash command (e.g. `select 1 \gset`).
-                    if let Some(pos) = find_inline_backslash(&line) {
+                    let scs = settings.db_capabilities.standard_conforming_strings;
+                    if let Some(pos) = find_inline_backslash_scs(&line, None, scs) {
                         let sql_part = &line[..pos];
                         let meta_part = line[pos..].trim();
                         if !sql_part.trim().is_empty() {
@@ -6839,16 +6888,10 @@ async fn run_dumb_loop(
                         {
                             HandleLineResult::Quit => break,
                             HandleLineResult::Reconnected(new_client, new_params) => {
-                                *client = *new_client;
-                                *params = *new_params;
-                                *tx = TxState::default();
-                                buf.clear();
-                                // Re-detect superuser status for the new connection.
-                                settings.is_superuser =
-                                    crate::capabilities::detect_superuser(client).await;
-                                // Update audit connection context for the new connection.
-                                settings.audit_dbname.clone_from(&params.dbname);
-                                settings.audit_user.clone_from(&params.user);
+                                apply_dumb_reconnect(
+                                    client, params, settings, tx, &mut buf, new_client, new_params,
+                                )
+                                .await;
                             }
                             HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                         }
@@ -7021,8 +7064,9 @@ async fn run_wasm_loop(
 /// Return the open dollar-quote tag from the buffer, if any.
 /// Used to initialise `find_inline_backslash` with the correct context
 /// when the current line may close an already-open dollar quote.
-fn get_open_dollar_tag(buf: &str) -> Option<String> {
+fn get_open_dollar_tag(buf: &str, scs: bool) -> Option<String> {
     let mut in_single = false;
+    let mut bs_escapes = false;
     let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
     let bytes = buf.as_bytes();
@@ -7052,7 +7096,12 @@ fn get_open_dollar_tag(buf: &str) -> Option<String> {
             continue;
         }
         if in_single {
-            if bytes[i] == b'\'' {
+            if bs_escapes && bytes[i] == b'\\' {
+                i += 1;
+                if i < len {
+                    i += 1;
+                }
+            } else if bytes[i] == b'\'' {
                 if i + 1 < len && bytes[i + 1] == b'\'' {
                     i += 2;
                 } else {
@@ -7075,8 +7124,16 @@ fn get_open_dollar_tag(buf: &str) -> Option<String> {
             i += 2;
             continue;
         }
+        // E-string start
+        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < len && bytes[i + 1] == b'\'' {
+            in_single = true;
+            bs_escapes = true;
+            i += 2;
+            continue;
+        }
         if bytes[i] == b'\'' {
             in_single = true;
+            bs_escapes = !scs;
             i += 1;
             continue;
         }
@@ -7100,8 +7157,17 @@ fn get_open_dollar_tag(buf: &str) -> Option<String> {
     dollar_tag
 }
 
+#[allow(dead_code)]
 fn find_inline_backslash(line: &str) -> Option<usize> {
-    find_inline_backslash_ctx(line, None)
+    find_inline_backslash_scs(line, None, true)
+}
+
+fn find_inline_backslash_scs(
+    line: &str,
+    initial_dollar_tag: Option<String>,
+    scs: bool,
+) -> Option<usize> {
+    find_inline_backslash_ctx(line, initial_dollar_tag, scs)
 }
 
 /// Find the raw (uninterpolated) counterpart of an interpolated continuation.
@@ -7192,12 +7258,35 @@ fn find_raw_continuation(raw: &str, cont: &str) -> Option<String> {
     None
 }
 
-fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> Option<usize> {
+/// Try to parse a dollar-quote tag starting at `line[pos..]`.
+///
+/// Returns the tag string (e.g. `$$` or `$body$`) if the position starts
+/// a valid dollar-quoted string opener, or `None` otherwise.
+fn try_parse_dollar_tag(line: &str, pos: usize) -> Option<String> {
+    let rest = &line[pos..];
+    let end = rest[1..].find('$')?;
+    let inner = &rest[1..=end];
+    let valid = inner.is_empty()
+        || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !inner.chars().all(|c| c.is_ascii_digit()));
+    if valid {
+        Some(rest[..end + 2].to_owned())
+    } else {
+        None
+    }
+}
+
+fn find_inline_backslash_ctx(
+    line: &str,
+    initial_dollar_tag: Option<String>,
+    scs: bool,
+) -> Option<usize> {
     let bytes = line.as_bytes();
     let len = bytes.len();
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_double = false;
+    let (mut i, mut in_single, mut in_double) = (0, false, false);
+    // Whether the current single-quoted string uses backslash escapes.
+    // True for E'...' strings (always) and plain '...' when SCS=off.
+    let mut bs_escapes = false;
     let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = initial_dollar_tag;
 
@@ -7242,7 +7331,10 @@ fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> 
         }
 
         if in_single {
-            if bytes[i] == b'\'' {
+            if bs_escapes && bytes[i] == b'\\' {
+                // Backslash escape: skip backslash + next byte.
+                i += if i + 1 < len { 2 } else { 1 };
+            } else if bytes[i] == b'\'' {
                 if i + 1 < len && bytes[i + 1] == b'\'' {
                     i += 2;
                 } else {
@@ -7255,57 +7347,51 @@ fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> 
             continue;
         }
 
-        // Line comment
-        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            return None; // rest of line is a comment
-        }
-
-        // Block comment start
-        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            block_comment_depth += 1;
-            i += 2;
-            continue;
-        }
-
-        // Double-quoted identifier start
-        if bytes[i] == b'"' {
-            in_double = true;
-            i += 1;
-            continue;
-        }
-
-        // Single-quote start
-        if bytes[i] == b'\'' {
-            in_single = true;
-            i += 1;
-            continue;
-        }
-
-        // Dollar-quote start
-        if bytes[i] == b'$' {
-            let rest = &line[i..];
-            if let Some(end) = rest[1..].find('$') {
-                let inner = &rest[1..=end];
-                let valid = inner.is_empty()
-                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !inner.chars().all(|c| c.is_ascii_digit()));
-                if valid {
-                    let tag = &rest[..end + 2];
-                    dollar_tag = Some(tag.to_owned());
+        match bytes[i] {
+            // Line comment — rest of line is a comment
+            b'-' if i + 1 < len && bytes[i + 1] == b'-' => return None,
+            // Block comment start
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            // Double-quoted identifier start
+            b'"' => {
+                in_double = true;
+                i += 1;
+                continue;
+            }
+            // E-string start: E'…' / e'…'
+            b'E' | b'e' if i + 1 < len && bytes[i + 1] == b'\'' => {
+                in_single = true;
+                bs_escapes = true;
+                i += 2;
+                continue;
+            }
+            // Single-quote start
+            b'\'' => {
+                in_single = true;
+                bs_escapes = !scs;
+                i += 1;
+                continue;
+            }
+            // Dollar-quote start
+            b'$' => {
+                if let Some(tag) = try_parse_dollar_tag(line, i) {
                     i += tag.len();
+                    dollar_tag = Some(tag);
                     continue;
                 }
             }
-        }
-
-        // Backslash followed by a letter — potential meta-command
-        if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1].is_ascii_alphabetic() {
-            // Only treat as inline if there is some SQL before this position
-            if line[..i].trim().is_empty() {
-                // The line starts with `\` — not an inline command
-                return None;
+            // Backslash followed by a letter — potential meta-command
+            b'\\' if i + 1 < len && bytes[i + 1].is_ascii_alphabetic() => {
+                if line[..i].trim().is_empty() {
+                    return None; // line starts with `\` — not inline
+                }
+                return Some(i);
             }
-            return Some(i);
+            _ => {}
         }
 
         i += 1;
@@ -7319,13 +7405,14 @@ fn find_inline_backslash_ctx(line: &str, initial_dollar_tag: Option<String>) -> 
 /// are no `\;` in the line, returns a single-element vec containing the whole
 /// line.  The `\;` token itself is consumed (not included in any segment).
 #[allow(clippy::too_many_lines)]
-fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
+fn split_on_backslash_semicolon(line: &str, scs: bool) -> Vec<&str> {
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut parts: Vec<&str> = Vec::new();
     let mut seg_start = 0;
     let mut i = 0;
     let mut in_single = false;
+    let mut bs_escapes = false;
     let mut in_double = false;
     let mut block_depth: u32 = 0;
     let mut dollar_tag: Option<String> = None;
@@ -7367,7 +7454,12 @@ fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
             continue;
         }
         if in_single {
-            if bytes[i] == b'\'' {
+            if bs_escapes && bytes[i] == b'\\' {
+                i += 1;
+                if i < len {
+                    i += 1;
+                }
+            } else if bytes[i] == b'\'' {
                 if i + 1 < len && bytes[i + 1] == b'\'' {
                     i += 2;
                 } else {
@@ -7393,24 +7485,24 @@ fn split_on_backslash_semicolon(line: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
+        // E-string start
+        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < len && bytes[i + 1] == b'\'' {
+            in_single = true;
+            bs_escapes = true;
+            i += 2;
+            continue;
+        }
         if bytes[i] == b'\'' {
             in_single = true;
+            bs_escapes = !scs;
             i += 1;
             continue;
         }
         if bytes[i] == b'$' {
-            let rest = &line[i..];
-            if let Some(end) = rest[1..].find('$') {
-                let inner = &rest[1..=end];
-                let valid = inner.is_empty()
-                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !inner.chars().all(|c| c.is_ascii_digit()));
-                if valid {
-                    let tag = &rest[..end + 2];
-                    dollar_tag = Some(tag.to_owned());
-                    i += tag.len();
-                    continue;
-                }
+            if let Some(tag) = try_parse_dollar_tag(line, i) {
+                i += tag.len();
+                dollar_tag = Some(tag);
+                continue;
             }
         }
         // Detect \;
@@ -8030,7 +8122,8 @@ async fn handle_line(
     }
 
     // Check for inline backslash command (e.g. `select 1 \gset my_`).
-    if let Some(pos) = find_inline_backslash(line) {
+    let scs = settings.db_capabilities.standard_conforming_strings;
+    if let Some(pos) = find_inline_backslash_scs(line, None, scs) {
         let sql_part = &line[..pos];
         let meta_part = line[pos..].trim();
         // Accumulate the SQL portion into the buffer.
@@ -9523,6 +9616,66 @@ mod tests {
         assert_eq!(
             find_inline_backslash("select 'create table t()' \\gexec"),
             Some(26)
+        );
+    }
+
+    // -- SCS-aware inline backslash tests (#793) ------------------------------
+
+    #[test]
+    fn inline_backslash_scs_off_ignores_backslash_in_string() {
+        // With SCS=off, \b inside 'a\bcd' is an escape — not a metacommand.
+        assert_eq!(
+            find_inline_backslash_scs("select 'a\\bcd'", None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn inline_backslash_scs_on_ignores_backslash_in_string() {
+        // With SCS=on, backslash is just a character — still inside the string.
+        assert_eq!(
+            find_inline_backslash_scs("select 'a\\bcd'", None, true),
+            None
+        );
+    }
+
+    #[test]
+    fn inline_backslash_scs_off_detects_after_string() {
+        // Backslash command after a string with SCS=off should be found.
+        assert_eq!(
+            find_inline_backslash_scs("select 'a\\bcd' \\gset", None, false),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn inline_backslash_scs_off_escaped_quote_in_string() {
+        // With SCS=off, \' is an escaped quote — string continues.
+        // select 'hello\'world' has the string ending at the second unescaped '.
+        assert_eq!(
+            find_inline_backslash_scs("select 'hello\\'world'", None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn inline_backslash_e_string_always_escapes() {
+        // E-strings always treat backslash as escape regardless of SCS.
+        assert_eq!(
+            find_inline_backslash_scs("select E'a\\bcd'", None, true),
+            None
+        );
+        assert_eq!(
+            find_inline_backslash_scs("select E'a\\bcd'", None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn inline_backslash_e_string_lowercase() {
+        assert_eq!(
+            find_inline_backslash_scs("select e'a\\bcd'", None, true),
+            None
         );
     }
 

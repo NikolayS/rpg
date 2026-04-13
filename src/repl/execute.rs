@@ -994,6 +994,12 @@ pub async fn execute_query(
         // Update transaction state based on what SQL was sent.
         tx.update_from_sql(sql_to_send);
 
+        // Detect mid-session changes to standard_conforming_strings.
+        // When the user runs `SET standard_conforming_strings = off/on`,
+        // we need to update the tokenizer's SCS tracking immediately so
+        // subsequent input is parsed correctly.
+        update_scs_if_changed(sql_to_send, client, settings).await;
+
         true
     };
 
@@ -1039,6 +1045,21 @@ pub async fn execute_query(
     settings.last_was_fix = false;
 
     success
+}
+
+/// Re-query `standard_conforming_strings` when the executed SQL looks like it
+/// may have changed the GUC.
+///
+/// This is intentionally conservative: we only fire the extra `SHOW` when the
+/// SQL contains both `standard_conforming_strings` and a SET-like keyword.
+async fn update_scs_if_changed(sql: &str, client: &Client, settings: &mut ReplSettings) {
+    let upper = sql.to_uppercase();
+    if upper.contains("STANDARD_CONFORMING_STRINGS")
+        && (upper.starts_with("SET ") || upper.starts_with("RESET "))
+    {
+        settings.db_capabilities.standard_conforming_strings =
+            crate::capabilities::detect_standard_conforming_strings_pub(client).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
