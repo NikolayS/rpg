@@ -457,6 +457,39 @@ pub(super) fn confirm_single_step(sql: &str) -> bool {
 /// Execute a SQL string using `simple_query` and print results.
 ///
 /// Interpolates variables from `settings.vars` before sending to the server,
+/// Conditionally prepend an EXPLAIN prefix to a SQL string.
+///
+/// Returns `(possibly_rewritten_sql, auto_explain_active)`.  The second
+/// element is `true` when the prefix was actually prepended.
+///
+/// Rules:
+/// - If both `auto_explain` is `Off` and `exec_mode` is not `Plan`, no
+///   rewriting happens.
+/// - SELECT, WITH, TABLE, and VALUES statements are wrapped; everything
+///   else (SET, BEGIN, COMMIT, DDL, …) is left unchanged.
+/// - Statements that already start with `EXPLAIN` are never double-wrapped.
+fn maybe_prepend_explain(
+    sql: &str,
+    auto_explain: AutoExplain,
+    exec_mode: ExecMode,
+) -> (String, bool) {
+    let effective = auto_explain.effective(exec_mode);
+    if effective == AutoExplain::Off {
+        return (sql.to_owned(), false);
+    }
+    let trimmed_upper = sql.trim_start().to_uppercase();
+    let is_query = trimmed_upper.starts_with("SELECT")
+        || trimmed_upper.starts_with("WITH")
+        || trimmed_upper.starts_with("TABLE")
+        || trimmed_upper.starts_with("VALUES");
+    let already_explain = trimmed_upper.starts_with("EXPLAIN");
+    if is_query && !already_explain {
+        (format!("{}{}", effective.prefix(), sql), true)
+    } else {
+        (sql.to_owned(), false)
+    }
+}
+
 /// then renders output using `settings.pset`.
 ///
 /// Returns `true` on success, `false` if the query produced a SQL error.
@@ -497,27 +530,10 @@ pub async fn execute_query(
     // Auto-EXPLAIN: prepend EXPLAIN prefix when enabled or when plan
     // execution mode is active.  Skip for statements that are already
     // EXPLAIN, or for non-query statements (SET, BEGIN, COMMIT, etc.).
-    let auto_explained;
-    let mut auto_explain_active = false;
-    let effective_auto_explain = settings.auto_explain.effective(settings.exec_mode);
     let auto_explain_label = settings.auto_explain.banner_label(settings.exec_mode);
-    let sql_to_send = if effective_auto_explain == AutoExplain::Off {
-        interpolated.as_str()
-    } else {
-        let trimmed_upper = interpolated.trim_start().to_uppercase();
-        let is_query = trimmed_upper.starts_with("SELECT")
-            || trimmed_upper.starts_with("WITH")
-            || trimmed_upper.starts_with("TABLE")
-            || trimmed_upper.starts_with("VALUES");
-        let already_explain = trimmed_upper.starts_with("EXPLAIN");
-        if is_query && !already_explain {
-            auto_explained = format!("{}{}", effective_auto_explain.prefix(), interpolated);
-            auto_explain_active = true;
-            auto_explained.as_str()
-        } else {
-            interpolated.as_str()
-        }
-    };
+    let (rewritten, auto_explain_active) =
+        maybe_prepend_explain(&interpolated, settings.auto_explain, settings.exec_mode);
+    let sql_to_send = rewritten.as_str();
 
     // -s / --single-step: prompt before executing.
     if settings.single_step && !confirm_single_step(sql_to_send) {
@@ -2849,10 +2865,98 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_explain_statement, is_no_tx_statement, needs_split_execution, print_result_set_pset,
-        strip_psql_table_format,
+        is_explain_statement, is_no_tx_statement, maybe_prepend_explain, needs_split_execution,
+        print_result_set_pset, strip_psql_table_format,
     };
     use crate::output::PsetConfig;
+    use crate::repl::{AutoExplain, ExecMode};
+
+    // -- maybe_prepend_explain (plan mode + auto-explain SQL rewriting) --------
+
+    #[test]
+    fn plan_mode_prepends_explain_to_select() {
+        let (sql, active) = maybe_prepend_explain("select 1", AutoExplain::Off, ExecMode::Plan);
+        assert!(active);
+        assert_eq!(sql, "EXPLAIN select 1");
+    }
+
+    #[test]
+    fn plan_mode_prepends_explain_to_with() {
+        let (sql, active) = maybe_prepend_explain(
+            "WITH cte AS (select 1) select * from cte",
+            AutoExplain::Off,
+            ExecMode::Plan,
+        );
+        assert!(active);
+        assert!(sql.starts_with("EXPLAIN "));
+    }
+
+    #[test]
+    fn plan_mode_prepends_explain_to_table() {
+        let (sql, active) = maybe_prepend_explain("TABLE foo", AutoExplain::Off, ExecMode::Plan);
+        assert!(active);
+        assert_eq!(sql, "EXPLAIN TABLE foo");
+    }
+
+    #[test]
+    fn plan_mode_prepends_explain_to_values() {
+        let (sql, active) = maybe_prepend_explain("VALUES (1)", AutoExplain::Off, ExecMode::Plan);
+        assert!(active);
+        assert_eq!(sql, "EXPLAIN VALUES (1)");
+    }
+
+    #[test]
+    fn plan_mode_skips_non_query_set() {
+        let (sql, active) =
+            maybe_prepend_explain("SET work_mem = '64MB'", AutoExplain::Off, ExecMode::Plan);
+        assert!(!active);
+        assert_eq!(sql, "SET work_mem = '64MB'");
+    }
+
+    #[test]
+    fn plan_mode_skips_non_query_begin() {
+        let (sql, active) = maybe_prepend_explain("BEGIN", AutoExplain::Off, ExecMode::Plan);
+        assert!(!active);
+        assert_eq!(sql, "BEGIN");
+    }
+
+    #[test]
+    fn plan_mode_no_double_wrap_explain() {
+        let (sql, active) =
+            maybe_prepend_explain("EXPLAIN select 1", AutoExplain::Off, ExecMode::Plan);
+        assert!(!active);
+        assert_eq!(sql, "EXPLAIN select 1");
+    }
+
+    #[test]
+    fn plan_mode_no_double_wrap_explain_analyze() {
+        let (sql, active) =
+            maybe_prepend_explain("EXPLAIN ANALYZE select 1", AutoExplain::Off, ExecMode::Plan);
+        assert!(!active);
+        assert_eq!(sql, "EXPLAIN ANALYZE select 1");
+    }
+
+    #[test]
+    fn interactive_mode_no_prepend_when_auto_explain_off() {
+        let (sql, active) =
+            maybe_prepend_explain("select 1", AutoExplain::Off, ExecMode::Interactive);
+        assert!(!active);
+        assert_eq!(sql, "select 1");
+    }
+
+    #[test]
+    fn auto_explain_analyze_overrides_plan_mode_default() {
+        let (sql, active) = maybe_prepend_explain("select 1", AutoExplain::Analyze, ExecMode::Plan);
+        assert!(active);
+        assert_eq!(sql, "EXPLAIN ANALYZE select 1");
+    }
+
+    #[test]
+    fn auto_explain_verbose_overrides_plan_mode_default() {
+        let (sql, active) = maybe_prepend_explain("select 1", AutoExplain::Verbose, ExecMode::Plan);
+        assert!(active);
+        assert!(sql.starts_with("EXPLAIN (ANALYZE, VERBOSE, BUFFERS, TIMING) "));
+    }
 
     // -- is_no_tx_statement ---------------------------------------------------
 

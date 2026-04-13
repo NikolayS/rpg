@@ -894,28 +894,29 @@ impl AutoExplain {
     }
 
     /// Return the effective auto-explain level, accounting for plan execution
-    /// mode.  When `exec_mode == Plan` and auto-explain is `Off`, plan mode
-    /// implicitly promotes it to `On`.  Any explicitly set level (`On`,
-    /// `Analyze`, `Verbose`) is preserved unchanged.
+    /// mode.
+    ///
+    /// Returns `Self::On` when `exec_mode == Plan` and `self == Off` (plan
+    /// mode implicitly promotes it). Any explicitly set level (`On`,
+    /// `Analyze`, `Verbose`) is preserved unchanged. All other exec modes
+    /// (`Interactive`, `Yolo`) leave auto-explain unchanged.
     pub(crate) fn effective(self, exec_mode: ExecMode) -> Self {
-        if exec_mode == ExecMode::Plan && self == Self::Off {
-            Self::On
-        } else {
-            self
+        match exec_mode {
+            ExecMode::Plan if self == Self::Off => Self::On,
+            ExecMode::Plan | ExecMode::Interactive | ExecMode::Yolo => self,
         }
     }
 
     /// Return the human-readable label for the `[auto-explain: …]` banner.
     ///
-    /// Shows `"plan"` only when plan mode is the sole reason auto-explain
-    /// activated (i.e. the user did not explicitly set a level).  Otherwise
-    /// returns the actual auto-explain level label so the user knows what
-    /// actually ran (important because `EXPLAIN ANALYZE` executes the query).
+    /// Returns `"plan"` when `exec_mode == Plan` and `self == Off` (plan
+    /// mode is the sole trigger). Otherwise delegates to `self.label()` so
+    /// the user sees the actual level (important because `EXPLAIN ANALYZE`
+    /// executes the query, unlike plain `EXPLAIN`).
     pub(crate) fn banner_label(self, exec_mode: ExecMode) -> &'static str {
-        if exec_mode == ExecMode::Plan && self == Self::Off {
-            "plan"
-        } else {
-            self.label()
+        match exec_mode {
+            ExecMode::Plan if self == Self::Off => "plan",
+            ExecMode::Plan | ExecMode::Interactive | ExecMode::Yolo => self.label(),
         }
     }
 }
@@ -3377,7 +3378,7 @@ Named queries:
 Input/execution modes:
   /sql              switch to SQL input mode (default)
   /text2sql / /t2s  switch to text2sql input mode
-  /plan             enter plan execution mode
+  /plan             enter plan mode (auto-prepend EXPLAIN to queries)
   /yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
   /interactive      return to interactive mode (default)
   /mode             show current input and execution mode
@@ -9161,6 +9162,11 @@ mod tests {
             AutoExplain::Analyze.banner_label(ExecMode::Interactive),
             "analyze"
         );
+    }
+
+    #[test]
+    fn banner_label_yolo_mode_uses_auto_explain_label() {
+        assert_eq!(AutoExplain::Off.banner_label(ExecMode::Yolo), "off");
     }
 
     // -- \set AI_PROVIDER / AI_MODEL -------------------------------------------
