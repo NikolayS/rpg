@@ -89,13 +89,14 @@ pub async fn run_ash(
     let pg_ash = sampler::detect_pg_ash(client).await;
     let mut state = AshState::new(pg_ash.installed);
     let mut snapshots: VecDeque<sampler::AshSnapshot> = VecDeque::with_capacity(600);
+    let timeout_ms = settings.config.ash.sample_timeout_ms();
 
     // Pre-populate ring buffer from pg_ash history when available.
     // Fills the left side of the timeline; live data scrolls in on the right.
     if pg_ash.installed {
         // Pre-populate using the current zoom window (bucket_secs × 600 samples).
         let history_window = state.bucket_secs() * 600;
-        let history = sampler::query_ash_history(client, history_window).await;
+        let history = sampler::query_ash_history(client, history_window, timeout_ms).await;
         for snap in history {
             if snapshots.len() == 600 {
                 snapshots.pop_front();
@@ -113,7 +114,8 @@ pub async fn run_ash(
     'outer: loop {
         // 1. Collect snapshot data for this frame.
         let snap_slice =
-            collect_frame_snapshots(client, &mut snapshots, &mut state, cpu_override).await;
+            collect_frame_snapshots(client, &mut snapshots, &mut state, cpu_override, timeout_ms)
+                .await;
         let in_history = state.pan_offset > 0 || matches!(state.mode, ViewMode::History { .. });
 
         // 2. Draw frame.
@@ -211,6 +213,7 @@ async fn collect_frame_snapshots(
     snapshots: &mut std::collections::VecDeque<sampler::AshSnapshot>,
     state: &mut AshState,
     cpu_override: Option<u32>,
+    timeout_ms: u64,
 ) -> Vec<sampler::AshSnapshot> {
     match &state.mode {
         ViewMode::History { from, to } => {
@@ -219,7 +222,7 @@ async fn collect_frame_snapshots(
                 .unwrap_or_default()
                 .as_secs()
                 .max(1);
-            let v = sampler::query_ash_history(client, window).await;
+            let v = sampler::query_ash_history(client, window, timeout_ms).await;
             if v.is_empty() {
                 snapshots.iter().cloned().collect()
             } else {
@@ -227,7 +230,7 @@ async fn collect_frame_snapshots(
             }
         }
         ViewMode::Live => {
-            match sampler::live_snapshot(client).await {
+            match sampler::live_snapshot(client, timeout_ms).await {
                 Ok(sampler::LiveSnapshotResult::Ok(mut snap)) => {
                     if cpu_override.is_some() {
                         snap.cpu_count = cpu_override;
