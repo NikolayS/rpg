@@ -237,11 +237,11 @@ pub struct PromptContext<'a> {
 ///
 /// IMPORTANT: The `result.ends_with('%')` check below fixes #789.
 /// This fix was lost once when mod.rs was replaced wholesale by an agent.
-/// It is guarded by unit tests: backtick_percent_before_backtick_consumed,
-/// backtick_double_percent_before_backtick_keeps_one,
-/// backtick_no_percent_before_backtick_unchanged
-/// AND by the integration test: prompt_backtick_percent_fix_789 in
-/// tests/integration_repl.rs.
+/// It is guarded by unit tests: `backtick_percent_before_backtick_consumed`,
+/// `backtick_double_percent_before_backtick_keeps_one`,
+/// `backtick_no_percent_before_backtick_unchanged`
+/// AND by the integration test: `prompt_backtick_percent_fix_789` in
+/// `tests/integration_repl.rs`.
 pub fn expand_prompt_backticks(prompt: &str) -> String {
     #[cfg(target_arch = "wasm32")]
     return prompt.to_owned(); // backtick expansion not available on WASM
@@ -1671,7 +1671,7 @@ pub fn history_file() -> Option<PathBuf> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        return dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE));
+        dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE))
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -4120,6 +4120,23 @@ fn parse_inline_pset_opts(s: &str) -> Vec<(String, Option<String>)> {
 fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
     use crate::output::OutputFormat;
 
+    const ALL_FORMATS: &[(&str, OutputFormat)] = &[
+        ("aligned", OutputFormat::Aligned),
+        ("asciidoc", OutputFormat::Asciidoc),
+        ("csv", OutputFormat::Csv),
+        ("html", OutputFormat::Html),
+        ("latex", OutputFormat::Latex),
+        ("latex-longtable", OutputFormat::LatexLongtable),
+        ("troff-ms", OutputFormat::TroffMs),
+        ("unaligned", OutputFormat::Unaligned),
+        ("wrapped", OutputFormat::Wrapped),
+        // rpg extensions (not in psql):
+        ("json", OutputFormat::Json),
+        ("markdown", OutputFormat::Markdown),
+    ];
+    const PSQL_FORMAT_NAMES: &str = "aligned, asciidoc, csv, html, latex, latex-longtable, \
+         troff-ms, unaligned, wrapped";
+
     // In quiet mode (-q), psql suppresses all \pset confirmation messages.
     let quiet = settings.quiet;
 
@@ -4139,28 +4156,6 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                 }
                 return;
             }
-            // All supported format names (psql-compatible ones first,
-            // then rpg extensions).  Order matters: the psql-compatible
-            // list is alphabetical so ambiguity messages match psql.
-            const ALL_FORMATS: &[(&str, OutputFormat)] = &[
-                ("aligned", OutputFormat::Aligned),
-                ("asciidoc", OutputFormat::Asciidoc),
-                ("csv", OutputFormat::Csv),
-                ("html", OutputFormat::Html),
-                ("latex", OutputFormat::Latex),
-                ("latex-longtable", OutputFormat::LatexLongtable),
-                ("troff-ms", OutputFormat::TroffMs),
-                ("unaligned", OutputFormat::Unaligned),
-                ("wrapped", OutputFormat::Wrapped),
-                // rpg extensions (not in psql):
-                ("json", OutputFormat::Json),
-                ("markdown", OutputFormat::Markdown),
-            ];
-            // psql-only format names (used in error message and ambiguity
-            // detection to stay compatible with psql).
-            const PSQL_FORMAT_NAMES: &str =
-                "aligned, asciidoc, csv, html, latex, latex-longtable, \
-                 troff-ms, unaligned, wrapped";
             let val = value.unwrap_or("");
             // Try exact match first.
             let fmt_opt = ALL_FORMATS
@@ -4415,9 +4410,8 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
         "pager" => {
             // psql supports: \pset pager [on|off|always]
             match value.unwrap_or("").to_lowercase().as_str() {
-                "on" | "1" => settings.pager_enabled = true,
+                "on" | "1" | "always" => settings.pager_enabled = true,
                 "off" | "0" => settings.pager_enabled = false,
-                "always" => settings.pager_enabled = true,
                 _ => settings.pager_enabled = !settings.pager_enabled,
             }
             if !quiet {

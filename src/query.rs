@@ -170,25 +170,19 @@ pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
         "MOVE" => format!("MOVE {n}"),
         // SELECT / TABLE / VALUES / WITH: these normally go via the Rows path;
         // if they somehow reach here it means 0 rows with no RowDescription.
-        "SELECT" | "TABLE" | "VALUES" => format!("SELECT {n}"),
-        "WITH" => format!("SELECT {n}"),
+        "SELECT" | "TABLE" | "VALUES" | "WITH" => format!("SELECT {n}"),
 
         // --- CREATE variants ---
         "CREATE" => match w1 {
             "OR" => {
                 // CREATE OR REPLACE FUNCTION/PROCEDURE/VIEW/RULE/TRANSFORM
-                let kind = match w3 {
-                    "FUNCTION" | "PROCEDURE" | "VIEW" | "RULE" | "AGGREGATE" | "TRANSFORM"
-                    | "TRIGGER" => w3,
-                    _ => w3,
-                };
+                let kind = w3;
                 format!("CREATE {kind}")
             }
             "TEMP" | "TEMPORARY" => {
                 // CREATE [TEMP|TEMPORARY] [UNLOGGED] TABLE ...
                 match w2 {
-                    "UNLOGGED" => "CREATE TABLE".to_string(),
-                    "TABLE" => "CREATE TABLE".to_string(),
+                    "UNLOGGED" | "TABLE" => "CREATE TABLE".to_string(),
                     _ => format!("CREATE {w2}"),
                 }
             }

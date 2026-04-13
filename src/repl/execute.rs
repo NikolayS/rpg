@@ -496,6 +496,10 @@ pub async fn execute_query(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> bool {
+    use crate::output::OutputFormat;
+    use futures::StreamExt as _;
+    use tokio_postgres::SimpleQueryMessage;
+
     // Interpolate variables before sending.
     let interpolated = settings.vars.interpolate(sql);
 
@@ -626,9 +630,6 @@ pub async fn execute_query(
     // to display intermediate result sets from statements that completed
     // before an error occurs in a later statement of the same batch, matching
     // psql's behaviour for \; multi-statement queries.
-    use futures::StreamExt as _;
-    use tokio_postgres::SimpleQueryMessage;
-
     let stream_result = client.simple_query_raw(sql_to_send).await;
     // Pin the stream so we can call .next() on it (SimpleQueryStream is !Unpin).
     let mut stream = match stream_result {
@@ -813,7 +814,6 @@ pub async fn execute_query(
                     // NOT echo blanks after them (they emit a separate command
                     // tag and format_rowset_pset already appends a blank).
                     // Unaligned and tuples-only modes are excluded too.
-                    use crate::output::OutputFormat;
                     if is_select
                         && !settings.pset.tuples_only
                         && matches!(
@@ -1542,7 +1542,7 @@ fn is_explain_statement(sql: &str) -> bool {
 }
 
 /// Return `true` if `sql` is a transaction control command that should NOT
-/// be wrapped with implicit savepoints by ON_ERROR_ROLLBACK.
+/// be wrapped with implicit savepoints by `ON_ERROR_ROLLBACK`.
 ///
 /// psql excludes: BEGIN, START TRANSACTION, COMMIT, END, ROLLBACK, ABORT,
 /// SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT, PREPARE TRANSACTION.
@@ -2802,6 +2802,9 @@ fn is_numeric_oid(oid: u32) -> bool {
 /// When `buf` is empty, prints an informational message.
 /// On prepare error, prints the Postgres error message.
 pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: bool) {
+    use crate::output::format_rowset_pset;
+    use crate::query::{ColumnMeta, RowSet};
+
     if buf.is_empty() {
         rpg_println!("Query buffer is empty.");
         return;
@@ -2865,9 +2868,6 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 
     // Build a RowSet and use format_rowset_pset for proper alignment
     // (center-aligned headers, trailing blank line — matching psql).
-    use crate::output::format_rowset_pset;
-    use crate::query::{ColumnMeta, RowSet};
-
     let columns = vec![
         ColumnMeta {
             name: "Column".to_owned(),
