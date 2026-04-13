@@ -138,7 +138,19 @@ pub(super) async fn watch_query(
 
     loop {
         // Print timestamp header matching psql's ctime-like format.
-        let ts = format_system_time(std::time::SystemTime::now());
+        // std::time::SystemTime::now() panics on wasm32-unknown-unknown;
+        // use web_time which provides a browser-compatible implementation.
+        #[cfg(not(target_arch = "wasm32"))]
+        let now = std::time::SystemTime::now();
+        #[cfg(target_arch = "wasm32")]
+        let now = {
+            // web_time::SystemTime uses Performance.now() in the browser.
+            let wt = web_time::SystemTime::now();
+            let dur = wt.duration_since(web_time::SystemTime::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO);
+            std::time::UNIX_EPOCH + dur
+        };
+        let ts = format_system_time(now);
         rpg_println!("{ts} (every {interval_secs}s)\n");
 
         // Execute the stored query.  Use a fresh TxState so that

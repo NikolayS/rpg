@@ -2010,11 +2010,17 @@ pub(super) fn format_utc_timestamp(secs: u64) -> String {
 /// Passwords and connection strings are never written.
 pub fn format_audit_entry(ctx: &AuditEntryCtx<'_>) -> String {
     use std::fmt::Write as _;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     // Format current UTC time as "YYYY-MM-DD HH:MM:SS UTC" using only std.
-    let secs_since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    // std::time::SystemTime::now() panics on wasm32-unknown-unknown; use
+    // web_time which provides a browser-compatible implementation.
+    #[cfg(not(target_arch = "wasm32"))]
+    let secs_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[cfg(target_arch = "wasm32")]
+    let secs_since_epoch = web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let ts = format_utc_timestamp(secs_since_epoch);

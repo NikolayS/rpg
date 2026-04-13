@@ -1548,7 +1548,16 @@ pub(super) async fn handle_ai_plan(
             rpg_eprintln!("Cannot create plans directory: {e}");
             return;
         }
-        let date = format_system_time(std::time::SystemTime::now())
+        #[cfg(not(target_arch = "wasm32"))]
+        let now = std::time::SystemTime::now();
+        #[cfg(target_arch = "wasm32")]
+        let now = {
+            let wt = web_time::SystemTime::now();
+            let dur = wt.duration_since(web_time::SystemTime::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO);
+            std::time::UNIX_EPOCH + dur
+        };
+        let date = format_system_time(now)
             .replace(' ', "-")
             .replace(':', "");
         // Build a slug from the first few words of the prompt.
