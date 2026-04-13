@@ -390,7 +390,13 @@ rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 
 ## PostgreSQL compatibility
 
-Supports PostgreSQL 14, 15, 16, 17, and 18.
+Supports PostgreSQL 14–18.
+
+rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree). Both psql and rpg are run against the same queries; outputs are normalized and diff'd — pass only if identical.
+
+**221 of 232 PostgreSQL regression tests pass** (0 failures, 11 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
+
+→ Full compatibility report: [`docs/psql-compat.md`](docs/psql-compat.md)
 
 ## Development
 

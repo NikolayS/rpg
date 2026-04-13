@@ -117,6 +117,291 @@ fn parse_rows_affected(tag: &str) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Reconstruct command tag from SQL + row count
+// ---------------------------------------------------------------------------
+
+/// Reconstruct the full `PostgreSQL` command tag from the SQL statement and row count.
+///
+/// `tokio-postgres 0.7` exposes only the numeric row count from `CommandComplete`;
+/// the full tag string (e.g. `"INSERT 0 3"`, `"CREATE TABLE"`) is discarded by the
+/// library before it reaches our code.  We recover it by inspecting the first
+/// keyword(s) of the SQL statement and applying the same rules that `PostgreSQL`
+/// uses to form the tag (defined in `src/include/tcop/cmdtaglist.h`).
+///
+/// Tags that carry a row count (per `rowcount = true` in cmdtaglist.h):
+///   COPY, DELETE, FETCH, INSERT, MERGE, MOVE, SELECT, UPDATE
+///
+/// All other commands (DDL, utility) produce a fixed tag with no number.
+///
+/// # Format
+/// - `INSERT`  → `"INSERT 0 {n}"` (the `0` is the historical OID placeholder)
+/// - `UPDATE`  → `"UPDATE {n}"`
+/// - `DELETE`  → `"DELETE {n}"`
+/// - `MERGE`   → `"MERGE {n}"`
+/// - `COPY`    → `"COPY {n}"`
+/// - `FETCH`   → `"FETCH {n}"`
+/// - `MOVE`    → `"MOVE {n}"`
+/// - DDL / utility → the tag text (e.g. `"CREATE TABLE"`, `"SET"`, `"BEGIN"`)
+#[allow(clippy::too_many_lines)]
+pub fn reconstruct_command_tag(sql: &str, n: u64) -> String {
+    // Skip leading whitespace and block/line comments to find the first keyword.
+    let sql = skip_leading_comments(sql);
+    let upper: String = sql
+        .split_whitespace()
+        .take(6)
+        .map(str::to_ascii_uppercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let words: Vec<&str> = upper.split_whitespace().collect();
+    let w0 = words.first().copied().unwrap_or("");
+    let w1 = words.get(1).copied().unwrap_or("");
+    let w2 = words.get(2).copied().unwrap_or("");
+    let w3 = words.get(3).copied().unwrap_or("");
+
+    match w0 {
+        // --- DML: tag includes row count ---
+        "INSERT" => format!("INSERT 0 {n}"),
+        "UPDATE" => format!("UPDATE {n}"),
+        "DELETE" => format!("DELETE {n}"),
+        "MERGE" => format!("MERGE {n}"),
+        "COPY" => format!("COPY {n}"),
+        "FETCH" => format!("FETCH {n}"),
+        "MOVE" => format!("MOVE {n}"),
+        // SELECT / TABLE / VALUES / WITH: these normally go via the Rows path;
+        // if they somehow reach here it means 0 rows with no RowDescription.
+        "SELECT" | "TABLE" | "VALUES" => format!("SELECT {n}"),
+        "WITH" => format!("SELECT {n}"),
+
+        // --- CREATE variants ---
+        "CREATE" => match w1 {
+            "OR" => {
+                // CREATE OR REPLACE FUNCTION/PROCEDURE/VIEW/RULE/TRANSFORM
+                let kind = match w3 {
+                    "FUNCTION" | "PROCEDURE" | "VIEW" | "RULE" | "AGGREGATE" | "TRANSFORM"
+                    | "TRIGGER" => w3,
+                    _ => w3,
+                };
+                format!("CREATE {kind}")
+            }
+            "TEMP" | "TEMPORARY" => {
+                // CREATE [TEMP|TEMPORARY] [UNLOGGED] TABLE ...
+                match w2 {
+                    "UNLOGGED" => "CREATE TABLE".to_string(),
+                    "TABLE" => "CREATE TABLE".to_string(),
+                    _ => format!("CREATE {w2}"),
+                }
+            }
+            "UNLOGGED" => "CREATE TABLE".to_string(),
+            "UNIQUE" | "CONCURRENTLY" => "CREATE INDEX".to_string(),
+            "MATERIALIZED" => "CREATE MATERIALIZED VIEW".to_string(),
+            "FOREIGN" => match w2 {
+                "TABLE" => "CREATE FOREIGN TABLE".to_string(),
+                "DATA" => "CREATE FOREIGN DATA WRAPPER".to_string(),
+                _ => format!("CREATE FOREIGN {w2}"),
+            },
+            "TEXT" => format!("CREATE TEXT SEARCH {w3}"),
+            "OPERATOR" => match w2 {
+                "CLASS" => "CREATE OPERATOR CLASS".to_string(),
+                "FAMILY" => "CREATE OPERATOR FAMILY".to_string(),
+                _ => "CREATE OPERATOR".to_string(),
+            },
+            "USER" => match w2 {
+                "MAPPING" => "CREATE USER MAPPING".to_string(),
+                _ => "CREATE ROLE".to_string(),
+            },
+            "GROUP" => "CREATE ROLE".to_string(),
+            "ACCESS" => "CREATE ACCESS METHOD".to_string(),
+            "DEFAULT" => "CREATE CONVERSION".to_string(),
+            "EVENT" => "CREATE EVENT TRIGGER".to_string(),
+            "" => "CREATE".to_string(),
+            _ => format!("CREATE {w1}"),
+        },
+
+        // --- DROP variants ---
+        "DROP" => match w1 {
+            "MATERIALIZED" => "DROP MATERIALIZED VIEW".to_string(),
+            "FOREIGN" => match w2 {
+                "TABLE" => "DROP FOREIGN TABLE".to_string(),
+                "DATA" => "DROP FOREIGN DATA WRAPPER".to_string(),
+                _ => format!("DROP FOREIGN {w2}"),
+            },
+            "TEXT" => format!("DROP TEXT SEARCH {w3}"),
+            "OPERATOR" => match w2 {
+                "CLASS" => "DROP OPERATOR CLASS".to_string(),
+                "FAMILY" => "DROP OPERATOR FAMILY".to_string(),
+                _ => "DROP OPERATOR".to_string(),
+            },
+            "USER" => match w2 {
+                "MAPPING" => "DROP USER MAPPING".to_string(),
+                _ => "DROP ROLE".to_string(),
+            },
+            "GROUP" => "DROP ROLE".to_string(),
+            "ACCESS" => "DROP ACCESS METHOD".to_string(),
+            "EVENT" => "DROP EVENT TRIGGER".to_string(),
+            "OWNED" => "DROP OWNED".to_string(),
+            "" => "DROP".to_string(),
+            _ => format!("DROP {w1}"),
+        },
+
+        // --- ALTER variants ---
+        "ALTER" => match w1 {
+            "DEFAULT" => "ALTER DEFAULT PRIVILEGES".to_string(),
+            "TEXT" => format!("ALTER TEXT SEARCH {w3}"),
+            "FOREIGN" => match w2 {
+                "TABLE" => "ALTER FOREIGN TABLE".to_string(),
+                "DATA" => "ALTER FOREIGN DATA WRAPPER".to_string(),
+                _ => format!("ALTER FOREIGN {w2}"),
+            },
+            "MATERIALIZED" => "ALTER MATERIALIZED VIEW".to_string(),
+            "OPERATOR" => match w2 {
+                "CLASS" => "ALTER OPERATOR CLASS".to_string(),
+                "FAMILY" => "ALTER OPERATOR FAMILY".to_string(),
+                _ => "ALTER OPERATOR".to_string(),
+            },
+            "USER" => match w2 {
+                "MAPPING" => "ALTER USER MAPPING".to_string(),
+                _ => "ALTER ROLE".to_string(), // ALTER USER → ALTER ROLE tag
+            },
+            "GROUP" => "ALTER ROLE".to_string(),
+            "ACCESS" => "ALTER ACCESS METHOD".to_string(),
+            "" => "ALTER".to_string(),
+            _ => format!("ALTER {w1}"),
+        },
+
+        // --- Transaction control ---
+        "BEGIN" | "START" => "BEGIN".to_string(),
+        "COMMIT" | "END" => match w1 {
+            "PREPARED" => "COMMIT PREPARED".to_string(),
+            _ => "COMMIT".to_string(),
+        },
+        "ROLLBACK" => match w1 {
+            "PREPARED" => "ROLLBACK PREPARED".to_string(),
+            _ => "ROLLBACK".to_string(),
+        },
+        "SAVEPOINT" => "SAVEPOINT".to_string(),
+        "RELEASE" => "RELEASE".to_string(),
+
+        // --- Cursor commands ---
+        "DECLARE" => "DECLARE CURSOR".to_string(),
+        "CLOSE" => "CLOSE CURSOR".to_string(),
+
+        // --- Prepare / execute ---
+        "PREPARE" => "PREPARE".to_string(),
+        "EXECUTE" => "EXECUTE".to_string(),
+        "DEALLOCATE" => match w1 {
+            "ALL" => "DEALLOCATE ALL".to_string(),
+            _ => "DEALLOCATE".to_string(),
+        },
+
+        // --- DISCARD ---
+        "DISCARD" => match w1 {
+            "ALL" => "DISCARD ALL".to_string(),
+            "PLANS" => "DISCARD PLANS".to_string(),
+            "SEQUENCES" => "DISCARD SEQUENCES".to_string(),
+            "TEMP" | "TEMPORARY" => "DISCARD TEMP".to_string(),
+            _ => "DISCARD".to_string(),
+        },
+
+        // --- GRANT / REVOKE ---
+        "GRANT" => match w1 {
+            "ROLE" => "GRANT ROLE".to_string(),
+            _ => "GRANT".to_string(),
+        },
+        "REVOKE" => match w1 {
+            "ROLE" => "REVOKE ROLE".to_string(),
+            _ => "REVOKE".to_string(),
+        },
+
+        // --- SET / RESET / SHOW ---
+        "SET" => match w1 {
+            "CONSTRAINTS" => "SET CONSTRAINTS".to_string(),
+            _ => "SET".to_string(),
+        },
+        "RESET" => "RESET".to_string(),
+        "SHOW" => "SHOW".to_string(),
+
+        // --- TRUNCATE ---
+        "TRUNCATE" => "TRUNCATE TABLE".to_string(),
+
+        // --- Maintenance ---
+        "VACUUM" => "VACUUM".to_string(),
+        "ANALYZE" | "ANALYSE" => "ANALYZE".to_string(),
+        "CLUSTER" => "CLUSTER".to_string(),
+        "REINDEX" => "REINDEX".to_string(),
+        "CHECKPOINT" => "CHECKPOINT".to_string(),
+
+        // --- LOCK ---
+        "LOCK" => "LOCK TABLE".to_string(),
+
+        // --- Async messaging ---
+        "LISTEN" => "LISTEN".to_string(),
+        "UNLISTEN" => "UNLISTEN".to_string(),
+        "NOTIFY" => "NOTIFY".to_string(),
+
+        // --- Misc ---
+        "LOAD" => "LOAD".to_string(),
+        "CALL" => "CALL".to_string(),
+        "DO" => "DO".to_string(),
+        "COMMENT" => "COMMENT".to_string(),
+        "SECURITY" => "SECURITY LABEL".to_string(),
+        "REASSIGN" => "REASSIGN OWNED".to_string(),
+        "IMPORT" => "IMPORT FOREIGN SCHEMA".to_string(),
+        "REFRESH" => "REFRESH MATERIALIZED VIEW".to_string(),
+        "EXPLAIN" => "EXPLAIN".to_string(),
+
+        // --- Fallback: return the first word ---
+        other => other.to_string(),
+    }
+}
+
+/// Skip leading whitespace and SQL comments (line `--` and block `/* */`)
+/// to find the first meaningful keyword in a SQL statement.
+/// Strip leading blank lines and line/block comments from a SQL string.
+///
+/// `PostgreSQL` counts lines from the start of the query string it receives.
+/// psql strips these leading decorations before sending so that LINE N in
+/// error messages is relative to the first real SQL token (LINE 1 for a
+/// single-statement query).  rpg must do the same to match psql output.
+pub fn strip_leading_preamble(sql: &str) -> &str {
+    skip_leading_comments(sql)
+}
+
+fn skip_leading_comments(sql: &str) -> &str {
+    let mut s = sql.trim_start();
+    loop {
+        if s.starts_with("--") {
+            // Line comment: skip to end of line.
+            s = s.find('\n').map_or("", |i| s[i + 1..].trim_start());
+        } else if s.starts_with("/*") {
+            // Block comment: skip to matching `*/`, handling nesting.
+            let bytes = s.as_bytes();
+            let len = bytes.len();
+            let mut depth: u32 = 0;
+            let mut i = 0;
+            while i < len {
+                if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            s = s[i..].trim_start();
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
 // Multi-statement splitter
 // ---------------------------------------------------------------------------
 
@@ -170,6 +455,13 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     let mut current = String::new();
+    // Track parenthesis depth so that semicolons inside `(...)` do not split
+    // the statement.  This handles cases like CREATE RULE ... DO ALSO (s1; s2)
+    // and function calls with multiple arguments.
+    let mut paren_depth: u32 = 0;
+    // Track BEGIN ATOMIC depth so that semicolons inside SQL-language function
+    // bodies are not treated as statement terminators.
+    let mut begin_atomic_depth: u32 = 0;
 
     while i < len {
         let b = bytes[i];
@@ -184,19 +476,26 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             continue;
         }
 
-        // -- block comment: /* … */ ----------------------------------------
+        // -- block comment: /* … */ (supports nesting: /* /* */ */) ----------
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
             flush_to!(current, i);
-            i += 2; // skip '/'  '*'
+            let mut depth: u32 = 0;
             while i + 1 < len {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
                     i += 2;
-                    break;
+                } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
                 }
-                i += 1;
             }
-            // If '*/' was not found, consume to end of input.
-            if i + 1 >= len && !(i >= 2 && bytes[i - 2] == b'*' && bytes[i - 1] == b'/') {
+            // If comment was not closed, consume to end of input.
+            if depth > 0 {
                 i = len;
             }
             flush_to!(current, i);
@@ -282,8 +581,50 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             // Not a valid dollar-quote — fall through.
         }
 
-        // -- statement terminator -------------------------------------------
-        if b == b';' {
+        // -- parenthesis depth (outside strings/comments) ------------------
+        if b == b'(' {
+            paren_depth += 1;
+        } else if b == b')' {
+            paren_depth = paren_depth.saturating_sub(1);
+        }
+
+        // -- BEGIN ATOMIC / END depth (SQL-language function bodies) -------
+        if b.eq_ignore_ascii_case(&b'b') && i + 12 <= len {
+            let ahead = &bytes[i..i + 12];
+            if ahead.eq_ignore_ascii_case(b"begin atomic") {
+                let after = if i + 12 < len { bytes[i + 12] } else { b' ' };
+                let before_ok =
+                    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+                if before_ok && !after.is_ascii_alphanumeric() && after != b'_' {
+                    begin_atomic_depth += 1;
+                }
+            }
+        }
+        // Only decrement for END that closes a BEGIN ATOMIC body.
+        // The closing END must be preceded by `;` (the last statement in
+        // the body), optionally with whitespace between.  This avoids
+        // confusing CASE...END, LOOP...END LOOP, etc.
+        if begin_atomic_depth > 0
+            && b.eq_ignore_ascii_case(&b'e')
+            && i + 3 <= len
+            && bytes[i..i + 3].eq_ignore_ascii_case(b"end")
+        {
+            let after = if i + 3 < len { bytes[i + 3] } else { b';' };
+            if !after.is_ascii_alphanumeric() && after != b'_' {
+                // Walk backwards over whitespace; the character before must
+                // be `;` (end of the last statement in the ATOMIC body).
+                let mut k = i;
+                while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                    k -= 1;
+                }
+                if k > 0 && bytes[k - 1] == b';' {
+                    begin_atomic_depth -= 1;
+                }
+            }
+        }
+
+        // -- statement terminator (only at top-level, depth == 0) ----------
+        if b == b';' && paren_depth == 0 && begin_atomic_depth == 0 {
             flush_to!(current, i);
             let trimmed = current.trim().to_owned();
             if !trimmed.is_empty() {
@@ -343,10 +684,29 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
 
     let mut columns: Option<Vec<ColumnMeta>> = None;
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    // Set to true when a RowDescription message is received, indicating this
+    // is a SELECT-like statement even if it returns zero rows.
+    let mut saw_row_description = false;
     let mut tag: Option<String> = None;
 
     for msg in messages {
         match msg {
+            SimpleQueryMessage::RowDescription(cols) => {
+                // A RowDescription message precedes data rows (or CommandComplete
+                // for zero-row results).  Capture column names so that empty
+                // result sets still render their headers correctly.
+                saw_row_description = true;
+                if columns.is_none() {
+                    columns = Some(
+                        cols.iter()
+                            .map(|c| ColumnMeta {
+                                name: c.name().to_owned(),
+                                is_numeric: false,
+                            })
+                            .collect(),
+                    );
+                }
+            }
             SimpleQueryMessage::Row(row) => {
                 // Materialise column metadata lazily from the first row.
                 if columns.is_none() {
@@ -367,8 +727,11 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
                     (0..n).map(|i| row.get(i).map(ToOwned::to_owned)).collect();
                 rows.push(cells);
             }
-            SimpleQueryMessage::CommandComplete(t) => {
-                tag = Some(t.to_string());
+            SimpleQueryMessage::CommandComplete(n) => {
+                // tokio-postgres 0.7 exposes only the numeric count from
+                // CommandComplete, not the full tag string (e.g. "INSERT 0 3").
+                // Reconstruct the full tag from the SQL statement and count.
+                tag = Some(reconstruct_command_tag(stmt, n));
             }
             _ => {}
         }
@@ -380,6 +743,14 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
             columns: cols,
             rows,
         }))
+    } else if saw_row_description {
+        // Empty SELECT (0 rows) — RowDescription was received but no Row
+        // messages followed.  Columns are unavailable via the simple query
+        // protocol in this case; render with no column headers.
+        Ok(StatementResult::Rows(RowSet {
+            columns: vec![],
+            rows: vec![],
+        }))
     } else if !rows.is_empty() {
         // Defensive: rows without a column descriptor — treat as row set.
         Ok(StatementResult::Rows(RowSet {
@@ -387,35 +758,20 @@ async fn execute_one(client: &Client, stmt: &str) -> Result<StatementResult, Que
             rows,
         }))
     } else if let Some(t) = tag {
-        // NOTE: The simple query protocol does not return column descriptors
-        // when a SELECT matches zero rows (e.g. `SELECT ... WHERE false`).
-        // We detect this via the "SELECT 0" command tag and synthesise an
-        // empty RowSet with no columns.  Column names are unavailable at
-        // this point; a future migration to the extended query protocol
-        // (issue #21) will eliminate this special case.
-        if t == "SELECT 0" {
+        let rows_affected = parse_rows_affected(&t);
+        // SELECT-like tags (no column descriptor received) → empty row set.
+        if t.starts_with("SELECT") {
             return Ok(StatementResult::Rows(RowSet {
                 columns: vec![],
                 rows: vec![],
             }));
         }
-
-        let rows_affected = parse_rows_affected(&t);
-        // Treat DDL / utility statements as `Empty` (no row-count output).
-        if rows_affected == 0
-            && !t.starts_with("INSERT")
-            && !t.starts_with("UPDATE")
-            && !t.starts_with("DELETE")
-            && !t.starts_with("MERGE")
-            && !t.starts_with("SELECT")
-        {
-            Ok(StatementResult::Empty)
-        } else {
-            Ok(StatementResult::CommandTag(CommandTag {
-                tag: t,
-                rows_affected,
-            }))
-        }
+        // DDL and utility tags with zero rows → show the tag (psql does this).
+        // Only truly "empty" (no-op) statements return no tag at all.
+        Ok(StatementResult::CommandTag(CommandTag {
+            tag: t,
+            rows_affected,
+        }))
     } else {
         Ok(StatementResult::Empty)
     }
@@ -582,5 +938,270 @@ mod tests {
     #[test]
     fn test_parse_rows_affected_select() {
         assert_eq!(parse_rows_affected("SELECT 1"), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // reconstruct_command_tag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reconstruct_insert() {
+        assert_eq!(
+            reconstruct_command_tag("INSERT INTO t VALUES (1)", 1),
+            "INSERT 0 1"
+        );
+        assert_eq!(
+            reconstruct_command_tag("INSERT INTO t VALUES (1),(2),(3)", 3),
+            "INSERT 0 3"
+        );
+        assert_eq!(
+            reconstruct_command_tag("insert into t values (1)", 1),
+            "INSERT 0 1"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_update() {
+        assert_eq!(reconstruct_command_tag("UPDATE t SET x = 1", 5), "UPDATE 5");
+        assert_eq!(
+            reconstruct_command_tag("UPDATE t SET x = 1 WHERE false", 0),
+            "UPDATE 0"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_delete() {
+        assert_eq!(
+            reconstruct_command_tag("DELETE FROM t WHERE id = 1", 1),
+            "DELETE 1"
+        );
+        assert_eq!(reconstruct_command_tag("delete from t", 0), "DELETE 0");
+    }
+
+    #[test]
+    fn test_reconstruct_copy() {
+        assert_eq!(
+            reconstruct_command_tag("COPY t FROM 'file.csv'", 42),
+            "COPY 42"
+        );
+        assert_eq!(reconstruct_command_tag("COPY t TO STDOUT", 10), "COPY 10");
+    }
+
+    #[test]
+    fn test_reconstruct_ddl() {
+        assert_eq!(
+            reconstruct_command_tag("CREATE TABLE foo (id int)", 0),
+            "CREATE TABLE"
+        );
+        assert_eq!(reconstruct_command_tag("DROP TABLE foo", 0), "DROP TABLE");
+        assert_eq!(
+            reconstruct_command_tag("ALTER TABLE foo ADD COLUMN x int", 0),
+            "ALTER TABLE"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE INDEX idx ON foo (id)", 0),
+            "CREATE INDEX"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE UNIQUE INDEX idx ON foo (id)", 0),
+            "CREATE INDEX"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE MATERIALIZED VIEW v AS SELECT 1", 0),
+            "CREATE MATERIALIZED VIEW"
+        );
+        assert_eq!(
+            reconstruct_command_tag("DROP MATERIALIZED VIEW v", 0),
+            "DROP MATERIALIZED VIEW"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_create_or_replace() {
+        assert_eq!(
+            reconstruct_command_tag(
+                "CREATE OR REPLACE FUNCTION foo() RETURNS void AS $$ $$ LANGUAGE sql",
+                0
+            ),
+            "CREATE FUNCTION"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE OR REPLACE VIEW v AS SELECT 1", 0),
+            "CREATE VIEW"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_transaction() {
+        assert_eq!(reconstruct_command_tag("BEGIN", 0), "BEGIN");
+        assert_eq!(reconstruct_command_tag("COMMIT", 0), "COMMIT");
+        assert_eq!(reconstruct_command_tag("ROLLBACK", 0), "ROLLBACK");
+        assert_eq!(reconstruct_command_tag("SAVEPOINT sp1", 0), "SAVEPOINT");
+        assert_eq!(
+            reconstruct_command_tag("RELEASE SAVEPOINT sp1", 0),
+            "RELEASE"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_utility() {
+        assert_eq!(
+            reconstruct_command_tag("SET search_path = public", 0),
+            "SET"
+        );
+        assert_eq!(reconstruct_command_tag("TRUNCATE foo", 0), "TRUNCATE TABLE");
+        assert_eq!(reconstruct_command_tag("VACUUM", 0), "VACUUM");
+        assert_eq!(reconstruct_command_tag("ANALYZE foo", 0), "ANALYZE");
+        assert_eq!(
+            reconstruct_command_tag("COMMENT ON TABLE foo IS 'bar'", 0),
+            "COMMENT"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_create_temp_table() {
+        assert_eq!(
+            reconstruct_command_tag("CREATE TEMP TABLE foo (id int)", 0),
+            "CREATE TABLE"
+        );
+        assert_eq!(
+            reconstruct_command_tag("CREATE TEMPORARY TABLE foo (id int)", 0),
+            "CREATE TABLE"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_create_user_vs_user_mapping() {
+        // CREATE USER is an alias for CREATE ROLE — tag should be CREATE ROLE
+        assert_eq!(
+            reconstruct_command_tag("CREATE USER alice PASSWORD 'secret'", 0),
+            "CREATE ROLE"
+        );
+        // CREATE USER MAPPING is a separate command
+        assert_eq!(
+            reconstruct_command_tag("CREATE USER MAPPING FOR alice SERVER s", 0),
+            "CREATE USER MAPPING"
+        );
+        // DROP USER (alias for DROP ROLE)
+        assert_eq!(reconstruct_command_tag("DROP USER alice", 0), "DROP ROLE");
+        // DROP USER MAPPING
+        assert_eq!(
+            reconstruct_command_tag("DROP USER MAPPING FOR alice SERVER s", 0),
+            "DROP USER MAPPING"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_close_all() {
+        // CLOSE ALL produces tag "CLOSE CURSOR", not "CLOSE CURSOR ALL"
+        assert_eq!(reconstruct_command_tag("CLOSE ALL", 0), "CLOSE CURSOR");
+        assert_eq!(
+            reconstruct_command_tag("CLOSE my_cursor", 0),
+            "CLOSE CURSOR"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_group_aliases() {
+        // CREATE/DROP/ALTER GROUP are aliases for ROLE operations.
+        assert_eq!(
+            reconstruct_command_tag("CREATE GROUP staff", 0),
+            "CREATE ROLE"
+        );
+        assert_eq!(reconstruct_command_tag("DROP GROUP staff", 0), "DROP ROLE");
+        assert_eq!(
+            reconstruct_command_tag("ALTER GROUP staff ADD USER alice", 0),
+            "ALTER ROLE"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_create_default_conversion() {
+        // CREATE DEFAULT CONVERSION should produce CREATE CONVERSION.
+        assert_eq!(
+            reconstruct_command_tag(
+                "CREATE DEFAULT CONVERSION myconv FOR 'UTF8' TO 'LATIN1' FROM utf8_to_iso8859_1",
+                0
+            ),
+            "CREATE CONVERSION"
+        );
+    }
+
+    #[test]
+    fn test_split_begin_atomic() {
+        let sql =
+            "CREATE FUNCTION f() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 1; SELECT 2; END;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "BEGIN ATOMIC body should not be split: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_plain_begin_still_splits() {
+        // Plain BEGIN (transaction) should still split normally.
+        let stmts = split_statements("BEGIN; SELECT 1; COMMIT;");
+        assert_eq!(stmts, vec!["BEGIN", "SELECT 1", "COMMIT"]);
+    }
+
+    #[test]
+    fn test_split_begin_atomic_case_insensitive() {
+        let sql =
+            "create function f() returns void language sql begin atomic select 1; select 2; end;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "lowercase BEGIN ATOMIC should work: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_begin_atomic_with_case_end() {
+        // CASE...END inside BEGIN ATOMIC must not prematurely close the block.
+        let sql = "CREATE FUNCTION f() RETURNS int LANGUAGE SQL BEGIN ATOMIC SELECT CASE WHEN true THEN 1 ELSE 0 END; END;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "CASE...END should not close BEGIN ATOMIC: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_begin_atomic_in_dollar_quote() {
+        // BEGIN ATOMIC inside a dollar-quoted string should not be detected.
+        let sql = "SELECT $$BEGIN ATOMIC SELECT 1; END$$; SELECT 2;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "dollar-quoted BEGIN ATOMIC is just a string: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_two_begin_atomic_functions() {
+        let sql = "CREATE FUNCTION f() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 1; END; CREATE FUNCTION g() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 2; END;";
+        let stmts = split_statements(sql);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "two BEGIN ATOMIC functions should be 2 statements: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_with_leading_comment() {
+        assert_eq!(
+            reconstruct_command_tag("-- drop the old table\nDROP TABLE foo", 0),
+            "DROP TABLE"
+        );
+        assert_eq!(
+            reconstruct_command_tag("/* insert */\nINSERT INTO t VALUES (1)", 1),
+            "INSERT 0 1"
+        );
     }
 }

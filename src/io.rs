@@ -8,7 +8,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-#[cfg(not(target_arch = "wasm32"))]
 use std::process::Command;
 
 use tokio_postgres::Client;
@@ -60,24 +59,53 @@ pub fn include_file<'a>(
             }
         };
 
-        // Save and update current_file so that nested \ir commands resolve
-        // paths relative to the directory of this file.
+        // Save and update current_file / line counter so that nested \ir
+        // commands resolve paths relative to the directory of this file,
+        // and error messages include the correct `rpg:filename:line:` prefix.
         let prev_file = settings.current_file.clone();
+        let prev_line = settings.current_line_number;
         settings.current_file = Some(path.to_owned());
+        settings.current_line_number = Some(0);
 
         let start_depth = settings.cond.depth();
-        let exit_code = crate::repl::exec_lines(
-            client,
-            content.lines().map(str::to_owned),
-            settings,
-            params,
-            tx,
-        )
-        .await;
 
-        // Restore the previous current_file so callers see the right value
-        // after this include returns.
+        // Loop to handle \c reconnections within the included file.
+        let mut lines_iter: Box<dyn Iterator<Item = String>> = Box::new(
+            content
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        let mut active_client: &Client = client;
+        let mut active_params: ConnParams = params.clone();
+        #[allow(unused_assignments)]
+        let mut reconnected_client: Option<Box<Client>> = None;
+        let mut exit_code: i32;
+
+        loop {
+            let (code, maybe_new_client) = crate::repl::exec_lines(
+                active_client,
+                lines_iter.as_mut(),
+                settings,
+                &mut active_params,
+                tx,
+            )
+            .await;
+            exit_code = code;
+
+            if let Some(new_client) = maybe_new_client {
+                reconnected_client = Some(new_client);
+                active_client = reconnected_client.as_deref().unwrap();
+            } else {
+                break;
+            }
+        }
+
+        // Restore the previous current_file and line counter so callers
+        // see the right values after this include returns.
         settings.current_file = prev_file;
+        settings.current_line_number = prev_line;
 
         let end_depth = settings.cond.depth();
         if end_depth > start_depth {
@@ -136,7 +164,15 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
                 .create(true)
                 .truncate(true)
                 .open(p)
-                .map_err(|e| format!("\\o: could not open \"{p}\": {e}"))?;
+                .map_err(|e| {
+                    // Match psql error format: "error: <path>: <strerror>"
+                    // Strip the " (os error N)" suffix that Rust appends.
+                    let full = e.to_string();
+                    let msg = full
+                        .find(" (os error ")
+                        .map_or(full.as_str(), |pos| &full[..pos]);
+                    format!("error: {p}: {msg}")
+                })?;
             // Wrap in BufWriter so that large result sets are written in
             // batches rather than one syscall per write_all call.
             Ok(Some(Box::new(std::io::BufWriter::new(file))))
@@ -177,7 +213,6 @@ pub fn write_buffer(buf: &str, path: &str) -> Result<(), String> {
 /// # Errors
 /// Returns `Err(message)` if the editor cannot be launched or the temporary
 /// file cannot be read back.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<String, String> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -221,18 +256,16 @@ pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<St
     Ok(result)
 }
 
-/// WASM stub: editor invocation is not supported in a browser context.
-#[cfg(target_arch = "wasm32")]
-pub fn edit(_content: &str, _file: Option<&str>, _line: Option<usize>) -> Result<String, String> {
-    Err("\\e: editor not available in browser".to_owned())
-}
-
 /// Return a path for a temporary file.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Uses PID + high-resolution timestamp nanos to avoid predictable paths.
 fn temp_file_path() -> String {
     let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     let dir = std::env::temp_dir();
-    dir.join(format!("rpg_edit_{pid}.sql"))
+    dir.join(format!("rpg_edit_{pid}_{nanos}.sql"))
         .to_string_lossy()
         .into_owned()
 }
@@ -249,7 +282,6 @@ fn temp_file_path() -> String {
 ///
 /// Returns the exit code of the child process, or 1 if it could not be
 /// launched.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn shell_command(cmd: Option<&str>) -> i32 {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
 
@@ -266,13 +298,6 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
             1
         }
     }
-}
-
-/// WASM stub: shell command spawning is not supported in a browser context.
-#[cfg(target_arch = "wasm32")]
-pub fn shell_command(_cmd: Option<&str>) -> i32 {
-    rpg_eprintln!("\\!: shell commands not available in browser");
-    1
 }
 
 // ---------------------------------------------------------------------------
@@ -292,15 +317,7 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     let target: std::path::PathBuf = match dir {
         Some(d) => Path::new(d).to_path_buf(),
         None => {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                dirs::home_dir()
-                    .ok_or_else(|| "\\cd: could not determine home directory".to_owned())?
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                return Err("\\cd: not supported in browser".to_owned());
-            }
+            dirs::home_dir().ok_or_else(|| "\\cd: could not determine home directory".to_owned())?
         }
     };
 

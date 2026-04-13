@@ -797,6 +797,27 @@ from users as u
 order by u.id"
 
 # ---------------------------------------------------------------------------
+# Prompt backtick % handling — regression guard for #789
+# ---------------------------------------------------------------------------
+#
+# psql consumes a `%` that immediately precedes a backtick command during
+# prompt expansion.  rpg must do the same.  In pipe/-c mode prompts are
+# suppressed, so we verify that `\set PROMPT1` is accepted without error
+# and that subsequent query output matches psql exactly.
+
+compare_flags "#789: PROMPT1 with % before backtick" \
+  -c "\set PROMPT1 '(%\`echo OK\`) %/%# '
+select 'backtick_pct_ok' as marker;"
+
+compare_flags "#789: PROMPT1 with %% before backtick" \
+  -c "\set PROMPT1 '(%%\`echo OK\`) %/%# '
+select 'double_pct_ok' as marker;"
+
+compare_flags "#789: PROMPT1 with backtick (no %)" \
+  -c "\set PROMPT1 '(\`echo OK\`) %/%# '
+select 'no_pct_ok' as marker;"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

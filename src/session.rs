@@ -155,7 +155,7 @@ pub async fn show_function_source(client: &Client, name: &str, plus: bool, echo_
     let rows = match client.simple_query(&sql).await {
         Ok(r) => r,
         Err(e) => {
-            crate::output::eprint_db_error(&e, None, false);
+            crate::output::eprint_db_error(&e, None, false, false, false);
             return;
         }
     };
@@ -170,7 +170,7 @@ pub async fn show_function_source(client: &Client, name: &str, plus: bool, echo_
     }
 
     if !found {
-        rpg_eprintln!("ERROR:  function {name} does not exist");
+        rpg_eprintln!("error: ERROR:  function \"{name}\" does not exist");
     }
 }
 
@@ -216,7 +216,7 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
     let rows = match client.simple_query(&sql).await {
         Ok(r) => r,
         Err(e) => {
-            crate::output::eprint_db_error(&e, None, false);
+            crate::output::eprint_db_error(&e, None, false, false, false);
             return;
         }
     };
@@ -236,7 +236,9 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
     }
 
     if !found {
-        rpg_eprintln!("ERROR:  view {name} does not exist");
+        // Match psql error format: `error: ERROR:  relation "X" does not exist`
+        // (the "error: " prefix appears in psql's script-file error output).
+        rpg_eprintln!("error: ERROR:  relation \"{name}\" does not exist");
     }
 }
 
@@ -1161,7 +1163,9 @@ fn split_schema_name(name: &str) -> (Option<String>, String) {
 /// (every 8 columns), which is what psql produces.
 fn print_with_optional_line_numbers(text: &str, plus: bool) {
     if !plus {
-        rpg_println!("{text}");
+        // pg_get_functiondef already ends with a newline; use print! to
+        // avoid a spurious extra blank line (println! would add another \n).
+        rpg_print!("{text}");
         return;
     }
 

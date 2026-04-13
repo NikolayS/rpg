@@ -48,7 +48,8 @@ tokio-rustls = { version = "0.26", default-features = false }
 anyhow = "1"
 x509-certificate = { version = "0.23", default-features = false }
 webpki-roots = "0.26"
-russh = { version = "0.57", default-features = false, features = ["ring", "flate2"] }
+russh = { version = "0.60", default-features = false, features = ["ring", "flate2"] }
+md5 = "0.7"
 rpassword = "7"
 crossterm = "0.29"
 ratatui = "0.30"
@@ -71,6 +72,7 @@ web-sys = { version = "0.3", features = ["console", "WebSocket", "CloseEvent", "
 js-sys = "0.3"
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"
 tokio-postgres = { version = "0.7", default-features = false }
 
@@ -94,3 +96,6 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+[patch.crates-io]
+tokio-postgres = { git = "https://github.com/NikolayS/rust-postgres", tag = "tokio-postgres-v0.7.17-patched.1" }
