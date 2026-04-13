@@ -538,7 +538,10 @@ pub struct CliConnOpts {
 /// 5. `pg_service.conf` service defaults
 /// 6. Environment variables
 /// 7. Defaults
-pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError> {
+///
+/// Returns `(params, initial_password)`.  The password is kept out of
+/// `ConnParams` so the struct stays free of cleartext taint for display.
+pub fn resolve_params(opts: &CliConnOpts) -> Result<(ConnParams, Option<String>), ConnectionError> {
     let mut params = ConnParams::default();
 
     // Check if the first positional argument is a URI or conninfo string.
@@ -617,7 +620,9 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
 
     // Password (from URI / conninfo / service / env only;
     // pgpass + prompt happen later).
-    params.password = uri_ref
+    // Returned separately to keep ConnParams free of password taint for
+    // display/logging purposes (`CodeQL` cleartext-logging).
+    let initial_password = uri_ref
         .and_then(|u| u.password.clone())
         .or_else(|| {
             conninfo_params
@@ -655,7 +660,7 @@ pub fn resolve_params(opts: &CliConnOpts) -> Result<ConnParams, ConnectionError>
     // target_session_attrs — URI query param, conninfo key, then env.
     resolve_target_session_attrs(&mut params, uri_ref, ci_ref)?;
 
-    Ok(params)
+    Ok((params, initial_password))
 }
 
 fn resolve_host(
@@ -2492,14 +2497,13 @@ where
 #[allow(clippy::too_many_lines)]
 pub async fn connect(
     mut params: ConnParams,
+    initial_password: Option<String>,
     opts: &CliConnOpts,
 ) -> Result<(Client, ConnParams, Option<String>), ConnectionError> {
-    // Resolve password into a separate variable.  The password is returned
-    // as a third tuple element so that callers can display connection info
-    // from the (untainted) ConnParams and only store the password afterward.
-    // This prevents `CodeQL` from tracing cleartext credentials to log sinks.
+    // Resolve password from the initial value (passed separately to keep
+    // ConnParams free of cleartext taint for display / `CodeQL` analysis).
     let password = resolve_password_value(
-        params.password.take(),
+        initial_password,
         &params,
         opts.force_password,
         opts.no_password,
@@ -3159,14 +3163,14 @@ mod tests {
         ]);
 
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.port, 5432);
         // dbname defaults to user
         assert_eq!(params.dbname, params.user);
         assert_eq!(params.application_name, "rpg");
         assert_eq!(params.sslmode, SslMode::Prefer);
-        assert!(params.password.is_none());
+        assert!(initial_pw.is_none());
     }
 
     #[test]
@@ -3185,7 +3189,7 @@ mod tests {
             port_pos: Some("9999".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "flag-host");
         assert_eq!(params.port, 5555);
@@ -3205,7 +3209,7 @@ mod tests {
             port_pos: Some("6543".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "myhost");
         assert_eq!(params.port, 6543);
@@ -3237,13 +3241,13 @@ mod tests {
         env::set_var("PGCONNECT_TIMEOUT", "10");
 
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "env-host");
         assert_eq!(params.port, 7777);
         assert_eq!(params.user, "env-user");
         assert_eq!(params.dbname, "env-db");
-        assert_eq!(params.password, Some("env-pass".into()));
+        assert_eq!(initial_pw, Some("env-pass".into()));
         assert_eq!(params.sslmode, SslMode::Require);
         assert_eq!(params.application_name, "env-app");
         assert_eq!(params.connect_timeout, Some(10));
@@ -3262,13 +3266,13 @@ mod tests {
             ),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "db.example.com");
         assert_eq!(params.port, 5433);
         assert_eq!(params.user, "alice");
         assert_eq!(params.dbname, "mydb");
-        assert_eq!(params.password, Some("s3cret".into()));
+        assert_eq!(initial_pw, Some("s3cret".into()));
         assert_eq!(params.sslmode, SslMode::Require);
     }
 
@@ -3281,7 +3285,7 @@ mod tests {
             dbname_pos: Some("postgres://localhost/testdb".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "localhost");
         assert_eq!(params.dbname, "testdb");
@@ -3330,7 +3334,7 @@ mod tests {
             dbname_pos: Some("postgresql://localhost/db?connect_timeout=5".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.connect_timeout, Some(5));
     }
 
@@ -3345,7 +3349,7 @@ mod tests {
             dbname_pos: Some("host=connhost port=6543 dbname=conndb user=connuser".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "connhost");
         assert_eq!(params.port, 6543);
@@ -3369,7 +3373,7 @@ mod tests {
             dbname_pos: Some("host=h sslmode=require".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.sslmode, SslMode::Require);
     }
 
@@ -3385,7 +3389,7 @@ mod tests {
             sslmode: Some("require".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.sslmode, SslMode::Require);
     }
 
@@ -3489,7 +3493,7 @@ mod tests {
 
         env::set_var("PGSSLROOTCERT", "/etc/ssl/certs/ca-certificates.crt");
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.ssl_root_cert,
             Some("/etc/ssl/certs/ca-certificates.crt".into())
@@ -3512,7 +3516,7 @@ mod tests {
             dbname_pos: Some("host=h sslrootcert=/tmp/ca.pem sslmode=verify-ca".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.ssl_root_cert, Some("/tmp/ca.pem".into()));
         assert_eq!(params.sslmode, SslMode::VerifyCa);
     }
@@ -3535,7 +3539,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.ssl_root_cert, Some("/tmp/ca.pem".into()));
         assert_eq!(params.sslmode, SslMode::VerifyFull);
     }
@@ -3545,7 +3549,7 @@ mod tests {
     fn test_pgsslrootcert_not_set_by_default() {
         let _guard = EnvGuard::new(&["PGSSLROOTCERT"]);
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert!(params.ssl_root_cert.is_none());
     }
 
@@ -3556,7 +3560,7 @@ mod tests {
     fn test_application_name_defaults_to_rpg() {
         let _guard = EnvGuard::new(&["PGAPPNAME"]);
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.application_name, "rpg");
     }
 
@@ -3573,7 +3577,7 @@ mod tests {
             dbname_pos: Some("postgresql://alice:pass@urihost:5433/uridb".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, initial_pw) = resolve_params(&opts).unwrap();
 
         // CLI flags win over URI.
         assert_eq!(params.host, "override-host");
@@ -3581,7 +3585,7 @@ mod tests {
         // URI provides what flags don't.
         assert_eq!(params.user, "alice");
         assert_eq!(params.port, 5433);
-        assert_eq!(params.password, Some("pass".into()));
+        assert_eq!(initial_pw, Some("pass".into()));
     }
 
     // -- Helper: temporarily unset env vars for test isolation ---------------
@@ -3965,7 +3969,7 @@ mod tests {
         env::set_var("PGSSLCERT", "/etc/ssl/client.crt");
         env::set_var("PGSSLKEY", "/etc/ssl/client.key");
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.ssl_cert, Some("/etc/ssl/client.crt".into()));
         assert_eq!(params.ssl_key, Some("/etc/ssl/client.key".into()));
     }
@@ -3975,7 +3979,7 @@ mod tests {
     fn test_pgsslcert_pgsslkey_not_set_by_default() {
         let _guard = EnvGuard::new(&["PGSSLCERT", "PGSSLKEY"]);
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert!(params.ssl_cert.is_none());
         assert!(params.ssl_key.is_none());
     }
@@ -4003,7 +4007,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.ssl_cert, Some("/tmp/client.crt".into()));
         assert_eq!(params.ssl_key, Some("/tmp/client.key".into()));
         assert_eq!(params.sslmode, SslMode::VerifyFull);
@@ -4030,7 +4034,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.ssl_cert, Some("/tmp/c.crt".into()));
         assert_eq!(params.ssl_key, Some("/tmp/c.key".into()));
         assert_eq!(params.sslmode, SslMode::VerifyCa);
@@ -4043,7 +4047,7 @@ mod tests {
     fn test_pgoptions_default_is_none() {
         let _guard = EnvGuard::new(&["PGOPTIONS"]);
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert!(params.options.is_none());
     }
 
@@ -4054,7 +4058,7 @@ mod tests {
 
         env::set_var("PGOPTIONS", "-c search_path=myschema");
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.options, Some("-c search_path=myschema".into()));
     }
 
@@ -4067,7 +4071,7 @@ mod tests {
             dbname_pos: Some("host=h options='-c search_path=myschema'".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.options, Some("-c search_path=myschema".into()),);
     }
 
@@ -4082,7 +4086,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.options, Some("-c search_path=myschema".into()),);
     }
 
@@ -4098,7 +4102,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.options, Some("-c search_path=from_uri".into()),);
     }
 
@@ -4328,7 +4332,7 @@ host=myhost
         env::set_var("PGSERVICE", "testservice");
 
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "svchost");
         assert_eq!(params.port, 5555);
@@ -4343,7 +4347,7 @@ host=myhost
     fn test_target_session_attrs_default_is_any() {
         let _guard = EnvGuard::new(&["PGTARGETSESSIONATTRS"]);
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.target_session_attrs, TargetSessionAttrs::Any);
     }
 
@@ -4353,7 +4357,7 @@ host=myhost
         let _guard = EnvGuard::new(&["PGTARGETSESSIONATTRS"]);
         env::set_var("PGTARGETSESSIONATTRS", "read-write");
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.target_session_attrs, TargetSessionAttrs::ReadWrite);
     }
 
@@ -4384,7 +4388,7 @@ host=myhost
             dbname_pos: Some("service=ci".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         assert_eq!(params.host, "cihost");
         assert_eq!(params.port, 6543);
@@ -4408,7 +4412,7 @@ host=myhost
             dbname_pos: Some("postgresql://h1,h2/db?target_session_attrs=standby".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.target_session_attrs, TargetSessionAttrs::Standby);
     }
 
@@ -4441,7 +4445,7 @@ host=myhost
             dbname: Some("override-db".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         // CLI flags win.
         assert_eq!(params.host, "override-host");
@@ -4467,7 +4471,7 @@ host=myhost
             dbname_pos: Some("host=h1,h2 target_session_attrs=primary".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.target_session_attrs, TargetSessionAttrs::Primary);
     }
 
@@ -4496,7 +4500,7 @@ host=myhost
         env::set_var("PGHOST", "env-host");
 
         let opts = CliConnOpts::default();
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
 
         // Service file wins over PGHOST env var.
         assert_eq!(params.host, "svchost");
@@ -4600,7 +4604,7 @@ host=myhost
             dbname_pos: Some("postgresql://h1:5432,h2:5433,h3/db".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![
@@ -4632,7 +4636,7 @@ host=myhost
             dbname_pos: Some("host=h1,h2,h3 port=5432,5433 dbname=mydb".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![
@@ -4657,7 +4661,7 @@ host=myhost
             dbname_pos: Some("host=h1,h2,h3 port=6543 dbname=mydb".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![
@@ -4682,7 +4686,7 @@ host=myhost
             dbname_pos: Some("postgresql://myhost:9999/mydb".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.hosts, vec![("myhost".to_owned(), 9999)]);
     }
 
@@ -4699,7 +4703,7 @@ host=myhost
             port_str: Some("6543".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![
@@ -4724,7 +4728,7 @@ host=myhost
             port_str: Some("5432,5433,5434".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![
@@ -4747,7 +4751,7 @@ host=myhost
             port_str: Some("5432,5433".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![
@@ -4769,7 +4773,7 @@ host=myhost
             port_pos: Some("7777,7778".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![("h1".to_owned(), 7777), ("h2".to_owned(), 7778),]
@@ -4794,7 +4798,7 @@ host=myhost
         // Should not panic; the invalid port causes the multi-host path to be
         // abandoned.  The resulting host list must reflect the single-host
         // fallback (params.host / params.port), not stale defaults.
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(
             params.hosts,
             vec![(params.host.clone(), params.port)],
@@ -4818,7 +4822,7 @@ host=myhost
             port_str: Some("9999".into()),
             ..Default::default()
         };
-        let params = resolve_params(&opts).unwrap();
+        let (params, _initial_pw) = resolve_params(&opts).unwrap();
         assert_eq!(params.hosts, vec![("myhost".to_owned(), 9999)]);
         assert_eq!(params.host, "myhost");
         assert_eq!(params.port, 9999);

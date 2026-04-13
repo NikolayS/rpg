@@ -873,7 +873,7 @@ async fn async_main() {
 
     // Resolve parameters once; pass into connect() so both display and the
     // actual driver use the exact same values (avoids double-resolve drift).
-    let params = match connection::resolve_params(&opts) {
+    let (params, initial_password) = match connection::resolve_params(&opts) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("rpg: {e}");
@@ -881,7 +881,7 @@ async fn async_main() {
         }
     };
 
-    match connection::connect(params, &opts).await {
+    match connection::connect(params, initial_password, &opts).await {
         Ok((client, mut resolved, resolved_password)) => {
             use std::io::IsTerminal;
             logging::info(
