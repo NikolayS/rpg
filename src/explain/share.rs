@@ -302,38 +302,38 @@ pub fn copy_to_clipboard(text: &str) {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+        use std::io::Write;
+        use std::process::{Command, Stdio};
 
-    #[cfg(target_os = "macos")]
-    let candidates: &[&[&str]] = &[&["pbcopy"]];
+        #[cfg(target_os = "macos")]
+        let candidates: &[&[&str]] = &[&["pbcopy"]];
 
-    #[cfg(not(target_os = "macos"))]
-    let candidates: &[&[&str]] = &[
-        &["wl-copy"],
-        &["xclip", "-selection", "clipboard"],
-        &["xsel", "--clipboard", "--input"],
-    ];
+        #[cfg(not(target_os = "macos"))]
+        let candidates: &[&[&str]] = &[
+            &["wl-copy"],
+            &["xclip", "-selection", "clipboard"],
+            &["xsel", "--clipboard", "--input"],
+        ];
 
-    for argv in candidates {
-        let (prog, args) = argv.split_first().unwrap();
-        let Ok(mut child) = Command::new(prog)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
+        for argv in candidates {
+            let (prog, args) = argv.split_first().unwrap();
+            let Ok(mut child) = Command::new(prog)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            else {
+                continue;
+            };
 
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            // Ignore wait errors — clipboard is best-effort.
+            let _ = child.wait();
+            return;
         }
-        // Ignore wait errors — clipboard is best-effort.
-        let _ = child.wait();
-        return;
-    }
     }
 }
 

@@ -432,43 +432,42 @@ async fn execute_copy_from(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    use futures::SinkExt;
+        use futures::SinkExt;
 
-    let sql = build_copy_from_sql(spec);
+        let sql = build_copy_from_sql(spec);
 
-    // Read data bytes from the source.
-    let data: Vec<u8> = match &spec.source {
-        CopySource::File(path) => {
-            std::fs::read(path).map_err(|e| format!("\\copy: could not read file '{path}': {e}"))?
+        // Read data bytes from the source.
+        let data: Vec<u8> = match &spec.source {
+            CopySource::File(path) => std::fs::read(path)
+                .map_err(|e| format!("\\copy: could not read file '{path}': {e}"))?,
+            CopySource::Stdin => read_stdin_until_terminator()?,
+            CopySource::InlineData(bytes) => bytes.clone(),
+            CopySource::Stdout => {
+                // Validated earlier; this branch is unreachable in practice.
+                return Err("\\copy: STDOUT is not valid for FROM direction".to_owned());
+            }
+            CopySource::Program(cmd) => run_program_capture_stdout(cmd)?,
+        };
+
+        let sink = client
+            .copy_in(&sql)
+            .await
+            .map_err(|e| format_pg_error_psql(&e))?;
+
+        // CopyInSink is !Unpin; we must pin it on the stack before using SinkExt.
+        tokio::pin!(sink);
+
+        sink.send(bytes::Bytes::from(data))
+            .await
+            .map_err(|e| format!("\\copy: {e}"))?;
+
+        // finish() flushes, sends CopyDone, and returns the number of rows copied.
+        let rows = sink.finish().await.map_err(|e| format!("\\copy: {e}"))?;
+
+        if !quiet {
+            rpg_println!("COPY {rows}");
         }
-        CopySource::Stdin => read_stdin_until_terminator()?,
-        CopySource::InlineData(bytes) => bytes.clone(),
-        CopySource::Stdout => {
-            // Validated earlier; this branch is unreachable in practice.
-            return Err("\\copy: STDOUT is not valid for FROM direction".to_owned());
-        }
-        CopySource::Program(cmd) => run_program_capture_stdout(cmd)?,
-    };
-
-    let sink = client
-        .copy_in(&sql)
-        .await
-        .map_err(|e| format_pg_error_psql(&e))?;
-
-    // CopyInSink is !Unpin; we must pin it on the stack before using SinkExt.
-    tokio::pin!(sink);
-
-    sink.send(bytes::Bytes::from(data))
-        .await
-        .map_err(|e| format!("\\copy: {e}"))?;
-
-    // finish() flushes, sends CopyDone, and returns the number of rows copied.
-    let rows = sink.finish().await.map_err(|e| format!("\\copy: {e}"))?;
-
-    if !quiet {
-        rpg_println!("COPY {rows}");
-    }
-    Ok(())
+        Ok(())
     }
 }
 
@@ -483,90 +482,90 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    use futures::StreamExt;
+        use futures::StreamExt;
 
-    let sql = build_copy_to_sql(spec);
+        let sql = build_copy_to_sql(spec);
 
-    let stream = client
-        .copy_out(&sql)
-        .await
-        .map_err(|e| format_pg_error_psql(&e))?;
+        let stream = client
+            .copy_out(&sql)
+            .await
+            .map_err(|e| format_pg_error_psql(&e))?;
 
-    // CopyOutStream is !Unpin; pin it before using StreamExt.
-    tokio::pin!(stream);
+        // CopyOutStream is !Unpin; pin it before using StreamExt.
+        tokio::pin!(stream);
 
-    match &spec.source {
-        CopySource::File(path) => {
-            let mut file = std::fs::File::create(path)
-                .map_err(|e| format!("\\copy: could not create file '{path}': {e}"))?;
-            let mut row_count = 0u64;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
-                // Count newlines as a proxy for row count (text/csv format).
-                // NOTE: this is an approximation — it can over-count when field
-                // values contain embedded newlines (e.g. multi-line text in CSV).
-                // A precise count would require full CSV/text-format parsing,
-                // which is not worth the complexity here.
-                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
-                file.write_all(&chunk)
-                    .map_err(|e| format!("\\copy: write error: {e}"))?;
+        match &spec.source {
+            CopySource::File(path) => {
+                let mut file = std::fs::File::create(path)
+                    .map_err(|e| format!("\\copy: could not create file '{path}': {e}"))?;
+                let mut row_count = 0u64;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
+                    // Count newlines as a proxy for row count (text/csv format).
+                    // NOTE: this is an approximation — it can over-count when field
+                    // values contain embedded newlines (e.g. multi-line text in CSV).
+                    // A precise count would require full CSV/text-format parsing,
+                    // which is not worth the complexity here.
+                    row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
+                    file.write_all(&chunk)
+                        .map_err(|e| format!("\\copy: write error: {e}"))?;
+                }
+                rpg_println!("COPY {row_count}");
             }
-            rpg_println!("COPY {row_count}");
-        }
-        CopySource::Stdout => {
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
-                out.write_all(&chunk)
-                    .map_err(|e| format!("\\copy: write error: {e}"))?;
+            CopySource::Stdout => {
+                let stdout = io::stdout();
+                let mut out = stdout.lock();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
+                    out.write_all(&chunk)
+                        .map_err(|e| format!("\\copy: write error: {e}"))?;
+                }
+                // psql does not print "COPY N" when copying to stdout.
             }
-            // psql does not print "COPY N" when copying to stdout.
-        }
-        CopySource::Stdin | CopySource::InlineData(_) => {
-            // Validated earlier; these branches are unreachable for TO.
-            return Err("\\copy: STDIN is not valid for TO direction".to_owned());
-        }
-        CopySource::Program(cmd) => {
-            // Collect all data from the server, pipe it to the program's stdin,
-            // then wait for the program to exit.
-            let mut child = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("\\copy: could not spawn program '{cmd}': {e}"))?;
-
-            let mut child_stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "\\copy: could not open program stdin".to_owned())?;
-
-            let mut row_count = 0u64;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
-                row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
-                child_stdin
-                    .write_all(&chunk)
-                    .map_err(|e| format!("\\copy: write to program failed: {e}"))?;
+            CopySource::Stdin | CopySource::InlineData(_) => {
+                // Validated earlier; these branches are unreachable for TO.
+                return Err("\\copy: STDIN is not valid for TO direction".to_owned());
             }
-            // Drop stdin to signal EOF to the child process.
-            drop(child_stdin);
+            CopySource::Program(cmd) => {
+                // Collect all data from the server, pipe it to the program's stdin,
+                // then wait for the program to exit.
+                let mut child = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("\\copy: could not spawn program '{cmd}': {e}"))?;
 
-            let status = child
-                .wait()
-                .map_err(|e| format!("\\copy: waiting for program failed: {e}"))?;
-            if !status.success() {
-                let code = status
-                    .code()
-                    .map_or_else(|| "signal".to_owned(), |c| c.to_string());
-                return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
+                let mut child_stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| "\\copy: could not open program stdin".to_owned())?;
+
+                let mut row_count = 0u64;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| format!("\\copy: {e}"))?;
+                    row_count += chunk.iter().fold(0u64, |n, &b| n + u64::from(b == b'\n'));
+                    child_stdin
+                        .write_all(&chunk)
+                        .map_err(|e| format!("\\copy: write to program failed: {e}"))?;
+                }
+                // Drop stdin to signal EOF to the child process.
+                drop(child_stdin);
+
+                let status = child
+                    .wait()
+                    .map_err(|e| format!("\\copy: waiting for program failed: {e}"))?;
+                if !status.success() {
+                    let code = status
+                        .code()
+                        .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+                    return Err(format!("\\copy: program '{cmd}' exited with status {code}"));
+                }
+                rpg_println!("COPY {row_count}");
             }
-            rpg_println!("COPY {row_count}");
         }
-    }
 
-    Ok(())
+        Ok(())
     }
 }
 

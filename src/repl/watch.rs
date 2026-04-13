@@ -146,7 +146,8 @@ pub(super) async fn watch_query(
         let now = {
             // web_time::SystemTime uses Performance.now() in the browser.
             let wt = web_time::SystemTime::now();
-            let dur = wt.duration_since(web_time::SystemTime::UNIX_EPOCH)
+            let dur = wt
+                .duration_since(web_time::SystemTime::UNIX_EPOCH)
                 .unwrap_or(std::time::Duration::ZERO);
             std::time::UNIX_EPOCH + dur
         };

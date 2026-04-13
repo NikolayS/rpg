@@ -58,23 +58,23 @@ pub async fn lo_import(client: &Client, filename: &str, comment: &str, quiet: bo
     // produces a clear error without starting a transaction.
     #[cfg(not(target_arch = "wasm32"))]
     {
-    let data = match read_file(filename) {
-        Ok(d) => d,
-        Err(e) => {
-            // psql prints the error without a command prefix, e.g.:
-            // could not open file "foo": No such file or directory
-            rpg_eprintln!("{e}");
-            return None;
-        }
-    };
+        let data = match read_file(filename) {
+            Ok(d) => d,
+            Err(e) => {
+                // psql prints the error without a command prefix, e.g.:
+                // could not open file "foo": No such file or directory
+                rpg_eprintln!("{e}");
+                return None;
+            }
+        };
 
-    match run_lo_import(client, filename, comment, &data, quiet).await {
-        Ok(oid) => Some(oid),
-        Err(e) => {
-            rpg_eprintln!("\\lo_import: {e}");
-            None
+        match run_lo_import(client, filename, comment, &data, quiet).await {
+            Ok(oid) => Some(oid),
+            Err(e) => {
+                rpg_eprintln!("\\lo_import: {e}");
+                None
+            }
         }
-    }
     }
 }
 
@@ -168,17 +168,17 @@ pub async fn lo_export(client: &Client, loid: &str, filename: &str, quiet: bool)
     // returns "large object 0 does not exist".  Match that behaviour.
     #[cfg(not(target_arch = "wasm32"))]
     {
-    let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
+        let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
 
-    match run_lo_export(client, loid_parsed, filename).await {
-        Ok(()) => {
-            if !quiet {
-                rpg_println!("lo_export");
+        match run_lo_export(client, loid_parsed, filename).await {
+            Ok(()) => {
+                if !quiet {
+                    rpg_println!("lo_export");
+                }
             }
+            // psql prints the PostgreSQL error directly without a command prefix.
+            Err(e) => rpg_eprintln!("{e}"),
         }
-        // psql prints the PostgreSQL error directly without a command prefix.
-        Err(e) => rpg_eprintln!("{e}"),
-    }
     }
 }
 

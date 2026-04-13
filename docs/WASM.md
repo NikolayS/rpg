@@ -1,7 +1,12 @@
 <!-- Copyright 2026 Nikolay Samokhvalov / postgres.ai -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# rpg WASM — Browser Build
+# rpg WASM — Browser Build (Experimental)
+
+> **Status: Experimental.** The WASM build is functional for interactive SQL
+> and most meta-commands, but some features are unavailable due to platform
+> constraints (no filesystem, no shell, no ratatui). See
+> [Known Limitations](#known-limitations) below.
 
 Run rpg in the browser as a WebAssembly module. SQL queries, meta-commands,
 and rpg diagnostics work against a real Postgres server via a WebSocket proxy.

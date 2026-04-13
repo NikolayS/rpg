@@ -3000,7 +3000,9 @@ order by 2, 3"
             );
 
             if meta.echo_hidden {
-                rpg_eprintln!("/******** QUERY *********/\n{lookup_sql}\n/************************/");
+                rpg_eprintln!(
+                    "/******** QUERY *********/\n{lookup_sql}\n/************************/"
+                );
             }
 
             let matches: Vec<(String, String)> = match client.simple_query(&lookup_sql).await {
@@ -3638,12 +3640,17 @@ order by 1"
                                         }
                                     }
                                     if !pnames.is_empty() {
-                                        rpg_println!("Partitions: {}", pnames.join(",\n            "));
+                                        rpg_println!(
+                                            "Partitions: {}",
+                                            pnames.join(",\n            ")
+                                        );
                                     }
                                 }
                             }
                         } else {
-                            rpg_println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+                            rpg_println!(
+                                "Number of partitions: {num_parts} (Use \\d+ to list them.)"
+                            );
                         }
                     }
 
@@ -4497,7 +4504,9 @@ order by nsp, s.stxname"
                     } else {
                         format!("; STATISTICS {stxtgt}")
                     };
-                    rpg_println!("    \"{nsp}.{name}\"{kinds_str} ON {cols} FROM {tbl}{target_str}");
+                    rpg_println!(
+                        "    \"{nsp}.{name}\"{kinds_str} ON {cols} FROM {tbl}{target_str}"
+                    );
                 }
             }
         }

@@ -22,6 +22,9 @@ on:
       - '.cargo/config.toml'
       - '.github/workflows/wasm-check.yml'
 
+permissions:
+  contents: read
+
 jobs:
   wasm-check:
     name: cargo check (wasm32-unknown-unknown)

@@ -248,50 +248,50 @@ pub fn expand_prompt_backticks(prompt: &str) -> String {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    let mut result = String::new();
-    let mut chars = prompt.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '`' {
-            // Collect until closing backtick.
-            let mut cmd = String::new();
-            let mut found_close = false;
-            for inner in chars.by_ref() {
-                if inner == '`' {
-                    found_close = true;
-                    break;
+        let mut result = String::new();
+        let mut chars = prompt.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '`' {
+                // Collect until closing backtick.
+                let mut cmd = String::new();
+                let mut found_close = false;
+                for inner in chars.by_ref() {
+                    if inner == '`' {
+                        found_close = true;
+                        break;
+                    }
+                    cmd.push(inner);
                 }
-                cmd.push(inner);
+                if !found_close {
+                    // No closing backtick — emit literally, do not execute.
+                    result.push('`');
+                    result.push_str(&cmd);
+                    continue;
+                }
+                // psql processes backtick substitution during its single-pass
+                // %-code expansion.  When `%` immediately precedes a backtick,
+                // psql consumes the `%` as part of the backtick handling (it
+                // never becomes a literal or an escape prefix).  Since rpg
+                // runs backtick expansion as a separate pass *before*
+                // %-expansion, we must strip a trailing `%` from the result
+                // buffer to match psql behaviour.  (Fixes #789.)
+                if result.ends_with('%') {
+                    result.pop();
+                }
+                // Execute the command and capture stdout.
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .unwrap_or_default();
+                result.push_str(output.trim_end_matches('\n').trim_end_matches('\r'));
+            } else {
+                result.push(ch);
             }
-            if !found_close {
-                // No closing backtick — emit literally, do not execute.
-                result.push('`');
-                result.push_str(&cmd);
-                continue;
-            }
-            // psql processes backtick substitution during its single-pass
-            // %-code expansion.  When `%` immediately precedes a backtick,
-            // psql consumes the `%` as part of the backtick handling (it
-            // never becomes a literal or an escape prefix).  Since rpg
-            // runs backtick expansion as a separate pass *before*
-            // %-expansion, we must strip a trailing `%` from the result
-            // buffer to match psql behaviour.  (Fixes #789.)
-            if result.ends_with('%') {
-                result.pop();
-            }
-            // Execute the command and capture stdout.
-            let output = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .unwrap_or_default();
-            result.push_str(output.trim_end_matches('\n').trim_end_matches('\r'));
-        } else {
-            result.push(ch);
         }
-    }
-    result
+        result
     }
 }
 
@@ -3982,8 +3982,7 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
                 match read() {
                     Ok(Event::Key(key)) => match (key.code, key.modifiers) {
                         // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
-                        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL)
-                        | (KeyCode::Esc, _) => {
+                        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
                             let _ = write!(io::stderr(), "\r\n");
                             break true;
                         }
@@ -4186,7 +4185,8 @@ fn apply_pset(settings: &mut ReplSettings, option: &str, value: Option<&str>) {
                     rpg_eprintln!(
                         "error: \\pset: ambiguous abbreviation \"{val}\" \
                          matches both \"{}\" and \"{}\"",
-                        names[0], names[1]
+                        names[0],
+                        names[1]
                     );
                     return;
                 } else if !all_matches.is_empty() {
@@ -5430,8 +5430,7 @@ async fn dispatch_meta(
             if settings.lua_registry.get(cmd_name).is_some() {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let args: Vec<String> =
-                        rest.split_whitespace().map(str::to_owned).collect();
+                    let args: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
                     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                     let dbname = params.dbname.clone();
                     let cmd_name_owned = cmd_name.to_owned();
@@ -5916,7 +5915,9 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
             #[cfg(target_arch = "wasm32")]
             {
                 let _ = &resolved;
-                rpg_eprintln!("\\s: file save is not available on wasm32-unknown-unknown (no filesystem)");
+                rpg_eprintln!(
+                    "\\s: file save is not available on wasm32-unknown-unknown (no filesystem)"
+                );
             }
             #[cfg(not(target_arch = "wasm32"))]
             match std::fs::write(&resolved, entries.join("\n") + "\n") {
@@ -6175,7 +6176,11 @@ pub(super) fn dispatch_session_list() {
     }
     rpg_println!(
         "{:<16}  {:<20}  {:<5}  {:<16}  {:<24}  name",
-        "id", "host", "port", "dbname", "last_used"
+        "id",
+        "host",
+        "port",
+        "dbname",
+        "last_used"
     );
     rpg_println!("{}", "-".repeat(100));
     for s in &sessions {
@@ -6185,7 +6190,12 @@ pub(super) fn dispatch_session_list() {
         let name = s.name.as_deref().unwrap_or("");
         rpg_println!(
             "{:<16}  {:<20}  {:<5}  {:<16}  {:<24}  {}",
-            s.id, host, port, dbname, s.last_used, name
+            s.id,
+            host,
+            port,
+            dbname,
+            s.last_used,
+            name
         );
     }
 }
@@ -6409,8 +6419,14 @@ pub async fn run_repl(
         run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
     };
     #[cfg(target_arch = "wasm32")]
-    let exit_code =
-        run_wasm_loop(&mut client, &mut params, &mut settings, &mut tx, wasm_reader).await;
+    let exit_code = run_wasm_loop(
+        &mut client,
+        &mut params,
+        &mut settings,
+        &mut tx,
+        wasm_reader,
+    )
+    .await;
 
     // Tear down the status bar on exit.
     if let Some(ref sl_arc) = settings.statusline {

@@ -47,7 +47,9 @@ pub fn include_file<'a>(
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (client, path, settings, tx, params);
-        rpg_eprintln!("\\i: file include is not available on wasm32-unknown-unknown (no filesystem)");
+        rpg_eprintln!(
+            "\\i: file include is not available on wasm32-unknown-unknown (no filesystem)"
+        );
         return Box::pin(async { 1 });
     }
 
@@ -167,7 +169,10 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
     #[cfg(target_arch = "wasm32")]
     {
         let _ = path;
-        return Err("\\o: file output is not available on wasm32-unknown-unknown (no filesystem)".to_owned());
+        return Err(
+            "\\o: file output is not available on wasm32-unknown-unknown (no filesystem)"
+                .to_owned(),
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -207,7 +212,9 @@ pub fn write_buffer(buf: &str, path: &str) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (buf, path);
-        return Err("\\w: file write is not available on wasm32-unknown-unknown (no filesystem)".to_owned());
+        return Err(
+            "\\w: file write is not available on wasm32-unknown-unknown (no filesystem)".to_owned(),
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -316,21 +323,21 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
 
-    let status = if let Some(c) = cmd {
-        Command::new(&shell).arg("-c").arg(c).status()
-    } else {
-        Command::new(&shell).status()
-    };
+        let status = if let Some(c) = cmd {
+            Command::new(&shell).arg("-c").arg(c).status()
+        } else {
+            Command::new(&shell).status()
+        };
 
-    match status {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => {
-            rpg_eprintln!("\\!: could not launch shell \"{shell}\": {e}");
-            1
+        match status {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                rpg_eprintln!("\\!: could not launch shell \"{shell}\": {e}");
+                1
+            }
         }
-    }
     }
 }
 

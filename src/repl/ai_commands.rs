@@ -1545,33 +1545,31 @@ pub(super) async fn handle_ai_plan(
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-        let plans_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("rpg")
-            .join("plans");
-        if let Err(e) = std::fs::create_dir_all(&plans_dir) {
-            rpg_eprintln!("Cannot create plans directory: {e}");
-            return;
-        }
-        let now = std::time::SystemTime::now();
-        let date = format_system_time(now)
-            .replace(' ', "-")
-            .replace(':', "");
-        // Build a slug from the first few words of the prompt.
-        let slug: String = prompt
-            .split_whitespace()
-            .take(4)
-            .collect::<Vec<_>>()
-            .join("-")
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-')
-            .collect();
-        let filename = format!("{date}-{slug}.md");
-        let path = plans_dir.join(&filename);
-        match std::fs::write(&path, &result.content) {
-            Ok(()) => rpg_eprintln!("Saved to: {}", path.display()),
-            Err(e) => rpg_eprintln!("Failed to save plan: {e}"),
-        }
+            let plans_dir = dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("rpg")
+                .join("plans");
+            if let Err(e) = std::fs::create_dir_all(&plans_dir) {
+                rpg_eprintln!("Cannot create plans directory: {e}");
+                return;
+            }
+            let now = std::time::SystemTime::now();
+            let date = format_system_time(now).replace(' ', "-").replace(':', "");
+            // Build a slug from the first few words of the prompt.
+            let slug: String = prompt
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("-")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+            let filename = format!("{date}-{slug}.md");
+            let path = plans_dir.join(&filename);
+            match std::fs::write(&path, &result.content) {
+                Ok(()) => rpg_eprintln!("Saved to: {}", path.display()),
+                Err(e) => rpg_eprintln!("Failed to save plan: {e}"),
+            }
         }
     }
 }

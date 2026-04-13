@@ -1426,7 +1426,9 @@ pub(super) async fn execute_to_file(
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (client, buf, path, settings, tx);
-        rpg_eprintln!("\\g file: file output is not available on wasm32-unknown-unknown (no filesystem)");
+        rpg_eprintln!(
+            "\\g file: file output is not available on wasm32-unknown-unknown (no filesystem)"
+        );
         return;
     }
 
@@ -1481,46 +1483,48 @@ pub(super) async fn execute_piped(
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (client, buf, cmd, settings, tx);
-        rpg_eprintln!("\\g |: piped execution is not available on wasm32-unknown-unknown (no shell)");
+        rpg_eprintln!(
+            "\\g |: piped execution is not available on wasm32-unknown-unknown (no shell)"
+        );
         return;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
 
-    // Strip the leading `|` and trim whitespace.
-    let shell_cmd = cmd.trim_start_matches('|').trim();
+        // Strip the leading `|` and trim whitespace.
+        let shell_cmd = cmd.trim_start_matches('|').trim();
 
-    // Capture query output into a shared buffer, then pipe it to the child.
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let writer = CapturingWriter(std::sync::Arc::clone(&shared));
+        // Capture query output into a shared buffer, then pipe it to the child.
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = CapturingWriter(std::sync::Arc::clone(&shared));
 
-    let prev = settings.output_target.take();
-    settings.output_target = Some(Box::new(writer));
-    execute_query(client, buf, settings, tx).await;
-    settings.output_target = prev;
+        let prev = settings.output_target.take();
+        settings.output_target = Some(Box::new(writer));
+        execute_query(client, buf, settings, tx).await;
+        settings.output_target = prev;
 
-    let captured = std::sync::Arc::try_unwrap(shared)
-        .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
-        .into_inner()
-        .unwrap_or_default();
+        let captured = std::sync::Arc::try_unwrap(shared)
+            .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
+            .into_inner()
+            .unwrap_or_default();
 
-    match Command::new("sh")
-        .arg("-c")
-        .arg(shell_cmd)
-        .stdin(Stdio::piped())
-        .spawn()
-    {
-        Ok(mut child) => {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(&captured);
+        match Command::new("sh")
+            .arg("-c")
+            .arg(shell_cmd)
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(&captured);
+                }
+                let _ = child.wait();
             }
-            let _ = child.wait();
+            Err(e) => rpg_eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
         }
-        Err(e) => rpg_eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
-    }
     }
 }
 
