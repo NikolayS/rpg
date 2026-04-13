@@ -5596,16 +5596,21 @@ async fn dispatch_meta(
             apply_set_title(settings, title.as_deref());
         }
         MetaCmd::Watch => {
-            let interval = parse_watch_interval(parsed.pattern.as_deref().unwrap_or(""));
-            // Capture the last query before the (potentially long) watch loop
-            // to avoid borrow issues with `settings`.
-            let sql = settings.last_query.clone();
-            match sql {
-                Some(ref q) => {
-                    watch_query(client, q, interval, settings).await;
-                }
-                None => {
-                    rpg_eprintln!("\\watch cannot be used with an empty query");
+            #[cfg(target_arch = "wasm32")]
+            {
+                rpg_eprintln!("\\watch: not available on wasm32-unknown-unknown (tokio::time::sleep panics without OS clock)");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let interval = parse_watch_interval(parsed.pattern.as_deref().unwrap_or(""));
+                let sql = settings.last_query.clone();
+                match sql {
+                    Some(ref q) => {
+                        watch_query(client, q, interval, settings).await;
+                    }
+                    None => {
+                        rpg_eprintln!("\\watch cannot be used with an empty query");
+                    }
                 }
             }
         }
