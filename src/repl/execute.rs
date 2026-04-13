@@ -1728,10 +1728,14 @@ pub(super) async fn execute_query_interactive(
             (s, captured.as_slice())
         }
     } else if ok && is_explain_statement(sql) {
-        // Raw format: `last_explain_text` already set by `execute_query`.
-        display = std::borrow::Cow::Borrowed(captured.as_slice());
-        let s = std::str::from_utf8(&captured).unwrap_or("");
-        (s, captured.as_slice())
+        // Raw format: apply syntax highlighting to plan lines within the
+        // psql-formatted table output.  `highlight_explain` only colorizes
+        // plan node names, timing, and filter lines — table borders, the
+        // QUERY PLAN header, and the (N rows) footer pass through unchanged.
+        let raw_text = String::from_utf8_lossy(&captured);
+        enhanced = crate::explain::highlight::highlight_explain(&raw_text, settings.no_highlight);
+        display = std::borrow::Cow::Borrowed(b"");
+        (enhanced.as_str(), enhanced.as_bytes())
     } else {
         display = std::borrow::Cow::Borrowed(captured.as_slice());
         let s = std::str::from_utf8(&captured).unwrap_or("");
