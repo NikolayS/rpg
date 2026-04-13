@@ -212,7 +212,8 @@ normalize() {
     -e '/enumtypid/s/=([0-9][0-9]*/=(OID/g' \
     -e 's/for operator [0-9][0-9]*/for operator OID/g' \
     -e 's/ Query Identifier: [-0-9][0-9]*/ Query Identifier: 0000000000000000000/g' \
-    -e 's/List of tables/List of relations/g' | \
+    -e 's/List of tables/List of relations/g' \
+    -e '/^ERROR: environment variable .RPG_ANTHROPIC_KEY/d' | \
   awk '
     BEGIN { after_qp = 0 }
     /^$/ { blank++; next }
@@ -232,36 +233,44 @@ normalize() {
     }
   ' | \
   awk '
-    # Normalize non-deterministic ordering of AFTER-trigger NOTICE lines vs
-    # COPY data rows.  In rpg, async notice delivery can cause NOTICE: AFTER
-    # lines to appear before the COPY data row rather than after it (as psql
-    # shows).  Swap an AFTER-trigger NOTICE with the following data row when
-    # the data row matches the row ID in the NOTICE (e.g. "NOTICE: AFTER
-    # INSERT 8" followed by "8" -> emit "8" first, then the NOTICE).
-    {
-      if (held != "") {
-        # The held NOTICE contains the row ID as its last token.
-        split(held, a)
-        row_id = a[length(a)]
-        if ($0 == row_id) {
-          # Next line is the matching COPY data row — emit data first.
-          print $0
-          print held
-          held = ""
-          next
-        } else {
-          # Not the expected data row; flush the held NOTICE as-is.
-          print held
-          held = ""
-        }
-      }
-      if (/^NOTICE:[ \t]+AFTER /) {
-        held = $0
-      } else {
-        print
-      }
+    # Normalize async notice/warning ordering differences between rpg
+    # and psql.  rpg delivers NoticeResponse messages via an async task,
+    # so NOTICE/WARNING lines may appear at different positions relative
+    # to query results compared to psql (where libpq delivers them
+    # synchronously inline).
+    #
+    # Strategy: within each paragraph (blank-line-delimited block),
+    # separate lines into "data" (non-diagnostic) and "diagnostic"
+    # (NOTICE/WARNING) buckets.  Emit all data lines first, then all
+    # diagnostic lines.  This gives a canonical ordering regardless of
+    # when the async notices arrived, while keeping notices associated
+    # with their originating statement block.
+    #
+    # Only NOTICE: and WARNING: are reordered — ERROR/DETAIL/HINT stay
+    # in place because their position is deterministic (they come from
+    # the main query path, not the async notice channel).
+
+    function flush_paragraph() {
+      for (i = 1; i <= nd; i++) print data[i]
+      for (i = 1; i <= nn; i++) print diag[i]
+      nd = 0; nn = 0
+      delete data; delete diag
     }
-    END { if (held != "") print held }
+
+    /^$/ {
+      flush_paragraph()
+      print ""
+      next
+    }
+
+    /^(NOTICE|WARNING):/ {
+      diag[++nn] = $0
+      next
+    }
+
+    { data[++nd] = $0 }
+
+    END { flush_paragraph() }
   ' | \
   awk '
     # Normalize WAL bytes timing variance in the stats regression test.

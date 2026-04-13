@@ -606,9 +606,6 @@ pub async fn execute_query(
         Ok(s) => Box::pin(s),
         Err(e) => {
             // Connection-level error before any messages were sent.
-            // Flush any buffered notices first.
-            tokio::task::yield_now().await;
-            crate::output::flush_notices();
             if settings.echo_errors {
                 eprintln!("{sql_to_send}");
             }
@@ -763,18 +760,6 @@ pub async fn execute_query(
                         settings.quiet,
                     );
 
-                    // Flush buffered notices (NOTICE, WARNING, etc.) so they
-                    // appear deterministically *before* each statement's
-                    // result output, matching psql's synchronous ordering
-                    // where libpq delivers notices inline before the result.
-                    // The yield gives the connection-driving task a chance to
-                    // buffer any notices that arrived during execution.
-                    // Flush stdout first so any preceding echo-all output is
-                    // committed before notice lines appear on stderr.
-                    let _ = io::stdout().flush();
-                    tokio::task::yield_now().await;
-                    crate::output::flush_notices();
-
                     // Mirror output to log file if active.
                     if let Some(ref mut lf) = settings.log_file {
                         let _ = lf.write_all(&out_buf);
@@ -829,11 +814,6 @@ pub async fn execute_query(
     }
     // Drop the stream so the connection is ready for the next query.
     drop(stream);
-
-    // Give the connection task a chance to deliver any remaining notices
-    // that arrived just before the stream ended, then flush them.
-    tokio::task::yield_now().await;
-    crate::output::flush_notices();
 
     let success = if let Some(e) = stream_error {
         // ON_ERROR_ROLLBACK: roll back to the implicit savepoint so
@@ -1194,12 +1174,6 @@ pub async fn execute_query_extended(
                     row_data.push(vals);
                 }
             }
-
-            // Flush buffered notices before printing results, matching
-            // psql's synchronous notice delivery order.
-            let _ = io::stdout().flush();
-            tokio::task::yield_now().await;
-            crate::output::flush_notices();
 
             if !col_names.is_empty() || !row_data.is_empty() {
                 let columns: Vec<ColumnMeta> = col_names
