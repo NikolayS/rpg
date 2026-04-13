@@ -8,7 +8,10 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};

@@ -510,22 +510,24 @@ pub(super) async fn dispatch_ai_command(
             crate::rpg::run_game();
         }
         #[cfg(target_arch = "wasm32")]
-        rpg_eprintln!("/rpg is not available in the browser");
+        rpg_eprintln!("/rpg requires ratatui which is not available on wasm32-unknown-unknown");
     } else if input == "/ash" || input.starts_with("/ash ") {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
-            rpg_eprintln!("/ash requires an interactive terminal");
-            return None;
-        }
-        // Parse optional --cpu N flag: /ash --cpu 8
-        let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
-        let cpu_override = parse_ash_cpu_flag(ash_args);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
-            rpg_eprintln!("/ash: {e}");
+        {
+            use std::io::IsTerminal;
+            if !std::io::stdout().is_terminal() {
+                rpg_eprintln!("/ash requires an interactive terminal");
+                return None;
+            }
+            // Parse optional --cpu N flag: /ash --cpu 8
+            let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
+            let cpu_override = parse_ash_cpu_flag(ash_args);
+            if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
+                rpg_eprintln!("/ash: {e}");
+            }
         }
         #[cfg(target_arch = "wasm32")]
-        rpg_eprintln!("/ash: not available in browser");
+        rpg_eprintln!("/ash requires ratatui which is not available on wasm32-unknown-unknown");
 
     // /sql — switch to SQL input mode.
     } else if input == "/sql" {
