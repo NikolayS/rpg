@@ -3327,6 +3327,7 @@ Describe commands:
   \dc [pattern]     list conversions
   \dC [pattern]     list casts
   \dd [pattern]     list object comments
+  \ddp [pattern]    list default access privileges
   \dD [pattern]     list domains
   \dE [pattern]     list foreign tables
   \des [pattern]    list foreign servers
@@ -3348,12 +3349,16 @@ Describe commands:
   \dP [pattern]     list partitioned relations
   \dPt [pattern]    list partitioned tables
   \dPi [pattern]    list partitioned indexes
+  \dRp [pattern]    list publications
+  \dRs [pattern]    list subscriptions
+  \drg [pattern]    list role grants
   \ds [pattern]     list sequences
   \dt [pattern]     list tables
   \dT [pattern]     list data types
   \du [pattern]     list roles
   \dv [pattern]     list views
   \dx [pattern]     list extensions
+  \dX [pattern]     list extended statistics
   \dy [pattern]     list event triggers
   \l  [pattern]     list databases
 
@@ -3372,12 +3377,10 @@ AI commands:
 DBA diagnostics:
   /dba               show available diagnostics
   /dba activity      pg_stat_activity summary
-  /dba ash           active session history (requires pg_ash)
   /dba bloat         table bloat estimates
   /dba cache-hit     buffer cache hit ratios
   /dba config        non-default configuration
   /dba connections   connection counts by state
-  /dba indexes       index health (unused, redundant, invalid)
   /dba io            I/O statistics (PG 16+)
   /dba locks         lock tree (blocked/blocking)
   /dba progress      long-running operation progress
@@ -11587,6 +11590,57 @@ mod tests {
     fn sql_help_text_unknown_topic_returns_err() {
         let err = crate::session::sql_help_text(Some("NOTACOMMAND")).expect_err("should be Err");
         assert_eq!(err, "NOTACOMMAND");
+    }
+
+    // -- help_text ------------------------------------------------------------
+
+    #[test]
+    fn help_text_contains_all_describe_commands() {
+        let text = help_text();
+
+        // Five describe commands that must be present.
+        assert!(
+            text.contains("\\dX"),
+            "help_text must list \\dX (extended statistics)"
+        );
+        assert!(
+            text.contains("\\dRp"),
+            "help_text must list \\dRp (publications)"
+        );
+        assert!(
+            text.contains("\\dRs"),
+            "help_text must list \\dRs (subscriptions)"
+        );
+        assert!(
+            text.contains("\\drg"),
+            "help_text must list \\drg (role grants)"
+        );
+        assert!(
+            text.contains("\\ddp"),
+            "help_text must list \\ddp (default privileges)"
+        );
+    }
+
+    #[test]
+    fn help_text_no_stale_dba_ash() {
+        let text = help_text();
+        // /ash is a standalone command, not a /dba subcommand.
+        // The line "/dba ash" should not appear in the DBA section.
+        assert!(
+            !text.contains("/dba ash"),
+            "help_text must not list '/dba ash' — /ash is standalone"
+        );
+    }
+
+    #[test]
+    fn help_text_no_stale_dba_indexes() {
+        let text = help_text();
+        // /dba indexes doesn't exist; the actual commands are
+        // unused-idx, invalid-idx, redundant-idx, missing-fk-idx.
+        assert!(
+            !text.contains("/dba indexes"),
+            "help_text must not list '/dba indexes' — use /dba help for index diagnostics"
+        );
     }
 
     // -- is_write_query (comprehensive Section 13 coverage) -------------------
