@@ -8,31 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **psql compatibility: 222 of 232 native PostgreSQL regression tests passing.** rpg now runs PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree) in CI — both psql and rpg execute the same queries against the same server, outputs are normalized and diff'd. Pass means byte-identical output. This is the most rigorous psql compatibility validation available. Full report: [`docs/psql-compat.md`](docs/psql-compat.md). Key improvements in this release:
-  - 8 new describe commands: `\dP` (partitioned relations), `\dA`/`\dAc` (access methods / operator classes), `\dO` (collations), `\dF`/`\dFd`/`\dFp`/`\dFt` (text search objects) (#806)
-  - `standard_conforming_strings` GUC tracking — fixes backslash parsing in `E''` strings (#808)
-  - Async NOTICE/WARNING buffering for deterministic output ordering (#807)
-  - `rpg:file:line:` error location prefix matching psql's `-f` behaviour (#803)
-  - Wrapped format trailing-space and padding fixes (#809)
-  - 3 previously skipped tests un-skipped: `copydml`, `transactions`, `plpgsql` (#810)
-- **WASM browser build (experimental).** rpg compiles to `wasm32-unknown-unknown` for browser use via WebSocket proxy. SQL queries, most `\` meta-commands, `/version`, `/dba`, and error reporting all work. Line editing with arrow keys, history, and Ctrl-U/K/W supported. See [`docs/WASM.md`](docs/WASM.md). (#759)
+- **psql compatibility: 222 of 232 native PostgreSQL regression tests passing.** rpg now runs PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree) in CI on every push and PR — both psql and rpg execute the same queries against the same server, outputs are normalized and diff'd. Pass means byte-identical output. This regression testing runs continuously and gates every merge, ensuring compatibility never silently regresses. Full report: [`docs/psql-compat.md`](docs/psql-compat.md). Key improvements in this release:
+  - 8 new describe commands: `\dP` (partitioned relations), `\dA`/`\dAc` (access methods / operator classes), `\dO` (collations), `\dF`/`\dFd`/`\dFp`/`\dFt` (text search objects) ([#806](https://github.com/NikolayS/rpg/pull/806))
+  - `standard_conforming_strings` GUC tracking — fixes backslash parsing in `E''` strings ([#808](https://github.com/NikolayS/rpg/pull/808))
+  - Async NOTICE/WARNING buffering for deterministic output ordering ([#807](https://github.com/NikolayS/rpg/pull/807))
+  - `rpg:file:line:` error location prefix matching psql's `-f` behaviour ([#803](https://github.com/NikolayS/rpg/pull/803))
+  - Wrapped format trailing-space and padding fixes ([#809](https://github.com/NikolayS/rpg/pull/809))
+  - 3 previously skipped tests un-skipped: `copydml`, `transactions`, `plpgsql` ([#810](https://github.com/NikolayS/rpg/pull/810))
+- **WASM browser build (experimental).** rpg compiles to `wasm32-unknown-unknown` for browser use via WebSocket proxy. SQL queries, most `\` meta-commands, `/version`, `/dba`, and error reporting all work. Line editing with arrow keys, history, and Ctrl-U/K/W supported. See [`docs/WASM.md`](docs/WASM.md). ([#759](https://github.com/NikolayS/rpg/pull/759))
 - **Connection info + SSL status on startup.** The welcome banner now shows database, user, host, port, and TLS protocol/cipher — matching psql startup output.
-- **EXPLAIN syntax highlighting.** Plain `EXPLAIN` output now gets color-coded nodes, costs, and row counts, matching the existing enhanced format. (#812, #750)
-- **`/ash` sample timeout configurable.** The live `pg_stat_activity` query timeout is now a setting, avoiding freezes on heavily loaded servers. (#805, #771)
+- **EXPLAIN syntax highlighting.** Plain `EXPLAIN` output now gets color-coded nodes, costs, and row counts, matching the existing enhanced format. ([#812](https://github.com/NikolayS/rpg/pull/812), [#750](https://github.com/NikolayS/rpg/pull/750))
+- **`/ash` sample timeout configurable.** The live `pg_stat_activity` query timeout is now a setting, avoiding freezes on heavily loaded servers. ([#805](https://github.com/NikolayS/rpg/pull/805), [#771](https://github.com/NikolayS/rpg/pull/771))
 
 ### Fixed
 
-- **`/plan` now prepends `EXPLAIN`** to SQL queries instead of running them directly. (#811)
+- **`/plan` now prepends `EXPLAIN`** to SQL queries instead of running them directly. ([#811](https://github.com/NikolayS/rpg/pull/811))
 - **Apple Terminal status line.** Skip `DECSTBM` escape on Apple Terminal to prevent scroll-region rendering artifacts.
 - **AI config hint.** When AI key is not set, the message now shows the config file path (`~/.config/rpg/config.toml`) instead of listing individual commands.
-- **CodeQL cleartext-logging.** Password no longer flows through connection display or logging paths; TLS metadata queried from `pg_stat_ssl` on the server instead of the password-tainted client handshake. (#817)
+- **CodeQL cleartext-logging.** Password no longer flows through connection display or logging paths; TLS metadata queried from `pg_stat_ssl` on the server instead of the password-tainted client handshake. ([#817](https://github.com/NikolayS/rpg/pull/817))
 
 ### Tests
 
-- Multi-host failover tests enabled in CI. (#757)
-- PostgreSQL regress test script portable to bash 3.2. (#801)
-- PG14–17 partition test output normalization. (#800)
-- WAL bytes timing variance normalization. (#802)
+- Native psql regression test suite runs in CI on every push/PR, gating merges on byte-identical output with psql. ([#788](https://github.com/NikolayS/rpg/pull/788))
+- Multi-host failover tests enabled in CI. ([#757](https://github.com/NikolayS/rpg/pull/757))
+- PostgreSQL regress test script portable to bash 3.2. ([#801](https://github.com/NikolayS/rpg/pull/801))
+- PG14–17 partition test output normalization. ([#800](https://github.com/NikolayS/rpg/pull/800))
+- WAL bytes timing variance normalization. ([#802](https://github.com/NikolayS/rpg/pull/802))
 
 ## [0.10.2] - 2026-04-02
 
