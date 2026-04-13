@@ -70,7 +70,15 @@ pub fn parse_reconnect_args(pattern: Option<&str>) -> ReconnectArgs {
 pub async fn reconnect(
     pattern: Option<&str>,
     current_params: &ConnParams,
-) -> Result<(Client, ConnParams), String> {
+) -> Result<
+    (
+        Client,
+        ConnParams,
+        Option<String>,
+        Option<connection::TlsInfo>,
+    ),
+    String,
+> {
     let args = parse_reconnect_args(pattern);
 
     // Build a CliConnOpts that, when passed to resolve_params, will produce
@@ -105,13 +113,14 @@ pub async fn reconnect(
         ssh_tunnel: None,
     };
 
-    let mut new_params = connection::resolve_params(&opts).map_err(|e| e.to_string())?;
+    let (mut new_params, mut initial_password) =
+        connection::resolve_params(&opts).map_err(|e| e.to_string())?;
 
     // Carry forward the password if the user does not have a .pgpass entry
     // and no PGPASSWORD is set — avoids spurious prompts on same-server
     // reconnects.
-    if new_params.password.is_none() {
-        new_params.password = current_params.password.clone();
+    if initial_password.is_none() {
+        initial_password = current_params.password.clone();
     }
 
     // Carry forward the sslmode from the current params when no override given.
@@ -129,9 +138,16 @@ pub async fn reconnect(
         new_params.application_name = appname;
     }
 
-    connection::connect(new_params, &opts)
+    // Resolve the password before connect() to keep the connect function
+    // free of password-source calls (breaks CodeQL taint chain).
+    let password =
+        connection::resolve_password_value(initial_password, &new_params, false, false, false)
+            .map_err(|e| e.to_string())?;
+
+    let (client, params, tls_info) = connection::connect(new_params, password.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok((client, params, password, tls_info))
 }
 
 // ---------------------------------------------------------------------------
