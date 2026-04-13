@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0] - 2026-04-13
+
+### Added
+
+- **WASM browser build (experimental).** rpg compiles to `wasm32-unknown-unknown` for browser use via WebSocket proxy. SQL queries, most `\` meta-commands, `/version`, `/dba`, and error reporting all work. Line editing with arrow keys, history, and Ctrl-U/K/W supported. (#759)
+- **Connection info + SSL status on startup.** The welcome banner now shows database, user, host, port, and TLS protocol/cipher — matching psql startup output.
+- **EXPLAIN syntax highlighting.** Plain `EXPLAIN` output now gets color-coded nodes, costs, and row counts, matching the existing enhanced format. (#812, #750)
+- **New describe commands** — `\dP` (partitioned relations), `\dA`/`\dAc` (access methods / operator classes), `\dO` (collations), `\dF`/`\dFd`/`\dFp`/`\dFt` (text search objects). (#806)
+- **`/ash` sample timeout configurable.** The live `pg_stat_activity` query timeout is now a setting, avoiding freezes on heavily loaded servers. (#805, #771)
+
+### Fixed
+
+- **`/plan` now prepends `EXPLAIN`** to SQL queries instead of running them directly. (#811)
+- **Async NOTICE/WARNING buffering.** Notices from asynchronous operations are buffered and emitted in deterministic order, fixing flaky output in scripts. (#807)
+- **`standard_conforming_strings` tracking.** rpg now tracks the server's `standard_conforming_strings` GUC, fixing backslash parsing in `E''` strings and non-SCS-mode servers. (#808)
+- **Wrapped format trailing space.** Old-ASCII wrapped format no longer emits extra trailing whitespace or incorrect padding. (#809)
+- **Error location prefix.** `rpg:file:line:` prefix now emitted for error messages when processing `-f` files, matching psql behaviour. (#803)
+- **Apple Terminal status line.** Skip `DECSTBM` escape on Apple Terminal to prevent scroll-region rendering artifacts.
+- **AI config hint.** When AI key is not set, the message now shows the config file path (`~/.config/rpg/config.toml`) instead of listing individual commands.
+- **CodeQL cleartext-logging.** Password no longer flows through connection display or logging paths; TLS metadata queried from `pg_stat_ssl` on the server instead of the password-tainted client handshake. (#817)
+
+### Changed
+
+- **psql regression tests: 222 of 232 passing** (was 221). `copydml`, `transactions`, `plpgsql` tests un-skipped after async notice buffering fix. (#810)
+
+### Tests
+
+- Multi-host failover tests enabled in CI. (#757)
+- PostgreSQL regress test script portable to bash 3.2. (#801)
+- PG14–17 partition test output normalization. (#800)
+- WAL bytes timing variance normalization. (#802)
+
 ## [0.10.2] - 2026-04-02
 
 ### Fixed

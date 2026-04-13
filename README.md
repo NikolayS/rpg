@@ -35,14 +35,14 @@ Single binary, no dependencies, cross-platform.
 Build the latest stable release from source (requires Rust 1.85+):
 
 ```bash
-git clone --branch v0.10.2 --depth 1 https://github.com/NikolayS/rpg.git
+git clone --branch v0.11.0 --depth 1 https://github.com/NikolayS/rpg.git
 cd rpg
 cargo build --release
 sudo cp ./target/release/rpg /usr/local/bin/
 ```
 
 > **Note:** `main` is under active development and may be unstable. Pin to a
-> release tag (e.g. `v0.10.2`) for a known-good build. Release notes:
+> release tag (e.g. `v0.11.0`) for a known-good build. Release notes:
 > [github.com/NikolayS/rpg/releases](https://github.com/NikolayS/rpg/releases)
 
 ## Connect
@@ -58,7 +58,7 @@ rpg "postgresql://user@localhost/mydb"
 rpg -d postgres -c "select version()"
 ```
 
-On connect, rpg prints its version (with commit count and hash if built past a release tag), the full server version, AI status, and a reminder to type `\?` for help.
+On connect, rpg prints its version (with commit count and hash if built past a release tag), the full server version, connection details with SSL status (matching psql), AI provider status, and a reminder to type `\?` for help.
 
 ## Command convention
 
@@ -394,7 +394,7 @@ Supports PostgreSQL 14–18.
 
 rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree). Both psql and rpg are run against the same queries; outputs are normalized and diff'd — pass only if identical.
 
-**221 of 232 PostgreSQL regression tests pass** (0 failures, 11 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
+**222 of 232 PostgreSQL regression tests pass** (0 failures, 10 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
 
 → Full compatibility report: [`docs/psql-compat.md`](docs/psql-compat.md)
 
