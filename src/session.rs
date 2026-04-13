@@ -70,7 +70,15 @@ pub fn parse_reconnect_args(pattern: Option<&str>) -> ReconnectArgs {
 pub async fn reconnect(
     pattern: Option<&str>,
     current_params: &ConnParams,
-) -> Result<(Client, ConnParams, Option<String>), String> {
+) -> Result<
+    (
+        Client,
+        ConnParams,
+        Option<String>,
+        Option<connection::TlsInfo>,
+    ),
+    String,
+> {
     let args = parse_reconnect_args(pattern);
 
     // Build a CliConnOpts that, when passed to resolve_params, will produce
@@ -130,10 +138,11 @@ pub async fn reconnect(
         new_params.application_name = appname;
     }
 
-    let (client, params, password) = connection::connect(new_params, initial_password, &opts)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok((client, params, password))
+    let (client, params, password, tls_info) =
+        connection::connect(new_params, initial_password, &opts)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok((client, params, password, tls_info))
 }
 
 // ---------------------------------------------------------------------------

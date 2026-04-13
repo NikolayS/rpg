@@ -5542,8 +5542,8 @@ async fn dispatch_meta(
                 };
 
             match crate::session::reconnect(resolved_pattern.as_deref(), params).await {
-                Ok((new_client, mut new_params, new_password)) => {
-                    // Display reconnect info BEFORE storing the password so
+                Ok((new_client, mut new_params, new_password, new_tls)) => {
+                    // Display reconnect info BEFORE storing password/tls so
                     // that new_params stays untainted for display purposes.
                     let server_ver =
                         crate::capabilities::detect_server_version_pub(&new_client).await;
@@ -5557,14 +5557,15 @@ async fn dispatch_meta(
                                 user: &new_params.user,
                                 dbname: &new_params.dbname,
                                 resolved_addr: new_params.resolved_addr.as_deref(),
-                                tls_info: new_params.tls_info.as_ref(),
+                                tls_info: new_tls.as_ref(),
                             },
                         );
                         rpg_println!("{msg}");
                     }
 
-                    // Store password now that display is done.
+                    // Store password and TLS now that display is done.
                     new_params.password = new_password;
+                    new_params.tls_info = new_tls;
 
                     // If the target was a profile, carry forward its sslmode
                     // and password when the profile specifies them.
@@ -6330,7 +6331,7 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
     // Borrow a dummy current_params for reconnect (port 5432 default).
     let dummy = crate::connection::ConnParams::default();
     match crate::session::reconnect(Some(&pattern), &dummy).await {
-        Ok((new_client, mut new_params, new_password)) => {
+        Ok((new_client, mut new_params, new_password, new_tls)) => {
             let server_ver = crate::capabilities::detect_server_version_pub(&new_client).await;
             let msg = crate::connection::reconnect_info(
                 crate::version_string(),
@@ -6341,11 +6342,12 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
                     user: &new_params.user,
                     dbname: &new_params.dbname,
                     resolved_addr: new_params.resolved_addr.as_deref(),
-                    tls_info: new_params.tls_info.as_ref(),
+                    tls_info: new_tls.as_ref(),
                 },
             );
             rpg_println!("{msg}");
             new_params.password = new_password;
+            new_params.tls_info = new_tls;
             Some(MetaResult::Reconnected(
                 Box::new(new_client),
                 Box::new(new_params),

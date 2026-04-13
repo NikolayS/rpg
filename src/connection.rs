@@ -2499,7 +2499,7 @@ pub async fn connect(
     mut params: ConnParams,
     initial_password: Option<String>,
     opts: &CliConnOpts,
-) -> Result<(Client, ConnParams, Option<String>), ConnectionError> {
+) -> Result<(Client, ConnParams, Option<String>, Option<TlsInfo>), ConnectionError> {
     // Resolve password from the initial value (passed separately to keep
     // ConnParams free of cleartext taint for display / `CodeQL` analysis).
     let password = resolve_password_value(
@@ -2627,7 +2627,6 @@ pub async fn connect(
             }
 
             // Successful connection on this host.
-            params.tls_info = tls_info;
             // host/port already updated above.
 
             // Resolve hostname → IP for \conninfo display.
@@ -2643,8 +2642,11 @@ pub async fn connect(
                 }
             }
 
-            // Return password separately to keep params untainted for display.
-            return Ok((client, params, password));
+            // Return password and tls_info separately — both are tainted by
+            // the password→pg_config→connect_one chain.  Keeping them out of
+            // ConnParams lets callers display connection info from the
+            // untainted struct first, then store these values afterward.
+            return Ok((client, params, password, tls_info));
         }
 
         // If we exhausted all hosts on the standby pass and none qualified,

@@ -882,7 +882,7 @@ async fn async_main() {
     };
 
     match connection::connect(params, initial_password, &opts).await {
-        Ok((client, mut resolved, resolved_password)) => {
+        Ok((client, mut resolved, resolved_password, resolved_tls)) => {
             use std::io::IsTerminal;
             logging::info(
                 "connection",
@@ -925,9 +925,9 @@ async fn async_main() {
                 // Server version (full, including distro build info when present)
                 println!("Server: PostgreSQL {server_ver}");
                 // Connection details + SSL status — matching psql startup output.
-                // Build ConnDisplayInfo via direct field access (not .display_info())
-                // so CodeQL's field-sensitive taint analysis sees that the password
-                // field is never read.
+                // Use fields from the untainted `resolved` struct (password
+                // and tls_info were returned separately from connect() to
+                // keep ConnParams free of CodeQL cleartext-logging taint).
                 println!(
                     "{}",
                     connection::connection_info(&connection::ConnDisplayInfo {
@@ -936,7 +936,7 @@ async fn async_main() {
                         user: &resolved.user,
                         dbname: &resolved.dbname,
                         resolved_addr: resolved.resolved_addr.as_deref(),
-                        tls_info: resolved.tls_info.as_ref(),
+                        tls_info: resolved_tls.as_ref(),
                     })
                 );
 
@@ -985,9 +985,10 @@ async fn async_main() {
                 false
             };
 
-            // Store password in params now that display is done — needed for
-            // reconnection in the REPL.
+            // Store password and TLS info in params now that display is done —
+            // needed for reconnection and \conninfo in the REPL.
             resolved.password = resolved_password;
+            resolved.tls_info = resolved_tls;
 
             // --report [format]: run all analyzers, print detailed report,
             // exit with severity code (0=healthy, 1=warning, 2=critical).
