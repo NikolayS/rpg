@@ -9143,6 +9143,13 @@ mod tests {
     }
 
     #[test]
+    fn banner_label_plan_mode_with_explicit_on() {
+        // User explicitly set EXPLAIN on; same as plan-mode default level,
+        // but since user set it explicitly the label should still be "on".
+        assert_eq!(AutoExplain::On.banner_label(ExecMode::Plan), "on");
+    }
+
+    #[test]
     fn banner_label_plan_mode_with_explicit_verbose() {
         assert_eq!(AutoExplain::Verbose.banner_label(ExecMode::Plan), "verbose");
     }

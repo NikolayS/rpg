@@ -1059,6 +1059,12 @@ pub async fn execute_query_extended(
     let interpolated = settings.vars.interpolate(sql);
     let sql_to_send = interpolated.as_str();
 
+    // NOTE: Auto-EXPLAIN and plan-mode EXPLAIN wrapping are intentionally
+    // not applied here.  The extended query protocol uses server-side
+    // prepared statements; wrapping with EXPLAIN would require re-preparing
+    // an `EXPLAIN <original>` variant, which changes parameter semantics.
+    // Users who need a plan for bound queries can use manual EXPLAIN.
+
     // -s / --single-step: prompt before executing.
     if settings.single_step && !confirm_single_step(sql_to_send) {
         return true; // skipped — not an error
