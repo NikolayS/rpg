@@ -94,6 +94,24 @@ timeout 10 kubectl exec pod-name -n namespace -- \
 - Dynamic UI: relative timestamps with ISO 8601 hover tooltip
 - Static content: absolute timestamps `YYYY-MM-DD HH:mm:ss UTC`
 
+
+## Testing approach — red/green TDD
+
+Use red/green TDD, especially for bug fixes but also for new features:
+
+1. **Red** — write a failing test (or identify an existing failing test case) that
+   reproduces the bug or specifies the new behavior. Confirm it fails.
+2. **Green** — write the minimal code to make the test pass.
+3. **Refactor** — clean up while keeping tests green.
+
+For bug fixes this is mandatory: every fix must include a test that would have
+caught the bug. For new features it is strongly encouraged — write the test
+first when practical, or immediately after the implementation when the test
+setup is complex.
+
+When fixing psql compatibility gaps, the psql regression test suite serves as
+
+the "red" phase — a failing diff is the test. The fix makes the diff disappear.
 ## PR workflow (mandatory for all agents)
 
 Every PR must go through this sequence before merge — no exceptions:
