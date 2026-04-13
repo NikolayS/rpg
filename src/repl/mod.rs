@@ -5277,7 +5277,10 @@ async fn dispatch_meta(
         MetaCmd::ConnInfo => {
             // `\conninfo`   — psql-compatible single line (always shown).
             // `\conninfo+`  — additionally show pooler / provider details.
-            rpg_println!("{}", crate::connection::connection_info(params));
+            rpg_println!(
+                "{}",
+                crate::connection::connection_info(&params.display_info())
+            );
             if parsed.plus {
                 let caps = &settings.db_capabilities;
                 match &caps.pooler {
@@ -5532,7 +5535,7 @@ async fn dispatch_meta(
                         let msg = crate::connection::reconnect_info(
                             crate::version_string(),
                             server_ver.as_deref(),
-                            &new_params,
+                            &new_params.display_info(),
                         );
                         rpg_println!("{msg}");
                     }
@@ -6287,7 +6290,7 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
             let msg = crate::connection::reconnect_info(
                 crate::version_string(),
                 server_ver.as_deref(),
-                &new_params,
+                &new_params.display_info(),
             );
             rpg_println!("{msg}");
             Some(MetaResult::Reconnected(

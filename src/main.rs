@@ -925,7 +925,7 @@ async fn async_main() {
                 // Server version (full, including distro build info when present)
                 println!("Server: PostgreSQL {server_ver}");
                 // Connection details + SSL status — matching psql startup output.
-                println!("{}", connection::connection_info(&resolved));
+                println!("{}", connection::connection_info(&resolved.display_info()));
 
                 // LLM status
                 let ai_status = {

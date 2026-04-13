@@ -348,6 +348,38 @@ impl fmt::Debug for ConnParams {
     }
 }
 
+/// Subset of [`ConnParams`] that is safe to display or log.
+///
+/// Excludes `password`, SSL key paths, and other sensitive fields so that
+/// passing this struct to formatting / logging functions does not risk
+/// leaking credentials.
+pub struct ConnDisplayInfo<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub user: &'a str,
+    pub dbname: &'a str,
+    pub resolved_addr: Option<&'a str>,
+    pub tls_info: Option<&'a TlsInfo>,
+}
+
+impl ConnParams {
+    /// Borrow only the fields that are safe to display or log.
+    ///
+    /// The returned struct excludes `password`, SSL key/cert paths, and
+    /// other sensitive connection details, breaking any taint chain from
+    /// credential resolution to output sinks.
+    pub fn display_info(&self) -> ConnDisplayInfo<'_> {
+        ConnDisplayInfo {
+            host: &self.host,
+            port: self.port,
+            user: &self.user,
+            dbname: &self.dbname,
+            resolved_addr: self.resolved_addr.as_deref(),
+            tls_info: self.tls_info.as_ref(),
+        }
+    }
+}
+
 impl Default for ConnParams {
     fn default() -> Self {
         let (host, port) = default_host_port();
@@ -2978,32 +3010,32 @@ fn map_connect_error(e: &tokio_postgres::Error, params: &ConnParams) -> Connecti
 /// ```text
 /// SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
 /// ```
-pub fn connection_info(params: &ConnParams) -> String {
-    let is_socket = params.host.starts_with('/');
+pub fn connection_info(info: &ConnDisplayInfo<'_>) -> String {
+    let is_socket = info.host.starts_with('/');
     let connected_line = if is_socket {
         format!(
             "You are connected to database \"{}\" as user \"{}\" \
              via socket in \"{}\" at port \"{}\".",
-            params.dbname, params.user, params.host, params.port,
+            info.dbname, info.user, info.host, info.port,
         )
     } else {
         // For TCP connections, include the resolved IP address when it differs
         // from the host string — matching psql's `PQhostaddr()` behaviour.
-        match &params.resolved_addr {
+        match info.resolved_addr {
             Some(addr) => format!(
                 "You are connected to database \"{}\" as user \"{}\" \
                  on host \"{}\" (address \"{}\") at port \"{}\".",
-                params.dbname, params.user, params.host, addr, params.port,
+                info.dbname, info.user, info.host, addr, info.port,
             ),
             None => format!(
                 "You are connected to database \"{}\" as user \"{}\" \
                  on host \"{}\" at port \"{}\".",
-                params.dbname, params.user, params.host, params.port,
+                info.dbname, info.user, info.host, info.port,
             ),
         }
     };
-    if let Some(ref info) = params.tls_info {
-        format!("{connected_line}\n{}", info.status_line())
+    if let Some(tls) = info.tls_info {
+        format!("{connected_line}\n{}", tls.status_line())
     } else {
         connected_line
     }
@@ -3042,25 +3074,25 @@ pub fn connection_info(params: &ConnParams) -> String {
 pub fn reconnect_info(
     client_version: &str,
     server_version: Option<&str>,
-    new_params: &ConnParams,
+    info: &ConnDisplayInfo<'_>,
 ) -> String {
-    let is_socket = new_params.host.starts_with('/');
+    let is_socket = info.host.starts_with('/');
     let connected_line = if is_socket {
         format!(
             "You are now connected to database \"{}\" as user \"{}\" \
              via socket in \"{}\" at port \"{}\".",
-            new_params.dbname, new_params.user, new_params.host, new_params.port,
+            info.dbname, info.user, info.host, info.port,
         )
     } else {
         format!(
             "You are now connected to database \"{}\" as user \"{}\" \
              on host \"{}\" at port \"{}\".",
-            new_params.dbname, new_params.user, new_params.host, new_params.port,
+            info.dbname, info.user, info.host, info.port,
         )
     };
 
-    let ssl_suffix = if let Some(ref info) = new_params.tls_info {
-        format!("\n{}", info.status_line())
+    let ssl_suffix = if let Some(tls) = info.tls_info {
+        format!("\n{}", tls.status_line())
     } else {
         String::new()
     };
@@ -3571,7 +3603,7 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            connection_info(&params),
+            connection_info(&params.display_info()),
             "You are connected to database \"postgres\" as user \"postgres\" \
              on host \"localhost\" at port \"5432\".",
         );
@@ -3589,7 +3621,7 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            connection_info(&params),
+            connection_info(&params.display_info()),
             "You are connected to database \"postgres\" as user \"nik\" \
              on host \"localhost\" (address \"127.0.0.1\") at port \"5432\".",
         );
@@ -3605,7 +3637,7 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            connection_info(&params),
+            connection_info(&params.display_info()),
             "You are connected to database \"mydb\" as user \"alice\" \
              via socket in \"/var/run/postgresql\" at port \"5432\".",
         );
@@ -3624,7 +3656,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                Some("17.2"),
+                &new.display_info()
+            ),
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"localhost\" at port \"5432\".",
@@ -3642,7 +3678,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("16.3"), &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                Some("16.3"),
+                &new.display_info()
+            ),
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".",
@@ -3660,7 +3700,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("15.6"), &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                Some("15.6"),
+                &new.display_info()
+            ),
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 15.6)\n\
              You are now connected to database \"mydb\" as user \"postgres\" \
              on host \"localhost\" at port \"5433\".",
@@ -3678,7 +3722,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                Some("17.2"),
+                &new.display_info()
+            ),
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              via socket in \"/var/run/postgresql\" at port \"5432\".",
@@ -3696,7 +3744,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", None, &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                None,
+                &new.display_info()
+            ),
             "You are now connected to database \"postgres\" as user \"postgres\" \
              on host \"other.host\" at port \"5432\".",
         );
@@ -3786,7 +3838,7 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            connection_info(&params),
+            connection_info(&params.display_info()),
             "You are connected to database \"mydb\" as user \"alice\" \
              on host \"db.example.com\" at port \"5432\".\n\
              SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, \
@@ -3806,7 +3858,7 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            connection_info(&params),
+            connection_info(&params.display_info()),
             "You are connected to database \"mydb\" as user \"alice\" \
              via socket in \"/var/run/postgresql\" at port \"5432\".",
         );
@@ -3827,7 +3879,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("17.2"), &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                Some("17.2"),
+                &new.display_info()
+            ),
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 17.2)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"localhost\" at port \"5432\".\n\
@@ -3851,7 +3907,11 @@ mod tests {
             ..ConnParams::default()
         };
         assert_eq!(
-            reconnect_info("rpg 0.2.0 (abc1234, built 2026-01-01)", Some("16.3"), &new),
+            reconnect_info(
+                "rpg 0.2.0 (abc1234, built 2026-01-01)",
+                Some("16.3"),
+                &new.display_info()
+            ),
             "rpg 0.2.0 (abc1234, built 2026-01-01) (server PostgreSQL 16.3)\n\
              You are now connected to database \"mydb\" as user \"alice\" \
              on host \"other.example.com\" at port \"5432\".\n\
