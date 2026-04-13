@@ -250,7 +250,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
 /// Tokenize `input` with explicit `standard_conforming_strings` handling.
 ///
-/// When `scs` is `true` (the PostgreSQL default), backslash inside
+/// When `scs` is `true` (the Postgres default), backslash inside
 /// single-quoted strings has no special meaning.  When `false`, `\x`
 /// sequences are treated as escape characters — the backslash and the
 /// following byte are consumed without ending the string.
@@ -643,7 +643,7 @@ pub fn highlight_sql<'a>(
 ///
 /// See [`highlight_sql`] for the general description.  When `scs` is
 /// `false`, backslash inside single-quoted strings is treated as an escape
-/// character, matching PostgreSQL's behaviour with
+/// character, matching Postgres's behaviour with
 /// `standard_conforming_strings = off`.
 pub fn highlight_sql_scs<'a>(
     input: &'a str,

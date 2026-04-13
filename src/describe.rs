@@ -43,11 +43,11 @@ pub async fn execute(
             match pattern::validate_qualified_name(pat, max_parts, db_name) {
                 pattern::QualifiedNameCheck::Ok => {}
                 pattern::QualifiedNameCheck::TooManyDots => {
-                    eprintln!("error: improper qualified name (too many dotted names): {pat}");
+                    rpg_eprintln!("error: improper qualified name (too many dotted names): {pat}");
                     return false;
                 }
                 pattern::QualifiedNameCheck::CrossDatabase => {
-                    eprintln!("error: cross-database references are not implemented: {pat}");
+                    rpg_eprintln!("error: cross-database references are not implemented: {pat}");
                     return false;
                 }
             }
@@ -159,7 +159,7 @@ async fn run_and_print_full(
     use crate::query::{ColumnMeta, RowSet};
 
     if echo_hidden {
-        eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{sql}\n/************************/");
     }
 
     match client.simple_query(sql).await {
@@ -266,7 +266,7 @@ async fn run_and_print_full(
 /// The `#[cfg(test)]` wrapper below provides a `print_table` helper for tests.
 #[cfg(test)]
 fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) {
-    print!("{}", format_table_inner(col_names, rows, title, true));
+    rpg_print!("{}", format_table_inner(col_names, rows, title, true));
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2622,7 +2622,7 @@ order by 1"
     );
 
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{pubs_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{pubs_sql}\n/************************/");
     }
 
     let has_gencols = pg_ver.is_some_and(|v| v >= 18);
@@ -2740,7 +2740,7 @@ where pr.prpubid = {oid}
 order by 1"
         );
         if meta.echo_hidden {
-            eprintln!("/******** QUERY *********/\n{tables_sql}\n/************************/");
+            rpg_eprintln!("/******** QUERY *********/\n{tables_sql}\n/************************/");
         }
         let tbl_rows: Vec<(String, String, String)> =
             if let Ok(msgs) = client.simple_query(&tables_sql).await {
@@ -2771,7 +2771,7 @@ where pn.pnpubid = {oid}
 order by 1"
         );
         if meta.echo_hidden {
-            eprintln!("/******** QUERY *********/\n{schemas_sql}\n/************************/");
+            rpg_eprintln!("/******** QUERY *********/\n{schemas_sql}\n/************************/");
         }
         let schema_names: Vec<String> = if let Ok(msgs) = client.simple_query(&schemas_sql).await {
             msgs.into_iter()
@@ -3000,7 +3000,9 @@ order by 2, 3"
             );
 
             if meta.echo_hidden {
-                eprintln!("/******** QUERY *********/\n{lookup_sql}\n/************************/");
+                rpg_eprintln!(
+                    "/******** QUERY *********/\n{lookup_sql}\n/************************/"
+                );
             }
 
             let matches: Vec<(String, String)> = match client.simple_query(&lookup_sql).await {
@@ -3026,7 +3028,7 @@ order by 2, 3"
 
             if matches.is_empty() {
                 if !settings.quiet {
-                    eprintln!("Did not find any relation named \"{pattern}\".");
+                    rpg_eprintln!("Did not find any relation named \"{pattern}\".");
                 }
                 return false;
             }
@@ -3043,7 +3045,7 @@ order by 2, 3"
                     crate::output::OutputFormat::Unaligned | crate::output::OutputFormat::Csv
                 );
                 if !is_unaligned {
-                    println!();
+                    rpg_println!();
                 }
             }
 
@@ -3500,9 +3502,9 @@ where c.relispartition = true
                         } else {
                             format!(" {partdef}")
                         };
-                        println!("Partition of: {parent}{partdef_str}");
+                        rpg_println!("Partition of: {parent}{partdef_str}");
                         // No partition constraint applies to indexes.
-                        println!("No partition constraint");
+                        rpg_println!("No partition constraint");
                     }
                     break;
                 }
@@ -3576,7 +3578,7 @@ where c.oid = (
                         footer.push_str(" where ");
                         footer.push_str(pred);
                     }
-                    println!("{footer}");
+                    rpg_println!("{footer}");
                     // Options (reloptions) — shown when present, e.g. "Options: fastupdate=on"
                     if !reloptions.is_empty() {
                         // reloptions is a PostgreSQL array literal like {key=val,key2=val2}
@@ -3584,7 +3586,7 @@ where c.oid = (
                         let inner = reloptions.trim_start_matches('{').trim_end_matches('}');
                         if !inner.is_empty() {
                             let opts = inner.split(',').collect::<Vec<_>>().join(", ");
-                            println!("Options: {opts}");
+                            rpg_println!("Options: {opts}");
                         }
                     }
 
@@ -3638,23 +3640,28 @@ order by 1"
                                         }
                                     }
                                     if !pnames.is_empty() {
-                                        println!("Partitions: {}", pnames.join(",\n            "));
+                                        rpg_println!(
+                                            "Partitions: {}",
+                                            pnames.join(",\n            ")
+                                        );
                                     }
                                 }
                             }
                         } else {
-                            println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+                            rpg_println!(
+                                "Number of partitions: {num_parts} (Use \\d+ to list them.)"
+                            );
                         }
                     }
 
                     // Tablespace — shown when index is in a non-default tablespace.
                     if !idx_tablespace.is_empty() {
-                        println!("Tablespace: \"{idx_tablespace}\"");
+                        rpg_println!("Tablespace: \"{idx_tablespace}\"");
                     }
 
                     // Access method — shown for partitioned indexes in \d+ mode.
                     if relkind_char == 'I' && meta.plus {
-                        println!("Access method: {am}");
+                        rpg_println!("Access method: {am}");
                     }
 
                     break;
@@ -3722,9 +3729,9 @@ where c.relkind = 'S'
                         if !col_ref.is_empty() {
                             let deptype = row.get(1).unwrap_or("");
                             if deptype == "a" {
-                                println!("Owned by: {col_ref}");
+                                rpg_println!("Owned by: {col_ref}");
                             } else {
-                                println!("Sequence for identity column: {col_ref}");
+                                rpg_println!("Sequence for identity column: {col_ref}");
                             }
                         }
                     }
@@ -3828,16 +3835,16 @@ limit 1"
                 if let SimpleQueryMessage::Row(row) = msg {
                     let def = row.get(0).unwrap_or("");
                     if !def.is_empty() {
-                        println!("View definition:");
+                        rpg_println!("View definition:");
                         for vline in def.lines() {
-                            println!("{vline}");
+                            rpg_println!("{vline}");
                         }
                     }
                     // check_option is "check_option=local" or "check_option=cascaded"
                     if let Some(opt) = row.get(1) {
                         let val = opt.trim_start_matches("check_option=");
                         if !val.is_empty() {
-                            println!("Options: check_option={val}");
+                            rpg_println!("Options: check_option={val}");
                         }
                     }
                     break;
@@ -4046,7 +4053,7 @@ limit 1"
     // Phase 1: print "before indexes" partition info.
     // For partition child: Partition of / Partition constraint (constraint only for \d+).
     if !partbound.is_empty() && !parent_name.is_empty() {
-        println!("Partition of: {parent_name} {partbound}");
+        rpg_println!("Partition of: {parent_name} {partbound}");
         if meta.plus {
             let pcon_sql = format!(
                 "select pg_catalog.pg_get_partition_constraintdef(c.oid)
@@ -4060,9 +4067,9 @@ where {name_cond} limit 1"
                     if let SimpleQueryMessage::Row(prow) = pmsg {
                         let pcon = prow.get(0).unwrap_or("");
                         if pcon.is_empty() {
-                            println!("No partition constraint");
+                            rpg_println!("No partition constraint");
                         } else {
-                            println!("Partition constraint: {pcon}");
+                            rpg_println!("Partition constraint: {pcon}");
                         }
                         break;
                     }
@@ -4072,12 +4079,12 @@ where {name_cond} limit 1"
     }
     // For partition parent: Partition key.
     if part_relkind == "p" && !partkeydef.is_empty() {
-        println!("Partition key: {partkeydef}");
+        rpg_println!("Partition key: {partkeydef}");
     }
 
     // Indexes — print as indented text lines (psql format), not a table.
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{idx_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{idx_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&idx_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -4146,7 +4153,7 @@ where {name_cond} limit 1"
             }
         }
         if !index_rows.is_empty() {
-            println!("Indexes:");
+            rpg_println!("Indexes:");
             for (
                 idx_name,
                 is_primary,
@@ -4268,9 +4275,9 @@ where {name_cond} limit 1"
                 if is_exclude || is_non_btree_pk_or_uq {
                     // EXCLUDE / non-btree PK|UNIQUE: full definition already in col_expr;
                     // no access-method prefix, no separate type_label needed.
-                    println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
+                    rpg_println!("    \"{idx_name}\" {col_expr}{pred_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
                 } else {
-                    println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{nulls_not_distinct_suffix}{pred_suffix}{deferrable_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
+                    rpg_println!("    \"{idx_name}\"{type_label} {amname} {col_expr}{nulls_not_distinct_suffix}{pred_suffix}{deferrable_suffix}{invalid_suffix}{replident_suffix}{tblspc_suffix}");
                 }
             }
         }
@@ -4292,7 +4299,7 @@ where {name_cond} limit 1"
                 if let SimpleQueryMessage::Row(row) = msg {
                     let spcname = row.get(0).unwrap_or("");
                     if !spcname.is_empty() {
-                        println!("Tablespace: \"{spcname}\"");
+                        rpg_println!("Tablespace: \"{spcname}\"");
                     }
                     break;
                 }
@@ -4302,7 +4309,7 @@ where {name_cond} limit 1"
 
     // Check constraints — print as indented text lines.
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{chk_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{chk_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&chk_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -4315,16 +4322,16 @@ where {name_cond} limit 1"
             }
         }
         if !lines.is_empty() {
-            println!("Check constraints:");
+            rpg_println!("Check constraints:");
             for (name, def) in &lines {
-                println!("    \"{name}\" {def}");
+                rpg_println!("    \"{name}\" {def}");
             }
         }
     }
 
     // Foreign-key constraints — print as indented text lines.
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{fk_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{fk_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&fk_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -4338,12 +4345,12 @@ where {name_cond} limit 1"
             }
         }
         if !lines.is_empty() {
-            println!("Foreign-key constraints:");
+            rpg_println!("Foreign-key constraints:");
             for (parent_table, name, def) in &lines {
                 if let Some(pt) = parent_table {
-                    println!("    TABLE \"{pt}\" CONSTRAINT \"{name}\" {def}");
+                    rpg_println!("    TABLE \"{pt}\" CONSTRAINT \"{name}\" {def}");
                 } else {
-                    println!("    \"{name}\" {def}");
+                    rpg_println!("    \"{name}\" {def}");
                 }
             }
         }
@@ -4351,7 +4358,7 @@ where {name_cond} limit 1"
 
     // Referenced by — print as indented text lines (psql format).
     if meta.echo_hidden {
-        eprintln!("/******** QUERY *********/\n{ref_sql}\n/************************/");
+        rpg_eprintln!("/******** QUERY *********/\n{ref_sql}\n/************************/");
     }
     if let Ok(messages) = client.simple_query(&ref_sql).await {
         use tokio_postgres::SimpleQueryMessage;
@@ -4365,9 +4372,9 @@ where {name_cond} limit 1"
             }
         }
         if !lines.is_empty() {
-            println!("Referenced by:");
+            rpg_println!("Referenced by:");
             for (from_table, name, def) in &lines {
-                println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
+                rpg_println!("    TABLE \"{from_table}\" CONSTRAINT \"{name}\" {def}");
             }
         }
     }
@@ -4407,19 +4414,19 @@ order by pol.polname"
                 }
             }
             if !policies.is_empty() {
-                println!("Policies:");
+                rpg_println!("Policies:");
                 for (name, permissive, roles, qual, withcheck) in &policies {
                     // psql format: `    POLICY "name" [AS RESTRICTIVE]`
                     let restrictive = if *permissive { "" } else { " AS RESTRICTIVE" };
-                    println!("    POLICY \"{name}\"{restrictive}");
+                    rpg_println!("    POLICY \"{name}\"{restrictive}");
                     if let Some(r) = roles {
-                        println!("      TO {r}");
+                        rpg_println!("      TO {r}");
                     }
                     if let Some(q) = qual {
-                        println!("      USING ({q})");
+                        rpg_println!("      USING ({q})");
                     }
                     if let Some(w) = withcheck {
-                        println!("      WITH CHECK ({w})");
+                        rpg_println!("      WITH CHECK ({w})");
                     }
                 }
             }
@@ -4471,7 +4478,7 @@ order by nsp, s.stxname"
                 }
             }
             if !stat_rows.is_empty() {
-                println!("Statistics objects:");
+                rpg_println!("Statistics objects:");
                 for (nsp, name, cols, has_nd, has_dep, has_mcv, tbl, stxtgt) in &stat_rows {
                     // Show kinds only when some (but not all) of ndistinct/deps/mcv are set.
                     let has_all = *has_nd && *has_dep && *has_mcv;
@@ -4497,7 +4504,9 @@ order by nsp, s.stxname"
                     } else {
                         format!("; STATISTICS {stxtgt}")
                     };
-                    println!("    \"{nsp}.{name}\"{kinds_str} ON {cols} FROM {tbl}{target_str}");
+                    rpg_println!(
+                        "    \"{nsp}.{name}\"{kinds_str} ON {cols} FROM {tbl}{target_str}"
+                    );
                 }
             }
         }
@@ -4558,9 +4567,9 @@ order by 1"
                 }
             }
             if !pubs.is_empty() {
-                println!("Publications:");
+                rpg_println!("Publications:");
                 for (p, col_list, where_clause) in &pubs {
-                    println!("    \"{p}\"{col_list}{where_clause}");
+                    rpg_println!("    \"{p}\"{col_list}{where_clause}");
                 }
             }
         }
@@ -4614,9 +4623,9 @@ order by a.attnum"
                 }
             }
             if !lines.is_empty() {
-                println!("Not-null constraints:");
+                rpg_println!("Not-null constraints:");
                 for line in &lines {
-                    println!("{line}");
+                    rpg_println!("{line}");
                 }
             }
         }
@@ -4654,9 +4663,9 @@ order by (pg_catalog.pg_get_expr(c2.relpartbound, c2.oid, true) = 'DEFAULT'),
                     }
                 }
                 if parts.is_empty() {
-                    println!("Number of partitions: 0");
+                    rpg_println!("Number of partitions: 0");
                 } else {
-                    println!(
+                    rpg_println!(
                         "Partitions: {}",
                         parts
                             .iter()
@@ -4705,9 +4714,9 @@ where inhparent = (select c.oid from pg_catalog.pg_class as c
             };
 
             if num_parts == 0 {
-                println!("Number of partitions: 0");
+                rpg_println!("Number of partitions: 0");
             } else {
-                println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
+                rpg_println!("Number of partitions: {num_parts} (Use \\d+ to list them.)");
             }
         }
     }
@@ -4732,10 +4741,10 @@ limit 1"
                     let srvname = row.get(0).unwrap_or("");
                     let ftoptions = row.get(1).unwrap_or("");
                     if !srvname.is_empty() {
-                        println!("Server: {srvname}");
+                        rpg_println!("Server: {srvname}");
                     }
                     if !ftoptions.is_empty() {
-                        println!("FDW options: {ftoptions}");
+                        rpg_println!("FDW options: {ftoptions}");
                     }
                     break;
                 }
@@ -4801,15 +4810,15 @@ order by 1"
             }
         }
         if !trigger_lines.is_empty() {
-            println!("Triggers:");
+            rpg_println!("Triggers:");
             for line in &trigger_lines {
-                println!("{line}");
+                rpg_println!("{line}");
             }
         }
         if !disabled_lines.is_empty() {
-            println!("Disabled user triggers:");
+            rpg_println!("Disabled user triggers:");
             for line in &disabled_lines {
-                println!("{line}");
+                rpg_println!("{line}");
             }
         }
     }
@@ -4839,7 +4848,7 @@ order by 1"
             }
         }
         if !lines.is_empty() {
-            println!("Rules:");
+            rpg_println!("Rules:");
             for (name, def) in &lines {
                 // psql formats rules differently for views vs tables/other:
                 // - view rules: strip "CREATE RULE " and prepend 1 space
@@ -4848,11 +4857,11 @@ order by 1"
                     let display = def
                         .strip_prefix("CREATE RULE ")
                         .map_or_else(|| format!(" {def}"), |rest| format!(" {rest}"));
-                    println!("{display}");
+                    rpg_println!("{display}");
                 } else {
                     // Table (and other) rules: show name with 4-space indent,
                     // then the body lines after the "AS\n" separator.
-                    println!("    {name} AS");
+                    rpg_println!("    {name} AS");
                     let body =
                         if let Some(rest) = def.strip_prefix(&format!("CREATE RULE {name} AS")) {
                             rest.strip_prefix('\n').unwrap_or(rest)
@@ -4862,7 +4871,7 @@ order by 1"
                             def.as_str()
                         };
                     for line in body.lines() {
-                        println!("{line}");
+                        rpg_println!("{line}");
                     }
                 }
             }
@@ -4901,15 +4910,15 @@ order by i.inhseqno"
             // psql formats multi-parent lists with each name on its own line,
             // indented to align with the first name.
             if parents.len() == 1 {
-                println!("Inherits: {}", parents[0]);
+                rpg_println!("Inherits: {}", parents[0]);
             } else {
                 let prefix = "Inherits: ";
                 let indent = " ".repeat(prefix.len());
-                print!("{}{}", prefix, parents[0]);
+                rpg_print!("{}{}", prefix, parents[0]);
                 for p in &parents[1..] {
-                    print!(",\n{indent}{p}");
+                    rpg_print!(",\n{indent}{p}");
                 }
-                println!();
+                rpg_println!();
             }
         }
     }
@@ -4953,20 +4962,20 @@ order by 1"
                 if meta.plus {
                     // \d+ mode: list all child tables
                     if children.len() == 1 {
-                        println!("Child tables: {}", children[0]);
+                        rpg_println!("Child tables: {}", children[0]);
                     } else {
                         let prefix = "Child tables: ";
                         let indent = " ".repeat(prefix.len());
-                        print!("{}{}", prefix, children[0]);
+                        rpg_print!("{}{}", prefix, children[0]);
                         for c in &children[1..] {
-                            print!(",\n{indent}{c}");
+                            rpg_print!(",\n{indent}{c}");
                         }
-                        println!();
+                        rpg_println!();
                     }
                 } else {
                     // \d mode: show count summary
                     let n = children.len();
-                    println!("Number of child tables: {n} (Use \\d+ to list them.)");
+                    rpg_println!("Number of child tables: {n} (Use \\d+ to list them.)");
                 }
             }
         }
@@ -4992,7 +5001,7 @@ limit 1"
                 if let SimpleQueryMessage::Row(row) = msg {
                     let tname = row.get(0).unwrap_or("");
                     if !tname.is_empty() {
-                        println!("Typed table of type: {tname}");
+                        rpg_println!("Typed table of type: {tname}");
                     }
                     break;
                 }
@@ -5015,9 +5024,9 @@ limit 1"
                 if let SimpleQueryMessage::Row(row) = msg {
                     let def = row.get(0).unwrap_or("");
                     if !def.is_empty() {
-                        println!("View definition:");
+                        rpg_println!("View definition:");
                         for vline in def.lines() {
-                            println!("{vline}");
+                            rpg_println!("{vline}");
                         }
                     }
                     break;
@@ -5041,7 +5050,7 @@ where {name_cond} limit 1"
             for msg in msgs {
                 if let SimpleQueryMessage::Row(row) = msg {
                     if row.get(0).unwrap_or("") == "f" {
-                        println!("Replica Identity: FULL");
+                        rpg_println!("Replica Identity: FULL");
                     }
                     break;
                 }
@@ -5063,7 +5072,7 @@ where c.relkind in ('r','p','m')
 limit 1"
         );
         if meta.echo_hidden {
-            eprintln!("/******** QUERY *********/\n{am_sql}\n/************************/");
+            rpg_eprintln!("/******** QUERY *********/\n{am_sql}\n/************************/");
         }
         if let Ok(msgs) = client.simple_query(&am_sql).await {
             use tokio_postgres::SimpleQueryMessage;
@@ -5071,7 +5080,7 @@ limit 1"
                 if let SimpleQueryMessage::Row(row) = msg {
                     let amname = row.get(0).unwrap_or("");
                     if !amname.is_empty() {
-                        println!("Access method: {amname}");
+                        rpg_println!("Access method: {amname}");
                     }
                     break;
                 }

@@ -44,6 +44,16 @@ pub fn include_file<'a>(
     tx: &'a mut TxState,
     params: &'a ConnParams,
 ) -> Pin<Box<dyn std::future::Future<Output = i32> + 'a>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, path, settings, tx, params);
+        rpg_eprintln!(
+            "\\i: file include is not available on wasm32-unknown-unknown (no filesystem)"
+        );
+        return Box::pin(async { 1 });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     Box::pin(async move {
         let content = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -54,7 +64,7 @@ pub fn include_file<'a>(
                 let msg = full
                     .find(" (os error ")
                     .map_or(full.as_str(), |pos| &full[..pos]);
-                eprintln!("{path}: {msg}");
+                rpg_eprintln!("{path}: {msg}");
                 return 1;
             }
         };
@@ -109,7 +119,7 @@ pub fn include_file<'a>(
 
         let end_depth = settings.cond.depth();
         if end_depth > start_depth {
-            eprintln!(
+            rpg_eprintln!(
                 "rpg: warning: {} unterminated \\if block(s) at end of file \"{path}\"",
                 end_depth - start_depth
             );
@@ -156,6 +166,16 @@ pub fn resolve_relative_path(raw: &str, current_file: Option<&str>) -> String {
 /// # Errors
 /// Returns `Err(message)` if the file cannot be opened for writing.
 pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        return Err(
+            "\\o: file output is not available on wasm32-unknown-unknown (no filesystem)"
+                .to_owned(),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     match path {
         None => Ok(None),
         Some(p) => {
@@ -189,11 +209,22 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
 /// # Errors
 /// Returns `Err(message)` if the file cannot be created or written to.
 pub fn write_buffer(buf: &str, path: &str) -> Result<(), String> {
-    let mut file =
-        File::create(path).map_err(|e| format!("\\w: could not create \"{path}\": {e}"))?;
-    file.write_all(buf.as_bytes())
-        .map_err(|e| format!("\\w: write failed for \"{path}\": {e}"))?;
-    Ok(())
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (buf, path);
+        return Err(
+            "\\w: file write is not available on wasm32-unknown-unknown (no filesystem)".to_owned(),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut file =
+            File::create(path).map_err(|e| format!("\\w: could not create \"{path}\": {e}"))?;
+        file.write_all(buf.as_bytes())
+            .map_err(|e| format!("\\w: write failed for \"{path}\": {e}"))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +272,7 @@ pub fn edit(content: &str, file: Option<&str>, line: Option<usize>) -> Result<St
         .map_err(|e| format!("\\e: could not launch editor \"{editor}\": {e}"))?;
 
     if !status.success() {
-        eprintln!("\\e: editor exited with status {status}");
+        rpg_eprintln!("\\e: editor exited with status {status}");
     }
 
     // Read back the (possibly modified) file.
@@ -283,19 +314,29 @@ fn temp_file_path() -> String {
 /// Returns the exit code of the child process, or 1 if it could not be
 /// launched.
 pub fn shell_command(cmd: Option<&str>) -> i32 {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = cmd;
+        rpg_eprintln!("\\!: shell commands are not available on wasm32-unknown-unknown (no shell)");
+        return 1;
+    }
 
-    let status = if let Some(c) = cmd {
-        Command::new(&shell).arg("-c").arg(c).status()
-    } else {
-        Command::new(&shell).status()
-    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
 
-    match status {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("\\!: could not launch shell \"{shell}\": {e}");
-            1
+        let status = if let Some(c) = cmd {
+            Command::new(&shell).arg("-c").arg(c).status()
+        } else {
+            Command::new(&shell).status()
+        };
+
+        match status {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                rpg_eprintln!("\\!: could not launch shell \"{shell}\": {e}");
+                1
+            }
         }
     }
 }
@@ -313,6 +354,7 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
 /// # Errors
 /// Returns `Err(message)` if the directory does not exist or is not
 /// accessible.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     let target: std::path::PathBuf = match dir {
         Some(d) => Path::new(d).to_path_buf(),
@@ -322,6 +364,12 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     };
 
     std::env::set_current_dir(&target).map_err(|e| format!("\\cd: {}: {e}", target.display()))
+}
+
+/// WASM stub: no filesystem, `\cd` is a no-op.
+#[cfg(target_arch = "wasm32")]
+pub fn change_dir(_dir: Option<&str>) -> Result<(), String> {
+    Err("\\cd: not supported in WASM mode".to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -336,12 +384,12 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
 /// is limited.
 pub fn encoding(enc: Option<&str>) {
     match enc {
-        None => println!("UTF8"),
+        None => rpg_println!("UTF8"),
         Some(e) => {
             if e.to_uppercase() == "UTF8" || e.to_uppercase() == "UTF-8" {
-                println!("UTF8");
+                rpg_println!("UTF8");
             } else {
-                eprintln!("\\encoding: encoding \"{e}\" is not yet supported (only UTF8)");
+                rpg_eprintln!("\\encoding: encoding \"{e}\" is not yet supported (only UTF8)");
             }
         }
     }

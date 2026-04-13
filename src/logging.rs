@@ -241,7 +241,7 @@ pub fn init_rotating(level: Level, log_path: PathBuf, rotation: RotationConfig) 
             let _ = LOGGER.set(Arc::new(Mutex::new(logger)));
         }
         Err(e) => {
-            eprintln!("rpg: --log-file: {e}");
+            rpg_eprintln!("rpg: --log-file: {e}");
             std::process::exit(2);
         }
     }
@@ -405,8 +405,13 @@ pub fn mask_credentials(s: &str) -> String {
 ///
 /// Avoids pulling in the `chrono` crate.
 fn current_time_hms() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
     let duration = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    #[cfg(target_arch = "wasm32")]
+    let duration = web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = duration.as_secs();
     let hours = (secs % 86400) / 3600;

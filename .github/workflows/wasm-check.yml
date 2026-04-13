@@ -1,0 +1,54 @@
+# Copyright 2026 Nikolay Samokhvalov / postgres.ai
+# SPDX-License-Identifier: Apache-2.0
+#
+# wasm-check.yml — Verify the rpg crate compiles for wasm32-unknown-unknown.
+# Runs on every push and pull_request that touches Rust source or Cargo files.
+
+name: WASM Check
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/config.toml'
+      - '.github/workflows/wasm-check.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/config.toml'
+      - '.github/workflows/wasm-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  wasm-check:
+    name: cargo check (wasm32-unknown-unknown)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-wasm-
+
+      - name: cargo check (wasm32)
+        run: cargo check --target wasm32-unknown-unknown
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'

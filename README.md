@@ -398,6 +398,22 @@ rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` 
 
 → Full compatibility report: [`docs/psql-compat.md`](docs/psql-compat.md)
 
+## WASM — browser build (experimental)
+
+rpg can run in the browser as a WebAssembly module, connecting to Postgres
+through a WebSocket proxy. SQL queries, most `\` meta-commands (`\d`, `\dt`,
+`\l`, `\conninfo`, `\timing`, `\x`, etc.), `/version`, `/dba`, and error
+reporting all work. Line editing with arrow keys, history, and Ctrl-U/K/W is
+supported.
+
+**Limitations:** features that require OS facilities are unavailable —
+`\e` (editor), `\!` (shell), `\copy` (filesystem), `/ash` and `/rpg`
+(`ratatui`), `\watch` (`tokio::time`), `\password` (`rpassword`), tab
+completion, and AI commands (limited `reqwest` streaming). These show
+friendly error messages instead of crashing.
+
+→ Architecture, build instructions, and full limitations: [`docs/WASM.md`](docs/WASM.md)
+
 ## Development
 
 rpg is engineered by [Nikolay Samokhvalov](https://github.com/NikolayS) with a

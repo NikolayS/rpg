@@ -35,11 +35,11 @@ pub(super) fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
     if looks_like_raw_key {
         // Warn only once per session to avoid noise on repeated AI commands.
         if !RAW_KEY_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!(
+            rpg_eprintln!(
                 "WARNING: api_key_env appears to contain a raw API key. \
                  For security, set it to an environment variable name instead:"
             );
-            eprintln!(
+            rpg_eprintln!(
                 "  api_key_env = \"OPENAI_API_KEY\"  # then: export OPENAI_API_KEY=\"sk-...\""
             );
         }
@@ -50,7 +50,7 @@ pub(super) fn resolve_api_key(api_key_env: Option<&str>) -> Option<String> {
     match std::env::var(env_or_key) {
         Ok(val) if !val.is_empty() => Some(val),
         _ => {
-            eprintln!(
+            rpg_eprintln!(
                 "ERROR: environment variable '{env_or_key}' is not set. \
                  Set it with: export {env_or_key}=\"your-api-key\""
             );
@@ -146,7 +146,7 @@ pub(super) async fn suggest_error_fix_inline(
             let suggestion = result.content.trim();
             if !suggestion.is_empty() {
                 // Print dimmed (ANSI escape: dim = \x1b[2m, reset = \x1b[0m).
-                eprintln!("\x1b[2mHint: {suggestion}\x1b[0m");
+                rpg_eprintln!("\x1b[2mHint: {suggestion}\x1b[0m");
             }
         }
         Err(e) if e == CANCELLED => {} // silently ignore cancellation for auto-hints
@@ -199,7 +199,7 @@ pub(super) async fn interpret_auto_explain(
             record_token_usage(settings, &result);
             let interpretation = result.content.trim();
             if !interpretation.is_empty() {
-                eprintln!("\x1b[2m{interpretation}\x1b[0m");
+                rpg_eprintln!("\x1b[2m{interpretation}\x1b[0m");
             }
         }
         Err(e) if e == CANCELLED => {} // silently ignore cancellation for auto-hints
@@ -222,7 +222,7 @@ pub(super) async fn interpret_dba_output(
     }
 
     let Ok(provider) = get_ai_provider(settings) else {
-        eprintln!("-- AI interpretation requires [ai] provider to be configured");
+        rpg_eprintln!("-- AI interpretation requires [ai] provider to be configured");
         return;
     };
 
@@ -247,17 +247,17 @@ pub(super) async fn interpret_dba_output(
         temperature: 0.0,
     };
 
-    eprintln!("-- AI interpreting wait events...");
+    rpg_eprintln!("-- AI interpreting wait events...");
     match with_ctrl_c_cancel(provider.complete(&messages, &options)).await {
         Ok(result) => {
             record_token_usage(settings, &result);
             let interpretation = result.content.trim();
             if !interpretation.is_empty() {
-                eprintln!("\x1b[2m{interpretation}\x1b[0m");
+                rpg_eprintln!("\x1b[2m{interpretation}\x1b[0m");
             }
         }
-        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
-        Err(e) => eprintln!("AI error: {e}"),
+        Err(e) if e == CANCELLED => rpg_eprintln!("-- AI request cancelled"),
+        Err(e) => rpg_eprintln!("AI error: {e}"),
     }
 }
 
@@ -276,11 +276,18 @@ async fn with_ctrl_c_cancel<F, T>(fut: F) -> Result<T, String>
 where
     F: std::future::Future<Output = Result<T, String>>,
 {
-    tokio::select! {
-        biased;
-        _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
-        result = fut => result,
+    // tokio::signal is not available on WASM; run the future without
+    // Ctrl-C cancellation support in that environment.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => Err(CANCELLED.to_owned()),
+            result = fut => result,
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    fut.await
 }
 
 /// Stream a completion to the terminal, rendering markdown when enabled.
@@ -309,12 +316,12 @@ pub(super) async fn stream_completion(
             messages,
             options,
             Box::new(|token| {
-                print!("{token}");
+                rpg_print!("{token}");
                 let _ = io::stdout().flush();
             }),
         ))
         .await?;
-        println!();
+        rpg_println!();
         return Ok(result);
     }
 
@@ -327,7 +334,7 @@ pub(super) async fn stream_completion(
     let buf_clone = buf.clone();
 
     // Show a progress indicator so the terminal doesn't look stuck.
-    eprint!("\x1b[2m…\x1b[0m");
+    rpg_eprint!("\x1b[2m…\x1b[0m");
     let _ = io::stderr().flush();
 
     let result = with_ctrl_c_cancel(provider.complete_streaming(
@@ -342,7 +349,7 @@ pub(super) async fn stream_completion(
     .await;
 
     // Erase the progress indicator (carriage return clears the line).
-    eprint!("\r\x1b[K");
+    rpg_eprint!("\r\x1b[K");
     let _ = io::stderr().flush();
 
     let result = result?;
@@ -350,7 +357,7 @@ pub(super) async fn stream_completion(
     // Render markdown on the fully-collected content and print.
     let content = buf.lock().map(|b| b.clone()).unwrap_or_default();
     let rendered = crate::markdown::render_markdown(&content, no_highlight);
-    print!("{rendered}");
+    rpg_print!("{rendered}");
     let _ = io::stdout().flush();
 
     Ok(result)
@@ -429,7 +436,7 @@ pub(super) async fn dispatch_ai_command(
 
     if let Some(prompt) = input.strip_prefix("/ask").map(str::trim) {
         if prompt.is_empty() {
-            eprintln!("Usage: /ask <natural language description>");
+            rpg_eprintln!("Usage: /ask <natural language description>");
             return None;
         }
         match settings.exec_mode {
@@ -441,7 +448,7 @@ pub(super) async fn dispatch_ai_command(
     // /explain-share <service> — upload last EXPLAIN plan to external visualiser.
     } else if let Some(service) = input.strip_prefix("/explain-share").map(str::trim) {
         if service.is_empty() {
-            eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
+            rpg_eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
         } else {
             dispatch_explain_share(client, settings, service).await;
         }
@@ -451,21 +458,21 @@ pub(super) async fn dispatch_ai_command(
         handle_ai_optimize(client, query_arg, settings, params).await;
     } else if let Some(table_arg) = input.strip_prefix("/describe").map(str::trim) {
         if table_arg.is_empty() {
-            eprintln!("Usage: /describe <table_name>");
+            rpg_eprintln!("Usage: /describe <table_name>");
             return None;
         }
         handle_ai_describe(client, table_arg, settings, params).await;
     } else if input == "/clear" {
         settings.conversation.clear();
-        eprintln!("AI conversation context cleared.");
+        rpg_eprintln!("AI conversation context cleared.");
     } else if let Some(focus) = input.strip_prefix("/compact").map(str::trim) {
         if settings.conversation.is_empty() {
-            eprintln!("Nothing to compact — conversation context is empty.");
+            rpg_eprintln!("Nothing to compact — conversation context is empty.");
         } else {
             let focus = if focus.is_empty() { None } else { Some(focus) };
             let before = settings.conversation.entries.len();
             settings.conversation.compact(focus);
-            eprintln!(
+            rpg_eprintln!(
                 "Compacted {before} entries → {} entries (~{} tokens)",
                 settings.conversation.entries.len(),
                 settings.conversation.token_estimate(),
@@ -493,36 +500,46 @@ pub(super) async fn dispatch_ai_command(
 
     // /ash — active session history TUI.
     } else if input == "/rpg" {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
-            eprintln!("/rpg requires an interactive terminal");
-            return None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::IsTerminal;
+            if !std::io::stdout().is_terminal() {
+                rpg_eprintln!("/rpg requires an interactive terminal");
+                return None;
+            }
+            crate::rpg::run_game();
         }
-        crate::rpg::run_game();
+        #[cfg(target_arch = "wasm32")]
+        rpg_eprintln!("/rpg requires ratatui which is not available on wasm32-unknown-unknown");
     } else if input == "/ash" || input.starts_with("/ash ") {
-        use std::io::IsTerminal;
-        if !std::io::stdout().is_terminal() {
-            eprintln!("/ash requires an interactive terminal");
-            return None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::IsTerminal;
+            if !std::io::stdout().is_terminal() {
+                rpg_eprintln!("/ash requires an interactive terminal");
+                return None;
+            }
+            // Parse optional --cpu N flag: /ash --cpu 8
+            let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
+            let cpu_override = parse_ash_cpu_flag(ash_args);
+            if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
+                rpg_eprintln!("/ash: {e}");
+            }
         }
-        // Parse optional --cpu N flag: /ash --cpu 8
-        let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
-        let cpu_override = parse_ash_cpu_flag(ash_args);
-        if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
-            eprintln!("/ash: {e}");
-        }
+        #[cfg(target_arch = "wasm32")]
+        rpg_eprintln!("/ash requires ratatui which is not available on wasm32-unknown-unknown");
 
     // /sql — switch to SQL input mode.
     } else if input == "/sql" {
         let result = MetaResult::SetInputMode(InputMode::Sql);
         let label = apply_mode_change(&result, settings);
-        eprintln!("Input mode: {label}");
+        rpg_eprintln!("Input mode: {label}");
 
     // /text2sql, /t2s — switch to text-to-SQL input mode.
     } else if input == "/text2sql" || input == "/t2s" {
         let result = MetaResult::SetInputMode(InputMode::Text2Sql);
         let label = apply_mode_change(&result, settings);
-        eprintln!("Input mode: {label}");
+        rpg_eprintln!("Input mode: {label}");
 
     // /mode — show current input and execution mode.
     } else if input == "/mode" {
@@ -535,25 +552,25 @@ pub(super) async fn dispatch_ai_command(
             ExecMode::Plan => "plan",
             ExecMode::Yolo => "yolo",
         };
-        eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+        rpg_eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
 
     // /plan — enter plan execution mode.
     } else if input == "/plan" {
         let result = MetaResult::SetExecMode(ExecMode::Plan);
         let label = apply_mode_change(&result, settings);
-        eprintln!("Execution mode: {label}");
+        rpg_eprintln!("Execution mode: {label}");
 
     // /yolo — enter YOLO mode (text2sql + auto-execute).
     } else if input == "/yolo" {
         let result = MetaResult::SetExecMode(ExecMode::Yolo);
         let label = apply_mode_change(&result, settings);
-        eprintln!("Execution mode: {label}");
+        rpg_eprintln!("Execution mode: {label}");
 
     // /interactive — return to interactive (default) mode.
     } else if input == "/interactive" {
         let result = MetaResult::SetExecMode(ExecMode::Interactive);
         let label = apply_mode_change(&result, settings);
-        eprintln!("Execution mode: {label}");
+        rpg_eprintln!("Execution mode: {label}");
 
     // /profiles — list configured connection profiles.
     } else if input == "/profiles" {
@@ -561,20 +578,23 @@ pub(super) async fn dispatch_ai_command(
 
     // /refresh — reload schema cache for tab completion.
     } else if input == "/refresh" {
+        #[cfg(not(target_arch = "wasm32"))]
         match &settings.schema_cache {
             None => {
-                eprintln!("/refresh: no active connection or not in interactive mode");
+                rpg_eprintln!("/refresh: no active connection or not in interactive mode");
             }
             Some(cache) => match load_schema_cache(client).await {
                 Ok(loaded) => {
                     *cache.write().unwrap() = loaded;
-                    println!("Schema cache refreshed.");
+                    rpg_println!("Schema cache refreshed.");
                 }
                 Err(e) => {
-                    eprintln!("/refresh: failed to reload schema cache: {e}");
+                    rpg_eprintln!("/refresh: failed to reload schema cache: {e}");
                 }
             },
         }
+        #[cfg(target_arch = "wasm32")]
+        rpg_eprintln!("/refresh: schema completion not available in browser");
 
     // /session [subcommand] — session persistence.
     } else if let Some(rest) = input.strip_prefix("/session").map(str::trim) {
@@ -595,19 +615,19 @@ pub(super) async fn dispatch_ai_command(
             ),
             "delete" | "del" => {
                 if arg.is_empty() {
-                    eprintln!("Usage: /session delete <id>");
+                    rpg_eprintln!("Usage: /session delete <id>");
                 } else {
                     dispatch_session_delete(&arg);
                 }
             }
             "resume" | "connect" => {
                 if arg.is_empty() {
-                    eprintln!("Usage: /session resume <id>");
+                    rpg_eprintln!("Usage: /session resume <id>");
                 } else if let Some(result) = dispatch_session_resume(&arg).await {
                     return Some(result);
                 }
             }
-            _ => eprintln!("/session: unknown subcommand \"{sub}\". Try /session list."),
+            _ => rpg_eprintln!("/session: unknown subcommand \"{sub}\". Try /session list."),
         }
 
     // /log-file [path] — start or stop query audit logging.
@@ -633,7 +653,7 @@ pub(super) async fn dispatch_ai_command(
     } else if input == "/commands" {
         let cmds = &settings.lua_registry.commands;
         if cmds.is_empty() {
-            println!(
+            rpg_println!(
                 "No custom commands loaded.\n\
                  Add Lua scripts to ~/.config/rpg/commands/*.lua"
             );
@@ -648,9 +668,9 @@ pub(super) async fn dispatch_ai_command(
 
     // /version — show rpg version and build information.
     } else if input == "/version" {
-        println!("{}", crate::version_string());
+        rpg_println!("{}", crate::version_string());
         if let Some(ref sv) = settings.db_capabilities.server_version {
-            println!("Server: PostgreSQL {sv}");
+            rpg_println!("Server: PostgreSQL {sv}");
         }
 
     // /f2..f5 — function key toggles.
@@ -670,20 +690,20 @@ pub(super) async fn dispatch_ai_command(
         let name = parts.next().unwrap_or("").to_owned();
         let query = parts.next().map_or("", str::trim).to_owned();
         if name.is_empty() || query.is_empty() {
-            eprintln!("Usage: /ns <name> <query>");
+            rpg_eprintln!("Usage: /ns <name> <query>");
         } else if crate::named::NamedQueries::is_valid_name(&name) {
             let mut nq = crate::named::NamedQueries::load();
             nq.set(&name, &query);
             match nq.save() {
                 Ok(()) => {
                     if !settings.quiet {
-                        eprintln!("Saved query \"{name}\".");
+                        rpg_eprintln!("Saved query \"{name}\".");
                     }
                 }
-                Err(e) => eprintln!("/ns: {e}"),
+                Err(e) => rpg_eprintln!("/ns: {e}"),
             }
         } else {
-            eprintln!(
+            rpg_eprintln!(
                 "/ns: invalid query name \"{name}\": \
                  names must contain only alphanumerics and underscores"
             );
@@ -694,7 +714,7 @@ pub(super) async fn dispatch_ai_command(
         let nq = crate::named::NamedQueries::load();
         let queries = nq.list();
         if queries.is_empty() {
-            println!("No named queries saved.");
+            rpg_println!("No named queries saved.");
         } else {
             let mut out = String::new();
             for (name, query) in queries {
@@ -708,20 +728,20 @@ pub(super) async fn dispatch_ai_command(
     } else if input == "/nd" || input.starts_with("/nd ") {
         let name = input["/nd".len()..].trim();
         if name.is_empty() {
-            eprintln!("Usage: /nd <name>");
+            rpg_eprintln!("Usage: /nd <name>");
         } else {
             let mut nq = crate::named::NamedQueries::load();
             if nq.delete(name) {
                 match nq.save() {
                     Ok(()) => {
                         if !settings.quiet {
-                            eprintln!("Deleted query \"{name}\".");
+                            rpg_eprintln!("Deleted query \"{name}\".");
                         }
                     }
-                    Err(e) => eprintln!("/nd: {e}"),
+                    Err(e) => rpg_eprintln!("/nd: {e}"),
                 }
             } else {
-                eprintln!("/nd: unknown query \"{name}\"");
+                rpg_eprintln!("/nd: unknown query \"{name}\"");
             }
         }
 
@@ -729,12 +749,12 @@ pub(super) async fn dispatch_ai_command(
     } else if input == "/np" || input.starts_with("/np ") {
         let name = input["/np".len()..].trim();
         if name.is_empty() {
-            eprintln!("Usage: /np <name>");
+            rpg_eprintln!("Usage: /np <name>");
         } else {
             let nq = crate::named::NamedQueries::load();
             match nq.get(name) {
-                Some(query) => println!("{query}"),
-                None => eprintln!("/np: unknown query \"{name}\""),
+                Some(query) => rpg_println!("{query}"),
+                None => rpg_eprintln!("/np: unknown query \"{name}\""),
             }
         }
 
@@ -742,7 +762,7 @@ pub(super) async fn dispatch_ai_command(
     } else if input == "/n" || input.starts_with("/n ") {
         let rest = input["/n".len()..].trim();
         if rest.is_empty() {
-            eprintln!("Usage: /n <name> [args...]");
+            rpg_eprintln!("Usage: /n <name> [args...]");
         } else {
             let mut parts = rest.splitn(2, char::is_whitespace);
             let name = parts.next().unwrap_or("").to_owned();
@@ -755,11 +775,11 @@ pub(super) async fn dispatch_ai_command(
                     let sql = crate::named::NamedQueries::substitute(query, &arg_refs);
                     execute_query(client, &sql, settings, tx).await;
                 }
-                None => eprintln!("/n: unknown query \"{name}\""),
+                None => rpg_eprintln!("/n: unknown query \"{name}\""),
             }
         }
     } else {
-        eprintln!(
+        rpg_eprintln!(
             "Unknown command: {input}\n\
              AI: /ask, /fix, /explain, /optimize, /describe, /init, /clear, /compact, /budget\n\
              Diagnostics: /dba, /ash\n\
@@ -807,7 +827,7 @@ pub(super) fn check_token_budget(settings: &ReplSettings) -> bool {
         return false; // No budget limit.
     }
     if settings.tokens_used >= budget {
-        eprintln!(
+        rpg_eprintln!(
             "Token budget exhausted ({used}/{budget} tokens used). \
              AI commands are disabled for this session.",
             used = settings.tokens_used,
@@ -832,7 +852,7 @@ pub(super) fn record_token_usage(
 /// typing anything: `true` → default is yes, `false` → default is no.
 pub(super) fn ask_yn_prompt(prompt: &str, default_yes: bool) -> bool {
     use std::io::Write;
-    eprint!("{prompt}");
+    rpg_eprint!("{prompt}");
     let _ = io::stderr().flush();
 
     let mut input = String::new();
@@ -865,72 +885,86 @@ pub(super) enum AskChoice {
 /// Ctrl+C and Ctrl+D (EOF) always return `No` regardless of the default,
 /// so the user can safely abort without the query being executed.
 pub(super) fn ask_yne_prompt(prompt: &str, default_yes: bool) -> AskChoice {
-    use crossterm::event::{read, Event, KeyCode, KeyModifiers};
-    use crossterm::terminal;
-    use std::io::{IsTerminal, Write};
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+        use crossterm::terminal;
+        use std::io::{IsTerminal, Write};
 
-    eprint!("{prompt}");
-    let _ = io::stderr().flush();
+        rpg_eprint!("{prompt}");
+        let _ = io::stderr().flush();
 
-    // Non-TTY guard: if stdin is not a terminal (CI, piped input, scripts),
-    // skip the raw-mode loop entirely and return the default answer.
-    if !io::stdin().is_terminal() {
-        return if default_yes {
+        // Non-TTY guard: if stdin is not a terminal (CI, piped input, scripts),
+        // skip the raw-mode loop entirely and return the default answer.
+        if !io::stdin().is_terminal() {
+            return if default_yes {
+                AskChoice::Yes
+            } else {
+                AskChoice::No
+            };
+        }
+
+        // Enable raw mode so we can read single key events and detect Ctrl+C.
+        // Outside readline, the terminal is in cooked mode; we temporarily switch
+        // to raw, read one meaningful key, then restore.
+        let raw_enabled = terminal::enable_raw_mode().is_ok();
+
+        let choice = loop {
+            if let Ok(Event::Key(key)) = read() {
+                match (key.code, key.modifiers) {
+                    // Ctrl+C / Ctrl+D / Escape — abort without executing.
+                    (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break AskChoice::No;
+                    }
+                    // Enter — use the default.
+                    (KeyCode::Enter, _) => {
+                        let _ = write!(io::stderr(), "\r\n");
+                        break if default_yes {
+                            AskChoice::Yes
+                        } else {
+                            AskChoice::No
+                        };
+                    }
+                    (KeyCode::Char('y' | 'Y'), _) => {
+                        let _ = write!(io::stderr(), "y\r\n");
+                        break AskChoice::Yes;
+                    }
+                    (KeyCode::Char('n' | 'N'), _) => {
+                        let _ = write!(io::stderr(), "n\r\n");
+                        break AskChoice::No;
+                    }
+                    (KeyCode::Char('e' | 'E'), _) => {
+                        let _ = write!(io::stderr(), "e\r\n");
+                        break AskChoice::Edit;
+                    }
+                    // Any other key: ignore and keep waiting.
+                    _ => {}
+                }
+            } else {
+                // EOF or error — abort.
+                let _ = write!(io::stderr(), "\r\n");
+                break AskChoice::No;
+            }
+        };
+
+        if raw_enabled {
+            let _ = terminal::disable_raw_mode();
+        }
+
+        choice
+    }
+
+    // On WASM there is no raw-mode terminal; return the default.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = prompt;
+        if default_yes {
             AskChoice::Yes
         } else {
             AskChoice::No
-        };
-    }
-
-    // Enable raw mode so we can read single key events and detect Ctrl+C.
-    // Outside readline, the terminal is in cooked mode; we temporarily switch
-    // to raw, read one meaningful key, then restore.
-    let raw_enabled = terminal::enable_raw_mode().is_ok();
-
-    let choice = loop {
-        if let Ok(Event::Key(key)) = read() {
-            match (key.code, key.modifiers) {
-                // Ctrl+C / Ctrl+D / Escape — abort without executing.
-                (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-                    let _ = write!(io::stderr(), "\r\n");
-                    break AskChoice::No;
-                }
-                // Enter — use the default.
-                (KeyCode::Enter, _) => {
-                    let _ = write!(io::stderr(), "\r\n");
-                    break if default_yes {
-                        AskChoice::Yes
-                    } else {
-                        AskChoice::No
-                    };
-                }
-                (KeyCode::Char('y' | 'Y'), _) => {
-                    let _ = write!(io::stderr(), "y\r\n");
-                    break AskChoice::Yes;
-                }
-                (KeyCode::Char('n' | 'N'), _) => {
-                    let _ = write!(io::stderr(), "n\r\n");
-                    break AskChoice::No;
-                }
-                (KeyCode::Char('e' | 'E'), _) => {
-                    let _ = write!(io::stderr(), "e\r\n");
-                    break AskChoice::Edit;
-                }
-                // Any other key: ignore and keep waiting.
-                _ => {}
-            }
-        } else {
-            // EOF or error — abort.
-            let _ = write!(io::stderr(), "\r\n");
-            break AskChoice::No;
         }
-    };
-
-    if raw_enabled {
-        let _ = terminal::disable_raw_mode();
     }
-
-    choice
 }
 
 /// Wrap a SQL query in a `start transaction read only` / `commit` block.
@@ -1001,22 +1035,22 @@ pub(super) async fn handle_ai_ask(
         .unwrap_or("")
         .is_empty()
     {
-        eprintln!(
+        rpg_eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
         );
-        eprintln!("Supported providers: anthropic, openai, ollama");
-        eprintln!("Example:");
-        eprintln!("  [ai]");
-        eprintln!("  provider = \"anthropic\"");
-        eprintln!("  api_key_env = \"ANTHROPIC_API_KEY\"");
+        rpg_eprintln!("Supported providers: anthropic, openai, ollama");
+        rpg_eprintln!("Example:");
+        rpg_eprintln!("  [ai]");
+        rpg_eprintln!("  provider = \"anthropic\"");
+        rpg_eprintln!("  api_key_env = \"ANTHROPIC_API_KEY\"");
         return;
     }
 
     let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("AI error: {e}");
+            rpg_eprintln!("AI error: {e}");
             return;
         }
     };
@@ -1025,7 +1059,7 @@ pub(super) async fn handle_ai_ask(
     let schema_ctx = match crate::ai::context::build_schema_context(client).await {
         Ok(ctx) => ctx,
         Err(e) => {
-            eprintln!("Schema context error: {e}");
+            rpg_eprintln!("Schema context error: {e}");
             return;
         }
     };
@@ -1108,11 +1142,11 @@ pub(super) async fn handle_ai_ask(
             result.content
         }
         Err(e) if e == CANCELLED => {
-            eprintln!("-- AI request cancelled");
+            rpg_eprintln!("-- AI request cancelled");
             return;
         }
         Err(e) => {
-            eprintln!("AI error: {e}");
+            rpg_eprintln!("AI error: {e}");
             return;
         }
     };
@@ -1132,7 +1166,7 @@ pub(super) async fn handle_ai_ask(
         .conversation
         .auto_compact_if_needed(settings.config.ai.context_window)
     {
-        eprintln!("-- AI context auto-compacted to save tokens");
+        rpg_eprintln!("-- AI context auto-compacted to save tokens");
     }
 
     // Parse the response into text and SQL segments, then process each.
@@ -1157,7 +1191,7 @@ pub(super) async fn handle_ai_ask(
                 if !yolo {
                     let text = text.trim();
                     if !text.is_empty() {
-                        println!("{text}");
+                        rpg_println!("{text}");
                     }
                 }
             }
@@ -1165,21 +1199,21 @@ pub(super) async fn handle_ai_ask(
                 if text2sql_show {
                     // Print in the same ┌── sql box style as /fix.
                     let boxed = format!("```sql\n{sql}\n```");
-                    print!(
+                    rpg_print!(
                         "{}",
                         crate::markdown::render_markdown(&boxed, settings.no_highlight)
                     );
                 } else if show_sql {
                     // Legacy /ask path: plain highlighted SQL.
                     if settings.no_highlight {
-                        eprintln!("{sql}");
+                        rpg_eprintln!("{sql}");
                     } else {
-                        eprintln!("{}", crate::highlight::highlight_sql(sql, None));
+                        rpg_eprintln!("{}", crate::highlight::highlight_sql(sql, None));
                     }
                 } else {
                     // Always show the SQL /ask is about to execute so the user
                     // knows what's happening.
-                    eprintln!("{sql}");
+                    rpg_eprintln!("{sql}");
                 }
 
                 // Decide whether to prompt before executing.
@@ -1195,7 +1229,7 @@ pub(super) async fn handle_ai_ask(
                     // them at the DB level.  Warn so the user understands why
                     // the query failed.
                     if !read_only {
-                        eprintln!(
+                        rpg_eprintln!(
                             "-- YOLO: write query attempted — \
                              read-only transaction will reject it"
                         );
@@ -1210,7 +1244,7 @@ pub(super) async fn handle_ai_ask(
                     // /ask is a question command — show the SQL but do not
                     // execute DML or DDL.  The user can copy and run it
                     // manually or use raw SQL input / a direct \t2s prompt.
-                    eprintln!(
+                    rpg_eprintln!(
                         "-- (write query — not executed in /ask mode; \
                          use \\t2s to execute)"
                     );
@@ -1284,7 +1318,7 @@ pub(super) async fn handle_ai_ask(
                         Ok(edited) => {
                             let edited = edited.trim();
                             if edited.is_empty() {
-                                eprintln!("(empty — skipped)");
+                                rpg_eprintln!("(empty — skipped)");
                             } else {
                                 // Re-evaluate write/read-only from the
                                 // edited SQL — user may have changed the
@@ -1339,7 +1373,7 @@ pub(super) async fn handle_ai_ask(
                                 }
                             }
                         }
-                        Err(e) => eprintln!("{e}"),
+                        Err(e) => rpg_eprintln!("{e}"),
                     },
                     AskChoice::No => {}
                 }
@@ -1424,7 +1458,7 @@ pub(super) async fn handle_ai_plan(
         .unwrap_or("")
         .is_empty()
     {
-        eprintln!(
+        rpg_eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
         );
@@ -1434,7 +1468,7 @@ pub(super) async fn handle_ai_plan(
     let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("AI error: {e}");
+            rpg_eprintln!("AI error: {e}");
             return;
         }
     };
@@ -1442,7 +1476,7 @@ pub(super) async fn handle_ai_plan(
     let schema_ctx = match crate::ai::context::build_schema_context(client).await {
         Ok(ctx) => ctx,
         Err(e) => {
-            eprintln!("Schema context error: {e}");
+            rpg_eprintln!("Schema context error: {e}");
             return;
         }
     };
@@ -1480,7 +1514,7 @@ pub(super) async fn handle_ai_plan(
         temperature: 0.0,
     };
 
-    eprintln!("-- Plan mode: investigating...");
+    rpg_eprintln!("-- Plan mode: investigating...");
     let result = match stream_completion(
         provider.as_ref(),
         &messages,
@@ -1491,11 +1525,11 @@ pub(super) async fn handle_ai_plan(
     {
         Ok(r) => r,
         Err(e) if e == CANCELLED => {
-            eprintln!("-- AI request cancelled");
+            rpg_eprintln!("-- AI request cancelled");
             return;
         }
         Err(e) => {
-            eprintln!("AI error: {e}");
+            rpg_eprintln!("AI error: {e}");
             return;
         }
     };
@@ -1503,31 +1537,39 @@ pub(super) async fn handle_ai_plan(
 
     // Offer to save the plan.
     if ask_yn_prompt("Save this plan? [Y/n] ", true) {
-        let plans_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("rpg")
-            .join("plans");
-        if let Err(e) = std::fs::create_dir_all(&plans_dir) {
-            eprintln!("Cannot create plans directory: {e}");
+        #[cfg(target_arch = "wasm32")]
+        {
+            rpg_eprintln!("/plan save: not available on wasm32-unknown-unknown (no filesystem)");
             return;
         }
-        let date = format_system_time(std::time::SystemTime::now())
-            .replace(' ', "-")
-            .replace(':', "");
-        // Build a slug from the first few words of the prompt.
-        let slug: String = prompt
-            .split_whitespace()
-            .take(4)
-            .collect::<Vec<_>>()
-            .join("-")
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-')
-            .collect();
-        let filename = format!("{date}-{slug}.md");
-        let path = plans_dir.join(&filename);
-        match std::fs::write(&path, &result.content) {
-            Ok(()) => eprintln!("Saved to: {}", path.display()),
-            Err(e) => eprintln!("Failed to save plan: {e}"),
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let plans_dir = dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("rpg")
+                .join("plans");
+            if let Err(e) = std::fs::create_dir_all(&plans_dir) {
+                rpg_eprintln!("Cannot create plans directory: {e}");
+                return;
+            }
+            let now = std::time::SystemTime::now();
+            let date = format_system_time(now).replace(' ', "-").replace(':', "");
+            // Build a slug from the first few words of the prompt.
+            let slug: String = prompt
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("-")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+            let filename = format!("{date}-{slug}.md");
+            let path = plans_dir.join(&filename);
+            match std::fs::write(&path, &result.content) {
+                Ok(()) => rpg_eprintln!("Saved to: {}", path.display()),
+                Err(e) => rpg_eprintln!("Failed to save plan: {e}"),
+            }
         }
     }
 }
@@ -1589,7 +1631,7 @@ pub(super) async fn handle_ai_fix(
     let last_error = if let Some(e) = &settings.last_error {
         e.clone()
     } else {
-        eprintln!("No recent error to fix. Run a query first.");
+        rpg_eprintln!("No recent error to fix. Run a query first.");
         return;
     };
 
@@ -1601,22 +1643,22 @@ pub(super) async fn handle_ai_fix(
         .unwrap_or("")
         .is_empty()
     {
-        eprintln!(
+        rpg_eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
         );
-        eprintln!("Supported providers: anthropic, openai, ollama");
-        eprintln!("Example:");
-        eprintln!("  [ai]");
-        eprintln!("  provider = \"anthropic\"");
-        eprintln!("  api_key_env = \"ANTHROPIC_API_KEY\"");
+        rpg_eprintln!("Supported providers: anthropic, openai, ollama");
+        rpg_eprintln!("Example:");
+        rpg_eprintln!("  [ai]");
+        rpg_eprintln!("  provider = \"anthropic\"");
+        rpg_eprintln!("  api_key_env = \"ANTHROPIC_API_KEY\"");
         return;
     }
 
     let provider = match get_ai_provider(settings) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("AI error: {e}");
+            rpg_eprintln!("AI error: {e}");
             return;
         }
     };
@@ -1625,7 +1667,7 @@ pub(super) async fn handle_ai_fix(
     let schema_ctx = match crate::ai::context::build_schema_context(client).await {
         Ok(ctx) => ctx,
         Err(e) => {
-            eprintln!("Schema context error: {e}");
+            rpg_eprintln!("Schema context error: {e}");
             return;
         }
     };
@@ -1720,11 +1762,11 @@ pub(super) async fn handle_ai_fix(
     {
         Ok(r) => r,
         Err(e) if e == CANCELLED => {
-            eprintln!("-- AI request cancelled");
+            rpg_eprintln!("-- AI request cancelled");
             return;
         }
         Err(e) => {
-            eprintln!("AI error: {e}");
+            rpg_eprintln!("AI error: {e}");
             return;
         }
     };
@@ -1742,7 +1784,7 @@ pub(super) async fn handle_ai_fix(
         .conversation
         .auto_compact_if_needed(settings.config.ai.context_window)
     {
-        eprintln!("-- AI context auto-compacted to save tokens");
+        rpg_eprintln!("-- AI context auto-compacted to save tokens");
     }
 
     // If the response contains a corrected SQL block, offer to execute it.
@@ -1768,7 +1810,7 @@ pub(super) async fn handle_ai_fix(
                 Ok(edited) => {
                     let edited = edited.trim();
                     if edited.is_empty() {
-                        eprintln!("(empty — skipped)");
+                        rpg_eprintln!("(empty — skipped)");
                     } else {
                         settings.last_was_fix = true;
                         let ok = execute_query_interactive(client, edited, settings, tx).await;
@@ -1783,7 +1825,7 @@ pub(super) async fn handle_ai_fix(
                         }
                     }
                 }
-                Err(e) => eprintln!("{e}"),
+                Err(e) => rpg_eprintln!("{e}"),
             },
             AskChoice::No => {}
         }
@@ -1903,7 +1945,7 @@ pub(super) async fn handle_ai_explain(
         if let Some(q) = settings.last_query.as_deref() {
             q.to_owned()
         } else {
-            eprintln!(
+            rpg_eprintln!(
                 "/explain: no query to explain. \
                  Run a query first or provide one: /explain SELECT ..."
             );
@@ -1942,14 +1984,14 @@ pub(super) async fn handle_ai_explain(
     }
 
     if plan_lines.is_empty() {
-        eprintln!("/explain: EXPLAIN returned no output");
+        rpg_eprintln!("/explain: EXPLAIN returned no output");
         return;
     }
 
     let plan_text = plan_lines.join("\n");
     let display_plan =
         crate::explain::highlight::highlight_explain(&plan_text, settings.no_highlight);
-    println!("{display_plan}");
+    rpg_println!("{display_plan}");
 
     // AI interpretation — skip gracefully when AI is not configured.
     let Ok(provider) = get_ai_provider(settings) else {
@@ -1960,7 +2002,7 @@ pub(super) async fn handle_ai_explain(
     let schema_ctx = match crate::ai::context::build_schema_context(client).await {
         Ok(ctx) => ctx,
         Err(e) => {
-            eprintln!("Schema context error: {e}");
+            rpg_eprintln!("Schema context error: {e}");
             return;
         }
     };
@@ -2021,7 +2063,7 @@ pub(super) async fn handle_ai_explain(
         temperature: 0.0,
     };
 
-    println!();
+    rpg_println!();
     match stream_completion(
         provider.as_ref(),
         &ai_messages,
@@ -2031,8 +2073,8 @@ pub(super) async fn handle_ai_explain(
     .await
     {
         Ok(result) => record_token_usage(settings, &result),
-        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
-        Err(e) => eprintln!("AI error: {e}"),
+        Err(e) if e == CANCELLED => rpg_eprintln!("-- AI request cancelled"),
+        Err(e) => rpg_eprintln!("AI error: {e}"),
     }
 }
 
@@ -2089,7 +2131,7 @@ pub(super) async fn handle_ai_optimize(
         if let Some(q) = settings.last_query.as_deref() {
             q.to_owned()
         } else {
-            eprintln!(
+            rpg_eprintln!(
                 "/optimize: no query to optimize. \
                  Run a query first or provide one: /optimize SELECT ..."
             );
@@ -2127,14 +2169,14 @@ pub(super) async fn handle_ai_optimize(
     }
 
     if plan_lines.is_empty() {
-        eprintln!("/optimize: EXPLAIN returned no output");
+        rpg_eprintln!("/optimize: EXPLAIN returned no output");
         return;
     }
 
     let plan_text = plan_lines.join("\n");
     let display_plan =
         crate::explain::highlight::highlight_explain(&plan_text, settings.no_highlight);
-    println!("{display_plan}");
+    rpg_println!("{display_plan}");
 
     // Gather table statistics for referenced tables.
     let table_names = extract_table_names(&target_query);
@@ -2185,7 +2227,7 @@ pub(super) async fn handle_ai_optimize(
 
     // AI optimization — skip gracefully when AI is not configured.
     let Ok(provider) = get_ai_provider(settings) else {
-        eprintln!(
+        rpg_eprintln!(
             "\nAI not configured — showing raw plan only. \
              Add an [ai] section to {} for optimization suggestions.",
             crate::config::user_config_path_display()
@@ -2196,7 +2238,7 @@ pub(super) async fn handle_ai_optimize(
     let schema_ctx = match crate::ai::context::build_schema_context(client).await {
         Ok(ctx) => ctx,
         Err(e) => {
-            eprintln!("Schema context error: {e}");
+            rpg_eprintln!("Schema context error: {e}");
             return;
         }
     };
@@ -2245,7 +2287,7 @@ pub(super) async fn handle_ai_optimize(
         temperature: 0.0,
     };
 
-    println!();
+    rpg_println!();
     match stream_completion(
         provider.as_ref(),
         &ai_messages,
@@ -2255,8 +2297,8 @@ pub(super) async fn handle_ai_optimize(
     .await
     {
         Ok(result) => record_token_usage(settings, &result),
-        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
-        Err(e) => eprintln!("AI error: {e}"),
+        Err(e) if e == CANCELLED => rpg_eprintln!("-- AI request cancelled"),
+        Err(e) => rpg_eprintln!("AI error: {e}"),
     }
 }
 
@@ -2273,7 +2315,7 @@ pub(super) async fn handle_ai_describe(
     params: &ConnParams,
 ) {
     let Ok(provider) = get_ai_provider(settings) else {
-        eprintln!(
+        rpg_eprintln!(
             "AI not configured. Add an [ai] section to {}",
             crate::config::user_config_path_display()
         );
@@ -2373,7 +2415,7 @@ pub(super) async fn handle_ai_describe(
     }
 
     if table_info.trim().is_empty() {
-        eprintln!("No metadata found for table '{table_name}'.");
+        rpg_eprintln!("No metadata found for table '{table_name}'.");
         return;
     }
 
@@ -2416,8 +2458,8 @@ pub(super) async fn handle_ai_describe(
     .await
     {
         Ok(result) => record_token_usage(settings, &result),
-        Err(e) if e == CANCELLED => eprintln!("-- AI request cancelled"),
-        Err(e) => eprintln!("AI error: {e}"),
+        Err(e) if e == CANCELLED => rpg_eprintln!("-- AI request cancelled"),
+        Err(e) => rpg_eprintln!("AI error: {e}"),
     }
 }
 
@@ -2434,14 +2476,14 @@ pub(super) fn handle_ai_budget(settings: &ReplSettings) {
     let used = settings.tokens_used;
     let budget = settings.config.ai.token_budget;
 
-    eprintln!("Token usage this session:");
-    eprintln!("  Total:  {:>10} tokens", format_tokens(used));
+    rpg_eprintln!("Token usage this session:");
+    rpg_eprintln!("  Total:  {:>10} tokens", format_tokens(used));
     if budget == 0 {
-        eprintln!("  Budget: not set (use \\set TOKEN_BUDGET <N> to set)");
+        rpg_eprintln!("  Budget: not set (use \\set TOKEN_BUDGET <N> to set)");
     } else {
         let remaining = budget.saturating_sub(used);
         let pct = (used * 100).checked_div(budget).unwrap_or(100);
-        eprintln!(
+        rpg_eprintln!(
             "  Budget: {:>10} tokens ({}% used, {} remaining)",
             format_tokens(budget),
             pct,
@@ -2482,32 +2524,32 @@ pub(super) async fn handle_init(client: &Client, settings: &ReplSettings, params
     // Generate .rpg.toml -------------------------------------------------------
     let toml_path = Path::new(".rpg.toml");
     if toml_path.exists() {
-        eprintln!(
+        rpg_eprintln!(
             "WARNING: .rpg.toml already exists — skipping. \
              Remove it first if you want to regenerate."
         );
     } else {
         let toml_content = crate::init::generate_rpg_toml(&settings.config, params);
         match fs::write(toml_path, toml_content) {
-            Ok(()) => println!("Created .rpg.toml"),
-            Err(e) => eprintln!("Error writing .rpg.toml: {e}"),
+            Ok(()) => rpg_println!("Created .rpg.toml"),
+            Err(e) => rpg_eprintln!("Error writing .rpg.toml: {e}"),
         }
     }
 
     // Generate POSTGRES.md -----------------------------------------------------
     let md_path = Path::new("POSTGRES.md");
     if md_path.exists() {
-        eprintln!(
+        rpg_eprintln!(
             "WARNING: POSTGRES.md already exists — skipping. \
              Remove it first if you want to regenerate."
         );
     } else {
         match crate::init::generate_postgres_md(client).await {
             Ok(md_content) => match fs::write(md_path, md_content) {
-                Ok(()) => println!("Created POSTGRES.md"),
-                Err(e) => eprintln!("Error writing POSTGRES.md: {e}"),
+                Ok(()) => rpg_println!("Created POSTGRES.md"),
+                Err(e) => rpg_eprintln!("Error writing POSTGRES.md: {e}"),
             },
-            Err(e) => eprintln!("Error querying database for POSTGRES.md: {e}"),
+            Err(e) => rpg_eprintln!("Error querying database for POSTGRES.md: {e}"),
         }
     }
 }
