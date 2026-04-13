@@ -5542,7 +5542,30 @@ async fn dispatch_meta(
                 };
 
             match crate::session::reconnect(resolved_pattern.as_deref(), params).await {
-                Ok((new_client, mut new_params)) => {
+                Ok((new_client, mut new_params, new_password)) => {
+                    // Display reconnect info BEFORE storing the password so
+                    // that new_params stays untainted for display purposes.
+                    let server_ver =
+                        crate::capabilities::detect_server_version_pub(&new_client).await;
+                    if !settings.quiet {
+                        let msg = crate::connection::reconnect_info(
+                            crate::version_string(),
+                            server_ver.as_deref(),
+                            &crate::connection::ConnDisplayInfo {
+                                host: &new_params.host,
+                                port: new_params.port,
+                                user: &new_params.user,
+                                dbname: &new_params.dbname,
+                                resolved_addr: new_params.resolved_addr.as_deref(),
+                                tls_info: new_params.tls_info.as_ref(),
+                            },
+                        );
+                        rpg_println!("{msg}");
+                    }
+
+                    // Store password now that display is done.
+                    new_params.password = new_password;
+
                     // If the target was a profile, carry forward its sslmode
                     // and password when the profile specifies them.
                     if let Some(p) = pattern
@@ -5560,25 +5583,6 @@ async fn dispatch_meta(
                         if new_params.password.is_none() {
                             new_params.password.clone_from(&p.password);
                         }
-                    }
-                    // Detect server version to include in the reconnect
-                    // banner. Suppressed in quiet mode (-q), matching psql.
-                    let server_ver =
-                        crate::capabilities::detect_server_version_pub(&new_client).await;
-                    if !settings.quiet {
-                        let msg = crate::connection::reconnect_info(
-                            crate::version_string(),
-                            server_ver.as_deref(),
-                            &crate::connection::ConnDisplayInfo {
-                                host: &new_params.host,
-                                port: new_params.port,
-                                user: &new_params.user,
-                                dbname: &new_params.dbname,
-                                resolved_addr: new_params.resolved_addr.as_deref(),
-                                tls_info: new_params.tls_info.as_ref(),
-                            },
-                        );
-                        rpg_println!("{msg}");
                     }
                     return MetaResult::Reconnected(Box::new(new_client), Box::new(new_params));
                 }
@@ -6326,7 +6330,7 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
     // Borrow a dummy current_params for reconnect (port 5432 default).
     let dummy = crate::connection::ConnParams::default();
     match crate::session::reconnect(Some(&pattern), &dummy).await {
-        Ok((new_client, new_params)) => {
+        Ok((new_client, mut new_params, new_password)) => {
             let server_ver = crate::capabilities::detect_server_version_pub(&new_client).await;
             let msg = crate::connection::reconnect_info(
                 crate::version_string(),
@@ -6341,6 +6345,7 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
                 },
             );
             rpg_println!("{msg}");
+            new_params.password = new_password;
             Some(MetaResult::Reconnected(
                 Box::new(new_client),
                 Box::new(new_params),

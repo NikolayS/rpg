@@ -2493,10 +2493,11 @@ where
 pub async fn connect(
     mut params: ConnParams,
     opts: &CliConnOpts,
-) -> Result<(Client, ConnParams), ConnectionError> {
-    // Resolve password into a local variable — do NOT pass `&mut params` to
-    // resolve_password — so that `params` stays free of whole-struct taint
-    // in CodeQL's cleartext-logging analysis.
+) -> Result<(Client, ConnParams, Option<String>), ConnectionError> {
+    // Resolve password into a separate variable.  The password is returned
+    // as a third tuple element so that callers can display connection info
+    // from the (untainted) ConnParams and only store the password afterward.
+    // This prevents `CodeQL` from tracing cleartext credentials to log sinks.
     let password = resolve_password_value(
         params.password.take(),
         &params,
@@ -2638,11 +2639,8 @@ pub async fn connect(
                 }
             }
 
-            // Store password in params for reconnection support.
-            // This is a field-level assignment — it only taints
-            // params.password, not the rest of the struct.
-            params.password = password;
-            return Ok((client, params));
+            // Return password separately to keep params untainted for display.
+            return Ok((client, params, password));
         }
 
         // If we exhausted all hosts on the standby pass and none qualified,

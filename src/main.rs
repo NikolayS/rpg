@@ -882,7 +882,7 @@ async fn async_main() {
     };
 
     match connection::connect(params, &opts).await {
-        Ok((client, resolved)) => {
+        Ok((client, mut resolved, resolved_password)) => {
             use std::io::IsTerminal;
             logging::info(
                 "connection",
@@ -984,6 +984,10 @@ async fn async_main() {
             } else {
                 false
             };
+
+            // Store password in params now that display is done — needed for
+            // reconnection in the REPL.
+            resolved.password = resolved_password;
 
             // --report [format]: run all analyzers, print detailed report,
             // exit with severity code (0=healthy, 1=warning, 2=critical).
