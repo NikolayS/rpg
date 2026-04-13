@@ -5171,8 +5171,8 @@ async fn list_collations(
     let pg_ver = settings.db_capabilities.pg_major_version();
 
     // PG17 added the 'b' (builtin) collation provider.
-    // PG 15 added colliculocale; PG 16 renamed it to colllocale and added
-    // collicurules.  PG 14 has only collcollate / collctype.
+    // PG15 added colliculocale. PG17 renamed it to colllocale and added
+    // collicurules. PG14 has only collcollate / collctype.
     // Note: collcollate / collctype still exist in PG17-18 and psql shows
     // them, so we always include those columns.
     let provider_expr = if pg_ver.is_some_and(|v| v >= 17) {
@@ -5194,7 +5194,7 @@ async fn list_collations(
     // (14-18) and psql always shows them.
     let collate_cols = "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\"";
 
-    let locale_cols = if pg_ver.is_some_and(|v| v >= 16) {
+    let locale_cols = if pg_ver.is_some_and(|v| v >= 17) {
         ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\""
     } else if pg_ver.is_some_and(|v| v >= 15) {
         ",\n    c.colliculocale as \"ICU Locale\""
@@ -7124,8 +7124,8 @@ order by 1, 2"
     // -----------------------------------------------------------------------
 
     /// Build collation SQL the same way `list_collations` does for `\dO *`
-    /// (pattern given, no S flag, PG 16).
-    fn do_collation_sql_with_pattern() -> String {
+    /// (pattern given, no S flag, configurable PG major).
+    fn do_collation_sql_with_pattern(pg_ver: u32) -> String {
         let m = meta(MetaCmd::ListCollations, false, false, Some("*"));
         let name_filter =
             pattern::where_clause(m.pattern.as_deref(), "c.collname", Some("n.nspname"));
@@ -7180,7 +7180,13 @@ order by 1, 2"
     end as \"Provider\"";
 
         let collate_cols = "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\"";
-        let locale_cols = ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\"";
+        let locale_cols = if pg_ver >= 17 {
+            ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\""
+        } else if pg_ver >= 15 {
+            ",\n    c.colliculocale as \"ICU Locale\""
+        } else {
+            ""
+        };
         let deterministic_col =
             ",\n    case when c.collisdeterministic then 'yes' else 'no' end as \"Deterministic?\"";
 
@@ -7201,7 +7207,7 @@ order by 1, 2"
     /// `\dO *` must NOT exclude `pg_catalog` (pattern drops the system filter).
     #[test]
     fn list_collations_wildcard_does_not_exclude_pg_catalog() {
-        let sql = do_collation_sql_with_pattern();
+        let sql = do_collation_sql_with_pattern(17);
         assert!(
             !sql.contains("pg_catalog'"),
             "\\dO * SQL must not exclude pg_catalog:\n{sql}"
@@ -7211,7 +7217,7 @@ order by 1, 2"
     /// The collation query must include the encoding filter.
     #[test]
     fn list_collations_has_encoding_filter() {
-        let sql = do_collation_sql_with_pattern();
+        let sql = do_collation_sql_with_pattern(17);
         assert!(
             sql.contains("collencoding"),
             "collation SQL must filter by encoding:\n{sql}"
@@ -7226,7 +7232,7 @@ order by 1, 2"
     /// columns (matching psql output).
     #[test]
     fn list_collations_has_required_columns() {
-        let sql = do_collation_sql_with_pattern();
+        let sql = do_collation_sql_with_pattern(17);
         assert!(
             sql.contains("\"Collate\""),
             "collation SQL must have Collate column:\n{sql}"
