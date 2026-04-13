@@ -89,7 +89,11 @@ pub async fn run_ash(
     let pg_ash = sampler::detect_pg_ash(client).await;
     let mut state = AshState::new(pg_ash.installed);
     let mut snapshots: VecDeque<sampler::AshSnapshot> = VecDeque::with_capacity(600);
-    let timeout_ms = settings.config.ash.sample_timeout_ms;
+    let timeout_ms = settings
+        .config
+        .ash
+        .sample_timeout_ms
+        .unwrap_or(crate::config::DEFAULT_ASH_SAMPLE_TIMEOUT_MS);
 
     // Pre-populate ring buffer from pg_ash history when available.
     // Fills the left side of the timeline; live data scrolls in on the right.
