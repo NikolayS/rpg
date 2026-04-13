@@ -33,6 +33,8 @@ pub struct Config {
     pub pgmustard: PgMustardConfig,
     /// Structured-log file rotation settings.
     pub logging: LoggingConfig,
+    /// Active Session History (`/ash`) settings.
+    pub ash: AshConfig,
     /// Named connection profiles (keyed by profile name).
     #[serde(default)]
     pub connections: HashMap<String, ConnectionProfile>,
@@ -457,6 +459,46 @@ impl Default for LoggingConfig {
             max_files: 5,
             audit_file: None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASH (Active Session History) settings
+// ---------------------------------------------------------------------------
+
+/// Active Session History (`/ash`) settings.
+///
+/// Controls the timeout for both the live sample query and the history query
+/// used by the `/ash` TUI sampler.
+///
+/// ```toml
+/// [ash]
+/// sample_timeout_ms = 500  # 0 = disabled
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AshConfig {
+    /// Maximum time in milliseconds allowed for a single `/ash` sample query
+    /// (`pg_stat_activity` or `ash.wait_timeline`).
+    ///
+    /// Matches the same guard used by `pg_ash`'s per-second `pg_cron` job —
+    /// fail fast rather than block the TUI.
+    ///
+    /// Set to `0` to disable the timeout entirely (for power users on very
+    /// large clusters where the default 500 ms is too tight).
+    ///
+    /// Default: `500`.
+    pub sample_timeout_ms: Option<u64>,
+}
+
+const DEFAULT_ASH_SAMPLE_TIMEOUT_MS: u64 = 500;
+
+impl AshConfig {
+    /// Resolved timeout value: returns the configured value or the default
+    /// (500 ms) when not explicitly set.
+    pub fn sample_timeout_ms(&self) -> u64 {
+        self.sample_timeout_ms
+            .unwrap_or(DEFAULT_ASH_SAMPLE_TIMEOUT_MS)
     }
 }
 
@@ -985,6 +1027,9 @@ fn merge_config(base: Config, overlay: Config) -> Config {
                 overlay.logging.max_files
             },
             audit_file: overlay.logging.audit_file.or(base.logging.audit_file),
+        },
+        ash: AshConfig {
+            sample_timeout_ms: overlay.ash.sample_timeout_ms.or(base.ash.sample_timeout_ms),
         },
         connections: {
             let mut merged = base.connections;
@@ -2094,6 +2139,170 @@ api_key_env = "PGMUSTARD_API_KEY"
         assert_eq!(
             cfg.pgmustard.api_key_env,
             Some("PGMUSTARD_API_KEY".to_owned())
+        );
+    }
+
+    // -- AshConfig --------------------------------------------------------------
+
+    #[test]
+    fn ash_config_default_is_none() {
+        // Default is None so that config merging can distinguish "absent" from
+        // "explicitly set to 500".  The actual default of 500 is applied at the
+        // usage site via unwrap_or(DEFAULT_ASH_SAMPLE_TIMEOUT_MS).
+        let cfg = AshConfig::default();
+        assert_eq!(cfg.sample_timeout_ms, None);
+    }
+
+    #[test]
+    fn ash_config_parse_explicit_value() {
+        let toml_str = r"
+[ash]
+sample_timeout_ms = 200
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms, Some(200));
+    }
+
+    #[test]
+    fn ash_config_parse_explicit_default_value() {
+        // Explicitly setting 500 (the default) must be preserved as Some(500).
+        let toml_str = r"
+[ash]
+sample_timeout_ms = 500
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms, Some(500));
+    }
+
+    #[test]
+    fn ash_config_parse_zero_disables_timeout() {
+        let toml_str = r"
+[ash]
+sample_timeout_ms = 0
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms, Some(0));
+    }
+
+    #[test]
+    fn ash_config_absent_section_is_none() {
+        let toml_str = "";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms, None);
+    }
+
+    #[test]
+    fn ash_config_empty_section_is_none() {
+        let toml_str = r"
+[ash]
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms, None);
+    }
+
+    #[test]
+    fn ash_default_timeout_accessor() {
+        let cfg: Config = toml::from_str("").expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms(), 500);
+    }
+
+    #[test]
+    fn ash_disabled_timeout_accessor() {
+        let toml_str = r"
+[ash]
+sample_timeout_ms = 0
+";
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.ash.sample_timeout_ms(), 0);
+    }
+
+    // -- AshConfig merge --------------------------------------------------------
+
+    #[test]
+    fn merge_ash_overlay_none_preserves_base() {
+        let base = Config {
+            ash: AshConfig {
+                sample_timeout_ms: Some(0),
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            ash: AshConfig {
+                sample_timeout_ms: None,
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(
+            merged.ash.sample_timeout_ms,
+            Some(0),
+            "base value should be preserved when overlay is absent"
+        );
+    }
+
+    #[test]
+    fn merge_ash_overlay_explicit_wins() {
+        let base = Config {
+            ash: AshConfig {
+                sample_timeout_ms: Some(0),
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            ash: AshConfig {
+                sample_timeout_ms: Some(500),
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(
+            merged.ash.sample_timeout_ms,
+            Some(500),
+            "overlay explicit value should win even when it equals the old default"
+        );
+    }
+
+    #[test]
+    fn merge_ash_both_none_stays_none() {
+        let base = Config::default();
+        let overlay = Config::default();
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.ash.sample_timeout_ms, None);
+    }
+
+    #[test]
+    fn merge_ash_base_some_overlay_different_some() {
+        let base = Config {
+            ash: AshConfig {
+                sample_timeout_ms: Some(300),
+            },
+            ..Default::default()
+        };
+        let overlay = Config {
+            ash: AshConfig {
+                sample_timeout_ms: Some(1000),
+            },
+            ..Default::default()
+        };
+        let merged = merge_config(base, overlay);
+        assert_eq!(merged.ash.sample_timeout_ms, Some(1000));
+    }
+
+    #[test]
+    fn merge_ash_overlay_unset_preserves_base_via_toml() {
+        let base: Config = toml::from_str(
+            r"
+[ash]
+sample_timeout_ms = 0
+",
+        )
+        .expect("parse base");
+        let overlay: Config = toml::from_str("").expect("parse overlay");
+        let merged = merge_config(base, overlay);
+        assert_eq!(
+            merged.ash.sample_timeout_ms(),
+            0,
+            "unset overlay must preserve base value"
         );
     }
 }
