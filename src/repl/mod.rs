@@ -892,6 +892,17 @@ impl AutoExplain {
             Self::Verbose => "verbose",
         }
     }
+
+    /// Return the effective auto-explain level, accounting for plan execution
+    /// mode.  When `exec_mode == Plan` and auto-explain is `Off`, plan mode
+    /// implicitly enables `On`; an explicit higher level takes precedence.
+    pub(crate) fn effective(self, exec_mode: ExecMode) -> Self {
+        if exec_mode == ExecMode::Plan && self == Self::Off {
+            Self::On
+        } else {
+            self
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -9066,6 +9077,44 @@ mod tests {
         assert_eq!(settings.auto_explain, AutoExplain::Verbose);
         apply_fkey_toggle(FKeyAction::AutoExplain, &mut settings);
         assert_eq!(settings.auto_explain, AutoExplain::Off);
+    }
+
+    // -- AutoExplain::effective (plan mode integration) -------------------------
+
+    #[test]
+    fn plan_mode_promotes_auto_explain_off_to_on() {
+        assert_eq!(AutoExplain::Off.effective(ExecMode::Plan), AutoExplain::On);
+    }
+
+    #[test]
+    fn plan_mode_preserves_explicit_auto_explain_level() {
+        // If the user explicitly set a higher level, plan mode should not
+        // downgrade it.
+        assert_eq!(
+            AutoExplain::Analyze.effective(ExecMode::Plan),
+            AutoExplain::Analyze
+        );
+        assert_eq!(
+            AutoExplain::Verbose.effective(ExecMode::Plan),
+            AutoExplain::Verbose
+        );
+        assert_eq!(AutoExplain::On.effective(ExecMode::Plan), AutoExplain::On);
+    }
+
+    #[test]
+    fn interactive_mode_does_not_promote_auto_explain() {
+        assert_eq!(
+            AutoExplain::Off.effective(ExecMode::Interactive),
+            AutoExplain::Off
+        );
+    }
+
+    #[test]
+    fn yolo_mode_does_not_promote_auto_explain() {
+        assert_eq!(
+            AutoExplain::Off.effective(ExecMode::Yolo),
+            AutoExplain::Off
+        );
     }
 
     // -- \set AI_PROVIDER / AI_MODEL -------------------------------------------

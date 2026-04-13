@@ -500,11 +500,7 @@ pub async fn execute_query(
     let auto_explained;
     let mut auto_explain_active = false;
     let plan_mode_active = settings.exec_mode == ExecMode::Plan;
-    let effective_auto_explain = if plan_mode_active && settings.auto_explain == AutoExplain::Off {
-        AutoExplain::On
-    } else {
-        settings.auto_explain
-    };
+    let effective_auto_explain = settings.auto_explain.effective(settings.exec_mode);
     let auto_explain_label = effective_auto_explain.label();
     let sql_to_send = if effective_auto_explain == AutoExplain::Off {
         interpolated.as_str()
