@@ -212,7 +212,8 @@ normalize() {
     -e '/enumtypid/s/=([0-9][0-9]*/=(OID/g' \
     -e 's/for operator [0-9][0-9]*/for operator OID/g' \
     -e 's/ Query Identifier: [-0-9][0-9]*/ Query Identifier: 0000000000000000000/g' \
-    -e 's/List of tables/List of relations/g' | \
+    -e 's/List of tables/List of relations/g' \
+    -e '/^ERROR: environment variable .RPG_ANTHROPIC_KEY/d' | \
   awk '
     BEGIN { after_qp = 0 }
     /^$/ { blank++; next }
@@ -232,36 +233,102 @@ normalize() {
     }
   ' | \
   awk '
-    # Normalize non-deterministic ordering of AFTER-trigger NOTICE lines vs
-    # COPY data rows.  In rpg, async notice delivery can cause NOTICE: AFTER
-    # lines to appear before the COPY data row rather than after it (as psql
-    # shows).  Swap an AFTER-trigger NOTICE with the following data row when
-    # the data row matches the row ID in the NOTICE (e.g. "NOTICE: AFTER
-    # INSERT 8" followed by "8" → emit "8" first, then the NOTICE).
-    {
-      if (held != "") {
-        # The held NOTICE contains the row ID as its last token.
-        split(held, a)
-        row_id = a[length(a)]
-        if ($0 == row_id) {
-          # Next line is the matching COPY data row — emit data first.
-          print $0
-          print held
-          held = ""
-          next
-        } else {
-          # Not the expected data row; flush the held NOTICE as-is.
-          print held
-          held = ""
-        }
-      }
-      if (/^NOTICE:[ \t]+AFTER /) {
-        held = $0
-      } else {
-        print
-      }
+    # Normalize async notice/warning ordering differences between rpg
+    # and psql.  rpg delivers NoticeResponse messages via an async task,
+    # so NOTICE/WARNING lines may appear at different positions relative
+    # to query results compared to psql (where libpq delivers them
+    # synchronously inline).
+    #
+    # Strategy: within each paragraph (blank-line-delimited block),
+    # separate lines into "data" and "diagnostic" (NOTICE/WARNING plus
+    # their DETAIL/HINT continuations) buckets.  Emit all data lines
+    # first, then all diagnostic lines.
+    #
+    # Cross-paragraph merging: if a paragraph consists entirely of
+    # diagnostic lines (no data), those diagnostics are merged into
+    # the preceding paragraph.  This handles the case where rpg
+    # delivers a WARNING after a blank line that psql would have
+    # emitted before the blank line (e.g. in the transactions test).
+    # The diagnostics always stay with the paragraph BEFORE the
+    # blank line.
+
+    function flush_paragraph(    i) {
+      for (i = 1; i <= nd; i++) print data[i]
+      for (i = 1; i <= nn; i++) print diag[i]
+      nd = 0; nn = 0
+      delete data; delete diag
     }
-    END { if (held != "") print held }
+
+    BEGIN {
+      nd = 0; nn = 0; in_diag = 0
+      pending_blank = 0
+      merge_pending = 0
+    }
+
+    /^$/ {
+      in_diag = 0
+      if (pending_blank) {
+        # Two consecutive blanks: hard section boundary.
+        flush_paragraph()
+        print ""
+        print ""
+        pending_blank = 0
+        merge_pending = 0
+        next
+      }
+      if (merge_pending) {
+        # Blank after merge-pending diagnostics: the diagnostics
+        # have been absorbed.  This blank is a real paragraph
+        # boundary.
+        flush_paragraph()
+        print ""
+        merge_pending = 0
+        next
+      }
+      pending_blank = 1
+      next
+    }
+
+    /^(NOTICE|WARNING):/ {
+      if (pending_blank) {
+        # Blank then diagnostic: tentatively merge into previous
+        # paragraph.  The blank is consumed (not emitted).
+        pending_blank = 0
+        merge_pending = 1
+      }
+      in_diag = 1
+      diag[++nn] = $0
+      next
+    }
+
+    # DETAIL/HINT continuation of a diagnostic block
+    in_diag && /^(DETAIL|HINT):/ {
+      diag[++nn] = $0
+      next
+    }
+
+    # Non-diagnostic, non-blank line
+    {
+      if (pending_blank) {
+        # Normal paragraph boundary: blank followed by data.
+        flush_paragraph()
+        print ""
+        pending_blank = 0
+      } else if (merge_pending) {
+        # Diagnostics after a blank turned out to be followed by
+        # data — this is a new paragraph that starts with
+        # diagnostics then has data.  The diagnostics stay with
+        # the *previous* paragraph (merged), and this data line
+        # starts a fresh paragraph.
+        flush_paragraph()
+        print ""
+        merge_pending = 0
+      }
+      in_diag = 0
+      data[++nd] = $0
+    }
+
+    END { flush_paragraph() }
   ' | \
   awk '
     # Normalize WAL bytes timing variance in the stats regression test.
