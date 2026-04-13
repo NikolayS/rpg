@@ -5476,11 +5476,9 @@ async fn list_ts_configs(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.cfgname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -5552,11 +5550,9 @@ async fn list_ts_dicts(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "d.dictname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -5628,11 +5624,9 @@ async fn list_ts_parsers(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "p.prsname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -5704,11 +5698,9 @@ async fn list_ts_templates(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "t.tmplname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -6027,6 +6019,138 @@ order by 2, 3"
         assert!(
             !lookup_sql.contains("pg_table_is_visible"),
             "schema-qualified lookup should NOT include visibility filter: {lookup_sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Text search commands — pg_catalog must be included by default
+    // -----------------------------------------------------------------------
+
+    /// Helper: replicate the WHERE-clause filter logic used by
+    /// `list_ts_configs` / `list_ts_dicts` / `list_ts_parsers` /
+    /// `list_ts_templates` and return the assembled SQL string.
+    fn ts_where_clause(pattern: Option<&str>, name_col: &str, visibility_fn: &str) -> String {
+        let name_filter = pattern::where_clause(pattern, name_col, Some("n.nspname"));
+
+        // After the fix: sys_filter is always empty (pg_catalog is included).
+        let sys_filter = String::new();
+
+        let visibility_filter = if pattern.is_some_and(|p| p.contains('.')) {
+            String::new()
+        } else {
+            visibility_fn.to_owned()
+        };
+
+        let where_parts: Vec<&str> = [
+            if sys_filter.is_empty() {
+                None
+            } else {
+                Some(sys_filter.as_str())
+            },
+            if visibility_filter.is_empty() {
+                None
+            } else {
+                Some(visibility_filter.as_str())
+            },
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("where {}", where_parts.join("\n    and "))
+        }
+    }
+
+    #[test]
+    fn ts_configs_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "c.cfgname",
+            "pg_catalog.pg_ts_config_is_visible(c.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dF must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_config_is_visible"),
+            "\\dF should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_dicts_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "d.dictname",
+            "pg_catalog.pg_ts_dict_is_visible(d.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dFd must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_dict_is_visible"),
+            "\\dFd should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_parsers_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "p.prsname",
+            "pg_catalog.pg_ts_parser_is_visible(p.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dFp must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_parser_is_visible"),
+            "\\dFp should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_templates_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "t.tmplname",
+            "pg_catalog.pg_ts_template_is_visible(t.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dFt must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_template_is_visible"),
+            "\\dFt should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_configs_schema_qualified_skips_visibility() {
+        let clause = ts_where_clause(
+            Some("pg_catalog.english"),
+            "c.cfgname",
+            "pg_catalog.pg_ts_config_is_visible(c.oid)",
+        );
+        assert!(
+            !clause.contains("pg_ts_config_is_visible"),
+            "schema-qualified \\dF should skip visibility filter: {clause}"
+        );
+        assert!(
+            clause.contains("pg_catalog"),
+            "schema-qualified \\dF should filter on schema name: {clause}"
         );
     }
 
