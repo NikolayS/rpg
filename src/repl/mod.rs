@@ -9111,10 +9111,7 @@ mod tests {
 
     #[test]
     fn yolo_mode_does_not_promote_auto_explain() {
-        assert_eq!(
-            AutoExplain::Off.effective(ExecMode::Yolo),
-            AutoExplain::Off
-        );
+        assert_eq!(AutoExplain::Off.effective(ExecMode::Yolo), AutoExplain::Off);
     }
 
     // -- \set AI_PROVIDER / AI_MODEL -------------------------------------------
