@@ -99,7 +99,10 @@ pub async fn run_rpg(
         ..crate::repl::ReplSettings::default()
     };
 
-    crate::repl::run_repl(client, params, settings, true, true, reader).await;
+    // `reader` is kept alive so the JS sender remains functional; the REPL
+    // reads input through its own mechanism.
+    let _reader = reader;
+    crate::repl::run_repl(client, params, settings, true, true).await;
 
     web_sys::console::log_1(&"rpg: session ended".into());
     Ok(())

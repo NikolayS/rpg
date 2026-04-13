@@ -26,11 +26,16 @@
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io;
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::pin::Pin;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::task::{Context, Poll};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +45,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 #[cfg(not(target_arch = "wasm32"))]
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio_postgres::config::SslMode as TokioSslMode;

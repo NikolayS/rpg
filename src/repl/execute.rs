@@ -20,6 +20,23 @@ fn write_to_stdout_or_wasm(data: &[u8]) {
     }
 }
 
+/// Return the terminal height in rows.
+///
+/// On native this queries the real terminal via crossterm; on WASM it returns
+/// a fixed default (24 rows) since there is no physical terminal.
+fn terminal_rows() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crossterm::terminal::size()
+            .map(|(_, h)| h as usize)
+            .unwrap_or(24)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        24
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
@@ -1680,9 +1697,7 @@ pub(super) async fn execute_query_interactive(
     let _ = &display; // suppress unused warning
 
     // Determine terminal height; fall back to 24 if unavailable.
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = terminal_rows();
 
     if crate::pager::needs_paging_with_min(
         text,
@@ -1803,9 +1818,7 @@ pub(super) async fn execute_query_extended_interactive(
 
     let text = String::from_utf8_lossy(&captured);
 
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = terminal_rows();
 
     if crate::pager::needs_paging_with_min(
         &text,
@@ -2070,6 +2083,7 @@ pub(super) fn flush_audit_entry(settings: &mut ReplSettings, entry_text: &str) {
 ///
 /// Prints `-- Schema cache refreshed` on success.  Errors are silently
 /// ignored so that a cache refresh failure never disrupts normal output.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSettings) {
     if let Some(cache) = &settings.schema_cache {
         if let Ok(loaded) = load_schema_cache(client).await {
@@ -2078,6 +2092,10 @@ pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSett
         }
     }
 }
+
+/// WASM stub: schema cache refresh is a no-op (completion not available).
+#[cfg(target_arch = "wasm32")]
+pub(super) async fn auto_refresh_schema(_client: &Client, _settings: &mut ReplSettings) {}
 
 /// Activate the appropriate pager for `text`.
 ///

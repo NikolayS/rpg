@@ -13,15 +13,20 @@ use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::error::ReadlineError;
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::history::FileHistory;
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::{
     Cmd, ConditionalEventHandler, Event, EventContext, EventHandler, KeyCode, KeyEvent, Modifiers,
     RepeatCount,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use rustyline::{Config, EditMode, Editor};
 use tokio_postgres::Client;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::complete::{
     load_schema_cache, DropdownEventHandler, DropdownKey, RpgHelper, SchemaCache,
 };
@@ -1309,6 +1314,7 @@ pub struct ReplSettings {
     /// `None` in non-interactive paths (e.g. `-c`, `-f`, piped stdin).
     /// Set to `Some(...)` by the readline loop so that `\refresh` can
     /// update the same `Arc` that the completion helper holds.
+    #[cfg(not(target_arch = "wasm32"))]
     pub schema_cache: Option<Arc<RwLock<SchemaCache>>>,
 
     // -- Query audit log (FR-23) -------------------------------------------
@@ -1501,10 +1507,6 @@ impl std::fmt::Debug for ReplSettings {
             .field("query_count", &self.query_count)
             .field("is_superuser", &self.is_superuser)
             .field(
-                "schema_cache",
-                &self.schema_cache.as_ref().map(|_| "<cache>"),
-            )
-            .field(
                 "audit_log_file",
                 &self.audit_log_file.as_ref().map(|_| "<writer>"),
             )
@@ -1606,6 +1608,7 @@ impl Default for ReplSettings {
             session_id: crate::session_store::new_session_id(),
             query_count: 0,
             is_superuser: false,
+            #[cfg(not(target_arch = "wasm32"))]
             schema_cache: None,
             audit_log_file: None,
             audit_log_path: None,
@@ -1657,7 +1660,14 @@ pub fn history_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("PSQL_HISTORY") {
         return Some(PathBuf::from(val));
     }
-    dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return dirs::home_dir().map(|h| h.join(DEFAULT_HISTORY_FILE));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,6 +1685,7 @@ pub fn startup_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("PSQLRC") {
         return Some(PathBuf::from(val));
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(home) = dirs::home_dir() {
         let rpgrc = home.join(".rpgrc");
         if rpgrc.exists() {
@@ -3542,9 +3553,18 @@ pub(crate) fn maybe_page(settings: &mut ReplSettings, text: &str) {
         let _ = writeln!(w, "{text}");
         return;
     }
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crossterm::terminal::size()
+                .map(|(_, h)| h as usize)
+                .unwrap_or(24)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            24_usize
+        }
+    };
     if settings.pager_enabled
         && crate::pager::needs_paging_with_min(
             text,
@@ -3914,61 +3934,70 @@ pub(super) fn apply_fkey_toggle(action: FKeyAction, settings: &mut ReplSettings)
 fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) {
     use std::io::Write;
 
-    if io::stdin().is_terminal() {
-        // Interactive path: use crossterm raw mode so Ctrl+C is detectable.
-        // Read the input character-by-character, building a line.
-        use crossterm::event::{read, Event, KeyCode, KeyModifiers};
-        use crossterm::terminal;
+    #[cfg(not(target_arch = "wasm32"))]
+    let is_terminal = io::stdin().is_terminal();
+    #[cfg(target_arch = "wasm32")]
+    let is_terminal = false;
 
-        if !prompt_text.is_empty() {
-            rpg_eprint!("{prompt_text}");
-            let _ = io::stderr().flush();
-        }
+    if is_terminal {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Interactive path: use crossterm raw mode so Ctrl+C is detectable.
+            // Read the input character-by-character, building a line.
+            use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+            use crossterm::terminal;
 
-        let raw_enabled = terminal::enable_raw_mode().is_ok();
-        let mut input = String::new();
-        let interrupted = loop {
-            match read() {
-                Ok(Event::Key(key)) => match (key.code, key.modifiers) {
-                    // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
-                    (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-                        let _ = write!(io::stderr(), "\r\n");
-                        break true;
-                    }
-                    // Enter — end of input.
-                    (KeyCode::Enter, _) => {
-                        let _ = write!(io::stderr(), "\r\n");
-                        break false;
-                    }
-                    // Backspace — delete last character.
-                    (KeyCode::Backspace, _) => {
-                        if input.pop().is_some() {
-                            // Erase the character on screen.
-                            let _ = write!(io::stderr(), "\x08 \x08");
+            if !prompt_text.is_empty() {
+                rpg_eprint!("{prompt_text}");
+                let _ = io::stderr().flush();
+            }
+
+            let raw_enabled = terminal::enable_raw_mode().is_ok();
+            let mut input = String::new();
+            let interrupted = loop {
+                match read() {
+                    Ok(Event::Key(key)) => match (key.code, key.modifiers) {
+                        // Ctrl+C / Ctrl+D / Esc — interrupt: abort the current script.
+                        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL)
+                        | (KeyCode::Esc, _) => {
+                            let _ = write!(io::stderr(), "\r\n");
+                            break true;
+                        }
+                        // Enter — end of input.
+                        (KeyCode::Enter, _) => {
+                            let _ = write!(io::stderr(), "\r\n");
+                            break false;
+                        }
+                        // Backspace — delete last character.
+                        (KeyCode::Backspace, _) => {
+                            if input.pop().is_some() {
+                                // Erase the character on screen.
+                                let _ = write!(io::stderr(), "\x08 \x08");
+                                let _ = io::stderr().flush();
+                            }
+                        }
+                        // Printable character — echo and accumulate.
+                        (KeyCode::Char(ch), _) => {
+                            input.push(ch);
+                            let _ = write!(io::stderr(), "{ch}");
                             let _ = io::stderr().flush();
                         }
-                    }
-                    // Printable character — echo and accumulate.
-                    (KeyCode::Char(ch), _) => {
-                        input.push(ch);
-                        let _ = write!(io::stderr(), "{ch}");
-                        let _ = io::stderr().flush();
-                    }
-                    _ => {}
-                },
-                Ok(_) => {}
-                Err(_) => break false,
+                        _ => {}
+                    },
+                    Ok(_) => {}
+                    Err(_) => break false,
+                }
+            };
+            if raw_enabled {
+                let _ = terminal::disable_raw_mode();
             }
-        };
-        if raw_enabled {
-            let _ = terminal::disable_raw_mode();
-        }
 
-        if interrupted {
-            settings.vars.set(var_name, "");
-            settings.prompt_interrupted = true;
-        } else {
-            settings.vars.set(var_name, &input);
+            if interrupted {
+                settings.vars.set(var_name, "");
+                settings.prompt_interrupted = true;
+            } else {
+                settings.vars.set(var_name, &input);
+            }
         }
     } else {
         // Non-interactive (piped) path: use read_line as before; Ctrl+C is
@@ -4784,7 +4813,10 @@ pub(super) async fn dispatch_io(
             Some(MetaResult::Continue)
         }
         MetaCmd::Password => {
+            #[cfg(not(target_arch = "wasm32"))]
             dispatch_password(parsed.pattern.as_deref(), client).await;
+            #[cfg(target_arch = "wasm32")]
+            rpg_eprintln!("\\password: not supported in WASM");
             Some(MetaResult::Continue)
         }
         MetaCmd::GoExecute(ref target) => {
@@ -4845,6 +4877,7 @@ pub(super) async fn dispatch_io(
 
         MetaCmd::LogFile(ref path) => {
             rpg_eprintln!("\\log-file is deprecated; use /log-file instead.");
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(raw_path) = path.as_deref() {
                 // Expand leading `~` to the home directory.
                 let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
@@ -4884,7 +4917,10 @@ pub(super) async fn dispatch_io(
                         rpg_eprintln!("\\log-file: cannot open \"{}\": {e}", expanded.display());
                     }
                 }
-            } else {
+                return Some(MetaResult::Continue);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
                 // No path — close the current log file.
                 if let Some(ref path) = settings.audit_log_path.take() {
                     if !settings.quiet {
@@ -4892,6 +4928,10 @@ pub(super) async fn dispatch_io(
                     }
                 }
                 settings.audit_log_file = None;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                rpg_eprintln!("\\log-file: not supported in WASM");
             }
             Some(MetaResult::Continue)
         }
@@ -4917,6 +4957,7 @@ pub(super) async fn dispatch_io(
 ///
 /// The server will store the already-hashed value as-is when it recognises the
 /// prefix (`md5…`), so the cleartext password never reaches the wire.
+#[cfg(not(target_arch = "wasm32"))]
 async fn dispatch_password(user: Option<&str>, client: &Client) {
     use tokio_postgres::SimpleQueryMessage;
 
@@ -5293,6 +5334,7 @@ async fn dispatch_meta(
         }
         MetaCmd::RefreshSchema => {
             rpg_eprintln!("\\refresh is deprecated; use /refresh instead.");
+            #[cfg(not(target_arch = "wasm32"))]
             match &settings.schema_cache {
                 None => {
                     rpg_eprintln!("\\refresh: no active connection or not in interactive mode");
@@ -5307,6 +5349,8 @@ async fn dispatch_meta(
                     }
                 },
             }
+            #[cfg(target_arch = "wasm32")]
+            rpg_eprintln!("\\refresh: not supported in WASM");
         }
         // Function-key toggle metacommands (#321, #324, #325).
         MetaCmd::ToggleCompletion => {
@@ -5360,21 +5404,27 @@ async fn dispatch_meta(
                 .split_once(char::is_whitespace)
                 .map_or((name.as_str(), ""), |(n, r)| (n, r));
             if settings.lua_registry.get(cmd_name).is_some() {
-                let args: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
-                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                let dbname = params.dbname.clone();
-                let cmd_name_owned = cmd_name.to_owned();
-                let result = tokio::task::block_in_place(|| {
-                    settings.lua_registry.execute_command(
-                        &cmd_name_owned,
-                        &arg_refs,
-                        &dbname,
-                        client,
-                    )
-                });
-                if let Err(e) = result {
-                    rpg_eprintln!("{e}");
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let args: Vec<String> =
+                        rest.split_whitespace().map(str::to_owned).collect();
+                    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let dbname = params.dbname.clone();
+                    let cmd_name_owned = cmd_name.to_owned();
+                    let result = tokio::task::block_in_place(|| {
+                        settings.lua_registry.execute_command(
+                            &cmd_name_owned,
+                            &arg_refs,
+                            &dbname,
+                            client,
+                        )
+                    });
+                    if let Err(e) = result {
+                        rpg_eprintln!("{e}");
+                    }
                 }
+                #[cfg(target_arch = "wasm32")]
+                rpg_eprintln!("custom Lua commands are not supported in WASM");
             } else {
                 // Only print the command name (first word), not the args,
                 // matching psql's "error: invalid command \dG" format.
@@ -5785,6 +5835,7 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
     match arg {
         // ---- Interactive TUI picker (no argument) ------------------------
         None => {
+            #[cfg(not(target_arch = "wasm32"))]
             match crate::history_picker::run(entries) {
                 Ok(Some(query)) => {
                     settings.initial_input = Some(query);
@@ -5792,15 +5843,25 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
                 Ok(None) => {} // user cancelled
                 Err(e) => rpg_eprintln!("\\s: {e}"),
             }
+            #[cfg(target_arch = "wasm32")]
+            rpg_eprintln!("\\s: interactive history picker not supported in WASM");
         }
 
         // ---- Save to file ------------------------------------------------
         Some(path) if arg_is_filepath(path) => {
             // Expand leading `~`.
             let resolved = if let Some(rest) = path.strip_prefix("~/") {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(rest)
-                } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(rest)
+                    } else {
+                        std::path::PathBuf::from(path)
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = rest;
                     std::path::PathBuf::from(path)
                 }
             } else {
@@ -6223,6 +6284,7 @@ pub async fn run_repl(
     settings.lua_registry = crate::lua_commands::LuaRegistry::load(&params.dbname);
 
     // Open audit log file from config if one is configured.
+    #[cfg(not(target_arch = "wasm32"))]
     if settings.audit_log_file.is_none() {
         if let Some(ref raw_path) = settings.config.logging.audit_file.clone() {
             let expanded = if raw_path.starts_with("~/") || raw_path == "~" {
@@ -6263,7 +6325,10 @@ pub async fn run_repl(
     }
 
     // Build rustyline editor (skip if --no-readline).
+    #[cfg(not(target_arch = "wasm32"))]
     let use_readline = !no_readline && io::stdin().is_terminal();
+    #[cfg(target_arch = "wasm32")]
+    let use_readline = false;
 
     // Clear terminal so the REPL starts with a clean screen.
     if use_readline {
@@ -6273,6 +6338,7 @@ pub async fn run_repl(
 
     // Initialise the status bar for interactive sessions.
     // Enabled when: readline mode AND stderr is a terminal AND config allows it.
+    #[cfg(not(target_arch = "wasm32"))]
     if use_readline
         && crate::statusline::StatusLine::is_interactive()
         && settings.config.display.statusline_enabled
@@ -6284,11 +6350,14 @@ pub async fn run_repl(
         settings.statusline = Some(Arc::new(Mutex::new(sl)));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     let exit_code = if use_readline {
         run_readline_loop(&mut client, &mut params, &mut settings, &mut tx).await
     } else {
         run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
     };
+    #[cfg(target_arch = "wasm32")]
+    let exit_code = run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await;
 
     // Tear down the status bar on exit.
     if let Some(ref sl_arc) = settings.statusline {
@@ -6326,12 +6395,14 @@ pub(super) enum FKeyAction {
 /// returns `Cmd::Interrupt` so the readline loop gets control back without
 /// adding a blank line to history.  The loop checks the slot, clears it,
 /// and performs the toggle.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct FKeyHandler {
     action: FKeyAction,
     pending: Arc<Mutex<Option<FKeyAction>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ConditionalEventHandler for FKeyHandler {
     fn handle(
         &self,
@@ -6348,6 +6419,7 @@ impl ConditionalEventHandler for FKeyHandler {
 }
 
 /// Run with rustyline readline support.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_lines)]
 async fn run_readline_loop(
     client: &mut Client,

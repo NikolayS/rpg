@@ -26,7 +26,9 @@
 //! A brief "Copied!" or "Copied N lines!" message appears in the status bar
 //! for 1 second after copying.
 
-use std::io::{self, IsTerminal, Write};
+use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{IsTerminal, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::process::{Command, Stdio};
 

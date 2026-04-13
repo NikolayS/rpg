@@ -313,6 +313,7 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
 /// # Errors
 /// Returns `Err(message)` if the directory does not exist or is not
 /// accessible.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     let target: std::path::PathBuf = match dir {
         Some(d) => Path::new(d).to_path_buf(),
@@ -322,6 +323,12 @@ pub fn change_dir(dir: Option<&str>) -> Result<(), String> {
     };
 
     std::env::set_current_dir(&target).map_err(|e| format!("\\cd: {}: {e}", target.display()))
+}
+
+/// WASM stub: no filesystem, `\cd` is a no-op.
+#[cfg(target_arch = "wasm32")]
+pub fn change_dir(_dir: Option<&str>) -> Result<(), String> {
+    Err("\\cd: not supported in WASM mode".to_owned())
 }
 
 // ---------------------------------------------------------------------------

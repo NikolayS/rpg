@@ -4,6 +4,7 @@
 //! `~/.config/rpg/named_queries.toml`.
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
