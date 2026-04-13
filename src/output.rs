@@ -3633,11 +3633,21 @@ fn write_wrapped_row<F>(
                 }
 
                 // Content: left-aligned data (same as ASCII).
+                //
+                // In old-ascii wrapped format, trailing space indicates
+                // wrap continuation (psql uses space instead of the '.'
+                // marker that ASCII linestyle uses).  Pad non-last
+                // columns and border=2 as before; additionally pad the
+                // last column when its value wraps to the next line.
+                let oa_wrap_trailing = is_last_col && wraps_to_next;
                 if col.is_numeric {
                     for _ in 0..padding {
                         out.push(' ');
                     }
                     out.push_str(text);
+                    if oa_wrap_trailing {
+                        out.push(' ');
+                    }
                 } else {
                     out.push_str(text);
                     // Pad for border 2 and non-last columns.
@@ -3645,6 +3655,12 @@ fn write_wrapped_row<F>(
                         for _ in 0..padding {
                             out.push(' ');
                         }
+                    } else if oa_wrap_trailing {
+                        // Last column wraps: pad to column width + trailing space.
+                        for _ in 0..padding {
+                            out.push(' ');
+                        }
+                        out.push(' ');
                     }
                 }
 
@@ -3668,6 +3684,15 @@ fn write_wrapped_row<F>(
                             out.push(' ');
                         }
                     } else if is_last_col {
+                        out.push(' ');
+                    }
+                } else if oa_skip_trailing_cols && col_idx == 0 {
+                    // Border 0/1: when trailing columns are skipped, pad
+                    // only the separator area (not the skipped columns'
+                    // content area) — matching psql behavior.
+                    let sep_w = if border == 0 { 1 } else { 3 };
+                    let extra: usize = (1..cols.len()).map(|_| sep_w).sum::<usize>();
+                    for _ in 0..extra {
                         out.push(' ');
                     }
                 }
@@ -4738,6 +4763,305 @@ mod tests {
         assert_eq!(
             caret_col, expected_col,
             "caret at wrong position: expected {expected_col}, got {caret_col}\nfull output:\n{out}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Old-ASCII wrapped table format — `:` and `;` separators (#798)
+    // -----------------------------------------------------------------------
+
+    /// Build a RowSet matching the psql regression test's second query:
+    ///   select repeat('x',2*n) as "0123456789abcdef",
+    ///          repeat('y',20-2*n) as "0123456789"
+    ///   from generate_series(1,10) as n;
+    fn mk_wrap_rowset_single_header() -> RowSet {
+        RowSet {
+            columns: vec![
+                mk_col("0123456789abcdef", false),
+                mk_col("0123456789", false),
+            ],
+            rows: vec![
+                mk_row(&[Some("xx"), Some("yyyyyyyyyyyyyyyyyy")]),
+                mk_row(&[Some("xxxx"), Some("yyyyyyyyyyyyyyyy")]),
+                mk_row(&[Some("xxxxxx"), Some("yyyyyyyyyyyyyy")]),
+                mk_row(&[Some("xxxxxxxx"), Some("yyyyyyyyyyyy")]),
+                mk_row(&[Some("xxxxxxxxxx"), Some("yyyyyyyyyy")]),
+                mk_row(&[Some("xxxxxxxxxxxx"), Some("yyyyyyyy")]),
+                mk_row(&[Some("xxxxxxxxxxxxxx"), Some("yyyyyy")]),
+                mk_row(&[Some("xxxxxxxxxxxxxxxx"), Some("yyyy")]),
+                mk_row(&[Some("xxxxxxxxxxxxxxxxxx"), Some("yy")]),
+                mk_row(&[Some("xxxxxxxxxxxxxxxxxxxx"), Some("")]),
+            ],
+        }
+    }
+
+    #[test]
+    fn test_old_ascii_wrapped_border1_byte_exact() {
+        // Byte-exact match against psql expected output (psql.out lines 2486-2500).
+        let rs = mk_wrap_rowset_single_header();
+        let pcfg = PsetConfig {
+            format: OutputFormat::Wrapped,
+            border: 1,
+            linestyle: "old-ascii".to_owned(),
+            columns: 40,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_wrapped_pset(&mut out, &rs, &pcfg);
+        // Build expected string line by line to avoid whitespace mangling.
+        let expected_lines = [
+            "  0123456789abcdef   |    0123456789    ",
+            "---------------------+------------------",
+            " xx                  | yyyyyyyyyyyyyyyy ",
+            "                     ; yy",
+            " xxxx                | yyyyyyyyyyyyyyyy",
+            " xxxxxx              | yyyyyyyyyyyyyy",
+            " xxxxxxxx            | yyyyyyyyyyyy",
+            " xxxxxxxxxx          | yyyyyyyyyy",
+            " xxxxxxxxxxxx        | yyyyyyyy",
+            " xxxxxxxxxxxxxx      | yyyyyy",
+            " xxxxxxxxxxxxxxxx    | yyyy",
+            " xxxxxxxxxxxxxxxxxx  | yy",
+            " xxxxxxxxxxxxxxxxxxx | ",
+            " x                     ",
+            "(10 rows)",
+        ];
+        let expected = expected_lines.join("\n") + "\n";
+        assert_eq!(out, expected, "old-ascii wrapped border=1 mismatch");
+    }
+
+    #[test]
+    fn test_old_ascii_wrapped_border2_byte_exact() {
+        // Byte-exact match against psql expected output (psql.out lines 2537-2553).
+        let rs = mk_wrap_rowset_single_header();
+        let pcfg = PsetConfig {
+            format: OutputFormat::Wrapped,
+            border: 2,
+            linestyle: "old-ascii".to_owned(),
+            columns: 40,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_wrapped_pset(&mut out, &rs, &pcfg);
+        let expected = "\
++--------------------+-----------------+\n\
+|  0123456789abcdef  |   0123456789    |\n\
++--------------------+-----------------+\n\
+| xx                 | yyyyyyyyyyyyyyy |\n\
+|                    ; yyy             |\n\
+| xxxx               | yyyyyyyyyyyyyyy |\n\
+|                    ; y               |\n\
+| xxxxxx             | yyyyyyyyyyyyyy  |\n\
+| xxxxxxxx           | yyyyyyyyyyyy    |\n\
+| xxxxxxxxxx         | yyyyyyyyyy      |\n\
+| xxxxxxxxxxxx       | yyyyyyyy        |\n\
+| xxxxxxxxxxxxxx     | yyyyyy          |\n\
+| xxxxxxxxxxxxxxxx   | yyyy            |\n\
+| xxxxxxxxxxxxxxxxxx | yy              |\n\
+| xxxxxxxxxxxxxxxxxx |                 |\n\
+| xx                                   |\n\
++--------------------+-----------------+\n\
+(10 rows)\n";
+        assert_eq!(out, expected, "old-ascii wrapped border=2 mismatch");
+    }
+
+    // -----------------------------------------------------------------------
+    // Old-ASCII expanded wrapped format — `;` / `:` separators (#798)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_old_ascii_expanded_wrapped_border1_byte_exact() {
+        // Byte-exact match for old-ascii expanded wrapped border=1, columns=20.
+        // From psql.out lines 1329-1357:
+        let rs = RowSet {
+            columns: vec![mk_col("ab\n\nc", false), mk_col("a\nbc", false)],
+            rows: vec![mk_row(&[Some("xx"), Some("yyyyyyyyyyyyyyyyyy")])],
+        };
+        let pcfg = PsetConfig {
+            format: OutputFormat::Wrapped,
+            border: 1,
+            linestyle: "old-ascii".to_owned(),
+            columns: 20,
+            expanded: ExpandedMode::On,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_expanded_pset(&mut out, &rs, &pcfg);
+        let expected_lines = [
+            "-[ RECORD 1 ]-------",
+            " ab | xx",
+            "+   ;",
+            "+c  ;",
+            " a  | yyyyyyyyyyyyyy",
+            "+bc ; yyyy",
+        ];
+        let expected = expected_lines.join("\n") + "\n";
+        assert_eq!(
+            out, expected,
+            "old-ascii expanded wrapped border=1 mismatch"
+        );
+    }
+
+    #[test]
+    fn test_old_ascii_expanded_wrapped_border1_single_header() {
+        // psql: old-ascii, expanded, wrapped, border=1, columns=20
+        // Single-line headers: "0123456789abcdef", "0123456789"
+        // Record 1: "xx", "yyyyyyyyyyyyyyyyyy" (18 y's)
+        //
+        // Expected (from psql.out):
+        //   -[ RECORD 1 ]----+----
+        //   0123456789abcdef | xx
+        //   0123456789       | yyy.
+        //                    |.yyy.
+        //                    |.yyy.
+        //                    |.yyy.
+        //                    |.yyy.
+        //                    |.yyy
+        //
+        // Wait - the `.` markers are ASCII style, not old-ascii!
+        // For old-ascii expanded border=1, the separator is `;` for physical wrap.
+        //
+        // Actually checking: at columns=20, old-ascii, border=1, single-header
+        // the overhead = max_name_width(16) + 4 = 20, wrap_w = max(0,3) = 3.
+        // val_part = min(3, 20) = 3.
+        //
+        // But the output section is NOT in old-ascii — it's in the ASCII
+        // section (line 2097 is still in ASCII). The old-ascii version is
+        // at line 2655.
+
+        // psql: old-ascii expanded wrapped, border=1, columns=20 (not possible
+        // to test since the sql uses `\pset columns 20` after `\pset expanded on`
+        // and the test only tests columns 40 for expanded=off + old-ascii).
+        // Actually looking: the second query does test expanded old-ascii.
+        // Line 2655: `\pset border 1` under old-ascii expanded.
+        // Line 2720: `\pset format wrapped`
+        // Expected (psql.out line 2722-2751):
+        //   -[ RECORD 1 ]----+---------------------
+        //   0123456789abcdef | xx
+        //   0123456789       | yyyyyyyyyyyyyyyyyy
+        //   ... (no wrapping happens because wrap_w is large enough)
+
+        // The actual wrapping test would be with the multiline header query.
+        // So let me test the multiline-header old-ascii expanded wrapped border=1.
+        // From psql.out line 1329-1357 (columns=20):
+        let rs = RowSet {
+            columns: vec![mk_col("ab\n\nc", false), mk_col("a\nbc", false)],
+            rows: vec![
+                mk_row(&[Some("xx"), Some("yyyyyyyyyyyyyyyyyy")]),
+                mk_row(&[
+                    Some(
+                        "xxxx\nxxxxxx\nxxxxxxxx\nxxxxxxxxxx\nxxxxxxxxxxxx\n\
+                     xxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxx\nxxxxxxxxxxxxxxxxxx\n\
+                     xxxxxxxxxxxxxxxxxxxx",
+                    ),
+                    Some(
+                        "yyyyyyyyyyyyyyyy\nyyyyyyyyyyyyyy\nyyyyyyyyyyyy\n\
+                     yyyyyyyyyy\nyyyyyyyy\nyyyyyy\nyyyy\nyy\n",
+                    ),
+                ]),
+            ],
+        };
+        let pcfg = PsetConfig {
+            format: OutputFormat::Wrapped,
+            border: 1,
+            linestyle: "old-ascii".to_owned(),
+            columns: 20,
+            expanded: ExpandedMode::On,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_expanded_pset(&mut out, &rs, &pcfg);
+
+        // Expected from psql.out line 1329:
+        // -[ RECORD 1 ]-------
+        let first_line = out.lines().next().unwrap_or("");
+        assert!(
+            first_line.starts_with("-[ RECORD 1 ]"),
+            "expected record header, got: {first_line:?}"
+        );
+        // Record separator should be exactly 20 chars
+        assert_eq!(
+            first_line.len(),
+            20,
+            "record header should be 20 chars, got {} chars: {first_line:?}",
+            first_line.len()
+        );
+    }
+
+    #[test]
+    fn test_old_ascii_expanded_wrapped_border2_byte_exact() {
+        // Byte-exact match for old-ascii expanded wrapped border=2, columns=20.
+        // From psql.out lines 1420-1453:
+        let rs = RowSet {
+            columns: vec![mk_col("ab\n\nc", false), mk_col("a\nbc", false)],
+            rows: vec![mk_row(&[Some("xx"), Some("yyyyyyyyyyyyyyyyyy")])],
+        };
+        let pcfg = PsetConfig {
+            format: OutputFormat::Wrapped,
+            border: 2,
+            linestyle: "old-ascii".to_owned(),
+            columns: 20,
+            expanded: ExpandedMode::On,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_expanded_pset(&mut out, &rs, &pcfg);
+        let expected_lines = [
+            "+-[ RECORD 1 ]-----+",
+            "| ab | xx          |",
+            "|+   ;             |",
+            "|+c  ;             |",
+            "| a  | yyyyyyyyyyy |",
+            "|+bc ; yyyyyyy     |",
+            "+----+-------------+",
+        ];
+        let expected = expected_lines.join("\n") + "\n";
+        assert_eq!(
+            out, expected,
+            "old-ascii expanded wrapped border=2 mismatch"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Expanded record separator width (#798)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_expanded_border1_record_separator_width_wrapped() {
+        // ASCII expanded wrapped, border=1, columns=20
+        // Single-line headers: "0123456789abcdef" (16), "0123456789" (10)
+        // From psql.out: record header is:
+        //   -[ RECORD 1 ]----+----
+        // Which is exactly 22 chars.
+        //
+        // max_name_width = 16, wrap_w = max(20-20, 3) = 3
+        // val_part = min(3, 20) = 3
+        // pipe_pos = 17
+        // label = "-[ RECORD 1 ]" = 14
+        // fill_left = 17 - 14 = 3
+        // right_fill = val_part + 1 = 4
+        // total = 14 + 3 + 1 + 4 = 22
+        let rs = RowSet {
+            columns: vec![
+                mk_col("0123456789abcdef", false),
+                mk_col("0123456789", false),
+            ],
+            rows: vec![mk_row(&[Some("xx"), Some("yyyyyyyyyyyyyyyyyy")])],
+        };
+        let pcfg = PsetConfig {
+            format: OutputFormat::Wrapped,
+            border: 1,
+            linestyle: "ascii".to_owned(),
+            columns: 20,
+            expanded: ExpandedMode::On,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        format_expanded_pset(&mut out, &rs, &pcfg);
+        let first_line = out.lines().next().unwrap_or("");
+        assert_eq!(
+            first_line, "-[ RECORD 1 ]----+----",
+            "record header width mismatch: {first_line:?}"
         );
     }
 }
