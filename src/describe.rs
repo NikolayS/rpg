@@ -5098,8 +5098,16 @@ limit 1"
 /// List collations.
 ///
 /// Matches psql's `\dO [pattern]` output: Schema, Name, Provider, Collate,
-/// Ctype, ICU Locale (PG 16+), ICU Rules (PG 16+).
+/// Ctype, Locale (PG 16+), ICU Rules (PG 16+), Deterministic?.
 /// With `+`: also adds Description.
+///
+/// psql behaviour for the system-schema filter:
+/// - No pattern and no `S` flag: exclude `pg_catalog` / `information_schema`.
+/// - Pattern given OR `S` flag: do not exclude system schemas (so
+///   `\dO *` and `\dO english` search `pg_catalog` too).
+///
+/// An encoding filter (`collencoding IN (-1, …)`) is always applied so only
+/// collations compatible with the current database encoding are shown.
 async fn list_collations(
     client: &Client,
     meta: &ParsedMeta,
@@ -5108,13 +5116,21 @@ async fn list_collations(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.collname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
+    // psql drops the system-schema exclusion when a pattern is given OR
+    // the S modifier is active.  Mirror that behaviour here.
+    let has_pattern = meta.pattern.is_some();
+    let sys_filter = if meta.system || has_pattern {
         String::new()
     } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
     };
 
-    // psql also applies a visibility filter when no schema qualifier is present.
+    // Only show collations compatible with the current database encoding
+    // (encoding -1 means "any encoding").  This matches psql.
+    let encoding_filter =
+        "c.collencoding in (-1, pg_catalog.pg_char_to_encoding(pg_catalog.getdatabaseencoding()))";
+
+    // psql applies a visibility filter when no schema qualifier is present.
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
     } else {
@@ -5127,6 +5143,7 @@ async fn list_collations(
         } else {
             Some(sys_filter.as_str())
         },
+        Some(encoding_filter),
         if visibility_filter.is_empty() {
             None
         } else {
@@ -5150,10 +5167,11 @@ async fn list_collations(
 
     let pg_ver = settings.db_capabilities.pg_major_version();
 
-    // PG17 removed collcollate/collctype and consolidated into colllocale.
-    // PG17 also added the 'b' (builtin) collation provider.
+    // PG17 added the 'b' (builtin) collation provider.
     // PG 15 added colliculocale; PG 16 renamed it to colllocale and added
-    // collicurules.  PG 10-14 have only collcollate / collctype.
+    // collicurules.  PG 14 has only collcollate / collctype.
+    // Note: collcollate / collctype still exist in PG17-18 and psql shows
+    // them, so we always include those columns.
     let provider_expr = if pg_ver.is_some_and(|v| v >= 17) {
         "case c.collprovider
         when 'd' then 'default'
@@ -5169,22 +5187,21 @@ async fn list_collations(
     end as \"Provider\""
     };
 
-    let collate_cols = if pg_ver.is_some_and(|v| v >= 17) {
-        "c.colllocale as \"Locale\""
-    } else {
-        "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\""
-    };
+    // collcollate / collctype are present in all supported PG versions
+    // (14-18) and psql always shows them.
+    let collate_cols = "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\"";
 
-    let icu_locale_col = if pg_ver.is_some_and(|v| v >= 17) {
-        // PG17+: colllocale already shown above; only add ICU Rules.
-        ",\n    c.collicurules as \"ICU Rules\""
-    } else if pg_ver.is_some_and(|v| v >= 16) {
-        ",\n    c.colllocale as \"ICU Locale\",\n    c.collicurules as \"ICU Rules\""
+    let locale_cols = if pg_ver.is_some_and(|v| v >= 16) {
+        ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\""
     } else if pg_ver.is_some_and(|v| v >= 15) {
         ",\n    c.colliculocale as \"ICU Locale\""
     } else {
         ""
     };
+
+    // collisdeterministic was added in PG12; rpg supports PG14+.
+    let deterministic_col =
+        ",\n    case when c.collisdeterministic then 'yes' else 'no' end as \"Deterministic?\"";
 
     let desc_col = if meta.plus {
         ",\n    pg_catalog.obj_description(c.oid, 'pg_collation') as \"Description\""
@@ -5197,7 +5214,7 @@ async fn list_collations(
     n.nspname as \"Schema\",
     c.collname as \"Name\",
     {provider_expr},
-    {collate_cols}{icu_locale_col}{desc_col}
+    {collate_cols}{locale_cols}{deterministic_col}{desc_col}
 from pg_catalog.pg_collation as c
 join pg_catalog.pg_namespace as n
     on n.oid = c.collnamespace
@@ -6946,5 +6963,160 @@ order by 1, 2"
             acl_pos < desc_pos,
             "Access privileges must appear before Description: {sql}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_collations SQL generation — \dO
+    // -----------------------------------------------------------------------
+
+    /// Build collation SQL the same way `list_collations` does for `\dO *`
+    /// (pattern given, no S flag, PG 16).
+    fn do_collation_sql_with_pattern() -> String {
+        let m = meta(MetaCmd::ListCollations, false, false, Some("*"));
+        let name_filter =
+            pattern::where_clause(m.pattern.as_deref(), "c.collname", Some("n.nspname"));
+
+        let has_pattern = m.pattern.is_some();
+        let sys_filter = if m.system || has_pattern {
+            String::new()
+        } else {
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+        };
+
+        let encoding_filter = "c.collencoding in (-1, pg_catalog.pg_char_to_encoding(pg_catalog.getdatabaseencoding()))";
+
+        let visibility_filter = if m.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+            String::new()
+        } else {
+            "pg_catalog.pg_collation_is_visible(c.oid)".to_owned()
+        };
+
+        let where_parts: Vec<&str> = [
+            if sys_filter.is_empty() {
+                None
+            } else {
+                Some(sys_filter.as_str())
+            },
+            Some(encoding_filter),
+            if visibility_filter.is_empty() {
+                None
+            } else {
+                Some(visibility_filter.as_str())
+            },
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("where {}", where_parts.join("\n    and "))
+        };
+
+        let provider_expr = "case c.collprovider
+        when 'd' then 'default'
+        when 'c' then 'libc'
+        when 'i' then 'icu'
+    end as \"Provider\"";
+
+        let collate_cols = "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\"";
+        let locale_cols = ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\"";
+        let deterministic_col =
+            ",\n    case when c.collisdeterministic then 'yes' else 'no' end as \"Deterministic?\"";
+
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    c.collname as \"Name\",
+    {provider_expr},
+    {collate_cols}{locale_cols}{deterministic_col}
+from pg_catalog.pg_collation as c
+join pg_catalog.pg_namespace as n
+    on n.oid = c.collnamespace
+{where_clause}
+order by 1, 2"
+        )
+    }
+
+    /// `\dO *` must NOT exclude `pg_catalog` (pattern drops the system filter).
+    #[test]
+    fn list_collations_wildcard_does_not_exclude_pg_catalog() {
+        let sql = do_collation_sql_with_pattern();
+        assert!(
+            !sql.contains("pg_catalog'"),
+            "\\dO * SQL must not exclude pg_catalog:\n{sql}"
+        );
+    }
+
+    /// The collation query must include the encoding filter.
+    #[test]
+    fn list_collations_has_encoding_filter() {
+        let sql = do_collation_sql_with_pattern();
+        assert!(
+            sql.contains("collencoding"),
+            "collation SQL must filter by encoding:\n{sql}"
+        );
+        assert!(
+            sql.contains("getdatabaseencoding"),
+            "encoding filter must reference getdatabaseencoding():\n{sql}"
+        );
+    }
+
+    /// The collation query must include Collate, Ctype, and Deterministic?
+    /// columns (matching psql output).
+    #[test]
+    fn list_collations_has_required_columns() {
+        let sql = do_collation_sql_with_pattern();
+        assert!(
+            sql.contains("\"Collate\""),
+            "collation SQL must have Collate column:\n{sql}"
+        );
+        assert!(
+            sql.contains("\"Ctype\""),
+            "collation SQL must have Ctype column:\n{sql}"
+        );
+        assert!(
+            sql.contains("\"Deterministic?\""),
+            "collation SQL must have Deterministic? column:\n{sql}"
+        );
+        assert!(
+            sql.contains("\"Provider\""),
+            "collation SQL must have Provider column:\n{sql}"
+        );
+    }
+
+    /// `\dO` without pattern MUST exclude `pg_catalog` (matching psql).
+    #[test]
+    fn list_collations_no_pattern_excludes_pg_catalog() {
+        let m = meta(MetaCmd::ListCollations, false, false, None);
+        let has_pattern = m.pattern.is_some();
+        let sys_filter = if m.system || has_pattern {
+            String::new()
+        } else {
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+        };
+        assert!(
+            sys_filter.contains("pg_catalog"),
+            "\\dO without pattern should exclude pg_catalog"
+        );
+    }
+
+    /// `\dOS` (system flag) must NOT exclude `pg_catalog`.
+    #[test]
+    fn list_collations_system_flag_includes_pg_catalog() {
+        let m = meta(MetaCmd::ListCollations, false, true, None);
+        let has_pattern = m.pattern.is_some();
+        let sys_filter = if m.system || has_pattern {
+            String::new()
+        } else {
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+        };
+        assert!(sys_filter.is_empty(), "\\dOS should not exclude pg_catalog");
     }
 }
