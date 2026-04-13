@@ -12,7 +12,7 @@ Single binary, no dependencies, cross-platform.
 
 ## Features
 
-- **psql-compatible** — `\`-commands are standard psql meta-commands (`\d`, `\dt`, `\copy`, `\watch`, ...); `/`-commands are rpg extensions — both AI and non-AI. Same muscle memory, clearly distinct additions.
+- **[psql-compatible](docs/psql-compat.md)** — `\`-commands are standard psql meta-commands (`\d`, `\dt`, `\copy`, `\watch`, ...); `/`-commands are rpg extensions — both AI and non-AI. Same muscle memory, clearly distinct additions.
 - **Active Session History** — `/ash` live wait event timeline with drill-down; pg_ash history integration
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`, `/text2sql`, `/yolo`
 - **DBA diagnostics** — 15+ `/dba` commands: activity, locks, bloat, indexes, vacuum, replication, config
@@ -388,11 +388,11 @@ Connect through an SSH bastion with no extra tooling:
 rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 ```
 
-## PostgreSQL compatibility
+## psql compatibility
 
 Supports PostgreSQL 14–18.
 
-rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree). Both psql and rpg are run against the same queries; outputs are normalized and diff'd — pass only if identical.
+rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree) in CI on every push. Both psql and rpg execute the same queries against the same server; outputs are normalized and diff'd — pass only if identical.
 
 **222 of 232 PostgreSQL regression tests pass** (0 failures, 10 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
 
