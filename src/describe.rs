@@ -5406,21 +5406,48 @@ order by 1"
 
 /// List operator classes for access methods.
 ///
-/// Matches psql's `\dAc [pattern]` output: AM, Input type, Storage type,
-/// Operator family, Default.
-/// With `+`: also adds Description.
+/// Matches psql's `\dAc [AM-pattern [class-pattern]]` output: AM, Input type,
+/// Storage type, Operator class, Default?.
+/// With `+`: also adds Operator family, Owner, Description.
 async fn list_op_classes(
     client: &Client,
     meta: &ParsedMeta,
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    let name_filter =
-        pattern::where_clause(meta.pattern.as_deref(), "c.opcname", Some("am.amname"));
+    // psql treats \dAc as taking two separate pattern arguments:
+    //   \dAc [AM-pattern [opclass-pattern]]
+    // Split the combined pattern on whitespace to get each filter.
+    let (am_pat, class_pat) = match meta.pattern.as_deref() {
+        Some(p) => {
+            let mut parts = p.splitn(2, char::is_whitespace);
+            let first = parts.next().filter(|s| !s.is_empty());
+            let second = parts.next().map(str::trim).filter(|s| !s.is_empty());
+            (first, second)
+        }
+        None => (None, None),
+    };
 
-    let where_clause = if name_filter.is_empty() {
+    let am_filter = pattern::where_clause(am_pat, "am.amname", None);
+    let class_filter = pattern::where_clause(class_pat, "c.opcname", None);
+
+    let mut where_parts: Vec<&str> = Vec::new();
+    if !am_filter.is_empty() {
+        where_parts.push(&am_filter);
+    }
+    if !class_filter.is_empty() {
+        where_parts.push(&class_filter);
+    }
+    let where_clause = if where_parts.is_empty() {
         String::new()
     } else {
-        format!("where {name_filter}")
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let verbose_cols = if meta.plus {
+        ",\n    of.opfname as \"Operator family\",\
+         \n    pg_catalog.pg_get_userbyid(c.opcowner) as \"Owner\""
+    } else {
+        ""
     };
 
     let desc_col = if meta.plus {
@@ -5438,8 +5465,8 @@ async fn list_op_classes(
         then pg_catalog.format_type(c.opckeytype, null)
         else ''
     end as \"Storage type\",
-    of.opfname as \"Operator family\",
-    case when c.opcdefault then 'yes' else 'no' end as \"Default\"{desc_col}
+    c.opcname as \"Operator class\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default?\"{verbose_cols}{desc_col}
 from pg_catalog.pg_opclass as c
 left join pg_catalog.pg_am as am
     on am.oid = c.opcmethod
@@ -7242,5 +7269,120 @@ order by 1, 2"
             "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
         };
         assert!(sys_filter.is_empty(), "\\dOS should not exclude pg_catalog");
+    }
+    // \dAc — operator class listing uses opcname, not opfname
+    // -----------------------------------------------------------------------
+
+    /// The basic \dAc SQL must select `c.opcname` (operator class name), not
+    /// `of.opfname` (operator family name).
+    #[test]
+    fn dac_sql_uses_opcname_not_opfname() {
+        // Reproduce the SQL building logic from list_op_classes (no pattern).
+        let am_filter = pattern::where_clause(None, "am.amname", None);
+        let class_filter = pattern::where_clause(None, "c.opcname", None);
+        assert!(am_filter.is_empty());
+        assert!(class_filter.is_empty());
+
+        let sql = "select
+    am.amname as \"AM\",
+    pg_catalog.format_type(c.opcintype, null) as \"Input type\",
+    case
+        when c.opckeytype <> 0
+        then pg_catalog.format_type(c.opckeytype, null)
+        else ''
+    end as \"Storage type\",
+    c.opcname as \"Operator class\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default?\"
+from pg_catalog.pg_opclass as c";
+
+        assert!(
+            sql.contains("c.opcname as \"Operator class\""),
+            "must select opcname, not opfname: {sql}"
+        );
+        assert!(
+            !sql.contains("opfname as \"Operator family\""),
+            "basic \\dAc must NOT show Operator family as main column: {sql}"
+        );
+    }
+
+    /// `\dAc btree` — the first argument filters on AM name, not opclass.
+    #[test]
+    fn dac_pattern_filters_am_name() {
+        let pattern = "btree";
+        let mut parts = pattern.splitn(2, char::is_whitespace);
+        let am_pat = parts.next().filter(|s| !s.is_empty());
+        let class_pat = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+        let am_filter = pattern::where_clause(am_pat, "am.amname", None);
+        let class_filter = pattern::where_clause(class_pat, "c.opcname", None);
+
+        assert!(
+            am_filter.contains("am.amname = 'btree'"),
+            "first arg must filter am.amname: {am_filter}"
+        );
+        assert!(
+            class_filter.is_empty(),
+            "no second arg means no class filter: {class_filter}"
+        );
+    }
+
+    /// `\dAc btree int*` — first arg filters AM, second filters opclass name.
+    #[test]
+    fn dac_two_patterns_filter_am_and_class() {
+        let pattern = "btree int*";
+        let mut parts = pattern.splitn(2, char::is_whitespace);
+        let am_pat = parts.next().filter(|s| !s.is_empty());
+        let class_pat = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+        let am_filter = pattern::where_clause(am_pat, "am.amname", None);
+        let class_filter = pattern::where_clause(class_pat, "c.opcname", None);
+
+        assert!(
+            am_filter.contains("am.amname = 'btree'"),
+            "first arg must filter am.amname: {am_filter}"
+        );
+        assert!(
+            class_filter.contains("c.opcname LIKE 'int%'"),
+            "second arg must filter c.opcname with wildcard: {class_filter}"
+        );
+    }
+
+    /// `\dAc+` verbose mode adds Operator family and Owner columns.
+    #[test]
+    fn dac_plus_has_opfamily_and_owner() {
+        let verbose_cols = ",\n    of.opfname as \"Operator family\",\
+             \n    pg_catalog.pg_get_userbyid(c.opcowner) as \"Owner\"";
+        let desc_col = ",\n    pg_catalog.obj_description(c.oid, 'pg_opclass') as \"Description\"";
+
+        let sql = format!(
+            "select
+    am.amname as \"AM\",
+    pg_catalog.format_type(c.opcintype, null) as \"Input type\",
+    case
+        when c.opckeytype <> 0
+        then pg_catalog.format_type(c.opckeytype, null)
+        else ''
+    end as \"Storage type\",
+    c.opcname as \"Operator class\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default?\"{verbose_cols}{desc_col}
+from pg_catalog.pg_opclass as c"
+        );
+
+        assert!(
+            sql.contains("c.opcname as \"Operator class\""),
+            "must have Operator class column: {sql}"
+        );
+        assert!(
+            sql.contains("of.opfname as \"Operator family\""),
+            "verbose must have Operator family column: {sql}"
+        );
+        assert!(
+            sql.contains("pg_get_userbyid(c.opcowner) as \"Owner\""),
+            "verbose must have Owner column: {sql}"
+        );
+        assert!(
+            sql.contains("obj_description(c.oid, 'pg_opclass') as \"Description\""),
+            "verbose must have Description column: {sql}"
+        );
     }
 }
