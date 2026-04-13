@@ -1617,6 +1617,8 @@ fn i3_single_host_regression() {
         "-c",
         "SELECT 1",
     ]);
+    // Timeout prevents CI from hanging on slow DNS resolution.
+    cmd.env("PGCONNECT_TIMEOUT", "10");
     if let Some(pw) = trust_password() {
         cmd.env("PGPASSWORD", pw);
     }
