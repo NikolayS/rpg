@@ -240,35 +240,93 @@ normalize() {
     # synchronously inline).
     #
     # Strategy: within each paragraph (blank-line-delimited block),
-    # separate lines into "data" (non-diagnostic) and "diagnostic"
-    # (NOTICE/WARNING) buckets.  Emit all data lines first, then all
-    # diagnostic lines.  This gives a canonical ordering regardless of
-    # when the async notices arrived, while keeping notices associated
-    # with their originating statement block.
+    # separate lines into "data" and "diagnostic" (NOTICE/WARNING plus
+    # their DETAIL/HINT continuations) buckets.  Emit all data lines
+    # first, then all diagnostic lines.
     #
-    # Only NOTICE: and WARNING: are reordered — ERROR/DETAIL/HINT stay
-    # in place because their position is deterministic (they come from
-    # the main query path, not the async notice channel).
+    # Cross-paragraph merging: if a paragraph consists entirely of
+    # diagnostic lines (no data), those diagnostics are merged into
+    # the preceding paragraph.  This handles the case where rpg
+    # delivers a WARNING after a blank line that psql would have
+    # emitted before the blank line (e.g. in the transactions test).
+    # The diagnostics always stay with the paragraph BEFORE the
+    # blank line.
 
-    function flush_paragraph() {
+    function flush_paragraph(    i) {
       for (i = 1; i <= nd; i++) print data[i]
       for (i = 1; i <= nn; i++) print diag[i]
       nd = 0; nn = 0
       delete data; delete diag
     }
 
+    BEGIN {
+      nd = 0; nn = 0; in_diag = 0
+      pending_blank = 0
+      merge_pending = 0
+    }
+
     /^$/ {
-      flush_paragraph()
-      print ""
+      in_diag = 0
+      if (pending_blank) {
+        # Two consecutive blanks: hard section boundary.
+        flush_paragraph()
+        print ""
+        print ""
+        pending_blank = 0
+        merge_pending = 0
+        next
+      }
+      if (merge_pending) {
+        # Blank after merge-pending diagnostics: the diagnostics
+        # have been absorbed.  This blank is a real paragraph
+        # boundary.
+        flush_paragraph()
+        print ""
+        merge_pending = 0
+        next
+      }
+      pending_blank = 1
       next
     }
 
     /^(NOTICE|WARNING):/ {
+      if (pending_blank) {
+        # Blank then diagnostic: tentatively merge into previous
+        # paragraph.  The blank is consumed (not emitted).
+        pending_blank = 0
+        merge_pending = 1
+      }
+      in_diag = 1
       diag[++nn] = $0
       next
     }
 
-    { data[++nd] = $0 }
+    # DETAIL/HINT continuation of a diagnostic block
+    in_diag && /^(DETAIL|HINT):/ {
+      diag[++nn] = $0
+      next
+    }
+
+    # Non-diagnostic, non-blank line
+    {
+      if (pending_blank) {
+        # Normal paragraph boundary: blank followed by data.
+        flush_paragraph()
+        print ""
+        pending_blank = 0
+      } else if (merge_pending) {
+        # Diagnostics after a blank turned out to be followed by
+        # data — this is a new paragraph that starts with
+        # diagnostics then has data.  The diagnostics stay with
+        # the *previous* paragraph (merged), and this data line
+        # starts a fresh paragraph.
+        flush_paragraph()
+        print ""
+        merge_pending = 0
+      }
+      in_diag = 0
+      data[++nd] = $0
+    }
 
     END { flush_paragraph() }
   ' | \
