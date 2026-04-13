@@ -3269,6 +3269,8 @@ Session commands:
 
 Describe commands:
   \d  [pattern]     describe objects
+  \dA [pattern]     list access methods
+  \dAc [pattern]    list operator classes
   \db [pattern]     list tablespaces
   \dc [pattern]     list conversions
   \dC [pattern]     list casts
@@ -3280,12 +3282,20 @@ Describe commands:
   \dew [pattern]    list foreign-data wrappers
   \det [pattern]    list foreign tables via FDW
   \df [pattern]     list functions
+  \dF [pattern]     list text search configurations
+  \dFd [pattern]    list text search dictionaries
+  \dFp [pattern]    list text search parsers
+  \dFt [pattern]    list text search templates
   \dg [pattern]     list roles (same as \du)
   \di [pattern]     list indexes
   \dm [pattern]     list materialised views
   \dn [pattern]     list schemas
   \do [pattern]     list operators
+  \dO [pattern]     list collations
   \dp [pattern]     list access privileges
+  \dP [pattern]     list partitioned relations
+  \dPt [pattern]    list partitioned tables
+  \dPi [pattern]    list partitioned indexes
   \ds [pattern]     list sequences
   \dt [pattern]     list tables
   \dT [pattern]     list data types
@@ -5660,6 +5670,14 @@ async fn dispatch_meta(
                     | MetaCmd::ListExtStatistics
                     | MetaCmd::ListPublications
                     | MetaCmd::ListSubscriptions
+                    | MetaCmd::ListCollations
+                    | MetaCmd::ListPartitionedRels
+                    | MetaCmd::ListAccessMethods
+                    | MetaCmd::ListOpClasses
+                    | MetaCmd::ListTSConfigs
+                    | MetaCmd::ListTSDicts
+                    | MetaCmd::ListTSParsers
+                    | MetaCmd::ListTSTemplates
             ) =>
         {
             crate::describe::execute(
