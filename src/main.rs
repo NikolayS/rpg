@@ -5,11 +5,17 @@
 
 use clap::Parser;
 
+// Output macros — must be declared before all other modules so they are in scope.
+#[macro_use]
+mod macros;
+
 // Core modules.
 mod ai;
+#[cfg(not(target_arch = "wasm32"))]
 mod ash;
 mod capabilities;
 mod compat;
+#[cfg(not(target_arch = "wasm32"))]
 mod complete;
 mod conditional;
 mod config;
@@ -20,8 +26,11 @@ mod dba;
 mod describe;
 mod explain;
 mod highlight;
+#[cfg(not(target_arch = "wasm32"))]
 mod history_picker;
 mod init;
+#[allow(dead_code, unused_imports)]
+mod input;
 mod io;
 mod large_object;
 mod logging;
@@ -42,15 +51,23 @@ mod report;
     clippy::pedantic,
     clippy::nursery
 )]
+#[cfg(not(target_arch = "wasm32"))]
 mod rpg;
 mod safety;
 mod session;
 mod session_store;
 mod setup;
+// SSH tunneling uses russh which is not available for WASM targets.
+#[cfg(not(target_arch = "wasm32"))]
 mod ssh_tunnel;
 mod statusline;
+mod term;
 mod update;
 mod vars;
+// WASM browser support: WebSocket connector and wasm-bindgen entry point.
+// Only compiled on wasm32 targets — invisible to native builds.
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 /// Build-time git commit hash injected by `build.rs` (8 hex chars).
 const GIT_HASH: &str = env!("RPG_GIT_HASH");
@@ -385,9 +402,13 @@ impl Cli {
             force_password: self.password,
             no_password: self.no_password,
             sslmode: self.sslmode.clone(),
+            // SSH tunneling is not available on WASM targets.
+            #[cfg(not(target_arch = "wasm32"))]
             ssh_tunnel: self.ssh_tunnel.as_deref().and_then(|s| {
                 ssh_tunnel::SshTunnelSpec::parse(s).map(config::SshTunnelConfig::from)
             }),
+            #[cfg(target_arch = "wasm32")]
+            ssh_tunnel: None,
         }
     }
 }
@@ -595,21 +616,31 @@ fn build_settings(
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build tokio runtime");
-    rt.block_on(async_main());
+    // On WASM, wasm-bindgen calls main() automatically via __wbindgen_start.
+    // block_on() is incompatible with the browser event loop, so main() is a
+    // no-op here — run_rpg() in src/wasm/entry.rs is the real browser entry.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+        rt.block_on(async_main());
+    }
 }
 
 #[allow(clippy::too_many_lines)]
+#[cfg(not(target_arch = "wasm32"))]
 async fn async_main() {
     // Install the default rustls CryptoProvider before any TLS operations.
     // Required because multiple dependencies (tokio-postgres-rustls, reqwest)
     // pull in different crypto backends, preventing auto-selection.
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .ok();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .ok();
+    }
 
     let mut cli = Cli::parse();
 
@@ -676,15 +707,24 @@ async fn async_main() {
                 update::record_update_check();
 
                 if cli.update {
-                    println!("Downloading update from {}", info.download_url);
-                    match update::download_and_replace(&http, &info.download_url).await {
-                        Ok(()) => {
-                            println!("rpg updated to {} — please restart.", info.version);
+                    // Self-update requires filesystem access (not available on WASM).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        println!("Downloading update from {}", info.download_url);
+                        match update::download_and_replace(&http, &info.download_url).await {
+                            Ok(()) => {
+                                println!("rpg updated to {} — please restart.", info.version);
+                            }
+                            Err(e) => {
+                                eprintln!("rpg: update failed: {e}");
+                                std::process::exit(2);
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("rpg: update failed: {e}");
-                            std::process::exit(2);
-                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        eprintln!("rpg: self-update not supported in browser");
+                        std::process::exit(2);
                     }
                 }
             }
@@ -800,6 +840,8 @@ async fn async_main() {
     // If an SSH tunnel is configured, establish it now and redirect the
     // Postgres host/port to the local tunnel endpoint.  The `_tunnel` handle
     // must stay alive for the entire process (dropping it kills the tunnel).
+    // SSH tunneling is not available on WASM targets (no russh dependency).
+    #[cfg(not(target_arch = "wasm32"))]
     let _tunnel: Option<ssh_tunnel::SshTunnel> = if let Some(ref tcfg) = opts.ssh_tunnel {
         let target_host = opts.host.clone().unwrap_or_else(|| "localhost".to_owned());
         let target_port = opts.port.unwrap_or(5432);
@@ -824,6 +866,10 @@ async fn async_main() {
     } else {
         None
     };
+    // On WASM the tunnel handle is a unit placeholder so the borrow checker
+    // sees the variable used regardless of cfg.
+    #[cfg(target_arch = "wasm32")]
+    let _tunnel: Option<()> = None;
 
     // Resolve parameters once; pass into connect() so both display and the
     // actual driver use the exact same values (avoids double-resolve drift).

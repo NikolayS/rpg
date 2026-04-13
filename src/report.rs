@@ -37,14 +37,14 @@ pub async fn run_report(client: &Client, format: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn run_report_text(server_version: &str) -> i32 {
-    println!("=== Rpg Health Report ===");
-    println!();
-    println!("PostgreSQL server version: {server_version}");
-    println!();
-    println!("Use \\dba in the interactive REPL for diagnostic queries.");
-    println!();
-    println!("=== Summary ===");
-    println!("Analyzers: 0 | Critical: 0 | Warnings: 0 | Clean: 0");
+    rpg_println!("=== Rpg Health Report ===");
+    rpg_println!();
+    rpg_println!("PostgreSQL server version: {server_version}");
+    rpg_println!();
+    rpg_println!("Use \\dba in the interactive REPL for diagnostic queries.");
+    rpg_println!();
+    rpg_println!("=== Summary ===");
+    rpg_println!("Analyzers: 0 | Critical: 0 | Warnings: 0 | Clean: 0");
 
     0
 }
@@ -66,7 +66,7 @@ fn run_report_json(server_version: &str) -> i32 {
         "note": "Use \\dba in the interactive REPL for diagnostic queries.",
     });
 
-    println!(
+    rpg_println!(
         "{}",
         serde_json::to_string_pretty(&output)
             .unwrap_or_else(|e| { format!("{{\"error\": \"{e}\"}}") })

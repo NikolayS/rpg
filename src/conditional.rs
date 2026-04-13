@@ -41,7 +41,7 @@ pub fn eval_bool(expr: &str) -> bool {
 /// Like `eval_bool` but distinguishes invalid expressions from valid false.
 ///
 /// Returns `Some(true)` for recognised truthy values, `Some(false)` for
-/// recognised falsy values (`false`, `off`, `0`, `no`, `f`, `n`, ``),
+/// recognised falsy values (`false`, `off`, `0`, `no`, `f`, `n`, empty string),
 /// and `None` for anything that is not a recognised boolean.
 pub fn eval_bool_strict(expr: &str) -> Option<bool> {
     match expr.trim().to_lowercase().as_str() {

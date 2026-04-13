@@ -47,23 +47,33 @@ const INV_READ: i32 = 0x0004_0000; // 0x40000
 ///
 /// Returns the OID of the created large object so the caller can set LASTOID.
 pub async fn lo_import(client: &Client, filename: &str, comment: &str, quiet: bool) -> Option<i64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, filename, comment, quiet);
+        rpg_eprintln!("\\lo_import: not available on wasm32-unknown-unknown (no filesystem)");
+        return None;
+    }
+
     // Read the file before touching the database so that a missing file
     // produces a clear error without starting a transaction.
-    let data = match read_file(filename) {
-        Ok(d) => d,
-        Err(e) => {
-            // psql prints the error without a command prefix, e.g.:
-            // could not open file "foo": No such file or directory
-            eprintln!("{e}");
-            return None;
-        }
-    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let data = match read_file(filename) {
+            Ok(d) => d,
+            Err(e) => {
+                // psql prints the error without a command prefix, e.g.:
+                // could not open file "foo": No such file or directory
+                rpg_eprintln!("{e}");
+                return None;
+            }
+        };
 
-    match run_lo_import(client, filename, comment, &data, quiet).await {
-        Ok(oid) => Some(oid),
-        Err(e) => {
-            eprintln!("\\lo_import: {e}");
-            None
+        match run_lo_import(client, filename, comment, &data, quiet).await {
+            Ok(oid) => Some(oid),
+            Err(e) => {
+                rpg_eprintln!("\\lo_import: {e}");
+                None
+            }
         }
     }
 }
@@ -127,7 +137,7 @@ async fn run_lo_import(
 
     // With -q (quiet) psql suppresses the success message.
     if !quiet {
-        println!("lo_import {oid}");
+        rpg_println!("lo_import {oid}");
     }
     Ok(oid)
 }
@@ -147,18 +157,28 @@ async fn run_lo_import(
 /// 6. Write the accumulated bytes to the local file.
 /// 7. Print `lo_export`.
 pub async fn lo_export(client: &Client, loid: &str, filename: &str, quiet: bool) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, loid, filename, quiet);
+        rpg_eprintln!("\\lo_export: not available on wasm32-unknown-unknown (no filesystem)");
+        return;
+    }
+
     // psql uses atooid() which returns 0 for non-numeric input, then the server
     // returns "large object 0 does not exist".  Match that behaviour.
-    let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
 
-    match run_lo_export(client, loid_parsed, filename).await {
-        Ok(()) => {
-            if !quiet {
-                println!("lo_export");
+        match run_lo_export(client, loid_parsed, filename).await {
+            Ok(()) => {
+                if !quiet {
+                    rpg_println!("lo_export");
+                }
             }
+            // psql prints the PostgreSQL error directly without a command prefix.
+            Err(e) => rpg_eprintln!("{e}"),
         }
-        // psql prints the PostgreSQL error directly without a command prefix.
-        Err(e) => eprintln!("{e}"),
     }
 }
 
@@ -252,11 +272,11 @@ pub async fn lo_unlink(client: &Client, loid: &str, quiet: bool) {
     match simple_exec(client, &format!("select lo_unlink({loid_parsed})")).await {
         Ok(()) => {
             if !quiet {
-                println!("lo_unlink {loid_parsed}");
+                rpg_println!("lo_unlink {loid_parsed}");
             }
         }
         // psql prints the PostgreSQL error directly without a command prefix.
-        Err(e) => eprintln!("{e}"),
+        Err(e) => rpg_eprintln!("{e}"),
     }
 }
 
@@ -351,7 +371,7 @@ async fn run_and_print(client: &Client, sql: &str, title: Option<&str>) {
             print_table(&col_names, &rows, title);
         }
         Err(e) => {
-            eprintln!("{e}");
+            rpg_eprintln!("{e}");
         }
     }
 }
@@ -368,7 +388,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     if col_names.is_empty() {
         let n = rows.len();
         let word = if n == 1 { "row" } else { "rows" };
-        println!("({n} {word})");
+        rpg_println!("({n} {word})");
         return;
     }
 
@@ -408,10 +428,10 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
     if let Some(t) = title {
         let tlen = t.len();
         if tlen >= table_width {
-            println!("{t}");
+            rpg_println!("{t}");
         } else {
             let pad = (table_width - tlen) / 2;
-            println!("{:pad$}{t}", "");
+            rpg_println!("{:pad$}{t}", "");
         }
     }
 
@@ -468,7 +488,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         }
         s
     };
-    println!("{header_line}");
+    rpg_println!("{header_line}");
 
     // Separator.
     let sep: String = widths
@@ -476,7 +496,7 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
         .map(|&w| "-".repeat(w + 2))
         .collect::<Vec<_>>()
         .join("+");
-    println!("{sep}");
+    rpg_println!("{sep}");
 
     // Data rows, handling multiline cells.
     for srow in &split_rows {
@@ -493,15 +513,15 @@ fn print_table(col_names: &[String], rows: &[Vec<String>], title: Option<&str>) 
                     (text, w, has_more)
                 })
                 .collect();
-            println!("{}", build_line(&cells));
+            rpg_println!("{}", build_line(&cells));
         }
     }
 
     let n = rows.len();
     let word = if n == 1 { "row" } else { "rows" };
-    println!("({n} {word})");
+    rpg_println!("({n} {word})");
     // psql always prints a blank line after the result (aligned format trailing separator).
-    println!();
+    rpg_println!();
 }
 
 /// Return the OS error message without the Rust "(os error N)" suffix.

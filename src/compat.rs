@@ -286,9 +286,9 @@ pub fn print_compat_report() -> (usize, usize) {
         notes = "-".repeat(notes_w),
     );
 
-    println!("psql compatibility report");
-    println!("{separator}");
-    println!(
+    rpg_println!("psql compatibility report");
+    rpg_println!("{separator}");
+    rpg_println!(
         "| {:<cmd_w$} | {:<status_w$} | {:<notes_w$} |",
         "Command",
         "Status",
@@ -297,13 +297,13 @@ pub fn print_compat_report() -> (usize, usize) {
         status_w = status_w,
         notes_w = notes_w,
     );
-    println!("{separator}");
+    rpg_println!("{separator}");
 
     let mut total: usize = 0;
     let mut supported: usize = 0;
 
     for (cat, entries) in &cats {
-        println!(
+        rpg_println!(
             "| {:<cmd_w$} | {:<status_w$} | {:<notes_w$} |",
             format!("[{cat}]"),
             "",
@@ -317,7 +317,7 @@ pub fn print_compat_report() -> (usize, usize) {
             if e.status.is_supported() {
                 supported += 1;
             }
-            println!(
+            rpg_println!(
                 "| {:<cmd_w$} | {:<status_w$} | {:<notes_w$} |",
                 e.command,
                 e.status.label(),
@@ -329,14 +329,14 @@ pub fn print_compat_report() -> (usize, usize) {
         }
     }
 
-    println!("{separator}");
+    rpg_println!("{separator}");
 
     let pct = if total == 0 {
         0
     } else {
         supported * 100 / total
     };
-    println!("Overall: {supported}/{total} commands supported ({pct}%)");
+    rpg_println!("Overall: {supported}/{total} commands supported ({pct}%)");
 
     (supported, total)
 }

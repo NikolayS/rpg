@@ -19,6 +19,11 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Benchmark
 // them without restructuring the main binary's module tree.
 // ---------------------------------------------------------------------------
 
+// macros.rs must be included first — output.rs uses `rpg_eprint!`.
+#[macro_use]
+#[path = "../src/macros.rs"]
+mod macros;
+
 #[path = "../src/query.rs"]
 mod query;
 
