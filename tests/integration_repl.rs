@@ -3,7 +3,7 @@
 //! These tests require a running Postgres instance. Start one with:
 //!
 //! ```sh
-//! docker compose -f docker-compose.test.yml up -d --wait
+//! docker compose -f tests/docker-compose.test.yml up -d --wait
 //! ```
 //!
 //! Then run with:
@@ -34,7 +34,7 @@ macro_rules! connect_or_skip {
                 eprintln!(
                     "skipping integration test — cannot connect to test DB: {e}\n\
                      Start Postgres with: \
-                     docker compose -f docker-compose.test.yml up -d --wait"
+                     docker compose -f tests/docker-compose.test.yml up -d --wait"
                 );
                 return;
             }

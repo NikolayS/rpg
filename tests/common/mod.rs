@@ -21,7 +21,7 @@ use std::env;
 use tokio_postgres::{Client, Error, NoTls};
 
 // ---------------------------------------------------------------------------
-// Connection defaults (match docker-compose.test.yml)
+// Connection defaults (match tests/docker-compose.test.yml)
 // ---------------------------------------------------------------------------
 
 const DEFAULT_HOST: &str = "localhost";
