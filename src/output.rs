@@ -767,28 +767,16 @@ fn write_aligned_row_border<F>(
             }
             // Old-ASCII border 0/1: no trailing marker.
         } else {
-            match border {
-                0 => {
-                    let last_continues = col_continues.last().copied().unwrap_or(false);
-                    if !is_last_phys && last_continues {
-                        out.push('+');
-                    }
+            let last_continues = col_continues.last().copied().unwrap_or(false);
+            if border == 2 {
+                if !is_last_phys && last_continues {
+                    out.push_str("+|");
+                } else {
+                    out.push_str(" |");
                 }
-                2 => {
-                    let last_continues = col_continues.last().copied().unwrap_or(false);
-                    if !is_last_phys && last_continues {
-                        out.push_str("+|");
-                    } else {
-                        out.push_str(" |");
-                    }
-                }
-                _ => {
-                    let last_continues = col_continues.last().copied().unwrap_or(false);
-                    if !is_last_phys && last_continues {
-                        out.push('+');
-                    }
-                    // No trailing space on data rows (psql compat).
-                }
+            } else if !is_last_phys && last_continues {
+                out.push('+');
+                // No trailing space on data rows (psql compat).
             }
         }
         out.push('\n');
@@ -889,6 +877,12 @@ fn write_row_count(out: &mut String, n: usize) {
 /// Format expanded output using full `PsetConfig` (supports border=0/1/2 and wrapping).
 #[allow(clippy::too_many_lines)]
 fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
+    struct WrapLine {
+        text: String,
+        is_physical_cont: bool,
+        is_last_of_segment: bool,
+    }
+
     let cols = &rs.columns;
     let rows = &rs.rows;
     let border = cfg.border;
@@ -1048,11 +1042,6 @@ fn format_expanded_pset(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
     // For each physical output line we need: text, is_physical_cont, is_last_of_segment.
     // is_physical_cont: true if this line continues a previous physical wrap (use |. separator).
     // is_last_of_segment: true if no more physical lines follow in the same segment.
-    struct WrapLine {
-        text: String,
-        is_physical_cont: bool,
-        is_last_of_segment: bool,
-    }
 
     for (rec_idx, row) in rows.iter().enumerate() {
         // --- Record separator / header ---
@@ -1760,7 +1749,10 @@ pub fn eprint_db_error(
     };
     let msg = format_pg_error(err, sql, &cfg);
     // format_pg_error always ends with a newline; use eprint! to avoid double.
-    eprint!("{msg}");
+    #[cfg(not(target_arch = "wasm32"))]
+    rpg_eprint!("{msg}");
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm::io::wasm_eprint(&msg);
 }
 
 /// Print a `tokio_postgres::Error` to stderr with a file location prefix.
@@ -1806,7 +1798,10 @@ pub fn format_pg_notice(notice: &tokio_postgres::error::DbError) -> String {
 ///
 /// Convenience wrapper around [`format_pg_notice`].
 pub fn eprint_pg_notice(notice: &tokio_postgres::error::DbError) {
-    eprint!("{}", format_pg_notice(notice));
+    #[cfg(not(target_arch = "wasm32"))]
+    rpg_eprint!("{}", format_pg_notice(notice));
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm::io::wasm_eprint(&format_pg_notice(notice));
 }
 
 /// Write the `LINE N: …` context and the `^` position marker.
@@ -2683,7 +2678,9 @@ pub fn format_latex_longtable(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
 
     // Build column spec, possibly using tableattr for paragraph widths.
     let col_spec = if let Some(ref attr) = cfg.tableattr {
-        if !attr.is_empty() {
+        if attr.is_empty() {
+            latex_col_spec(cols, cfg.border)
+        } else {
             // With tableattr, non-numeric columns get p{attr\textwidth}
             let aligns: Vec<String> = cols
                 .iter()
@@ -2700,8 +2697,6 @@ pub fn format_latex_longtable(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
                 2 | 3 => format!("| {} |", aligns.join(" | ")),
                 _ => aligns.join(" | "),
             }
-        } else {
-            latex_col_spec(cols, cfg.border)
         }
     } else {
         latex_col_spec(cols, cfg.border)
@@ -2899,8 +2894,7 @@ fn format_troff_ms_expanded(out: &mut String, rs: &RowSet, cfg: &PsetConfig) {
             // Data format: border 2 uses "c l." (no pipe), others use
             // "c l." (border 0) or "c | l." (border 1)
             let data_fmt = match cfg.border {
-                0 => "c l.",
-                2 => "c l.",
+                0 | 2 => "c l.",
                 _ => "c | l.",
             };
             out.push_str(".T&\n");
@@ -4770,10 +4764,10 @@ mod tests {
     // Old-ASCII wrapped table format — `:` and `;` separators (#798)
     // -----------------------------------------------------------------------
 
-    /// Build a RowSet matching the psql regression test's second query:
-    ///   select repeat('x',2*n) as "0123456789abcdef",
-    ///          repeat('y',20-2*n) as "0123456789"
-    ///   from generate_series(1,10) as n;
+    /// Build a `RowSet` matching the psql regression test's second query:
+    ///   `select repeat('x',2*n) as "0123456789abcdef",`
+    ///   `repeat('y',20-2*n) as "0123456789"`
+    ///   `from generate_series(1,10) as n;`
     fn mk_wrap_rowset_single_header() -> RowSet {
         RowSet {
             columns: vec![

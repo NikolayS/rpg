@@ -149,7 +149,7 @@ pub async fn show_function_source(client: &Client, name: &str, plus: bool, echo_
     let sql = build_function_source_sql(schema_filter.as_deref(), &func_name);
 
     if echo_hidden {
-        println!("{sql}");
+        rpg_println!("{sql}");
     }
 
     let rows = match client.simple_query(&sql).await {
@@ -170,7 +170,7 @@ pub async fn show_function_source(client: &Client, name: &str, plus: bool, echo_
     }
 
     if !found {
-        eprintln!("error: ERROR:  function \"{name}\" does not exist");
+        rpg_eprintln!("error: ERROR:  function \"{name}\" does not exist");
     }
 }
 
@@ -210,7 +210,7 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
     let sql = build_view_def_sql(schema_filter.as_deref(), &view_name);
 
     if echo_hidden {
-        println!("{sql}");
+        rpg_println!("{sql}");
     }
 
     let rows = match client.simple_query(&sql).await {
@@ -238,7 +238,7 @@ pub async fn show_view_def(client: &Client, name: &str, plus: bool, echo_hidden:
     if !found {
         // Match psql error format: `error: ERROR:  relation "X" does not exist`
         // (the "error: " prefix appears in psql's script-file error output).
-        eprintln!("error: ERROR:  relation \"{name}\" does not exist");
+        rpg_eprintln!("error: ERROR:  relation \"{name}\" does not exist");
     }
 }
 
@@ -269,13 +269,13 @@ fn print_view_def(header: &str, body: &str, plus: bool) {
         let width = log + 8;
 
         // Header is line 1.
-        println!("{:<width$}{header}", 1);
+        rpg_println!("{:<width$}{header}", 1);
         for (i, line) in body_lines.iter().enumerate() {
-            println!("{:<width$}{line}", i + 2);
+            rpg_println!("{:<width$}{line}", i + 2);
         }
     } else {
-        println!("{header}");
-        println!("{body}");
+        rpg_println!("{header}");
+        rpg_println!("{body}");
     }
 }
 
@@ -1165,7 +1165,7 @@ fn print_with_optional_line_numbers(text: &str, plus: bool) {
     if !plus {
         // pg_get_functiondef already ends with a newline; use print! to
         // avoid a spurious extra blank line (println! would add another \n).
-        print!("{text}");
+        rpg_print!("{text}");
         return;
     }
 
@@ -1187,11 +1187,11 @@ fn print_with_optional_line_numbers(text: &str, plus: bool) {
     for (idx, line) in lines.iter().enumerate() {
         if idx < body_start {
             // psql: fprintf(output, "%*s\t", nln, "")
-            println!("{:>width$}\t{line}", "");
+            rpg_println!("{:>width$}\t{line}", "");
         } else {
             body_lineno += 1;
             // psql: fprintf(output, "%-*d\t", nln, lineno)
-            println!("{body_lineno:<width$}\t{line}");
+            rpg_println!("{body_lineno:<width$}\t{line}");
         }
     }
 }

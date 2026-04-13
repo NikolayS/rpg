@@ -1,4 +1,6 @@
 //! SSH tunnel support for Rpg (FR-22).
+// SSH tunneling uses russh which is a native-only dependency.
+#![cfg(not(target_arch = "wasm32"))]
 //!
 //! Establishes an SSH connection to a bastion/jump host and forwards a local
 //! TCP port to a remote Postgres host through it.  The forwarding loop runs

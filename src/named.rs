@@ -4,6 +4,7 @@
 //! `~/.config/rpg/named_queries.toml`.
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ pub struct NamedQueries {
 
 impl NamedQueries {
     /// Load from the default file path, or return an empty store.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load() -> Self {
         let Some(path) = Self::file_path() else {
             return Self::default();
@@ -27,7 +29,14 @@ impl NamedQueries {
         }
     }
 
+    /// WASM stub: no filesystem, return empty store.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load() -> Self {
+        Self::default()
+    }
+
     /// Save to the default file path.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save(&self) -> Result<(), String> {
         let Some(path) = Self::file_path() else {
             return Err("could not determine config directory".to_owned());
@@ -39,6 +48,13 @@ impl NamedQueries {
         std::fs::write(&path, content).map_err(|e| e.to_string())
     }
 
+    /// WASM stub: no filesystem, silently succeed.
+    #[cfg(target_arch = "wasm32")]
+    pub fn save(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("rpg").join("named_queries.toml"))
     }

@@ -701,6 +701,7 @@ pub struct ProjectConfigResult {
 /// Merges system config then user config; later entries win. Returns the
 /// merged [`Config`] and any non-fatal warning strings (e.g. parse errors
 /// in the system config are warnings, not hard failures).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_config() -> (Config, Vec<String>) {
     let mut warnings = Vec::new();
     let mut config = Config::default();
@@ -738,10 +739,20 @@ pub fn load_config() -> (Config, Vec<String>) {
     (config, warnings)
 }
 
+/// WASM stub: no filesystem, return defaults.
+#[cfg(target_arch = "wasm32")]
+pub fn load_config() -> (Config, Vec<String>) {
+    let mut config = Config::default();
+    config.ai.infer_provider();
+    config.ai.auto_detect_provider();
+    (config, Vec::new())
+}
+
 /// Search for `.rpg.toml` starting from `start_dir` and walking up to
 /// the user's home directory (inclusive).
 ///
 /// Returns the path of the first `.rpg.toml` found, or `None`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn find_project_config(start_dir: &Path) -> Option<PathBuf> {
     let home = dirs::home_dir();
     let mut dir = start_dir.to_path_buf();
@@ -764,6 +775,12 @@ pub fn find_project_config(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// WASM stub: no filesystem, no project config.
+#[cfg(target_arch = "wasm32")]
+pub fn find_project_config(_start_dir: &Path) -> Option<PathBuf> {
+    None
+}
+
 /// Load a `.rpg.toml` project config file and look for `POSTGRES.md`
 /// alongside it.
 ///
@@ -771,6 +788,7 @@ pub fn find_project_config(start_dir: &Path) -> Option<PathBuf> {
 /// directory.  Returns a [`ProjectConfigResult`] that is always safe to
 /// use: when no file is found, the config field holds a default value
 /// and the path fields are `None`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_project_config() -> ProjectConfigResult {
     let Ok(cwd) = std::env::current_dir() else {
         return ProjectConfigResult::default();
@@ -812,6 +830,12 @@ pub fn load_project_config() -> ProjectConfigResult {
         postgres_md_path,
         postgres_md,
     }
+}
+
+/// WASM stub: no filesystem, return defaults.
+#[cfg(target_arch = "wasm32")]
+pub fn load_project_config() -> ProjectConfigResult {
+    ProjectConfigResult::default()
 }
 
 /// Merge a [`ProjectConfig`] on top of an existing [`Config`].
@@ -879,6 +903,7 @@ pub fn merge_project_config(mut base: Config, project: &ProjectConfig) -> Config
 
 /// Return the path to the user config file, or `None` if the config
 /// directory cannot be determined.
+#[cfg(not(target_arch = "wasm32"))]
 fn user_config_path() -> Option<PathBuf> {
     // Check XDG-style path first (~/.config/rpg/config.toml) since that's
     // what our docs and error messages reference.  On macOS `dirs::config_dir`
@@ -897,14 +922,15 @@ fn user_config_path() -> Option<PathBuf> {
 /// Return a human-readable path string for the user config file (for error
 /// messages).  Prefers `~/.config/rpg/config.toml` since that's cross-platform.
 pub fn user_config_path_display() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(home) = dirs::home_dir() {
-        format!("{}/.config/rpg/config.toml", home.display())
-    } else {
-        "~/.config/rpg/config.toml".to_owned()
+        return format!("{}/.config/rpg/config.toml", home.display());
     }
+    "~/.config/rpg/config.toml".to_owned()
 }
 
 /// Read and parse a single TOML config file.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_file(path: &Path) -> Result<Config, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     toml::from_str(&content).map_err(|e| e.to_string())

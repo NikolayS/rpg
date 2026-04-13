@@ -10,6 +10,7 @@ repository = "https://github.com/NikolayS/project-alpha"
 [features]
 integration = []
 lua = ["dep:mlua"]
+wasm = []
 
 [profile.release]
 strip = true
@@ -24,30 +25,59 @@ path = "src/main.rs"
 bytes = "1"
 mlua = { version = "0.10", features = ["lua54", "vendored"], optional = true }
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-russh = { version = "0.60", default-features = false, features = ["ring", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-crossterm = "0.29"
-dirs = "6"
 futures = "0.3"
-libc = "0.2"
-md5 = "0.7"
-ratatui = "0.30"
-rpassword = "7"
-rustyline = "15"
+thiserror = "2"
+# On WASM we use a single-threaded runtime without signal/process support.
+# The rt-multi-thread, signal, and process features are added for native
+# targets via the platform-specific section below.
+tokio = { version = "1", features = ["rt", "macros", "time", "io-util", "sync"] }
+unicode-width = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# Native-only dependencies: TLS, SSH tunneling, terminal UI, password
+# prompts, multi-threaded Tokio, signal handling, process management,
+# and filesystem-dependent crates are not available in WASM/browser.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ring = { version = "0.17", default-features = false }
 rustls = "0.23"
 rustls-pemfile = "2"
-thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "process", "io-util"] }
-tokio-postgres = "0.7"
 tokio-rustls = { version = "0.26", default-features = false }
 anyhow = "1"
 x509-certificate = { version = "0.23", default-features = false }
-unicode-width = "0.2"
 webpki-roots = "0.26"
+russh = { version = "0.60", default-features = false, features = ["ring", "flate2"] }
+md5 = "0.7"
+rpassword = "7"
+crossterm = "0.29"
+ratatui = "0.30"
+rustyline = "15"
+libc = "0.2"
+dirs = "6"
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "process"] }
+tokio-postgres = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# WASM-only dependencies: browser WebSocket transport, JS interop, and
+# panic diagnostics.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+ws_stream_wasm = { version = "0.7", features = ["tokio_io"] }
+async_io_stream = { version = "0.3", features = ["tokio_io"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console", "WebSocket", "CloseEvent", "MessageEvent"] }
+js-sys = "0.3"
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+console_error_panic_hook = "0.1"
+tokio-postgres = { version = "0.7", default-features = false }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [[bench]]
 name = "non_ai_paths"
@@ -66,12 +96,6 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-items_after_statements = "allow"
-doc_markdown = "allow"
-# Allow patterns common in psql-compatibility code
-if_not_else = "allow"
-match_same_arms = "allow"
-wildcard_imports = "allow"
 
 [patch.crates-io]
 tokio-postgres = { git = "https://github.com/NikolayS/rust-postgres", tag = "tokio-postgres-v0.7.17-patched.1" }

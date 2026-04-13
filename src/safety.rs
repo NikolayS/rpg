@@ -129,7 +129,7 @@ pub fn confirm_destructive(reason: &str) -> bool {
         return true;
     }
 
-    eprint!("WARNING: {reason}\nAre you sure? [y/N] ");
+    rpg_eprint!("WARNING: {reason}\nAre you sure? [y/N] ");
     io::stderr().flush().ok();
 
     // Read from /dev/tty so the prompt works even when stdin is piped.

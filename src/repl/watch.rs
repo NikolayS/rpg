@@ -52,10 +52,10 @@ pub(super) fn format_system_time(now: std::time::SystemTime) -> String {
 
     let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
 
-    // Windows path: pure-Rust UTC computation.
-    // localtime_r is POSIX-only and unavailable on Windows; UTC is an
-    // acceptable fallback for the \watch timestamp display on Windows.
-    #[cfg(windows)]
+    // Non-Unix path: pure-Rust UTC computation.
+    // localtime_r is POSIX-only and unavailable on Windows or WASM; UTC is an
+    // acceptable fallback for the \watch timestamp display.
+    #[cfg(not(unix))]
     return {
         let secs = duration.as_secs();
 
@@ -90,7 +90,7 @@ pub(super) fn format_system_time(now: std::time::SystemTime) -> String {
     // Unix path: use libc::localtime_r for local-time conversion.
     // `#[allow(deprecated)]` silences the musl time_t 32→64-bit transition
     // warning; the cast is correct on all 64-bit targets Rpg ships for.
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
         #[allow(deprecated)]
         #[allow(clippy::cast_possible_wrap)]
@@ -132,13 +132,27 @@ pub(super) async fn watch_query(
     settings: &mut ReplSettings,
 ) {
     use std::time::Duration;
+    #[cfg(not(target_arch = "wasm32"))]
     use tokio::signal;
     use tokio::time::sleep;
 
     loop {
         // Print timestamp header matching psql's ctime-like format.
-        let ts = format_system_time(std::time::SystemTime::now());
-        println!("{ts} (every {interval_secs}s)\n");
+        // std::time::SystemTime::now() panics on wasm32-unknown-unknown;
+        // use web_time which provides a browser-compatible implementation.
+        #[cfg(not(target_arch = "wasm32"))]
+        let now = std::time::SystemTime::now();
+        #[cfg(target_arch = "wasm32")]
+        let now = {
+            // web_time::SystemTime uses Performance.now() in the browser.
+            let wt = web_time::SystemTime::now();
+            let dur = wt
+                .duration_since(web_time::SystemTime::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO);
+            std::time::UNIX_EPOCH + dur
+        };
+        let ts = format_system_time(now);
+        rpg_println!("{ts} (every {interval_secs}s)\n");
 
         // Execute the stored query.  Use a fresh TxState so that
         // transaction state changes inside the loop are not persisted.
@@ -146,9 +160,15 @@ pub(super) async fn watch_query(
         execute_query(client, sql, settings, &mut dummy_tx).await;
 
         // Sleep for the interval, but exit cleanly on Ctrl-C.
+        // On WASM signal::ctrl_c() is unavailable; use a never-resolving
+        // future so only the sleep arm can fire.
+        #[cfg(not(target_arch = "wasm32"))]
+        let ctrl_c = signal::ctrl_c();
+        #[cfg(target_arch = "wasm32")]
+        let ctrl_c = std::future::pending::<std::io::Result<()>>();
         tokio::select! {
             () = sleep(Duration::from_secs_f64(interval_secs)) => {},
-            _ = signal::ctrl_c() => {
+            _ = ctrl_c => {
                 break;
             },
         }
