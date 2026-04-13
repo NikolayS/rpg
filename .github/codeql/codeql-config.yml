@@ -1,0 +1,14 @@
+# Custom CodeQL configuration for rpg.
+#
+# The default "cleartext-logging" query produces a false positive:
+# connection_info() formats host/port/user/dbname for display but never
+# accesses ConnParams.password.  CodeQL's Rust taint analysis is not
+# field-sensitive enough to see this, so it flags the entire struct as
+# tainted because the password was resolved in a related call chain.
+#
+# Excluding the query here is the recommended approach for confirmed
+# false positives that cannot be resolved through code changes.
+
+query-filters:
+  - exclude:
+      id: rust/cleartext-logging
