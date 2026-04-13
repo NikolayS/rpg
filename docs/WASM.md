@@ -84,7 +84,7 @@ and click **Connect**.
 ## What Works
 
 - **SQL queries** with psql-style tabular formatting (`\x` expanded mode supported)
-- **Meta-commands:** `\d`, `\dt`, `\dn`, `\du`, `\di`, `\dv`, `\df`, `\conninfo`, `\timing`, `\x`, `\set`, `\echo`, `\?`
+- **Meta-commands:** `\d`, `\dt`, `\dn`, `\du`, `\di`, `\dv`, `\df`, `\l`, `\conninfo`, `\timing`, `\x`, `\set`, `\echo`, `\?`
 - **rpg commands:** `/version`, `/dba`, `/help`
 - **Error messages** with SQLSTATE codes and line/caret position markers
 - **Line editing:** arrow keys, command history (Up/Down), Ctrl-U/K/W/L, Home/End, Delete, Backspace
@@ -92,18 +92,29 @@ and click **Connect**.
 
 ## Known Limitations
 
+Commands that require native OS facilities show a friendly error message
+instead of panicking — e.g. `\i: file include is not available on
+wasm32-unknown-unknown (no filesystem)`.
+
 | Feature | Reason |
 |---|---|
-| `\l` (list databases) | Requires a second PG connection; `WasmConnector` does not support concurrent connections |
-| `/ash` | Requires `ratatui`, which is not available on `wasm32-unknown-unknown` |
+| `/ash` | Requires `ratatui` — not available on `wasm32-unknown-unknown` |
 | `/rpg` | Requires `ratatui` |
-| `\e` (edit in `$EDITOR`) | No editor available in the browser |
-| `\!` (shell command) | No shell in the browser |
-| `\cd` | No filesystem in the browser |
-| `\copy` | No local filesystem access |
-| `\password` | Requires `rpassword`, which is not available on WASM |
+| `\e` (edit in `$EDITOR`) | No editor / `std::process::Command` in the browser |
+| `\!` (shell command) | No `std::process::Command` on `wasm32-unknown-unknown` |
+| `\i`, `\ir` (include file) | No `std::fs` on `wasm32-unknown-unknown` |
+| `\o`, `\w` (file output) | No `std::fs` |
+| `\cd` | No filesystem |
+| `\copy` | No local filesystem |
+| `\lo_import`, `\lo_export` | No `std::fs` |
+| `\g file`, `\g \|cmd` | No filesystem / shell |
+| `\s filename` (save history) | No `std::fs` |
+| `\setenv` | `std::env::set_var` unavailable on `wasm32-unknown-unknown` |
+| `\password` | Requires `rpassword` — not available on WASM |
+| `/plan save` | No `std::fs` |
 | Tab completion | Not yet wired; `WasmLineReader` does not implement completion callbacks |
-| AI commands (`/ask`, `/fix`, `/explain`, `/optimize`) | Require `reqwest` streaming, which is limited on WASM targets |
+| AI commands (`/ask`, `/fix`, `/explain`, `/optimize`) | Require `reqwest` streaming, which is limited on WASM |
+| Multi-statement command tags | When multiple statements are sent in one line, the command tag from the first is reused for subsequent ones (cosmetic, queries execute correctly) |
 
 ## Output Routing
 
