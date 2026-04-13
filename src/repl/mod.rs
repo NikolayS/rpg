@@ -906,6 +906,33 @@ impl AutoExplain {
             Self::Verbose => "verbose",
         }
     }
+
+    /// Return the effective auto-explain level, accounting for plan execution
+    /// mode.
+    ///
+    /// Returns `Self::On` when `exec_mode == Plan` and `self == Off` (plan
+    /// mode implicitly promotes it). Any explicitly set level (`On`,
+    /// `Analyze`, `Verbose`) is preserved unchanged. All other exec modes
+    /// (`Interactive`, `Yolo`) leave auto-explain unchanged.
+    pub(crate) fn effective(self, exec_mode: ExecMode) -> Self {
+        match exec_mode {
+            ExecMode::Plan if self == Self::Off => Self::On,
+            ExecMode::Plan | ExecMode::Interactive | ExecMode::Yolo => self,
+        }
+    }
+
+    /// Return the human-readable label for the `[auto-explain: …]` banner.
+    ///
+    /// Returns `"plan"` when `exec_mode == Plan` and `self == Off` (plan
+    /// mode is the sole trigger). Otherwise delegates to `self.label()` so
+    /// the user sees the actual level (important because `EXPLAIN ANALYZE`
+    /// executes the query, unlike plain `EXPLAIN`).
+    pub(crate) fn banner_label(self, exec_mode: ExecMode) -> &'static str {
+        match exec_mode {
+            ExecMode::Plan if self == Self::Off => "plan",
+            ExecMode::Plan | ExecMode::Interactive | ExecMode::Yolo => self.label(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3371,7 +3398,7 @@ Named queries:
 Input/execution modes:
   /sql              switch to SQL input mode (default)
   /text2sql / /t2s  switch to text2sql input mode
-  /plan             enter plan execution mode
+  /plan             enter plan mode (auto-prepend EXPLAIN to queries)
   /yolo             YOLO mode: auto-enable text2sql, hide SQL box, auto-execute
   /interactive      return to interactive mode (default)
   /mode             show current input and execution mode
@@ -9299,6 +9326,80 @@ mod tests {
         assert_eq!(settings.auto_explain, AutoExplain::Verbose);
         apply_fkey_toggle(FKeyAction::AutoExplain, &mut settings);
         assert_eq!(settings.auto_explain, AutoExplain::Off);
+    }
+
+    // -- AutoExplain::effective (plan mode integration) -------------------------
+
+    #[test]
+    fn plan_mode_promotes_auto_explain_off_to_on() {
+        assert_eq!(AutoExplain::Off.effective(ExecMode::Plan), AutoExplain::On);
+    }
+
+    #[test]
+    fn plan_mode_preserves_explicit_auto_explain_level() {
+        // If the user explicitly set a higher level, plan mode should not
+        // downgrade it.
+        assert_eq!(
+            AutoExplain::Analyze.effective(ExecMode::Plan),
+            AutoExplain::Analyze
+        );
+        assert_eq!(
+            AutoExplain::Verbose.effective(ExecMode::Plan),
+            AutoExplain::Verbose
+        );
+        assert_eq!(AutoExplain::On.effective(ExecMode::Plan), AutoExplain::On);
+    }
+
+    #[test]
+    fn interactive_mode_does_not_promote_auto_explain() {
+        assert_eq!(
+            AutoExplain::Off.effective(ExecMode::Interactive),
+            AutoExplain::Off
+        );
+    }
+
+    #[test]
+    fn yolo_mode_does_not_promote_auto_explain() {
+        assert_eq!(AutoExplain::Off.effective(ExecMode::Yolo), AutoExplain::Off);
+    }
+
+    #[test]
+    fn banner_label_plan_mode_sole_trigger() {
+        // Plan mode is the only reason auto-explain activated → label "plan".
+        assert_eq!(AutoExplain::Off.banner_label(ExecMode::Plan), "plan");
+    }
+
+    #[test]
+    fn banner_label_plan_mode_with_explicit_analyze() {
+        // User explicitly set EXPLAIN ANALYZE; plan mode is active but not
+        // the trigger → label must reflect the actual level, not "plan".
+        assert_eq!(AutoExplain::Analyze.banner_label(ExecMode::Plan), "analyze");
+    }
+
+    #[test]
+    fn banner_label_plan_mode_with_explicit_on() {
+        // User explicitly set EXPLAIN on; same as plan-mode default level,
+        // but since user set it explicitly the label should still be "on".
+        assert_eq!(AutoExplain::On.banner_label(ExecMode::Plan), "on");
+    }
+
+    #[test]
+    fn banner_label_plan_mode_with_explicit_verbose() {
+        assert_eq!(AutoExplain::Verbose.banner_label(ExecMode::Plan), "verbose");
+    }
+
+    #[test]
+    fn banner_label_no_plan_mode() {
+        // No plan mode — always use the auto-explain label.
+        assert_eq!(
+            AutoExplain::Analyze.banner_label(ExecMode::Interactive),
+            "analyze"
+        );
+    }
+
+    #[test]
+    fn banner_label_yolo_mode_uses_auto_explain_label() {
+        assert_eq!(AutoExplain::Off.banner_label(ExecMode::Yolo), "off");
     }
 
     // -- \set AI_PROVIDER / AI_MODEL -------------------------------------------
