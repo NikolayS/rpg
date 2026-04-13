@@ -208,6 +208,7 @@ normalize() {
     -e '/^CONTEXT:  /d' \
     -e '/^SQL function "[^"]*" statement /d' \
     -e '/^PL\/pgSQL function "[^"]*" /d' \
+    -e '/^QUERY:  /d' \
     -e '/^parallel worker$/d' \
     -e '/enumtypid/s/=([0-9][0-9]*/=(OID/g' \
     -e 's/for operator [0-9][0-9]*/for operator OID/g' \
