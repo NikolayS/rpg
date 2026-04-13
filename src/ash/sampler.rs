@@ -676,10 +676,8 @@ mod tests {
         );
     }
 
-    /// Verifies `live_snapshot` works with `timeout_ms = 0` (timeout disabled).
-    ///
-    /// The `if timeout_ms > 0` guard must skip the SET/RESET statement_timeout
-    /// entirely; the sample query should still succeed.
+    /// Verifies `live_snapshot` works when `timeout_ms = 0` (timeout disabled).
+    /// The query must succeed without setting or resetting `statement_timeout`.
     ///
     /// Run with: `cargo test --include-ignored test_live_snapshot_timeout_disabled`
     #[tokio::test]
@@ -695,19 +693,39 @@ mod tests {
             conn.await.ok();
         });
 
-        // timeout_ms = 0 disables the statement_timeout guard.
         let result = live_snapshot(&client, 0).await;
         assert!(
             result.is_ok(),
-            "live_snapshot with timeout_ms=0 should not error"
+            "live_snapshot with timeout_ms=0 must succeed"
+        );
+        match result.unwrap() {
+            LiveSnapshotResult::Ok(snap) => {
+                // Snapshot should have valid structure (counts may be 0).
+                assert!(snap.active_count == snap.by_type.values().sum::<u32>());
+            }
+            LiveSnapshotResult::Missed => {
+                panic!("unexpected Missed with timeout disabled");
+            }
+        }
+
+        // Verify statement_timeout was not changed (should still be default 0).
+        let row = client
+            .query_one("show statement_timeout", &[])
+            .await
+            .expect("show statement_timeout");
+        let val: String = row.get(0);
+        assert_eq!(
+            val, "0",
+            "statement_timeout must remain unchanged when timeout_ms=0"
         );
     }
 
-    /// Verifies `query_ash_history` works with `timeout_ms = 0` (timeout disabled).
+    /// Verifies `query_ash_history` works when `timeout_ms = 0` (timeout
+    /// disabled). Must not panic or set `statement_timeout`.
     ///
     /// Run with: `cargo test --include-ignored test_ash_history_timeout_disabled`
     #[tokio::test]
-    #[ignore = "requires pg_ash installed on postgresql://postgres@127.0.0.1:15433/ashtest"]
+    #[ignore = "requires connection to postgresql://postgres@127.0.0.1:15433/ashtest"]
     async fn test_ash_history_timeout_disabled() {
         let (client, conn) = tokio_postgres::connect(
             "host=127.0.0.1 port=15433 user=postgres dbname=ashtest",
@@ -719,22 +737,25 @@ mod tests {
             conn.await.ok();
         });
 
-        // Skip gracefully if pg_ash is not installed.
-        let ext_rows = client
-            .query("select 1 from pg_extension where extname = 'pg_ash'", &[])
-            .await
-            .unwrap_or_default();
-        if ext_rows.is_empty() {
-            eprintln!("pg_ash not installed — skipping timeout_disabled history test");
-            return;
+        // Should return empty vec or valid data — must not panic.
+        let history = query_ash_history(&client, 60, 0).await;
+        for snap in &history {
+            assert_eq!(
+                snap.active_count,
+                snap.by_type.values().sum::<u32>(),
+                "by_type sum must equal active_count"
+            );
         }
 
-        // timeout_ms = 0 disables the statement_timeout guard.
-        let history = query_ash_history(&client, 60, 0).await;
-        // Should not panic; may be empty if no history data exists.
-        eprintln!(
-            "test_ash_history_timeout_disabled: {} snapshots returned",
-            history.len()
+        // Verify statement_timeout was not changed.
+        let row = client
+            .query_one("show statement_timeout", &[])
+            .await
+            .expect("show statement_timeout");
+        let val: String = row.get(0);
+        assert_eq!(
+            val, "0",
+            "statement_timeout must remain unchanged when timeout_ms=0"
         );
     }
 }
