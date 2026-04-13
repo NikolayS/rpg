@@ -5613,7 +5613,7 @@ async fn dispatch_meta(
         MetaCmd::Watch => {
             #[cfg(target_arch = "wasm32")]
             {
-                rpg_eprintln!("\\watch: not available on wasm32-unknown-unknown (tokio::time::sleep panics without OS clock)");
+                rpg_eprintln!("\\watch: not available on wasm32-unknown-unknown (tokio::time does not support this target)");
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
