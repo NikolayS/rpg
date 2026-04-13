@@ -138,7 +138,7 @@ Toggle back with `/sql` or `/interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
 <details>
-<summary>▶ Click to expand demo</summary>
+<summary>Click to expand demo</summary>
 
 ![/t2s text-to-SQL mode and /yolo auto-execute mode in action](demos/gif3_t2s.gif)
 
@@ -169,7 +169,7 @@ Execute? [Y/n/e]
 ```
 
 <details>
-<summary>▶ Click to expand demo</summary>
+<summary>Click to expand demo</summary>
 
 ![/fix auto-corrects a typo in the table name and re-runs the query](demos/gif2_typo.gif)
 
@@ -192,7 +192,7 @@ postgres=# /optimize
 ```
 
 <details>
-<summary>▶ Click to expand demo</summary>
+<summary>Click to expand demo</summary>
 
 ![/explain and /optimize workflow: slow query, AI analysis, index creation, re-run](demos/gif1_optimize.gif)
 
@@ -330,7 +330,7 @@ postgres=# /ash
 - **X-axis timestamps** — `HH:MM:SS` at zoom 1–2, `HH:MM` at coarser levels; anchors shift as time passes
 
 <details>
-<summary>▶ Click to expand — X-axis labels</summary>
+<summary>Click to expand — X-axis labels</summary>
 
 ![/ash X-axis timestamp labels shifting in real time](demos/slash-ash-xaxis.gif)
 
@@ -341,7 +341,7 @@ installed, the timeline pre-populates with historical data on startup —
 bars appear immediately rather than building from scratch.
 
 <details>
-<summary>▶ Click to expand — pg_ash history pre-population</summary>
+<summary>Click to expand — pg_ash history pre-population</summary>
 
 ![/ash with pg_ash history pre-population — bars from the past visible on launch](demos/slash-ash-pgash.gif)
 

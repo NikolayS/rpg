@@ -5130,8 +5130,11 @@ async fn list_collations(
     let encoding_filter =
         "c.collencoding in (-1, pg_catalog.pg_char_to_encoding(pg_catalog.getdatabaseencoding()))";
 
-    // psql applies a visibility filter when no schema qualifier is present.
-    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+    // psql applies a visibility filter only when no pattern is given.
+    // When a pattern is supplied (e.g., `\dO *`) we drop both the
+    // pg_catalog exclusion AND the visibility filter so that catalog
+    // collations are reachable.
+    let visibility_filter = if has_pattern || meta.system {
         String::new()
     } else {
         "pg_catalog.pg_collation_is_visible(c.oid)".to_owned()
@@ -7136,7 +7139,7 @@ order by 1, 2"
 
         let encoding_filter = "c.collencoding in (-1, pg_catalog.pg_char_to_encoding(pg_catalog.getdatabaseencoding()))";
 
-        let visibility_filter = if m.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+        let visibility_filter = if has_pattern || m.system {
             String::new()
         } else {
             "pg_catalog.pg_collation_is_visible(c.oid)".to_owned()
