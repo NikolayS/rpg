@@ -1041,6 +1041,7 @@ impl DropdownState {
 ///
 /// Also holds a shared [`DropdownState`] that drives the pgcli-style
 /// completion dropdown rendered via the [`Hinter`] trait.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.

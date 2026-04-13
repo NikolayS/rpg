@@ -6674,6 +6674,30 @@ async fn run_readline_loop(
     0
 }
 
+/// Apply reconnect state after a `\c` command in the dumb loop.
+async fn apply_dumb_reconnect(
+    client: &mut Client,
+    params: &mut ConnParams,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+    buf: &mut String,
+    new_client: Box<tokio_postgres::Client>,
+    new_params: Box<ConnParams>,
+) {
+    *client = *new_client;
+    *params = *new_params;
+    *tx = TxState::default();
+    buf.clear();
+    // Re-detect superuser status for the new connection.
+    settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+    // Re-detect standard_conforming_strings.
+    settings.db_capabilities.standard_conforming_strings =
+        crate::capabilities::detect_standard_conforming_strings_pub(client).await;
+    // Update audit connection context for the new connection.
+    settings.audit_dbname.clone_from(&params.dbname);
+    settings.audit_user.clone_from(&params.user);
+}
+
 /// Run without readline (dumb terminal or --no-readline).
 async fn run_dumb_loop(
     client: &mut Client,
@@ -6718,20 +6742,10 @@ async fn run_dumb_loop(
                     {
                         HandleLineResult::Quit => break,
                         HandleLineResult::Reconnected(new_client, new_params) => {
-                            *client = *new_client;
-                            *params = *new_params;
-                            *tx = TxState::default();
-                            buf.clear();
-                            // Re-detect superuser status for the new connection.
-                            settings.is_superuser =
-                                crate::capabilities::detect_superuser(client).await;
-                            // Re-detect standard_conforming_strings.
-                            settings.db_capabilities.standard_conforming_strings =
-                                crate::capabilities::detect_standard_conforming_strings_pub(client)
-                                    .await;
-                            // Update audit connection context for the new connection.
-                            settings.audit_dbname.clone_from(&params.dbname);
-                            settings.audit_user.clone_from(&params.user);
+                            apply_dumb_reconnect(
+                                client, params, settings, tx, &mut buf, new_client, new_params,
+                            )
+                            .await;
                         }
                         HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                     }
@@ -6754,22 +6768,10 @@ async fn run_dumb_loop(
                         {
                             HandleLineResult::Quit => break,
                             HandleLineResult::Reconnected(new_client, new_params) => {
-                                *client = *new_client;
-                                *params = *new_params;
-                                *tx = TxState::default();
-                                buf.clear();
-                                // Re-detect superuser status for the new connection.
-                                settings.is_superuser =
-                                    crate::capabilities::detect_superuser(client).await;
-                                // Re-detect standard_conforming_strings.
-                                settings.db_capabilities.standard_conforming_strings =
-                                    crate::capabilities::detect_standard_conforming_strings_pub(
-                                        client,
-                                    )
-                                    .await;
-                                // Update audit connection context for the new connection.
-                                settings.audit_dbname.clone_from(&params.dbname);
-                                settings.audit_user.clone_from(&params.user);
+                                apply_dumb_reconnect(
+                                    client, params, settings, tx, &mut buf, new_client, new_params,
+                                )
+                                .await;
                             }
                             HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
                         }
@@ -7015,6 +7017,24 @@ fn find_raw_continuation(raw: &str, cont: &str) -> Option<String> {
     None
 }
 
+/// Try to parse a dollar-quote tag starting at `line[pos..]`.
+///
+/// Returns the tag string (e.g. `$$` or `$body$`) if the position starts
+/// a valid dollar-quoted string opener, or `None` otherwise.
+fn try_parse_dollar_tag(line: &str, pos: usize) -> Option<String> {
+    let rest = &line[pos..];
+    let end = rest[1..].find('$')?;
+    let inner = &rest[1..=end];
+    let valid = inner.is_empty()
+        || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !inner.chars().all(|c| c.is_ascii_digit()));
+    if valid {
+        Some(rest[..end + 2].to_owned())
+    } else {
+        None
+    }
+}
+
 fn find_inline_backslash_ctx(
     line: &str,
     initial_dollar_tag: Option<String>,
@@ -7022,12 +7042,10 @@ fn find_inline_backslash_ctx(
 ) -> Option<usize> {
     let bytes = line.as_bytes();
     let len = bytes.len();
-    let mut i = 0;
-    let mut in_single = false;
+    let (mut i, mut in_single, mut in_double) = (0, false, false);
     // Whether the current single-quoted string uses backslash escapes.
     // True for E'...' strings (always) and plain '...' when SCS=off.
     let mut bs_escapes = false;
-    let mut in_double = false;
     let mut block_comment_depth: u32 = 0;
     let mut dollar_tag: Option<String> = initial_dollar_tag;
 
@@ -7074,10 +7092,7 @@ fn find_inline_backslash_ctx(
         if in_single {
             if bs_escapes && bytes[i] == b'\\' {
                 // Backslash escape: skip backslash + next byte.
-                i += 1;
-                if i < len {
-                    i += 1;
-                }
+                i += if i + 1 < len { 2 } else { 1 };
             } else if bytes[i] == b'\'' {
                 if i + 1 < len && bytes[i + 1] == b'\'' {
                     i += 2;
@@ -7091,66 +7106,51 @@ fn find_inline_backslash_ctx(
             continue;
         }
 
-        // Line comment
-        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            return None; // rest of line is a comment
-        }
-
-        // Block comment start
-        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            block_comment_depth += 1;
-            i += 2;
-            continue;
-        }
-
-        // Double-quoted identifier start
-        if bytes[i] == b'"' {
-            in_double = true;
-            i += 1;
-            continue;
-        }
-
-        // E-string start: E'…' / e'…'
-        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < len && bytes[i + 1] == b'\'' {
-            in_single = true;
-            bs_escapes = true;
-            i += 2; // skip E and opening quote
-            continue;
-        }
-
-        // Single-quote start
-        if bytes[i] == b'\'' {
-            in_single = true;
-            bs_escapes = !scs;
-            i += 1;
-            continue;
-        }
-
-        // Dollar-quote start
-        if bytes[i] == b'$' {
-            let rest = &line[i..];
-            if let Some(end) = rest[1..].find('$') {
-                let inner = &rest[1..=end];
-                let valid = inner.is_empty()
-                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !inner.chars().all(|c| c.is_ascii_digit()));
-                if valid {
-                    let tag = &rest[..end + 2];
-                    dollar_tag = Some(tag.to_owned());
+        match bytes[i] {
+            // Line comment — rest of line is a comment
+            b'-' if i + 1 < len && bytes[i + 1] == b'-' => return None,
+            // Block comment start
+            b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            // Double-quoted identifier start
+            b'"' => {
+                in_double = true;
+                i += 1;
+                continue;
+            }
+            // E-string start: E'…' / e'…'
+            b'E' | b'e' if i + 1 < len && bytes[i + 1] == b'\'' => {
+                in_single = true;
+                bs_escapes = true;
+                i += 2;
+                continue;
+            }
+            // Single-quote start
+            b'\'' => {
+                in_single = true;
+                bs_escapes = !scs;
+                i += 1;
+                continue;
+            }
+            // Dollar-quote start
+            b'$' => {
+                if let Some(tag) = try_parse_dollar_tag(line, i) {
                     i += tag.len();
+                    dollar_tag = Some(tag);
                     continue;
                 }
             }
-        }
-
-        // Backslash followed by a letter — potential meta-command
-        if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1].is_ascii_alphabetic() {
-            // Only treat as inline if there is some SQL before this position
-            if line[..i].trim().is_empty() {
-                // The line starts with `\` — not an inline command
-                return None;
+            // Backslash followed by a letter — potential meta-command
+            b'\\' if i + 1 < len && bytes[i + 1].is_ascii_alphabetic() => {
+                if line[..i].trim().is_empty() {
+                    return None; // line starts with `\` — not inline
+                }
+                return Some(i);
             }
-            return Some(i);
+            _ => {}
         }
 
         i += 1;
@@ -7258,18 +7258,10 @@ fn split_on_backslash_semicolon(line: &str, scs: bool) -> Vec<&str> {
             continue;
         }
         if bytes[i] == b'$' {
-            let rest = &line[i..];
-            if let Some(end) = rest[1..].find('$') {
-                let inner = &rest[1..=end];
-                let valid = inner.is_empty()
-                    || (inner.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !inner.chars().all(|c| c.is_ascii_digit()));
-                if valid {
-                    let tag = &rest[..end + 2];
-                    dollar_tag = Some(tag.to_owned());
-                    i += tag.len();
-                    continue;
-                }
+            if let Some(tag) = try_parse_dollar_tag(line, i) {
+                i += tag.len();
+                dollar_tag = Some(tag);
+                continue;
             }
         }
         // Detect \;
