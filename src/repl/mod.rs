@@ -5306,7 +5306,14 @@ async fn dispatch_meta(
             // `\conninfo+`  — additionally show pooler / provider details.
             rpg_println!(
                 "{}",
-                crate::connection::connection_info(&params.display_info())
+                crate::connection::connection_info(&crate::connection::ConnDisplayInfo {
+                    host: &params.host,
+                    port: params.port,
+                    user: &params.user,
+                    dbname: &params.dbname,
+                    resolved_addr: params.resolved_addr.as_deref(),
+                    tls_info: params.tls_info.as_ref(),
+                })
             );
             if parsed.plus {
                 let caps = &settings.db_capabilities;
@@ -5562,7 +5569,14 @@ async fn dispatch_meta(
                         let msg = crate::connection::reconnect_info(
                             crate::version_string(),
                             server_ver.as_deref(),
-                            &new_params.display_info(),
+                            &crate::connection::ConnDisplayInfo {
+                                host: &new_params.host,
+                                port: new_params.port,
+                                user: &new_params.user,
+                                dbname: &new_params.dbname,
+                                resolved_addr: new_params.resolved_addr.as_deref(),
+                                tls_info: new_params.tls_info.as_ref(),
+                            },
                         );
                         rpg_println!("{msg}");
                     }
@@ -6317,7 +6331,14 @@ pub(super) async fn dispatch_session_resume(id: &str) -> Option<MetaResult> {
             let msg = crate::connection::reconnect_info(
                 crate::version_string(),
                 server_ver.as_deref(),
-                &new_params.display_info(),
+                &crate::connection::ConnDisplayInfo {
+                    host: &new_params.host,
+                    port: new_params.port,
+                    user: &new_params.user,
+                    dbname: &new_params.dbname,
+                    resolved_addr: new_params.resolved_addr.as_deref(),
+                    tls_info: new_params.tls_info.as_ref(),
+                },
             );
             rpg_println!("{msg}");
             Some(MetaResult::Reconnected(

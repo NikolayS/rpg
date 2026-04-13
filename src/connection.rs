@@ -366,9 +366,14 @@ impl ConnParams {
     /// Borrow only the fields that are safe to display or log.
     ///
     /// The returned struct excludes `password`, SSL key/cert paths, and
-    /// other sensitive connection details, breaking any taint chain from
-    /// credential resolution to output sinks.
-    pub fn display_info(&self) -> ConnDisplayInfo<'_> {
+    /// other sensitive connection details.
+    ///
+    /// Production call sites construct `ConnDisplayInfo` via direct field
+    /// access (not this method) so that `CodeQL`'s field-sensitive taint
+    /// analysis can verify the password field is never read.  Tests use
+    /// this convenience method because taint tracking is not a concern.
+    #[cfg(test)]
+    fn display_info(&self) -> ConnDisplayInfo<'_> {
         ConnDisplayInfo {
             host: &self.host,
             port: self.port,

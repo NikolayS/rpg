@@ -925,7 +925,20 @@ async fn async_main() {
                 // Server version (full, including distro build info when present)
                 println!("Server: PostgreSQL {server_ver}");
                 // Connection details + SSL status — matching psql startup output.
-                println!("{}", connection::connection_info(&resolved.display_info()));
+                // Build ConnDisplayInfo via direct field access (not .display_info())
+                // so CodeQL's field-sensitive taint analysis sees that the password
+                // field is never read.
+                println!(
+                    "{}",
+                    connection::connection_info(&connection::ConnDisplayInfo {
+                        host: &resolved.host,
+                        port: resolved.port,
+                        user: &resolved.user,
+                        dbname: &resolved.dbname,
+                        resolved_addr: resolved.resolved_addr.as_deref(),
+                        tls_info: resolved.tls_info.as_ref(),
+                    })
+                );
 
                 // LLM status
                 let ai_status = {
