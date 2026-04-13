@@ -1041,6 +1041,7 @@ impl DropdownState {
 ///
 /// Also holds a shared [`DropdownState`] that drives the pgcli-style
 /// completion dropdown rendered via the [`Hinter`] trait.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RpgHelper {
     cache: Arc<RwLock<SchemaCache>>,
     /// Whether syntax highlighting is active.
@@ -1048,6 +1049,11 @@ pub struct RpgHelper {
     /// Current input mode — SQL highlighting is suppressed in `Text2Sql` mode
     /// because the user is typing natural language, not SQL.
     input_mode: crate::repl::InputMode,
+    /// Value of `standard_conforming_strings` GUC.
+    ///
+    /// Mirrors the server setting so the highlighter can correctly handle
+    /// backslash escapes inside single-quoted string literals.
+    standard_conforming_strings: bool,
     /// Whether schema-aware tab completion is active.
     ///
     /// When `false`, `complete()` returns no candidates (toggled by F2).
@@ -1084,6 +1090,7 @@ impl RpgHelper {
             cache,
             highlight,
             input_mode: crate::repl::InputMode::Sql,
+            standard_conforming_strings: true,
             completion_enabled: true,
             dropdown_completion_enabled: false,
             dropdown: Arc::new(Mutex::new(DropdownState::default())),
@@ -1117,6 +1124,11 @@ impl RpgHelper {
     /// Enable or disable schema-aware tab completion at runtime.
     pub fn set_completion(&mut self, enabled: bool) {
         self.completion_enabled = enabled;
+    }
+
+    /// Update the `standard_conforming_strings` state for the highlighter.
+    pub fn set_standard_conforming_strings(&mut self, scs: bool) {
+        self.standard_conforming_strings = scs;
     }
 
     /// Enable or disable the experimental dropdown completion overlay.
@@ -1394,7 +1406,11 @@ impl Highlighter for RpgHelper {
                     .chain(cache.columns.iter().map(|c| c.name.to_lowercase()))
                     .collect()
             });
-        crate::highlight::highlight_sql(line, schema_names.as_ref())
+        crate::highlight::highlight_sql_scs(
+            line,
+            schema_names.as_ref(),
+            self.standard_conforming_strings,
+        )
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize, _kind: CmdKind) -> bool {
