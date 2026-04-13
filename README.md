@@ -28,7 +28,7 @@ Single binary, no dependencies, cross-platform.
 - **Config profiles** — per-project `.rpg.toml`
 - **Shell backtick substitution** — dynamic prompts via `PROMPT1='[`git branch --show-current`] %/ # '`
 - **Status bar** — connection info, transaction state, timing
-- **Cross-platform** — single static binary: Linux, macOS, Windows (x86_64 + aarch64)
+- **Cross-platform** — single static binary: Linux, macOS, Windows (x86_64 + aarch64); experimental WASM/browser support (requires WebSocket proxy, limited REPL)
 
 ## Installation
 
