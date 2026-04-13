@@ -44,6 +44,14 @@ pub fn include_file<'a>(
     tx: &'a mut TxState,
     params: &'a ConnParams,
 ) -> Pin<Box<dyn std::future::Future<Output = i32> + 'a>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, path, settings, tx, params);
+        rpg_eprintln!("\\i: file include is not available on wasm32-unknown-unknown (no filesystem)");
+        return Box::pin(async { 1 });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     Box::pin(async move {
         let content = match std::fs::read_to_string(path) {
             Ok(s) => s,
@@ -156,6 +164,13 @@ pub fn resolve_relative_path(raw: &str, current_file: Option<&str>) -> String {
 /// # Errors
 /// Returns `Err(message)` if the file cannot be opened for writing.
 pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        return Err("\\o: file output is not available on wasm32-unknown-unknown (no filesystem)".to_owned());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     match path {
         None => Ok(None),
         Some(p) => {
@@ -189,11 +204,20 @@ pub fn open_output(path: Option<&str>) -> Result<Option<Box<dyn Write>>, String>
 /// # Errors
 /// Returns `Err(message)` if the file cannot be created or written to.
 pub fn write_buffer(buf: &str, path: &str) -> Result<(), String> {
-    let mut file =
-        File::create(path).map_err(|e| format!("\\w: could not create \"{path}\": {e}"))?;
-    file.write_all(buf.as_bytes())
-        .map_err(|e| format!("\\w: write failed for \"{path}\": {e}"))?;
-    Ok(())
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (buf, path);
+        return Err("\\w: file write is not available on wasm32-unknown-unknown (no filesystem)".to_owned());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut file =
+            File::create(path).map_err(|e| format!("\\w: could not create \"{path}\": {e}"))?;
+        file.write_all(buf.as_bytes())
+            .map_err(|e| format!("\\w: write failed for \"{path}\": {e}"))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +307,15 @@ fn temp_file_path() -> String {
 /// Returns the exit code of the child process, or 1 if it could not be
 /// launched.
 pub fn shell_command(cmd: Option<&str>) -> i32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = cmd;
+        rpg_eprintln!("\\!: shell commands are not available on wasm32-unknown-unknown (no shell)");
+        return 1;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
 
     let status = if let Some(c) = cmd {
@@ -297,6 +330,7 @@ pub fn shell_command(cmd: Option<&str>) -> i32 {
             rpg_eprintln!("\\!: could not launch shell \"{shell}\": {e}");
             1
         }
+    }
     }
 }
 

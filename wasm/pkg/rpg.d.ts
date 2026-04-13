@@ -53,11 +53,11 @@ export interface InitOutput {
     readonly run_rpg: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
     readonly wasmlinesender_push_line: (a: number, b: number, c: number) => void;
     readonly wasmlinesender_send_eof: (a: number) => void;
-    readonly __wasm_bindgen_func_elem_2180: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_2194: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_188: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1472: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1161: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_2031: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_2045: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_187: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_1325: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_1014: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

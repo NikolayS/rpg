@@ -1537,26 +1537,23 @@ pub(super) async fn handle_ai_plan(
 
     // Offer to save the plan.
     if ask_yn_prompt("Save this plan? [Y/n] ", true) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            rpg_eprintln!("/plan save: not available on wasm32-unknown-unknown (no filesystem)");
+            return;
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
+        {
         let plans_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("rpg")
             .join("plans");
-        #[cfg(target_arch = "wasm32")]
-        let plans_dir = std::path::PathBuf::from(".").join("rpg").join("plans");
         if let Err(e) = std::fs::create_dir_all(&plans_dir) {
             rpg_eprintln!("Cannot create plans directory: {e}");
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
         let now = std::time::SystemTime::now();
-        #[cfg(target_arch = "wasm32")]
-        let now = {
-            let wt = web_time::SystemTime::now();
-            let dur = wt.duration_since(web_time::SystemTime::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::ZERO);
-            std::time::UNIX_EPOCH + dur
-        };
         let date = format_system_time(now)
             .replace(' ', "-")
             .replace(':', "");
@@ -1574,6 +1571,7 @@ pub(super) async fn handle_ai_plan(
         match std::fs::write(&path, &result.content) {
             Ok(()) => rpg_eprintln!("Saved to: {}", path.display()),
             Err(e) => rpg_eprintln!("Failed to save plan: {e}"),
+        }
         }
     }
 }

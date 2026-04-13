@@ -423,6 +423,15 @@ async fn execute_copy_from(
     spec: &CopySpec,
     quiet: bool,
 ) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, spec, quiet);
+        rpg_eprintln!("\\copy: not available on wasm32-unknown-unknown (no filesystem)");
+        return Err("\\copy: not available on wasm32-unknown-unknown (no filesystem)".to_owned());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     use futures::SinkExt;
 
     let sql = build_copy_from_sql(spec);
@@ -460,10 +469,20 @@ async fn execute_copy_from(
         rpg_println!("COPY {rows}");
     }
     Ok(())
+    }
 }
 
 /// Execute `COPY TO STDOUT` — stream server data to a local file.
 async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, spec);
+        rpg_eprintln!("\\copy: not available on wasm32-unknown-unknown (no filesystem)");
+        return Err("\\copy: not available on wasm32-unknown-unknown (no filesystem)".to_owned());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     use futures::StreamExt;
 
     let sql = build_copy_to_sql(spec);
@@ -548,6 +567,7 @@ async fn execute_copy_to(client: &tokio_postgres::Client, spec: &CopySpec) -> Re
     }
 
     Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

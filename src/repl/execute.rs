@@ -1402,6 +1402,14 @@ pub(super) async fn execute_to_file(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, buf, path, settings, tx);
+        rpg_eprintln!("\\g file: file output is not available on wasm32-unknown-unknown (no filesystem)");
+        return;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     match std::fs::File::create(path) {
         Ok(file) => {
             let prev = settings.output_target.take();
@@ -1449,6 +1457,15 @@ pub(super) async fn execute_piped(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, buf, cmd, settings, tx);
+        rpg_eprintln!("\\g |: piped execution is not available on wasm32-unknown-unknown (no shell)");
+        return;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
@@ -1482,6 +1499,7 @@ pub(super) async fn execute_piped(
             let _ = child.wait();
         }
         Err(e) => rpg_eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
+    }
     }
 }
 

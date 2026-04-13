@@ -47,8 +47,17 @@ const INV_READ: i32 = 0x0004_0000; // 0x40000
 ///
 /// Returns the OID of the created large object so the caller can set LASTOID.
 pub async fn lo_import(client: &Client, filename: &str, comment: &str, quiet: bool) -> Option<i64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, filename, comment, quiet);
+        rpg_eprintln!("\\lo_import: not available on wasm32-unknown-unknown (no filesystem)");
+        return None;
+    }
+
     // Read the file before touching the database so that a missing file
     // produces a clear error without starting a transaction.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let data = match read_file(filename) {
         Ok(d) => d,
         Err(e) => {
@@ -65,6 +74,7 @@ pub async fn lo_import(client: &Client, filename: &str, comment: &str, quiet: bo
             rpg_eprintln!("\\lo_import: {e}");
             None
         }
+    }
     }
 }
 
@@ -147,8 +157,17 @@ async fn run_lo_import(
 /// 6. Write the accumulated bytes to the local file.
 /// 7. Print `lo_export`.
 pub async fn lo_export(client: &Client, loid: &str, filename: &str, quiet: bool) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, loid, filename, quiet);
+        rpg_eprintln!("\\lo_export: not available on wasm32-unknown-unknown (no filesystem)");
+        return;
+    }
+
     // psql uses atooid() which returns 0 for non-numeric input, then the server
     // returns "large object 0 does not exist".  Match that behaviour.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let loid_parsed = loid.trim().parse::<u32>().unwrap_or(0);
 
     match run_lo_export(client, loid_parsed, filename).await {
@@ -159,6 +178,7 @@ pub async fn lo_export(client: &Client, loid: &str, filename: &str, quiet: bool)
         }
         // psql prints the PostgreSQL error directly without a command prefix.
         Err(e) => rpg_eprintln!("{e}"),
+    }
     }
 }
 

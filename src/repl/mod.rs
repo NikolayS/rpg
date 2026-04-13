@@ -243,6 +243,11 @@ pub struct PromptContext<'a> {
 /// AND by the integration test: prompt_backtick_percent_fix_789 in
 /// tests/integration_repl.rs.
 pub fn expand_prompt_backticks(prompt: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    return prompt.to_owned(); // backtick expansion not available on WASM
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let mut result = String::new();
     let mut chars = prompt.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -287,6 +292,7 @@ pub fn expand_prompt_backticks(prompt: &str) -> String {
         }
     }
     result
+    }
 }
 
 /// Expand a psql-compatible prompt template string.
@@ -5545,16 +5551,24 @@ async fn dispatch_meta(
         MetaCmd::SetEnv(ref env_name, ref value) => {
             // \setenv ENVVAR [value] — set or unset an OS environment variable.
             // When value is empty, the variable is removed from the environment.
-            if env_name.is_empty() {
-                rpg_eprintln!("\\setenv: missing required argument");
-            } else if value.is_empty() {
-                // SAFETY: only called from a single-threaded context.
-                unsafe { std::env::remove_var(env_name) };
-            } else {
-                // Strip surrounding single quotes (psql passes them through).
-                let clean = value.trim_matches('\'');
-                // SAFETY: only called from a single-threaded context.
-                unsafe { std::env::set_var(env_name, clean) };
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (env_name, value);
+                rpg_eprintln!("\\setenv: not available on wasm32-unknown-unknown");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if env_name.is_empty() {
+                    rpg_eprintln!("\\setenv: missing required argument");
+                } else if value.is_empty() {
+                    // SAFETY: only called from a single-threaded context.
+                    unsafe { std::env::remove_var(env_name) };
+                } else {
+                    // Strip surrounding single quotes (psql passes them through).
+                    let clean = value.trim_matches('\'');
+                    // SAFETY: only called from a single-threaded context.
+                    unsafe { std::env::set_var(env_name, clean) };
+                }
             }
         }
         MetaCmd::Unset(ref name) => {
@@ -5871,6 +5885,12 @@ pub(super) fn dispatch_history(settings: &mut ReplSettings, arg: Option<&str>) {
                 std::path::PathBuf::from(path)
             };
 
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = &resolved;
+                rpg_eprintln!("\\s: file save is not available on wasm32-unknown-unknown (no filesystem)");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             match std::fs::write(&resolved, entries.join("\n") + "\n") {
                 Ok(()) => {
                     if !settings.quiet {

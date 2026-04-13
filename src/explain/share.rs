@@ -294,6 +294,14 @@ async fn upload_pgmustard(
 ///
 /// Fails silently if no clipboard tool is available or the copy fails.
 pub fn copy_to_clipboard(text: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = text;
+        return; // clipboard not available on WASM
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -325,6 +333,7 @@ pub fn copy_to_clipboard(text: &str) {
         // Ignore wait errors — clipboard is best-effort.
         let _ = child.wait();
         return;
+    }
     }
 }
 
