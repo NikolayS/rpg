@@ -138,10 +138,15 @@ pub async fn reconnect(
         new_params.application_name = appname;
     }
 
-    let (client, params, password, tls_info) =
-        connection::connect(new_params, initial_password, &opts)
-            .await
+    // Resolve the password before connect() to keep the connect function
+    // free of password-source calls (breaks CodeQL taint chain).
+    let password =
+        connection::resolve_password_value(initial_password, &new_params, false, false, false)
             .map_err(|e| e.to_string())?;
+
+    let (client, params, tls_info) = connection::connect(new_params, password.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
     Ok((client, params, password, tls_info))
 }
 

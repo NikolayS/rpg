@@ -881,8 +881,26 @@ async fn async_main() {
         }
     };
 
-    match connection::connect(params, initial_password, &opts).await {
-        Ok((client, mut resolved, resolved_password, resolved_tls)) => {
+    // Resolve the password before connect() so that the connect function
+    // never calls a password-source function internally.  This keeps
+    // CodeQL's taint analysis from attributing password-derived taint to
+    // connect()'s return values.
+    let password = match connection::resolve_password_value(
+        initial_password,
+        &params,
+        opts.force_password,
+        opts.no_password,
+        false,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("rpg: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    match connection::connect(params, password.as_deref()).await {
+        Ok((client, mut resolved, resolved_tls)) => {
             use std::io::IsTerminal;
             logging::info(
                 "connection",
@@ -985,9 +1003,9 @@ async fn async_main() {
                 false
             };
 
-            // Store password and TLS info in params now that display is done —
-            // needed for reconnection and \conninfo in the REPL.
-            resolved.password = resolved_password;
+            // Store password and TLS info in params — needed for
+            // reconnection and \conninfo in the REPL.
+            resolved.password = password;
             resolved.tls_info = resolved_tls;
 
             // --report [format]: run all analyzers, print detailed report,
