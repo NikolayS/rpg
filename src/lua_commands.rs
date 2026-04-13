@@ -129,7 +129,14 @@ mod lua_impl {
     // -----------------------------------------------------------------------
 
     fn commands_dir() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|d| d.join("rpg").join("commands"))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            dirs::config_dir().map(|d| d.join("rpg").join("commands"))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -143,7 +150,7 @@ mod lua_impl {
         let lua = match Lua::new_with(mlua::StdLib::ALL_SAFE, mlua::LuaOptions::default()) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("rpg: lua: failed to initialise Lua 5.4 runtime: {e}");
+                rpg_eprintln!("rpg: lua: failed to initialise Lua 5.4 runtime: {e}");
                 return LuaRegistry {
                     commands: Vec::new(),
                     lua: Lua::new(),
@@ -156,7 +163,7 @@ mod lua_impl {
         let dbname_arc: Arc<Mutex<String>> = Arc::new(Mutex::new(dbname.to_owned()));
 
         if let Err(e) = install_rpg_module(&lua, &Arc::clone(&pending), &Arc::clone(&dbname_arc)) {
-            eprintln!("rpg: lua: failed to install rpg API: {e}");
+            rpg_eprintln!("rpg: lua: failed to install rpg API: {e}");
             return LuaRegistry {
                 commands: Vec::new(),
                 lua,
@@ -192,14 +199,14 @@ mod lua_impl {
             let src = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("rpg: lua: skipping {source_path}: cannot read: {e}");
+                    rpg_eprintln!("rpg: lua: skipping {source_path}: cannot read: {e}");
                     continue;
                 }
             };
 
             let before = pending.lock().unwrap().len();
             if let Err(e) = lua.load(&src).set_name(&source_path).exec() {
-                eprintln!("rpg: lua: skipping {source_path}: {e}");
+                rpg_eprintln!("rpg: lua: skipping {source_path}: {e}");
                 continue;
             }
 
@@ -256,7 +263,7 @@ mod lua_impl {
         rpg.set(
             "print",
             lua.create_function(|_lua, text: String| {
-                println!("{text}");
+                rpg_println!("{text}");
                 Ok(())
             })?,
         )?;
@@ -265,7 +272,7 @@ mod lua_impl {
         rpg.set(
             "pager",
             lua.create_function(|_lua, text: String| {
-                println!("{text}");
+                rpg_println!("{text}");
                 Ok(())
             })?,
         )?;

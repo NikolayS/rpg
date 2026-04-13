@@ -8,6 +8,35 @@
 use super::ai_commands::{interpret_auto_explain, suggest_error_fix_inline};
 use super::*;
 
+/// Write bytes to stdout on native, or to `web_sys::console::log_1` on WASM.
+fn write_to_stdout_or_wasm(data: &[u8]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::io::stdout().write_all(data);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::wasm::io::wasm_print(std::str::from_utf8(data).unwrap_or(""));
+    }
+}
+
+/// Return the terminal height in rows.
+///
+/// On native this queries the real terminal via crossterm; on WASM it returns
+/// a fixed default (24 rows) since there is no physical terminal.
+fn terminal_rows() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crossterm::terminal::size()
+            .map(|(_, h)| h as usize)
+            .unwrap_or(24)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        24
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Query execution (stub — #19 will provide the proper implementation)
 // ---------------------------------------------------------------------------
@@ -444,7 +473,7 @@ pub(super) fn print_result_set_pset(
 /// Prints the command to stderr and asks "Execute? (y/n)".
 /// Returns `true` if the user confirms (or single-step is not enabled).
 pub(super) fn confirm_single_step(sql: &str) -> bool {
-    eprint!("***(Single step mode: verify command)*******************************************\n{sql}\n***(press return to proceed or enter x and return to cancel)***********************\n");
+    rpg_eprint!("***(Single step mode: verify command)*******************************************\n{sql}\n***(press return to proceed or enter x and return to cancel)***********************\n");
     let _ = io::stderr().flush();
     let mut answer = String::new();
     if io::stdin().read_line(&mut answer).is_err() {
@@ -467,6 +496,10 @@ pub async fn execute_query(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> bool {
+    use crate::output::OutputFormat;
+    use futures::StreamExt as _;
+    use tokio_postgres::SimpleQueryMessage;
+
     // Interpolate variables before sending.
     let interpolated = settings.vars.interpolate(sql);
 
@@ -536,7 +569,7 @@ pub async fn execute_query(
         let reason = built_in.or(custom);
         if let Some(ref r) = reason {
             if !crate::safety::confirm_destructive(r) {
-                eprintln!("Statement cancelled.");
+                rpg_eprintln!("Statement cancelled.");
                 return false; // not executed — caller must not assume DDL ran
             }
         }
@@ -549,13 +582,13 @@ pub async fn execute_query(
         if let Some(ref mut w) = settings.output_target {
             let _ = writeln!(w, "{sql_to_send}");
         } else {
-            println!("{sql_to_send}");
+            rpg_println!("{sql_to_send}");
         }
     }
 
     // -e / --echo-queries: print query to stderr before executing.
     if settings.echo_queries {
-        eprintln!("{sql_to_send}");
+        rpg_eprintln!("{sql_to_send}");
     }
 
     // -L: log query input to the log file.
@@ -597,9 +630,6 @@ pub async fn execute_query(
     // to display intermediate result sets from statements that completed
     // before an error occurs in a later statement of the same batch, matching
     // psql's behaviour for \; multi-statement queries.
-    use futures::StreamExt as _;
-    use tokio_postgres::SimpleQueryMessage;
-
     let stream_result = client.simple_query_raw(sql_to_send).await;
     // Pin the stream so we can call .next() on it (SimpleQueryStream is !Unpin).
     let mut stream = match stream_result {
@@ -607,7 +637,7 @@ pub async fn execute_query(
         Err(e) => {
             // Connection-level error before any messages were sent.
             if settings.echo_errors {
-                eprintln!("{sql_to_send}");
+                rpg_eprintln!("{sql_to_send}");
             }
             crate::output::eprint_db_error_located(
                 settings.error_location_prefix().as_deref(),
@@ -646,7 +676,7 @@ pub async fn execute_query(
                     .as_deref()
                     .is_some_and(|p| !p.is_empty())
             {
-                eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+                rpg_eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
             }
             // Store timing before returning.
             if let Some(t) = start {
@@ -658,7 +688,7 @@ pub async fn execute_query(
                     if let Some(ref mut w) = settings.output_target {
                         let _ = w.write_all(line.as_bytes());
                     } else {
-                        let _ = io::stdout().write_all(line.as_bytes());
+                        write_to_stdout_or_wasm(line.as_bytes());
                     }
                 }
                 settings.last_query_duration_ms = Some(elapsed_ms);
@@ -769,7 +799,7 @@ pub async fn execute_query(
                     if let Some(ref mut w) = settings.output_target {
                         let _ = w.write_all(&out_buf);
                     } else {
-                        let _ = io::stdout().write_all(&out_buf);
+                        write_to_stdout_or_wasm(&out_buf);
                     }
 
                     // Store row count for audit log entry.
@@ -784,7 +814,6 @@ pub async fn execute_query(
                     // NOT echo blanks after them (they emit a separate command
                     // tag and format_rowset_pset already appends a blank).
                     // Unaligned and tuples-only modes are excluded too.
-                    use crate::output::OutputFormat;
                     if is_select
                         && !settings.pset.tuples_only
                         && matches!(
@@ -830,7 +859,7 @@ pub async fn execute_query(
 
         // -b / --echo-errors: echo the failing query to stderr.
         if settings.echo_errors {
-            eprintln!("{sql_to_send}");
+            rpg_eprintln!("{sql_to_send}");
         }
         crate::output::eprint_db_error_located(
             settings.error_location_prefix().as_deref(),
@@ -950,7 +979,7 @@ pub async fn execute_query(
                 .as_deref()
                 .is_some_and(|p| !p.is_empty())
         {
-            eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+            rpg_eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
         }
 
         false
@@ -988,7 +1017,7 @@ pub async fn execute_query(
             if let Some(ref mut w) = settings.output_target {
                 let _ = w.write_all(line.as_bytes());
             } else {
-                let _ = io::stdout().write_all(line.as_bytes());
+                write_to_stdout_or_wasm(line.as_bytes());
             }
         }
         // Store duration for the status bar.
@@ -1074,7 +1103,7 @@ pub async fn execute_query_extended(
         let reason = built_in.or(custom);
         if let Some(ref r) = reason {
             if !crate::safety::confirm_destructive(r) {
-                eprintln!("Statement cancelled.");
+                rpg_eprintln!("Statement cancelled.");
                 return false; // not executed — caller must not assume DDL ran
             }
         }
@@ -1082,7 +1111,7 @@ pub async fn execute_query_extended(
 
     // -e / --echo-queries: print query to stderr before executing.
     if settings.echo_queries {
-        eprintln!("{sql_to_send}");
+        rpg_eprintln!("{sql_to_send}");
     }
 
     // -L: log query input to the log file.
@@ -1125,7 +1154,7 @@ pub async fn execute_query_extended(
             }
 
             if settings.echo_errors {
-                eprintln!("{sql_to_send}");
+                rpg_eprintln!("{sql_to_send}");
             }
             crate::output::eprint_db_error_located(
                 settings.error_location_prefix().as_deref(),
@@ -1163,7 +1192,7 @@ pub async fn execute_query_extended(
                     .as_deref()
                     .is_some_and(|p| !p.is_empty())
             {
-                eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+                rpg_eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
             }
             settings.last_was_fix = false;
             return false;
@@ -1226,7 +1255,7 @@ pub async fn execute_query_extended(
                 if let Some(ref mut w) = settings.output_target {
                     let _ = w.write_all(out_bytes);
                 } else {
-                    let _ = io::stdout().write_all(out_bytes);
+                    write_to_stdout_or_wasm(out_bytes);
                 }
             }
 
@@ -1253,7 +1282,7 @@ pub async fn execute_query_extended(
             }
 
             if settings.echo_errors {
-                eprintln!("{sql_to_send}");
+                rpg_eprintln!("{sql_to_send}");
             }
             crate::output::eprint_db_error_located(
                 settings.error_location_prefix().as_deref(),
@@ -1293,7 +1322,7 @@ pub async fn execute_query_extended(
                     .as_deref()
                     .is_some_and(|p| !p.is_empty())
             {
-                eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
+                rpg_eprintln!("\x1b[2mHint: type /fix to auto-correct this query\x1b[0m");
             }
 
             false
@@ -1311,7 +1340,7 @@ pub async fn execute_query_extended(
             if let Some(ref mut w) = settings.output_target {
                 let _ = w.write_all(line.as_bytes());
             } else {
-                let _ = io::stdout().write_all(line.as_bytes());
+                write_to_stdout_or_wasm(line.as_bytes());
             }
         }
         settings.last_query_duration_ms = Some(elapsed_ms);
@@ -1343,7 +1372,7 @@ pub(super) async fn execute_named_stmt(
     tx: &mut TxState,
 ) -> bool {
     if !settings.named_statements.contains(stmt_name) {
-        eprintln!("ERROR:  prepared statement \"{stmt_name}\" does not exist");
+        rpg_eprintln!("ERROR:  prepared statement \"{stmt_name}\" does not exist");
         return false;
     }
 
@@ -1394,6 +1423,16 @@ pub(super) async fn execute_to_file(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (client, buf, path, settings, tx);
+        rpg_eprintln!(
+            "\\g file: file output is not available on wasm32-unknown-unknown (no filesystem)"
+        );
+        return;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     match std::fs::File::create(path) {
         Ok(file) => {
             let prev = settings.output_target.take();
@@ -1408,7 +1447,7 @@ pub(super) async fn execute_to_file(
             let msg = full
                 .find(" (os error ")
                 .map_or(full.as_str(), |pos| &full[..pos]);
-            eprintln!("error: {path}: {msg}");
+            rpg_eprintln!("error: {path}: {msg}");
         }
     }
 }
@@ -1441,39 +1480,51 @@ pub(super) async fn execute_piped(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-
-    // Strip the leading `|` and trim whitespace.
-    let shell_cmd = cmd.trim_start_matches('|').trim();
-
-    // Capture query output into a shared buffer, then pipe it to the child.
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let writer = CapturingWriter(std::sync::Arc::clone(&shared));
-
-    let prev = settings.output_target.take();
-    settings.output_target = Some(Box::new(writer));
-    execute_query(client, buf, settings, tx).await;
-    settings.output_target = prev;
-
-    let captured = std::sync::Arc::try_unwrap(shared)
-        .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
-        .into_inner()
-        .unwrap_or_default();
-
-    match Command::new("sh")
-        .arg("-c")
-        .arg(shell_cmd)
-        .stdin(Stdio::piped())
-        .spawn()
+    #[cfg(target_arch = "wasm32")]
     {
-        Ok(mut child) => {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(&captured);
+        let _ = (client, buf, cmd, settings, tx);
+        rpg_eprintln!(
+            "\\g |: piped execution is not available on wasm32-unknown-unknown (no shell)"
+        );
+        return;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        // Strip the leading `|` and trim whitespace.
+        let shell_cmd = cmd.trim_start_matches('|').trim();
+
+        // Capture query output into a shared buffer, then pipe it to the child.
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = CapturingWriter(std::sync::Arc::clone(&shared));
+
+        let prev = settings.output_target.take();
+        settings.output_target = Some(Box::new(writer));
+        execute_query(client, buf, settings, tx).await;
+        settings.output_target = prev;
+
+        let captured = std::sync::Arc::try_unwrap(shared)
+            .unwrap_or_else(|arc| std::sync::Mutex::new(arc.lock().unwrap().clone()))
+            .into_inner()
+            .unwrap_or_default();
+
+        match Command::new("sh")
+            .arg("-c")
+            .arg(shell_cmd)
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(&captured);
+                }
+                let _ = child.wait();
             }
-            let _ = child.wait();
+            Err(e) => rpg_eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
         }
-        Err(e) => eprintln!("\\g: cannot run command \"{shell_cmd}\": {e}"),
     }
 }
 
@@ -1491,7 +1542,7 @@ fn is_explain_statement(sql: &str) -> bool {
 }
 
 /// Return `true` if `sql` is a transaction control command that should NOT
-/// be wrapped with implicit savepoints by ON_ERROR_ROLLBACK.
+/// be wrapped with implicit savepoints by `ON_ERROR_ROLLBACK`.
 ///
 /// psql excludes: BEGIN, START TRANSACTION, COMMIT, END, ROLLBACK, ABORT,
 /// SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT, PREPARE TRANSACTION.
@@ -1693,9 +1744,7 @@ pub(super) async fn execute_query_interactive(
     let _ = &display; // suppress unused warning
 
     // Determine terminal height; fall back to 24 if unavailable.
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = terminal_rows();
 
     if crate::pager::needs_paging_with_min(
         text,
@@ -1717,7 +1766,7 @@ pub(super) async fn execute_query_interactive(
             sl.render();
         }
     } else {
-        let _ = io::stdout().write_all(display_bytes);
+        write_to_stdout_or_wasm(display_bytes);
     }
 
     if ok && is_ddl_statement(sql) {
@@ -1816,9 +1865,7 @@ pub(super) async fn execute_query_extended_interactive(
 
     let text = String::from_utf8_lossy(&captured);
 
-    let term_rows = crossterm::terminal::size()
-        .map(|(_, h)| h as usize)
-        .unwrap_or(24);
+    let term_rows = terminal_rows();
 
     if crate::pager::needs_paging_with_min(
         &text,
@@ -1840,7 +1887,7 @@ pub(super) async fn execute_query_extended_interactive(
             sl.render();
         }
     } else {
-        let _ = io::stdout().write_all(&captured);
+        write_to_stdout_or_wasm(&captured);
     }
 
     if ok && is_ddl_statement(sql) {
@@ -2010,11 +2057,17 @@ pub(super) fn format_utc_timestamp(secs: u64) -> String {
 /// Passwords and connection strings are never written.
 pub fn format_audit_entry(ctx: &AuditEntryCtx<'_>) -> String {
     use std::fmt::Write as _;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     // Format current UTC time as "YYYY-MM-DD HH:MM:SS UTC" using only std.
-    let secs_since_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    // std::time::SystemTime::now() panics on wasm32-unknown-unknown; use
+    // web_time which provides a browser-compatible implementation.
+    #[cfg(not(target_arch = "wasm32"))]
+    let secs_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    #[cfg(target_arch = "wasm32")]
+    let secs_since_epoch = web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let ts = format_utc_timestamp(secs_since_epoch);
@@ -2083,14 +2136,19 @@ pub(super) fn flush_audit_entry(settings: &mut ReplSettings, entry_text: &str) {
 ///
 /// Prints `-- Schema cache refreshed` on success.  Errors are silently
 /// ignored so that a cache refresh failure never disrupts normal output.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) async fn auto_refresh_schema(client: &Client, settings: &mut ReplSettings) {
     if let Some(cache) = &settings.schema_cache {
         if let Ok(loaded) = load_schema_cache(client).await {
             *cache.write().unwrap() = loaded;
-            println!("-- Schema cache refreshed");
+            rpg_println!("-- Schema cache refreshed");
         }
     }
 }
+
+/// WASM stub: schema cache refresh is a no-op (completion not available).
+#[cfg(target_arch = "wasm32")]
+pub(super) async fn auto_refresh_schema(_client: &Client, _settings: &mut ReplSettings) {}
 
 /// Activate the appropriate pager for `text`.
 ///
@@ -2101,22 +2159,22 @@ pub(super) fn run_pager_for_text(settings: &ReplSettings, text: &str, raw_bytes:
     if let Some(ref cmd) = settings.pager_command {
         if let Err(e) = crate::pager::run_pager_external(cmd, text) {
             if e.kind() == io::ErrorKind::NotFound {
-                eprintln!(
+                rpg_eprintln!(
                     "rpg: pager '{cmd}' not found — check your PAGER setting \
                      (\\set PAGER off to disable)"
                 );
             } else {
-                eprintln!("rpg: pager error: {e}");
+                rpg_eprintln!("rpg: pager error: {e}");
             }
-            let _ = io::stdout().write_all(raw_bytes);
+            write_to_stdout_or_wasm(raw_bytes);
         }
     } else if let Err(e) = crate::pager::run_pager(text) {
         // Unsupported means no TTY is available (e.g. piped / non-interactive
         // mode).  Fall back silently — no error message, just print.
         if e.kind() != io::ErrorKind::Unsupported {
-            eprintln!("rpg: pager error: {e}");
+            rpg_eprintln!("rpg: pager error: {e}");
         }
-        let _ = io::stdout().write_all(raw_bytes);
+        write_to_stdout_or_wasm(raw_bytes);
     }
 }
 
@@ -2194,7 +2252,7 @@ pub(super) async fn execute_gexec(
             if let Some(ref mut w) = settings.output_target {
                 let _ = writeln!(w, "{cell_sql}");
             } else {
-                println!("{cell_sql}");
+                rpg_println!("{cell_sql}");
             }
         }
         // Use execute_query so SELECT/EXPLAIN results are rendered correctly.
@@ -2284,7 +2342,7 @@ pub(super) async fn execute_gset(
             match rows.len() {
                 0 => {
                     // Always print this error (not suppressed by \quiet).
-                    eprintln!("error: no rows returned for \\gset");
+                    rpg_eprintln!("error: no rows returned for \\gset");
                 }
                 1 => {
                     tx.update_from_sql(sql_to_send);
@@ -2298,13 +2356,13 @@ pub(super) async fn execute_gset(
                         // Validate that the resulting variable name is legal
                         // (no spaces, slashes, etc.).
                         if !crate::vars::is_valid_variable_name(&var_name) {
-                            eprintln!("error: invalid variable name: \"{var_name}\"");
+                            rpg_eprintln!("error: invalid variable name: \"{var_name}\"");
                             continue;
                         }
                         // Warn about specially treated variables that psql
                         // ignores when set via \gset.
                         if is_specially_treated_gset_var(&var_name) {
-                            eprintln!(
+                            rpg_eprintln!(
                                 "warning: attempt to \\gset into specially treated \
                                  variable \"{var_name}\" ignored"
                             );
@@ -2319,7 +2377,7 @@ pub(super) async fn execute_gset(
                         }
                     }
                 }
-                _ => eprintln!("error: more than one row returned for \\gset"),
+                _ => rpg_eprintln!("error: more than one row returned for \\gset"),
             }
             // \gset stores results in variables, not displayed — psql does
             // not echo blank lines following \gset.
@@ -2678,13 +2736,13 @@ pub(super) async fn execute_crosstabview(
             // psql always outputs a blank line after the crosstabview
             // result table in echo-all (-a) mode.
             out.push('\n');
-            let _ = io::stdout().write_all(out.as_bytes());
+            write_to_stdout_or_wasm(out.as_bytes());
             // Do NOT set last_stmt_produced_rows: the trailing blank line
             // was already output above, so blank lines that follow in the
             // input file should NOT be echoed a second time.
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            rpg_eprintln!("error: {e}");
         }
     }
 }
@@ -2748,8 +2806,11 @@ fn is_numeric_oid(oid: u32) -> bool {
 /// When `buf` is empty, prints an informational message.
 /// On prepare error, prints the Postgres error message.
 pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: bool) {
+    use crate::output::format_rowset_pset;
+    use crate::query::{ColumnMeta, RowSet};
+
     if buf.is_empty() {
-        println!("Query buffer is empty.");
+        rpg_println!("Query buffer is empty.");
         return;
     }
 
@@ -2763,7 +2824,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 
     let cols = stmt.columns();
     if cols.is_empty() {
-        println!("The command has no result, or the result has no columns.");
+        rpg_println!("The command has no result, or the result has no columns.");
         return;
     }
 
@@ -2811,9 +2872,6 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
 
     // Build a RowSet and use format_rowset_pset for proper alignment
     // (center-aligned headers, trailing blank line — matching psql).
-    use crate::output::format_rowset_pset;
-    use crate::query::{ColumnMeta, RowSet};
-
     let columns = vec![
         ColumnMeta {
             name: "Column".to_owned(),
@@ -2836,7 +2894,7 @@ pub(super) async fn describe_buffer(client: &Client, buf: &str, verbose_errors: 
     let mut out = String::new();
     format_rowset_pset(&mut out, &rs, &crate::output::PsetConfig::default());
 
-    let _ = io::stdout().write_all(out.as_bytes());
+    write_to_stdout_or_wasm(out.as_bytes());
 }
 
 // ---------------------------------------------------------------------------

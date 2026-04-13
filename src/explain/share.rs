@@ -77,8 +77,13 @@ pub async fn share_explain_plan(
 /// `redirect::Policy::none()` lets us capture the `Location` header directly
 /// instead of following the redirect (which would return HTML).
 async fn upload_depesz(plan_text: &str) -> Result<String, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    #[cfg(target_arch = "wasm32")]
+    let client = reqwest::Client::builder()
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
@@ -167,8 +172,13 @@ fn extract_depesz_url(body: &str) -> Option<String> {
 /// instead of following the redirect automatically (which would give us
 /// the rendered HTML page with status 200, making URL extraction fail).
 async fn upload_dalibo(plan_text: &str) -> Result<String, String> {
+    #[cfg(not(target_arch = "wasm32"))]
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    #[cfg(target_arch = "wasm32")]
+    let client = reqwest::Client::builder()
         .build()
         .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
@@ -284,37 +294,46 @@ async fn upload_pgmustard(
 ///
 /// Fails silently if no clipboard tool is available or the copy fails.
 pub fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = text;
+        return; // clipboard not available on WASM
+    }
 
-    #[cfg(target_os = "macos")]
-    let candidates: &[&[&str]] = &[&["pbcopy"]];
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
 
-    #[cfg(not(target_os = "macos"))]
-    let candidates: &[&[&str]] = &[
-        &["wl-copy"],
-        &["xclip", "-selection", "clipboard"],
-        &["xsel", "--clipboard", "--input"],
-    ];
+        #[cfg(target_os = "macos")]
+        let candidates: &[&[&str]] = &[&["pbcopy"]];
 
-    for argv in candidates {
-        let (prog, args) = argv.split_first().unwrap();
-        let Ok(mut child) = Command::new(prog)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
+        #[cfg(not(target_os = "macos"))]
+        let candidates: &[&[&str]] = &[
+            &["wl-copy"],
+            &["xclip", "-selection", "clipboard"],
+            &["xsel", "--clipboard", "--input"],
+        ];
 
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+        for argv in candidates {
+            let (prog, args) = argv.split_first().unwrap();
+            let Ok(mut child) = Command::new(prog)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            else {
+                continue;
+            };
+
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            // Ignore wait errors — clipboard is best-effort.
+            let _ = child.wait();
+            return;
         }
-        // Ignore wait errors — clipboard is best-effort.
-        let _ = child.wait();
-        return;
     }
 }
 

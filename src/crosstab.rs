@@ -204,6 +204,8 @@ pub fn pivot(
     rows: &[Vec<String>],
     args: &CrosstabArgs,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    const MAX_CROSSTAB_COLS: usize = 1600;
+
     if headers.len() < 3 {
         return Err("\\crosstabview: query must return at least three columns".to_owned());
     }
@@ -230,7 +232,6 @@ pub fn pivot(
     }
 
     // Enforce psql's maximum column count.
-    const MAX_CROSSTAB_COLS: usize = 1600;
     if col_headers.len() > MAX_CROSSTAB_COLS {
         return Err(format!(
             "\\crosstabview: maximum number of columns ({MAX_CROSSTAB_COLS}) exceeded"

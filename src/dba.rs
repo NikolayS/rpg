@@ -107,8 +107,8 @@ pub async fn execute(
                 dba_progress(client, Some(rest.trim()), capabilities, settings).await;
                 return None;
             }
-            eprintln!("\\dba: unknown subcommand \"{subcommand}\"");
-            eprintln!("Try \\dba help for available subcommands.");
+            rpg_eprintln!("\\dba: unknown subcommand \"{subcommand}\"");
+            rpg_eprintln!("Try \\dba help for available subcommands.");
             None
         }
     }
@@ -154,9 +154,9 @@ async fn run_and_print(client: &Client, sql: &str, settings: &mut crate::repl::R
         }
         Err(e) => {
             if let Some(db_err) = e.as_db_error() {
-                eprintln!("\\dba: {}", db_err.message());
+                rpg_eprintln!("\\dba: {}", db_err.message());
             } else {
-                eprintln!("\\dba: {e}");
+                rpg_eprintln!("\\dba: {e}");
             }
         }
     }
@@ -403,7 +403,7 @@ async fn dba_activity(
     let messages = match client.simple_query(sql).await {
         Ok(msgs) => msgs,
         Err(e) => {
-            eprintln!("\\dba activity: {e}");
+            rpg_eprintln!("\\dba activity: {e}");
             return;
         }
     };
@@ -507,9 +507,9 @@ async fn collect_lock_edges(
         Ok(m) => m,
         Err(e) => {
             if let Some(db_err) = e.as_db_error() {
-                eprintln!("\\dba locks: {}", db_err.message());
+                rpg_eprintln!("\\dba locks: {}", db_err.message());
             } else {
-                eprintln!("\\dba locks: {e}");
+                rpg_eprintln!("\\dba locks: {e}");
             }
             return Vec::new();
         }
@@ -1241,8 +1241,8 @@ async fn dba_progress(
         Some("copy") => dba_progress_copy(client, settings).await,
         Some("basebackup" | "backup") => dba_progress_basebackup(client, settings).await,
         Some(other) => {
-            eprintln!("\\dba progress: unknown operation \"{other}\"");
-            eprintln!("Available: vacuum, analyze, create_index, cluster, copy, basebackup");
+            rpg_eprintln!("\\dba progress: unknown operation \"{other}\"");
+            rpg_eprintln!("Available: vacuum, analyze, create_index, cluster, copy, basebackup");
         }
     }
 }
@@ -1285,7 +1285,7 @@ async fn dba_progress_vacuum(
             on a.pid = p.pid \
         order by p.pid"
     );
-    eprintln!("-- VACUUM progress --");
+    rpg_eprintln!("-- VACUUM progress --");
     run_and_print(client, &sql, settings).await;
 }
 
@@ -1310,7 +1310,7 @@ async fn dba_progress_analyze(client: &Client, settings: &mut crate::repl::ReplS
         join pg_stat_activity as a \
             on a.pid = p.pid \
         order by p.pid";
-    eprintln!("-- ANALYZE progress --");
+    rpg_eprintln!("-- ANALYZE progress --");
     run_and_print(client, sql, settings).await;
 }
 
@@ -1337,7 +1337,7 @@ async fn dba_progress_create_index(client: &Client, settings: &mut crate::repl::
         join pg_stat_activity as a \
             on a.pid = p.pid \
         order by p.pid";
-    eprintln!("-- CREATE INDEX progress --");
+    rpg_eprintln!("-- CREATE INDEX progress --");
     run_and_print(client, sql, settings).await;
 }
 
@@ -1362,7 +1362,7 @@ async fn dba_progress_cluster(client: &Client, settings: &mut crate::repl::ReplS
         join pg_stat_activity as a \
             on a.pid = p.pid \
         order by p.pid";
-    eprintln!("-- CLUSTER / VACUUM FULL progress --");
+    rpg_eprintln!("-- CLUSTER / VACUUM FULL progress --");
     run_and_print(client, sql, settings).await;
 }
 
@@ -1386,7 +1386,7 @@ async fn dba_progress_copy(client: &Client, settings: &mut crate::repl::ReplSett
         join pg_stat_activity as a \
             on a.pid = p.pid \
         order by p.pid";
-    eprintln!("-- COPY progress --");
+    rpg_eprintln!("-- COPY progress --");
     run_and_print(client, sql, settings).await;
 }
 
@@ -1405,7 +1405,7 @@ async fn dba_progress_basebackup(client: &Client, settings: &mut crate::repl::Re
             p.tablespaces_streamed \
         from pg_stat_progress_basebackup as p \
         order by p.pid";
-    eprintln!("-- Base backup progress --");
+    rpg_eprintln!("-- Base backup progress --");
     run_and_print(client, sql, settings).await;
 }
 
@@ -1424,7 +1424,7 @@ async fn dba_io(
         let ver = capabilities
             .and_then(|c| c.server_version.as_deref())
             .unwrap_or("unknown");
-        eprintln!(
+        rpg_eprintln!(
             "\\dba io: pg_stat_io requires PostgreSQL 16+. \
              Current server version: {ver}"
         );
