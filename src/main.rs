@@ -892,7 +892,7 @@ async fn async_main() {
                                 format!("AI: {provider}/{model}")
                             } else {
                                 format!(
-                                    "AI: {provider}/{model} (key not set — /fix /optimize /explain unavailable)"
+                                    "AI: {provider}/{model} (key not set — edit ~/.config/rpg/config.toml)"
                                 )
                             }
                         }
