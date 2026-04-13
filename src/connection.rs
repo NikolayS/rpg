@@ -1692,11 +1692,6 @@ fn pgpass_field_matches(field: &str, value: &str) -> bool {
 // Password resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the password, trying pgpass and prompting if needed.
-///
-/// The `server_requested_auth` flag should be `true` when the server
-/// has demanded a password and we don't have one yet. On the initial
-/// resolve (before connect) we set it to `false`.
 /// Resolve the password from pgpass / interactive prompt WITHOUT mutating
 /// `ConnParams`.
 ///
@@ -3056,9 +3051,12 @@ pub async fn detect_tls_from_server(client: &Client) -> Option<TlsInfo> {
         .await
         .ok()
         .flatten()?;
-    let protocol: String = row.get(0);
-    let cipher: String = row.get(1);
-    Some(TlsInfo { protocol, cipher })
+    let protocol: Option<String> = row.get(0);
+    let cipher: Option<String> = row.get(1);
+    Some(TlsInfo {
+        protocol: protocol?,
+        cipher: cipher?,
+    })
 }
 
 /// Format a human-friendly connection-success message, matching psql output.
@@ -3066,7 +3064,7 @@ pub async fn detect_tls_from_server(client: &Client) -> Option<TlsInfo> {
 /// TCP:    You are connected to database "db" as user "u" on host "h" at port "5432".
 /// Socket: You are connected to database "db" as user "u" via socket in "/run/pg" at port "5432".
 ///
-/// When `params.tls_info` is `Some`, the SSL status line is appended:
+/// When `info.tls_info` is `Some`, the SSL status line is appended:
 /// ```text
 /// SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
 /// ```
@@ -3115,7 +3113,7 @@ pub fn connection_info(info: &ConnDisplayInfo<'_>) -> String {
 /// If `server_version` is `None`, the banner is omitted and only the
 /// connected line is printed.
 ///
-/// When `new_params.tls_info` is `Some`, the SSL status line is appended after
+/// When `info.tls_info` is `Some`, the SSL status line is appended after
 /// the connected line, matching psql behaviour:
 ///
 /// ```text
@@ -3127,7 +3125,7 @@ pub fn connection_info(info: &ConnDisplayInfo<'_>) -> String {
 ///
 /// `client_version` is rpg's own version string (from [`crate::version_string`]).
 /// `server_version` is the server's version string from `SHOW server_version`.
-/// `new_params` is the newly established connection.
+/// `info` is display metadata for the newly established connection.
 ///
 /// Returns lines joined by `\n` — the exact number depends on whether a
 /// version banner and/or SSL line is needed.
