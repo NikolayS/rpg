@@ -113,7 +113,7 @@ findings, they are not blocking for this project.
 
 ## Architecture
 
-See `SPEC.md` for the full specification. Key concepts:
+See `docs/blueprints/SPEC.md` for the full specification. Key concepts:
 
 - **Modern Postgres terminal** — psql replacement with DBA diagnostics and AI assistant
 - **AI via slash commands** — `/ask`, `/fix`, `/explain`, `/optimize`
@@ -124,7 +124,7 @@ See `SPEC.md` for the full specification. Key concepts:
 
 ## Command namespace convention
 
-See `COMMANDS.md` for the full reference.
+See `docs/COMMANDS.md` for the full reference.
 
 - `\` = psql-compatible commands only. Any command psql has uses `\`.
 - `/` = rpg-specific extensions. All commands rpg adds use `/`.

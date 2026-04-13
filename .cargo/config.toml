@@ -1,5 +1,5 @@
 # Cross-compilation targets for release builds.
-# See SPEC.md Appendix A.4 for full strategy.
+# See docs/blueprints/SPEC.md Appendix A.4 for full strategy.
 
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-musl-gcc"

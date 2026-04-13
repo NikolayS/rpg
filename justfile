@@ -15,7 +15,7 @@ test:
 
 # Run integration tests (requires Docker Postgres)
 test-integration:
-  docker compose -f docker-compose.test.yml up -d --wait && (cargo test --features integration; ret=$?; docker compose -f docker-compose.test.yml down; exit $ret)
+  docker compose -f tests/docker-compose.test.yml up -d --wait && (cargo test --features integration; ret=$?; docker compose -f tests/docker-compose.test.yml down; exit $ret)
 
 # Format code
 fmt:
