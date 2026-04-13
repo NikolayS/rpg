@@ -94,6 +94,7 @@
         status.className   = 'connected';
       }
       if (isPrompt(text)) {
+        lastPrompt = text;
         term.write(text);
       } else {
         term.writeln(text);
@@ -118,28 +119,147 @@
       }
     };
 
-    // Line editing buffer for xterm.js keystrokes.
+    // Line editing state for xterm.js keystrokes.
     let lineBuffer = '';
+    let cursorPos = 0;        // cursor position within lineBuffer
+    const history = [];       // command history
+    let historyIdx = -1;      // -1 = not browsing history
+    let savedLine = '';       // line saved when entering history browse
+
+    // Redraw the line from the current prompt position.
+    function redrawLine() {
+      // Clear from start of input to end of line, rewrite buffer, reposition cursor.
+      // \x1b[?K = erase to end of line; \r moves to column 0.
+      // We need to move back to the start of user input, so we erase the
+      // entire current line content and rewrite.
+      const eraseLen = lineBuffer.length + 10; // generous
+      term.write('\x1b[2K\r');  // clear entire line, carriage return
+
+      // Re-emit the prompt.  We don't know the exact prompt text, so we ask
+      // the Rust side... but we can't.  Instead, store the last prompt.
+      term.write(lastPrompt + lineBuffer);
+
+      // Position cursor within the line.
+      const charsAfter = lineBuffer.length - cursorPos;
+      if (charsAfter > 0) {
+        term.write(`\x1b[${charsAfter}D`);  // move cursor left
+      }
+    }
+
+    // Track the last prompt so we can redraw after edits.
+    let lastPrompt = 'postgres=> ';
+
+    // Update lastPrompt whenever a prompt line is detected.
+    const origConsoleLogForPrompt = console.log;
+    const _origLogRef = origConsoleLogForPrompt; // keep reference
 
     term.onKey(({ key, domEvent }) => {
       if (!window.rpgLineSender) return; // not connected yet
 
-      const code = domEvent.keyCode;
-
       if (domEvent.key === 'Enter') {
         term.writeln('');
-        window.rpgLineSender.push_line(lineBuffer);
-        lineBuffer = '';
-      } else if (domEvent.key === 'Backspace') {
-        if (lineBuffer.length > 0) {
-          lineBuffer = lineBuffer.slice(0, -1);
-          term.write('\b \b');
+        const line = lineBuffer;
+        if (line.trim().length > 0) {
+          history.push(line);
         }
-      } else if (key.length === 1 && !domEvent.ctrlKey && !domEvent.altKey) {
-        lineBuffer += key;
-        term.write(key);
+        historyIdx = -1;
+        window.rpgLineSender.push_line(line);
+        lineBuffer = '';
+        cursorPos = 0;
+      } else if (domEvent.key === 'Backspace') {
+        if (cursorPos > 0) {
+          lineBuffer = lineBuffer.slice(0, cursorPos - 1) + lineBuffer.slice(cursorPos);
+          cursorPos--;
+          redrawLine();
+        }
+      } else if (domEvent.key === 'Delete') {
+        if (cursorPos < lineBuffer.length) {
+          lineBuffer = lineBuffer.slice(0, cursorPos) + lineBuffer.slice(cursorPos + 1);
+          redrawLine();
+        }
+      } else if (domEvent.key === 'ArrowLeft') {
+        if (cursorPos > 0) {
+          cursorPos--;
+          term.write('\x1b[D');
+        }
+      } else if (domEvent.key === 'ArrowRight') {
+        if (cursorPos < lineBuffer.length) {
+          cursorPos++;
+          term.write('\x1b[C');
+        }
+      } else if (domEvent.key === 'ArrowUp') {
+        if (history.length === 0) return;
+        if (historyIdx === -1) {
+          savedLine = lineBuffer;
+          historyIdx = history.length - 1;
+        } else if (historyIdx > 0) {
+          historyIdx--;
+        } else {
+          return; // at oldest
+        }
+        lineBuffer = history[historyIdx];
+        cursorPos = lineBuffer.length;
+        redrawLine();
+      } else if (domEvent.key === 'ArrowDown') {
+        if (historyIdx === -1) return;
+        if (historyIdx < history.length - 1) {
+          historyIdx++;
+          lineBuffer = history[historyIdx];
+        } else {
+          historyIdx = -1;
+          lineBuffer = savedLine;
+        }
+        cursorPos = lineBuffer.length;
+        redrawLine();
+      } else if (domEvent.key === 'Home' || (domEvent.ctrlKey && domEvent.key === 'a')) {
+        if (cursorPos > 0) {
+          term.write(`\x1b[${cursorPos}D`);
+          cursorPos = 0;
+        }
+      } else if (domEvent.key === 'End' || (domEvent.ctrlKey && domEvent.key === 'e')) {
+        const move = lineBuffer.length - cursorPos;
+        if (move > 0) {
+          term.write(`\x1b[${move}C`);
+          cursorPos = lineBuffer.length;
+        }
+      } else if (domEvent.ctrlKey && domEvent.key === 'u') {
+        // Clear line before cursor.
+        lineBuffer = lineBuffer.slice(cursorPos);
+        cursorPos = 0;
+        redrawLine();
+      } else if (domEvent.ctrlKey && domEvent.key === 'k') {
+        // Clear line after cursor.
+        lineBuffer = lineBuffer.slice(0, cursorPos);
+        redrawLine();
+      } else if (domEvent.ctrlKey && domEvent.key === 'w') {
+        // Delete word before cursor.
+        const before = lineBuffer.slice(0, cursorPos);
+        const trimmed = before.replace(/\s+$/, '');
+        const lastSpace = trimmed.lastIndexOf(' ');
+        const newPos = lastSpace === -1 ? 0 : lastSpace + 1;
+        lineBuffer = lineBuffer.slice(0, newPos) + lineBuffer.slice(cursorPos);
+        cursorPos = newPos;
+        redrawLine();
+      } else if (domEvent.ctrlKey && domEvent.key === 'l') {
+        // Clear screen.
+        term.clear();
+        redrawLine();
       } else if (domEvent.ctrlKey && domEvent.key === 'd') {
-        window.rpgLineSender.send_eof();
+        if (lineBuffer.length === 0) {
+          window.rpgLineSender.send_eof();
+        }
+        // Ctrl-D on non-empty line: ignore (matches readline behavior)
+      } else if (key.length === 1 && !domEvent.ctrlKey && !domEvent.altKey && !domEvent.metaKey) {
+        // Insert printable character at cursor position.
+        lineBuffer = lineBuffer.slice(0, cursorPos) + key + lineBuffer.slice(cursorPos);
+        cursorPos++;
+        if (cursorPos === lineBuffer.length) {
+          // Appending at end — just write the char.
+          term.write(key);
+        } else {
+          // Inserting mid-line — redraw.
+          redrawLine();
+        }
       }
     });
 

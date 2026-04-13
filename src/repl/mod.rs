@@ -6261,6 +6261,7 @@ pub async fn run_repl(
     settings: ReplSettings,
     no_readline: bool,
     no_psqlrc: bool,
+    #[cfg(target_arch = "wasm32")] wasm_reader: crate::wasm::line_reader::WasmLineReader,
 ) -> i32 {
     let mut settings = settings;
     let mut tx = TxState::default();
@@ -6357,7 +6358,8 @@ pub async fn run_repl(
         run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await
     };
     #[cfg(target_arch = "wasm32")]
-    let exit_code = run_dumb_loop(&mut client, &mut params, &mut settings, &mut tx).await;
+    let exit_code =
+        run_wasm_loop(&mut client, &mut params, &mut settings, &mut tx, wasm_reader).await;
 
     // Tear down the status bar on exit.
     if let Some(ref sl_arc) = settings.statusline {
@@ -6842,6 +6844,127 @@ async fn run_dumb_loop(
             Err(e) => {
                 rpg_eprintln!("rpg: read error: {e}");
                 return 1;
+            }
+        }
+    }
+
+    if settings.cond.depth() > 0 {
+        rpg_eprintln!(
+            "rpg: warning: {} unterminated \\if block(s) at end of input",
+            settings.cond.depth()
+        );
+    }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// WASM browser loop
+// ---------------------------------------------------------------------------
+
+/// Reads input from [`crate::wasm::line_reader::WasmLineReader`] instead of
+/// `std::io::stdin`, making it compatible with the single-threaded browser
+/// event loop.  The prompt is emitted via `console.log` so xterm.js can
+/// intercept and display it.
+#[cfg(target_arch = "wasm32")]
+async fn run_wasm_loop(
+    client: &mut Client,
+    params: &mut ConnParams,
+    settings: &mut ReplSettings,
+    tx: &mut TxState,
+    mut reader: crate::wasm::line_reader::WasmLineReader,
+) -> i32 {
+    let mut buf = String::new();
+
+    loop {
+        settings.prompt_interrupted = false;
+
+        let prompt = build_prompt_from_settings(settings, params, *tx, !buf.is_empty());
+        web_sys::console::log_1(&prompt.into());
+
+        let line = match reader.next_line().await {
+            None => break,
+            Some(l) => l,
+        };
+
+        let line = line.trim_end_matches(['\r', '\n']).to_owned();
+        if is_quit_exit(line.trim(), buf.is_empty()) {
+            break;
+        }
+
+        let interpolated_line = settings.vars.interpolate(line.trim());
+        if interpolated_line.trim_start().starts_with('\\') {
+            match handle_backslash_dumb(&interpolated_line, &mut buf, client, params, settings, tx)
+                .await
+            {
+                HandleLineResult::Quit => break,
+                HandleLineResult::Reconnected(new_client, new_params) => {
+                    *client = *new_client;
+                    *params = *new_params;
+                    *tx = TxState::default();
+                    buf.clear();
+                    settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+                    settings.audit_dbname.clone_from(&params.dbname);
+                    settings.audit_user.clone_from(&params.user);
+                }
+                HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
+            }
+        } else if interpolated_line.trim_start().starts_with('/') {
+            buf.clear();
+            if let Some(result) =
+                dispatch_ai_command(interpolated_line.trim(), client, params, settings, tx).await
+            {
+                match result {
+                    MetaResult::Reconnected(new_client, new_params) => {
+                        *client = *new_client;
+                        *params = *new_params;
+                        *tx = TxState::default();
+                        buf.clear();
+                        settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+                        settings.audit_dbname.clone_from(&params.dbname);
+                        settings.audit_user.clone_from(&params.user);
+                    }
+                    MetaResult::Quit => break,
+                    _ => {}
+                }
+            }
+        } else if settings.cond.is_active() {
+            if let Some(pos) = find_inline_backslash(&line) {
+                let sql_part = &line[..pos];
+                let meta_part = line[pos..].trim();
+                if !sql_part.trim().is_empty() {
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(sql_part.trim_end());
+                }
+                match handle_backslash_dumb(meta_part, &mut buf, client, params, settings, tx).await
+                {
+                    HandleLineResult::Quit => break,
+                    HandleLineResult::Reconnected(new_client, new_params) => {
+                        *client = *new_client;
+                        *params = *new_params;
+                        *tx = TxState::default();
+                        buf.clear();
+                        settings.is_superuser = crate::capabilities::detect_superuser(client).await;
+                        settings.audit_dbname.clone_from(&params.dbname);
+                        settings.audit_user.clone_from(&params.user);
+                    }
+                    HandleLineResult::BufferUpdated | HandleLineResult::Continue => {}
+                }
+            } else {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(&line);
+                let complete = settings.single_line || is_complete(&buf);
+                if complete {
+                    let sql = buf.trim().to_owned();
+                    if !sql.is_empty() {
+                        execute_query_interactive(client, &sql, settings, tx).await;
+                    }
+                    buf.clear();
+                }
             }
         }
     }
