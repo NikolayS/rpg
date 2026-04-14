@@ -12,7 +12,7 @@ Single binary, no dependencies, cross-platform.
 
 ## Features
 
-- **psql-compatible** — `\`-commands are standard psql meta-commands (`\d`, `\dt`, `\copy`, `\watch`, ...); `/`-commands are rpg extensions — both AI and non-AI. Same muscle memory, clearly distinct additions.
+- **[psql-compatible](docs/psql-compat.md)** — `\`-commands are standard psql meta-commands (`\d`, `\dt`, `\copy`, `\watch`, ...); `/`-commands are rpg extensions — both AI and non-AI. Same muscle memory, clearly distinct additions.
 - **Active Session History** — `/ash` live wait event timeline with drill-down; pg_ash history integration
 - **AI assistant** — `/ask`, `/fix`, `/explain`, `/optimize`, `/text2sql`, `/yolo`
 - **DBA diagnostics** — 15+ `/dba` commands: activity, locks, bloat, indexes, vacuum, replication, config
@@ -35,14 +35,14 @@ Single binary, no dependencies, cross-platform.
 Build the latest stable release from source (requires Rust 1.85+):
 
 ```bash
-git clone --branch v0.10.2 --depth 1 https://github.com/NikolayS/rpg.git
+git clone --branch v0.11.0 --depth 1 https://github.com/NikolayS/rpg.git
 cd rpg
 cargo build --release
 sudo cp ./target/release/rpg /usr/local/bin/
 ```
 
 > **Note:** `main` is under active development and may be unstable. Pin to a
-> release tag (e.g. `v0.10.2`) for a known-good build. Release notes:
+> release tag (e.g. `v0.11.0`) for a known-good build. Release notes:
 > [github.com/NikolayS/rpg/releases](https://github.com/NikolayS/rpg/releases)
 
 ## Connect
@@ -58,7 +58,7 @@ rpg "postgresql://user@localhost/mydb"
 rpg -d postgres -c "select version()"
 ```
 
-On connect, rpg prints its version (with commit count and hash if built past a release tag), the full server version, AI status, and a reminder to type `\?` for help.
+On connect, rpg prints its version (with commit count and hash if built past a release tag), the full server version, connection details with SSL status (matching psql), AI provider status, and a reminder to type `\?` for help.
 
 ## Command convention
 
@@ -138,7 +138,7 @@ Toggle back with `/sql` or `/interactive`. Show/hide the SQL preview box with
 `\set TEXT2SQL_SHOW_SQL on`.
 
 <details>
-<summary>▶ Click to expand demo</summary>
+<summary>Click to expand demo</summary>
 
 ![/t2s text-to-SQL mode and /yolo auto-execute mode in action](demos/gif3_t2s.gif)
 
@@ -169,7 +169,7 @@ Execute? [Y/n/e]
 ```
 
 <details>
-<summary>▶ Click to expand demo</summary>
+<summary>Click to expand demo</summary>
 
 ![/fix auto-corrects a typo in the table name and re-runs the query](demos/gif2_typo.gif)
 
@@ -192,7 +192,7 @@ postgres=# /optimize
 ```
 
 <details>
-<summary>▶ Click to expand demo</summary>
+<summary>Click to expand demo</summary>
 
 ![/explain and /optimize workflow: slow query, AI analysis, index creation, re-run](demos/gif1_optimize.gif)
 
@@ -330,7 +330,7 @@ postgres=# /ash
 - **X-axis timestamps** — `HH:MM:SS` at zoom 1–2, `HH:MM` at coarser levels; anchors shift as time passes
 
 <details>
-<summary>▶ Click to expand — X-axis labels</summary>
+<summary>Click to expand — X-axis labels</summary>
 
 ![/ash X-axis timestamp labels shifting in real time](demos/slash-ash-xaxis.gif)
 
@@ -341,7 +341,7 @@ installed, the timeline pre-populates with historical data on startup —
 bars appear immediately rather than building from scratch.
 
 <details>
-<summary>▶ Click to expand — pg_ash history pre-population</summary>
+<summary>Click to expand — pg_ash history pre-population</summary>
 
 ![/ash with pg_ash history pre-population — bars from the past visible on launch](demos/slash-ash-pgash.gif)
 
@@ -388,13 +388,13 @@ Connect through an SSH bastion with no extra tooling:
 rpg --ssh-tunnel user@bastion.example.com -h 10.0.0.5 -d mydb
 ```
 
-## PostgreSQL compatibility
+## psql compatibility
 
 Supports PostgreSQL 14–18.
 
-rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree). Both psql and rpg are run against the same queries; outputs are normalized and diff'd — pass only if identical.
+rpg is tested against PostgreSQL's own regression test suite (unmodified `.sql` files from the postgres source tree) in CI on every push. Both psql and rpg execute the same queries against the same server; outputs are normalized and diff'd — pass only if identical.
 
-**221 of 232 PostgreSQL regression tests pass** (0 failures, 11 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
+**222 of 232 PostgreSQL regression tests pass** (0 failures, 10 skipped) against a PostgreSQL 18 server. The skips are CI infrastructure limits, C extensions, or known parsing gaps — not core compatibility issues.
 
 → Full compatibility report: [`docs/psql-compat.md`](docs/psql-compat.md)
 
@@ -413,15 +413,6 @@ completion, and AI commands (limited `reqwest` streaming). These show
 friendly error messages instead of crashing.
 
 → Architecture, build instructions, and full limitations: [`docs/WASM.md`](docs/WASM.md)
-
-## Development
-
-rpg is engineered by [Nikolay Samokhvalov](https://github.com/NikolayS) with a
-team of Claude Opus 4.6 AI agents (via [Claude Code](https://claude.com/claude-code),
-occasionally with OpenClaw). All architecture decisions, feature design, and
-project direction are human-driven. The codebase is ~46 kLOC and 100% of the
-code has been AI-reviewed and CI/AI-tested, though only a portion has been manually
-reviewed line-by-line.
 
 ## License
 

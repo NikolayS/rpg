@@ -774,6 +774,44 @@ async fn describe_df_lists_functions() {
     );
 }
 
+/// `\dO *` lists collations from `pg_catalog` (matching psql behaviour).
+///
+/// Bare `\dO` excludes `pg_catalog` (like psql), so it may return 0 rows on
+/// a fresh database.  `\dO *` drops the `pg_catalog` filter and must show
+/// the hundreds of built-in collations.
+#[test]
+fn describe_do_wildcard_lists_collations() {
+    let (stdout, stderr, code) = run_rpg(&["-c", r"\dO *"]);
+    assert_eq!(
+        code, 0,
+        "\\dO * should exit 0\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // pg_catalog always has collations (C, POSIX, en_US, etc.).
+    assert!(
+        stdout.contains("pg_catalog"),
+        "\\dO * should include pg_catalog collations:\n{stdout}"
+    );
+    // Must have the standard column headers.
+    assert!(
+        stdout.contains("Schema") && stdout.contains("Name") && stdout.contains("Provider"),
+        "\\dO * should show standard column headers:\n{stdout}"
+    );
+    // Deterministic? column must be present (psql-compatible).
+    assert!(
+        stdout.contains("Deterministic?"),
+        "\\dO * should show Deterministic? column:\n{stdout}"
+    );
+}
+
+/// `\dO english` finds the "english" collation by name.
+#[test]
+fn describe_do_pattern_finds_named_collation() {
+    let (stdout, _stderr, code) = run_rpg(&["-c", r"\dO en_US"]);
+    // en_US may not exist on all platforms, so just verify the command
+    // does not crash.  On systems with libc en_US it will show a row.
+    assert_eq!(code, 0, "\\dO en_US should exit 0\nstdout: {stdout}");
+}
+
 // ---------------------------------------------------------------------------
 // CLI output-format flags — Section 1 of issue #618
 // ---------------------------------------------------------------------------

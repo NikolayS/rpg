@@ -5098,8 +5098,16 @@ limit 1"
 /// List collations.
 ///
 /// Matches psql's `\dO [pattern]` output: Schema, Name, Provider, Collate,
-/// Ctype, ICU Locale (PG 16+), ICU Rules (PG 16+).
+/// Ctype, Locale (PG 16+), ICU Rules (PG 16+), Deterministic?.
 /// With `+`: also adds Description.
+///
+/// psql behaviour for the system-schema filter:
+/// - No pattern and no `S` flag: exclude `pg_catalog` / `information_schema`.
+/// - Pattern given OR `S` flag: do not exclude system schemas (so
+///   `\dO *` and `\dO english` search `pg_catalog` too).
+///
+/// An encoding filter (`collencoding IN (-1, …)`) is always applied so only
+/// collations compatible with the current database encoding are shown.
 async fn list_collations(
     client: &Client,
     meta: &ParsedMeta,
@@ -5108,14 +5116,25 @@ async fn list_collations(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.collname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
+    // psql drops the system-schema exclusion when a pattern is given OR
+    // the S modifier is active.  Mirror that behaviour here.
+    let has_pattern = meta.pattern.is_some();
+    let sys_filter = if meta.system || has_pattern {
         String::new()
     } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
+        "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
     };
 
-    // psql also applies a visibility filter when no schema qualifier is present.
-    let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
+    // Only show collations compatible with the current database encoding
+    // (encoding -1 means "any encoding").  This matches psql.
+    let encoding_filter =
+        "c.collencoding in (-1, pg_catalog.pg_char_to_encoding(pg_catalog.getdatabaseencoding()))";
+
+    // psql applies a visibility filter only when no pattern is given.
+    // When a pattern is supplied (e.g., `\dO *`) we drop both the
+    // pg_catalog exclusion AND the visibility filter so that catalog
+    // collations are reachable.
+    let visibility_filter = if has_pattern || meta.system {
         String::new()
     } else {
         "pg_catalog.pg_collation_is_visible(c.oid)".to_owned()
@@ -5127,6 +5146,7 @@ async fn list_collations(
         } else {
             Some(sys_filter.as_str())
         },
+        Some(encoding_filter),
         if visibility_filter.is_empty() {
             None
         } else {
@@ -5150,10 +5170,11 @@ async fn list_collations(
 
     let pg_ver = settings.db_capabilities.pg_major_version();
 
-    // PG17 removed collcollate/collctype and consolidated into colllocale.
-    // PG17 also added the 'b' (builtin) collation provider.
-    // PG 15 added colliculocale; PG 16 renamed it to colllocale and added
-    // collicurules.  PG 10-14 have only collcollate / collctype.
+    // PG17 added the 'b' (builtin) collation provider.
+    // PG15 added colliculocale. PG17 renamed it to colllocale and added
+    // collicurules. PG14 has only collcollate / collctype.
+    // Note: collcollate / collctype still exist in PG17-18 and psql shows
+    // them, so we always include those columns.
     let provider_expr = if pg_ver.is_some_and(|v| v >= 17) {
         "case c.collprovider
         when 'd' then 'default'
@@ -5169,22 +5190,21 @@ async fn list_collations(
     end as \"Provider\""
     };
 
-    let collate_cols = if pg_ver.is_some_and(|v| v >= 17) {
-        "c.colllocale as \"Locale\""
-    } else {
-        "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\""
-    };
+    // collcollate / collctype are present in all supported PG versions
+    // (14-18) and psql always shows them.
+    let collate_cols = "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\"";
 
-    let icu_locale_col = if pg_ver.is_some_and(|v| v >= 17) {
-        // PG17+: colllocale already shown above; only add ICU Rules.
-        ",\n    c.collicurules as \"ICU Rules\""
-    } else if pg_ver.is_some_and(|v| v >= 16) {
-        ",\n    c.colllocale as \"ICU Locale\",\n    c.collicurules as \"ICU Rules\""
+    let locale_cols = if pg_ver.is_some_and(|v| v >= 17) {
+        ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\""
     } else if pg_ver.is_some_and(|v| v >= 15) {
         ",\n    c.colliculocale as \"ICU Locale\""
     } else {
         ""
     };
+
+    // collisdeterministic was added in PG12; rpg supports PG14+.
+    let deterministic_col =
+        ",\n    case when c.collisdeterministic then 'yes' else 'no' end as \"Deterministic?\"";
 
     let desc_col = if meta.plus {
         ",\n    pg_catalog.obj_description(c.oid, 'pg_collation') as \"Description\""
@@ -5197,7 +5217,7 @@ async fn list_collations(
     n.nspname as \"Schema\",
     c.collname as \"Name\",
     {provider_expr},
-    {collate_cols}{icu_locale_col}{desc_col}
+    {collate_cols}{locale_cols}{deterministic_col}{desc_col}
 from pg_catalog.pg_collation as c
 join pg_catalog.pg_namespace as n
     on n.oid = c.collnamespace
@@ -5389,21 +5409,48 @@ order by 1"
 
 /// List operator classes for access methods.
 ///
-/// Matches psql's `\dAc [pattern]` output: AM, Input type, Storage type,
-/// Operator family, Default.
-/// With `+`: also adds Description.
+/// Matches psql's `\dAc [AM-pattern [class-pattern]]` output: AM, Input type,
+/// Storage type, Operator class, Default?.
+/// With `+`: also adds Operator family, Owner, Description.
 async fn list_op_classes(
     client: &Client,
     meta: &ParsedMeta,
     settings: &mut crate::repl::ReplSettings,
 ) -> bool {
-    let name_filter =
-        pattern::where_clause(meta.pattern.as_deref(), "c.opcname", Some("am.amname"));
+    // psql treats \dAc as taking two separate pattern arguments:
+    //   \dAc [AM-pattern [opclass-pattern]]
+    // Split the combined pattern on whitespace to get each filter.
+    let (am_pat, class_pat) = match meta.pattern.as_deref() {
+        Some(p) => {
+            let mut parts = p.splitn(2, char::is_whitespace);
+            let first = parts.next().filter(|s| !s.is_empty());
+            let second = parts.next().map(str::trim).filter(|s| !s.is_empty());
+            (first, second)
+        }
+        None => (None, None),
+    };
 
-    let where_clause = if name_filter.is_empty() {
+    let am_filter = pattern::where_clause(am_pat, "am.amname", None);
+    let class_filter = pattern::where_clause(class_pat, "c.opcname", None);
+
+    let mut where_parts: Vec<&str> = Vec::new();
+    if !am_filter.is_empty() {
+        where_parts.push(&am_filter);
+    }
+    if !class_filter.is_empty() {
+        where_parts.push(&class_filter);
+    }
+    let where_clause = if where_parts.is_empty() {
         String::new()
     } else {
-        format!("where {name_filter}")
+        format!("where {}", where_parts.join("\n    and "))
+    };
+
+    let verbose_cols = if meta.plus {
+        ",\n    of.opfname as \"Operator family\",\
+         \n    pg_catalog.pg_get_userbyid(c.opcowner) as \"Owner\""
+    } else {
+        ""
     };
 
     let desc_col = if meta.plus {
@@ -5421,8 +5468,8 @@ async fn list_op_classes(
         then pg_catalog.format_type(c.opckeytype, null)
         else ''
     end as \"Storage type\",
-    of.opfname as \"Operator family\",
-    case when c.opcdefault then 'yes' else 'no' end as \"Default\"{desc_col}
+    c.opcname as \"Operator class\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default?\"{verbose_cols}{desc_col}
 from pg_catalog.pg_opclass as c
 left join pg_catalog.pg_am as am
     on am.oid = c.opcmethod
@@ -5459,11 +5506,9 @@ async fn list_ts_configs(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "c.cfgname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -5535,11 +5580,9 @@ async fn list_ts_dicts(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "d.dictname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -5611,11 +5654,9 @@ async fn list_ts_parsers(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "p.prsname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -5687,11 +5728,9 @@ async fn list_ts_templates(
     let name_filter =
         pattern::where_clause(meta.pattern.as_deref(), "t.tmplname", Some("n.nspname"));
 
-    let sys_filter = if meta.system {
-        String::new()
-    } else {
-        "n.nspname not in ('pg_catalog', 'information_schema')".to_owned()
-    };
+    // psql includes pg_catalog by default for text search objects, so we only
+    // exclude system schemas when the user provides a schema-qualified pattern.
+    let sys_filter = String::new();
 
     let visibility_filter = if meta.pattern.as_deref().is_some_and(|p| p.contains('.')) {
         String::new()
@@ -6010,6 +6049,138 @@ order by 2, 3"
         assert!(
             !lookup_sql.contains("pg_table_is_visible"),
             "schema-qualified lookup should NOT include visibility filter: {lookup_sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Text search commands — pg_catalog must be included by default
+    // -----------------------------------------------------------------------
+
+    /// Helper: replicate the WHERE-clause filter logic used by
+    /// `list_ts_configs` / `list_ts_dicts` / `list_ts_parsers` /
+    /// `list_ts_templates` and return the assembled SQL string.
+    fn ts_where_clause(pattern: Option<&str>, name_col: &str, visibility_fn: &str) -> String {
+        let name_filter = pattern::where_clause(pattern, name_col, Some("n.nspname"));
+
+        // After the fix: sys_filter is always empty (pg_catalog is included).
+        let sys_filter = String::new();
+
+        let visibility_filter = if pattern.is_some_and(|p| p.contains('.')) {
+            String::new()
+        } else {
+            visibility_fn.to_owned()
+        };
+
+        let where_parts: Vec<&str> = [
+            if sys_filter.is_empty() {
+                None
+            } else {
+                Some(sys_filter.as_str())
+            },
+            if visibility_filter.is_empty() {
+                None
+            } else {
+                Some(visibility_filter.as_str())
+            },
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("where {}", where_parts.join("\n    and "))
+        }
+    }
+
+    #[test]
+    fn ts_configs_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "c.cfgname",
+            "pg_catalog.pg_ts_config_is_visible(c.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dF must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_config_is_visible"),
+            "\\dF should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_dicts_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "d.dictname",
+            "pg_catalog.pg_ts_dict_is_visible(d.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dFd must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_dict_is_visible"),
+            "\\dFd should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_parsers_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "p.prsname",
+            "pg_catalog.pg_ts_parser_is_visible(p.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dFp must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_parser_is_visible"),
+            "\\dFp should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_templates_sql_does_not_exclude_pg_catalog() {
+        let clause = ts_where_clause(
+            None,
+            "t.tmplname",
+            "pg_catalog.pg_ts_template_is_visible(t.oid)",
+        );
+        assert!(
+            !clause.contains("not in"),
+            "\\dFt must not exclude pg_catalog: {clause}"
+        );
+        assert!(
+            clause.contains("pg_ts_template_is_visible"),
+            "\\dFt should use visibility filter when no pattern: {clause}"
+        );
+    }
+
+    #[test]
+    fn ts_configs_schema_qualified_skips_visibility() {
+        let clause = ts_where_clause(
+            Some("pg_catalog.english"),
+            "c.cfgname",
+            "pg_catalog.pg_ts_config_is_visible(c.oid)",
+        );
+        assert!(
+            !clause.contains("pg_ts_config_is_visible"),
+            "schema-qualified \\dF should skip visibility filter: {clause}"
+        );
+        assert!(
+            clause.contains("pg_catalog"),
+            "schema-qualified \\dF should filter on schema name: {clause}"
         );
     }
 
@@ -6945,6 +7116,282 @@ order by 1, 2"
         assert!(
             acl_pos < desc_pos,
             "Access privileges must appear before Description: {sql}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_collations SQL generation — \dO
+    // -----------------------------------------------------------------------
+
+    /// Build collation SQL the same way `list_collations` does for `\dO *`
+    /// (pattern given, no S flag, configurable PG major).
+    fn do_collation_sql_with_pattern(pg_ver: u32) -> String {
+        let m = meta(MetaCmd::ListCollations, false, false, Some("*"));
+        let name_filter =
+            pattern::where_clause(m.pattern.as_deref(), "c.collname", Some("n.nspname"));
+
+        let has_pattern = m.pattern.is_some();
+        let sys_filter = if m.system || has_pattern {
+            String::new()
+        } else {
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+        };
+
+        let encoding_filter = "c.collencoding in (-1, pg_catalog.pg_char_to_encoding(pg_catalog.getdatabaseencoding()))";
+
+        let visibility_filter = if has_pattern || m.system {
+            String::new()
+        } else {
+            "pg_catalog.pg_collation_is_visible(c.oid)".to_owned()
+        };
+
+        let where_parts: Vec<&str> = [
+            if sys_filter.is_empty() {
+                None
+            } else {
+                Some(sys_filter.as_str())
+            },
+            Some(encoding_filter),
+            if visibility_filter.is_empty() {
+                None
+            } else {
+                Some(visibility_filter.as_str())
+            },
+            if name_filter.is_empty() {
+                None
+            } else {
+                Some(name_filter.as_str())
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("where {}", where_parts.join("\n    and "))
+        };
+
+        let provider_expr = "case c.collprovider
+        when 'd' then 'default'
+        when 'c' then 'libc'
+        when 'i' then 'icu'
+    end as \"Provider\"";
+
+        let collate_cols = "c.collcollate as \"Collate\",\n    c.collctype as \"Ctype\"";
+        let locale_cols = if pg_ver >= 17 {
+            ",\n    c.colllocale as \"Locale\",\n    c.collicurules as \"ICU Rules\""
+        } else if pg_ver >= 15 {
+            ",\n    c.colliculocale as \"ICU Locale\""
+        } else {
+            ""
+        };
+        let deterministic_col =
+            ",\n    case when c.collisdeterministic then 'yes' else 'no' end as \"Deterministic?\"";
+
+        format!(
+            "select
+    n.nspname as \"Schema\",
+    c.collname as \"Name\",
+    {provider_expr},
+    {collate_cols}{locale_cols}{deterministic_col}
+from pg_catalog.pg_collation as c
+join pg_catalog.pg_namespace as n
+    on n.oid = c.collnamespace
+{where_clause}
+order by 1, 2"
+        )
+    }
+
+    /// `\dO *` must NOT exclude `pg_catalog` (pattern drops the system filter).
+    #[test]
+    fn list_collations_wildcard_does_not_exclude_pg_catalog() {
+        let sql = do_collation_sql_with_pattern(17);
+        assert!(
+            !sql.contains("pg_catalog'"),
+            "\\dO * SQL must not exclude pg_catalog:\n{sql}"
+        );
+    }
+
+    /// The collation query must include the encoding filter.
+    #[test]
+    fn list_collations_has_encoding_filter() {
+        let sql = do_collation_sql_with_pattern(17);
+        assert!(
+            sql.contains("collencoding"),
+            "collation SQL must filter by encoding:\n{sql}"
+        );
+        assert!(
+            sql.contains("getdatabaseencoding"),
+            "encoding filter must reference getdatabaseencoding():\n{sql}"
+        );
+    }
+
+    /// The collation query must include Collate, Ctype, and Deterministic?
+    /// columns (matching psql output).
+    #[test]
+    fn list_collations_has_required_columns() {
+        let sql = do_collation_sql_with_pattern(17);
+        assert!(
+            sql.contains("\"Collate\""),
+            "collation SQL must have Collate column:\n{sql}"
+        );
+        assert!(
+            sql.contains("\"Ctype\""),
+            "collation SQL must have Ctype column:\n{sql}"
+        );
+        assert!(
+            sql.contains("\"Deterministic?\""),
+            "collation SQL must have Deterministic? column:\n{sql}"
+        );
+        assert!(
+            sql.contains("\"Provider\""),
+            "collation SQL must have Provider column:\n{sql}"
+        );
+    }
+
+    /// `\dO` without pattern MUST exclude `pg_catalog` (matching psql).
+    #[test]
+    fn list_collations_no_pattern_excludes_pg_catalog() {
+        let m = meta(MetaCmd::ListCollations, false, false, None);
+        let has_pattern = m.pattern.is_some();
+        let sys_filter = if m.system || has_pattern {
+            String::new()
+        } else {
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+        };
+        assert!(
+            sys_filter.contains("pg_catalog"),
+            "\\dO without pattern should exclude pg_catalog"
+        );
+    }
+
+    /// `\dOS` (system flag) must NOT exclude `pg_catalog`.
+    #[test]
+    fn list_collations_system_flag_includes_pg_catalog() {
+        let m = meta(MetaCmd::ListCollations, false, true, None);
+        let has_pattern = m.pattern.is_some();
+        let sys_filter = if m.system || has_pattern {
+            String::new()
+        } else {
+            "n.nspname <> 'pg_catalog'\n    and n.nspname <> 'information_schema'".to_owned()
+        };
+        assert!(sys_filter.is_empty(), "\\dOS should not exclude pg_catalog");
+    }
+    // \dAc — operator class listing uses opcname, not opfname
+    // -----------------------------------------------------------------------
+
+    /// The basic \dAc SQL must select `c.opcname` (operator class name), not
+    /// `of.opfname` (operator family name).
+    #[test]
+    fn dac_sql_uses_opcname_not_opfname() {
+        // Reproduce the SQL building logic from list_op_classes (no pattern).
+        let am_filter = pattern::where_clause(None, "am.amname", None);
+        let class_filter = pattern::where_clause(None, "c.opcname", None);
+        assert!(am_filter.is_empty());
+        assert!(class_filter.is_empty());
+
+        let sql = "select
+    am.amname as \"AM\",
+    pg_catalog.format_type(c.opcintype, null) as \"Input type\",
+    case
+        when c.opckeytype <> 0
+        then pg_catalog.format_type(c.opckeytype, null)
+        else ''
+    end as \"Storage type\",
+    c.opcname as \"Operator class\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default?\"
+from pg_catalog.pg_opclass as c";
+
+        assert!(
+            sql.contains("c.opcname as \"Operator class\""),
+            "must select opcname, not opfname: {sql}"
+        );
+        assert!(
+            !sql.contains("opfname as \"Operator family\""),
+            "basic \\dAc must NOT show Operator family as main column: {sql}"
+        );
+    }
+
+    /// `\dAc btree` — the first argument filters on AM name, not opclass.
+    #[test]
+    fn dac_pattern_filters_am_name() {
+        let pattern = "btree";
+        let mut parts = pattern.splitn(2, char::is_whitespace);
+        let am_pat = parts.next().filter(|s| !s.is_empty());
+        let class_pat = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+        let am_filter = pattern::where_clause(am_pat, "am.amname", None);
+        let class_filter = pattern::where_clause(class_pat, "c.opcname", None);
+
+        assert!(
+            am_filter.contains("am.amname = 'btree'"),
+            "first arg must filter am.amname: {am_filter}"
+        );
+        assert!(
+            class_filter.is_empty(),
+            "no second arg means no class filter: {class_filter}"
+        );
+    }
+
+    /// `\dAc btree int*` — first arg filters AM, second filters opclass name.
+    #[test]
+    fn dac_two_patterns_filter_am_and_class() {
+        let pattern = "btree int*";
+        let mut parts = pattern.splitn(2, char::is_whitespace);
+        let am_pat = parts.next().filter(|s| !s.is_empty());
+        let class_pat = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+        let am_filter = pattern::where_clause(am_pat, "am.amname", None);
+        let class_filter = pattern::where_clause(class_pat, "c.opcname", None);
+
+        assert!(
+            am_filter.contains("am.amname = 'btree'"),
+            "first arg must filter am.amname: {am_filter}"
+        );
+        assert!(
+            class_filter.contains("c.opcname LIKE 'int%'"),
+            "second arg must filter c.opcname with wildcard: {class_filter}"
+        );
+    }
+
+    /// `\dAc+` verbose mode adds Operator family and Owner columns.
+    #[test]
+    fn dac_plus_has_opfamily_and_owner() {
+        let verbose_cols = ",\n    of.opfname as \"Operator family\",\
+             \n    pg_catalog.pg_get_userbyid(c.opcowner) as \"Owner\"";
+        let desc_col = ",\n    pg_catalog.obj_description(c.oid, 'pg_opclass') as \"Description\"";
+
+        let sql = format!(
+            "select
+    am.amname as \"AM\",
+    pg_catalog.format_type(c.opcintype, null) as \"Input type\",
+    case
+        when c.opckeytype <> 0
+        then pg_catalog.format_type(c.opckeytype, null)
+        else ''
+    end as \"Storage type\",
+    c.opcname as \"Operator class\",
+    case when c.opcdefault then 'yes' else 'no' end as \"Default?\"{verbose_cols}{desc_col}
+from pg_catalog.pg_opclass as c"
+        );
+
+        assert!(
+            sql.contains("c.opcname as \"Operator class\""),
+            "must have Operator class column: {sql}"
+        );
+        assert!(
+            sql.contains("of.opfname as \"Operator family\""),
+            "verbose must have Operator family column: {sql}"
+        );
+        assert!(
+            sql.contains("pg_get_userbyid(c.opcowner) as \"Owner\""),
+            "verbose must have Owner column: {sql}"
+        );
+        assert!(
+            sql.contains("obj_description(c.oid, 'pg_opclass') as \"Description\""),
+            "verbose must have Description column: {sql}"
         );
     }
 }
