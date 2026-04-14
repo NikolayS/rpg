@@ -98,11 +98,6 @@ timeout 10 kubectl exec pod-name -n namespace -- \
 
 Use red/green TDD, especially for bug fixes but also for new features:
 
-1. **Red** — write a failing test (or identify an existing failing test case) that
-   reproduces the bug or specifies the new behavior. Confirm it fails.
-2. **Green** — write the minimal code to make the test pass.
-3. **Refactor** — clean up while keeping tests green.
-
 For bug fixes this is mandatory: every fix must include a test that would have
 caught the bug. For new features it is strongly encouraged — write the test
 first when practical, or immediately after the implementation when the test
