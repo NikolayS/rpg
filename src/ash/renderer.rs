@@ -1555,7 +1555,7 @@ mod tests {
         // Labels should not visually merge into garbage.
         for label in &labels {
             // Each label should look like HH:MM:SS (8 chars).
-            assert!(label.len() <= 8, "label '{label}' looks merged/overlapping",);
+            assert!(label.len() <= 8, "label '{label}' looks merged/overlapping");
         }
     }
 

@@ -344,10 +344,8 @@ async fn run_and_print(client: &Client, sql: &str, title: Option<&str>) {
 
             for msg in messages {
                 match msg {
-                    SimpleQueryMessage::RowDescription(cols) => {
-                        if col_names.is_empty() {
-                            col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                        }
+                    SimpleQueryMessage::RowDescription(cols) if col_names.is_empty() => {
+                        col_names = cols.iter().map(|c| c.name().to_owned()).collect();
                     }
                     SimpleQueryMessage::Row(row) => {
                         if col_names.is_empty() {

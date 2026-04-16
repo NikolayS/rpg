@@ -171,10 +171,8 @@ async fn run_and_print_full(
 
             for msg in messages {
                 match msg {
-                    SimpleQueryMessage::RowDescription(columns) => {
-                        if col_names.is_empty() {
-                            col_names = columns.iter().map(|c| c.name().to_owned()).collect();
-                        }
+                    SimpleQueryMessage::RowDescription(columns) if col_names.is_empty() => {
+                        col_names = columns.iter().map(|c| c.name().to_owned()).collect();
                     }
                     SimpleQueryMessage::Row(row) => {
                         if col_names.is_empty() {

@@ -27,9 +27,7 @@ fn write_to_stdout_or_wasm(data: &[u8]) {
 fn terminal_rows() -> usize {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        crossterm::terminal::size()
-            .map(|(_, h)| h as usize)
-            .unwrap_or(24)
+        crossterm::terminal::size().map_or(24, |(_, h)| h as usize)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -2679,14 +2677,12 @@ pub(super) async fn execute_crosstabview(
             let null_str = settings.pset.null_display.clone();
             for msg in messages {
                 match msg {
-                    SimpleQueryMessage::RowDescription(cols) => {
-                        if col_names.is_empty() {
-                            col_names = cols.iter().map(|c| c.name().to_owned()).collect();
-                            col_oids = cols
-                                .iter()
-                                .map(tokio_postgres::SimpleColumn::type_oid)
-                                .collect();
-                        }
+                    SimpleQueryMessage::RowDescription(cols) if col_names.is_empty() => {
+                        col_names = cols.iter().map(|c| c.name().to_owned()).collect();
+                        col_oids = cols
+                            .iter()
+                            .map(tokio_postgres::SimpleColumn::type_oid)
+                            .collect();
                     }
                     SimpleQueryMessage::Row(row) => {
                         if col_names.is_empty() {
