@@ -785,11 +785,9 @@ fn draw_frame(
         let prefix = if state.search_forward { "/" } else { "?" };
         format!("{prefix}{buf}")
     } else {
-        let pct = if max_scroll_y == 0 {
-            100usize
-        } else {
-            (state.scroll_y * 100) / max_scroll_y
-        };
+        let pct = (state.scroll_y * 100)
+            .checked_div(max_scroll_y)
+            .unwrap_or(100usize);
         let last_visible = (state.scroll_y + content_height).min(lines.len());
         let mut base = format!(
             " Lines {}-{} of {} ({pct}%) \
@@ -892,10 +890,8 @@ fn handle_nav_key(
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
-        KeyCode::Down | KeyCode::Char('j') => {
-            if state.scroll_y < max_scroll_y {
-                state.scroll_y += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j') if state.scroll_y < max_scroll_y => {
+            state.scroll_y += 1;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             state.scroll_y = state.scroll_y.saturating_sub(1);

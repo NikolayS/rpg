@@ -435,8 +435,7 @@ fn default_host_port() -> (String, u16) {
             if path
                 .join(".s.PGSQL.5432")
                 .metadata()
-                .map(|m| m.file_type().is_socket())
-                .unwrap_or(false)
+                .is_ok_and(|m| m.file_type().is_socket())
             {
                 return ((*dir).to_owned(), 5432);
             }
@@ -455,8 +454,7 @@ fn default_host_port() -> (String, u16) {
                                 if entry
                                     .path()
                                     .metadata()
-                                    .map(|m| m.file_type().is_socket())
-                                    .unwrap_or(false)
+                                    .is_ok_and(|m| m.file_type().is_socket())
                                 {
                                     found_ports.push(port);
                                 }

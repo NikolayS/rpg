@@ -223,7 +223,7 @@ pub fn init(level: Level, log_file: Option<Box<dyn Write + Send>>) {
 pub fn init_rotating(level: Level, log_path: PathBuf, rotation: RotationConfig) {
     // Determine initial bytes written so the first rotation threshold is
     // computed correctly even if the file already exists.
-    let existing_bytes = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    let existing_bytes = fs::metadata(&log_path).map_or(0, |m| m.len());
 
     match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(f) => {

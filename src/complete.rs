@@ -1419,7 +1419,7 @@ impl Highlighter for RpgHelper {
         if self.highlight_enabled() {
             return true;
         }
-        self.dropdown.lock().map(|dd| dd.active).unwrap_or(false)
+        self.dropdown.lock().is_ok_and(|dd| dd.active)
     }
 
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(

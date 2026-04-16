@@ -279,15 +279,11 @@ impl AshState {
         }
 
         match key.code {
-            KeyCode::Up => {
-                if self.selected_row > 0 {
-                    self.selected_row -= 1;
-                }
+            KeyCode::Up if self.selected_row > 0 => {
+                self.selected_row -= 1;
             }
-            KeyCode::Down => {
-                if list_len > 0 && self.selected_row < list_len - 1 {
-                    self.selected_row += 1;
-                }
+            KeyCode::Down if list_len > 0 && self.selected_row < list_len - 1 => {
+                self.selected_row += 1;
             }
             // Enter: caller is responsible for calling drill_into with row data.
             KeyCode::Char('b') => {
