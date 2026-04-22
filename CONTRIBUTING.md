@@ -9,13 +9,13 @@
 | **Docker** | Integration tests (Postgres containers) | [docker.com](https://www.docker.com/) |
 | **cross** | Cross-compilation (optional) | `cargo install cross` |
 
-Minimum supported Rust version: latest stable.
+Minimum supported Rust version: **1.82** (matches `rust-version` in `Cargo.toml`). Latest stable is recommended for development.
 
 ## Quick start
 
 ```bash
-git clone git@github.com:NikolayS/project-alpha.git
-cd project-alpha
+git clone git@github.com:NikolayS/rpg.git
+cd rpg
 just build
 just run
 ```

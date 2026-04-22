@@ -32,7 +32,7 @@ Single binary, no dependencies, cross-platform.
 
 ## Installation
 
-Build the latest stable release from source (requires Rust 1.85+):
+Build the latest stable release from source (requires Rust 1.82+):
 
 ```bash
 git clone --branch v0.11.0 --depth 1 https://github.com/NikolayS/rpg.git
