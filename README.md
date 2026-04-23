@@ -5,7 +5,7 @@
 [![CI](https://github.com/NikolayS/rpg/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/rpg/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/NikolayS/rpg/branch/main/graph/badge.svg)](https://codecov.io/gh/NikolayS/rpg)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
 A psql-compatible terminal written in Rust with built-in DBA diagnostics and AI assistant.
 Single binary, no dependencies, cross-platform.
@@ -32,7 +32,7 @@ Single binary, no dependencies, cross-platform.
 
 ## Installation
 
-Build the latest stable release from source (requires Rust 1.82+):
+Build the latest stable release from source (requires Rust 1.88+):
 
 ```bash
 git clone --branch v0.11.0 --depth 1 https://github.com/NikolayS/rpg.git

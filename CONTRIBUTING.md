@@ -9,7 +9,7 @@
 | **Docker** | Integration tests (Postgres containers) | [docker.com](https://www.docker.com/) |
 | **cross** | Cross-compilation (optional) | `cargo install cross` |
 
-Minimum supported Rust version: **1.82** (matches `rust-version` in `Cargo.toml`). Latest stable is recommended for development.
+Minimum supported Rust version: **1.88** (matches `rust-version` in `Cargo.toml`). Latest stable is recommended for development.
 
 ## Quick start
 
