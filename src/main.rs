@@ -57,6 +57,7 @@ mod safety;
 mod session;
 mod session_store;
 mod setup;
+mod slashcmd;
 // SSH tunneling uses russh which is not available for WASM targets.
 #[cfg(not(target_arch = "wasm32"))]
 mod ssh_tunnel;

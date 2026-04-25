@@ -140,6 +140,8 @@ mod session_store;
 #[cfg(target_arch = "wasm32")]
 mod setup;
 #[cfg(target_arch = "wasm32")]
+mod slashcmd;
+#[cfg(target_arch = "wasm32")]
 mod statusline;
 #[cfg(target_arch = "wasm32")]
 mod term;
