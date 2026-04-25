@@ -218,6 +218,38 @@ pub struct PromptContext<'a> {
     pub backend_pid: Option<u32>,
 }
 
+/// Environment variables forwarded to the prompt-backtick subshell.
+///
+/// The subshell is otherwise spawned with [`Command::env_clear`] so that
+/// secrets in the parent process (`PGPASSWORD`, `*_API_KEY`, `*_TOKEN`,
+/// `AWS_*`, ...) cannot be exfiltrated by a hostile `PROMPT1`/`PROMPT2`
+/// loaded via untrusted `.rpg.toml` (#824 H6, paired with H5's project-
+/// config trust check).
+///
+/// Variables on this list are needed for ordinary prompt commands to
+/// work (`HOME` for `~`-expansion, `PATH` for executable lookup, locale
+/// vars for proper formatting, ...).  Secrets and credential paths are
+/// deliberately excluded — see the block-list in #824 H6.
+const PROMPT_BACKTICK_ENV_ALLOWLIST: &[&str] = &[
+    "HOME",    // `~`-expansion and many tools' config discovery
+    "PATH",    // executable lookup (the whole point of backticks)
+    "USER",    // common in prompts
+    "LOGNAME", // common in prompts (BSD/macOS analogue of USER)
+    "LANG",    // locale (LC_* handled separately by prefix match)
+    "TERM",    // terminal type
+    "TZ",      // time zone
+    "SHELL",   // tools that introspect the user's shell
+];
+
+/// Prefix-matched env-var allowlist for the prompt-backtick subshell.
+///
+/// Variables whose name starts with any of these prefixes are forwarded.
+/// Today only `LC_*` (locale categories) qualifies; kept as a slice so
+/// future additions are an obvious one-liner.
+const PROMPT_BACKTICK_ENV_PREFIX_ALLOWLIST: &[&str] = &[
+    "LC_", // locale categories (LC_ALL, LC_CTYPE, LC_MESSAGES, ...)
+];
+
 /// Expand backtick-delimited shell commands in a prompt string.
 ///
 /// Matches psql behaviour: `` `cmd` `` is replaced with the trimmed stdout of
@@ -231,6 +263,11 @@ pub struct PromptContext<'a> {
 /// never from query input or remote data. This matches psql's behaviour and is
 /// intentional, but callers must ensure that only prompt strings from user
 /// config are passed here.
+///
+/// The subshell is spawned with a hardened, allowlisted environment
+/// (see [`PROMPT_BACKTICK_ENV_ALLOWLIST`]) — the parent's `PGPASSWORD`,
+/// `*_API_KEY`, `*_TOKEN`, `AWS_*`, etc. are NOT inherited.  This blocks
+/// the secret-exfiltration vector documented as #824 H6.
 ///
 /// This pass should be applied *before* [`expand_prompt`] so that the shell
 /// output can itself contain `%`-sequences (though in practice this is rare).
@@ -278,10 +315,29 @@ pub fn expand_prompt_backticks(prompt: &str) -> String {
                 if result.ends_with('%') {
                     result.pop();
                 }
-                // Execute the command and capture stdout.
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
+                // Execute the command and capture stdout.  Scrub the
+                // environment to block secret exfiltration via a hostile
+                // PROMPT1 (#824 H6): start from an empty env, then forward
+                // only the documented allowlist of safe variables.
+                let mut command = std::process::Command::new("sh");
+                command.arg("-c").arg(&cmd).env_clear();
+                for name in PROMPT_BACKTICK_ENV_ALLOWLIST {
+                    if let Some(value) = std::env::var_os(name) {
+                        command.env(name, value);
+                    }
+                }
+                for (name, value) in std::env::vars_os() {
+                    let Some(name_str) = name.to_str() else {
+                        continue;
+                    };
+                    if PROMPT_BACKTICK_ENV_PREFIX_ALLOWLIST
+                        .iter()
+                        .any(|prefix| name_str.starts_with(prefix))
+                    {
+                        command.env(&name, value);
+                    }
+                }
+                let output = command
                     .output()
                     .ok()
                     .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -9222,7 +9278,9 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn backtick_subshell_does_not_inherit_sensitive_env() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Pick variable names from the documented block-list.  Any one of
         // these leaking would be a security-relevant regression.
         let cases: &[(&str, &str)] = &[
@@ -9253,7 +9311,9 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn backtick_subshell_keeps_allowlisted_env() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // PATH is required for the subshell to find `printenv` itself, so
         // a positive test on PATH would be circular.  Use HOME instead:
         // it is on the allowlist and `printenv HOME` works without PATH
@@ -9269,7 +9329,8 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         assert_eq!(
-            rendered, format!("[{sentinel}]"),
+            rendered,
+            format!("[{sentinel}]"),
             "HOME must be forwarded to prompt-backtick subshell"
         );
     }
