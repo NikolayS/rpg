@@ -84,7 +84,7 @@ CI server: `postgres:18`. The `SKIP_ALWAYS` list in `tests/compat/test-psql-regr
 
 ## Backslash command compatibility
 
-> Based on `src/compat.rs` and `tests/compat/test-compat.sh` — tested in CI against PostgreSQL 16.
+> Based on `src/compat.rs` and `tests/compat/test-compat.sh` — tested in CI against PostgreSQL 14, 15, 16, 17, 18.
 
 ### Describe commands (`\d` family)
 

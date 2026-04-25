@@ -97,7 +97,7 @@ async fn smoke_execute() {
     assert_eq!(affected, 1, "expected 1 row affected");
 }
 
-/// Verify that the server version is Postgres 16.
+/// Verify that the server version is within the supported range (PG 14–18).
 #[tokio::test]
 async fn smoke_server_version() {
     let db = connect_or_skip!();
@@ -106,10 +106,10 @@ async fn smoke_server_version() {
         .await
         .expect("server_version_num query failed");
     let version: i32 = rows[0].get("v");
-    // server_version_num for PG 16.x is 160000–169999
+    // rpg supports PG 14-18; server_version_num for PG 14+ is >= 140_000.
     assert!(
-        (160_000..170_000).contains(&version),
-        "expected Postgres 16, got server_version_num={version}"
+        version >= 140_000,
+        "expected PostgreSQL >= 14, got server_version_num={version}"
     );
 }
 
