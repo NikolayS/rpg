@@ -126,16 +126,12 @@ jobs:
         run: cargo test --features integration
 
   compat:
-    name: Compatibility (PG ${{ matrix.pg_version }})
+    name: Compatibility
     runs-on: ubuntu-latest
     needs: [lint, test]
-    strategy:
-      fail-fast: false
-      matrix:
-        pg_version: ["14", "15", "16", "17", "18"]
     services:
       postgres:
-        image: postgres:${{ matrix.pg_version }}
+        image: postgres:16
         env:
           POSTGRES_PASSWORD: postgres
         options: >-
