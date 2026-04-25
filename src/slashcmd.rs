@@ -208,6 +208,7 @@ pub struct ParsedSlash {
 /// The parser is recognise-only: it does not check semantic validity (e.g.
 /// non-empty arguments, valid query names).  Handlers continue to perform
 /// those checks and emit usage messages.
+#[allow(clippy::too_many_lines)]
 pub fn parse(input: &str) -> ParsedSlash {
     let trimmed = input.trim();
     let raw = trimmed.to_owned();
