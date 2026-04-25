@@ -2860,7 +2860,7 @@ pub(crate) async fn exec_lines(
                                 }
                             }
                         }
-                        MetaResult::ClosePrepared(name) => {
+                        MetaResult::ClosePrepared(name)
                             if !deallocate_named(
                                 client,
                                 &name,
@@ -2869,12 +2869,11 @@ pub(crate) async fn exec_lines(
                                 settings.terse_errors,
                                 settings.sqlstate_errors,
                             )
-                            .await
-                            {
-                                exit_code = 1;
-                                if settings.single_transaction {
-                                    break 'lines;
-                                }
+                            .await =>
+                        {
+                            exit_code = 1;
+                            if settings.single_transaction {
+                                break 'lines;
                             }
                         }
                         MetaResult::ExecuteBufferToFile(path) => {
@@ -3610,9 +3609,7 @@ pub(crate) fn maybe_page(settings: &mut ReplSettings, text: &str) {
     let term_rows = {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crossterm::terminal::size()
-                .map(|(_, h)| h as usize)
-                .unwrap_or(24)
+            crossterm::terminal::size().map_or(24, |(_, h)| h as usize)
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -4022,12 +4019,10 @@ fn apply_prompt(settings: &mut ReplSettings, prompt_text: &str, var_name: &str) 
                             break false;
                         }
                         // Backspace — delete last character.
-                        (KeyCode::Backspace, _) => {
-                            if input.pop().is_some() {
-                                // Erase the character on screen.
-                                let _ = write!(io::stderr(), "\x08 \x08");
-                                let _ = io::stderr().flush();
-                            }
+                        (KeyCode::Backspace, _) if input.pop().is_some() => {
+                            // Erase the character on screen.
+                            let _ = write!(io::stderr(), "\x08 \x08");
+                            let _ = io::stderr().flush();
                         }
                         // Printable character — echo and accumulate.
                         (KeyCode::Char(ch), _) => {

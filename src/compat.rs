@@ -331,11 +331,7 @@ pub fn print_compat_report() -> (usize, usize) {
 
     rpg_println!("{separator}");
 
-    let pct = if total == 0 {
-        0
-    } else {
-        supported * 100 / total
-    };
+    let pct = (supported * 100).checked_div(total).unwrap_or(0);
     rpg_println!("Overall: {supported}/{total} commands supported ({pct}%)");
 
     (supported, total)
@@ -377,7 +373,7 @@ mod tests {
         let cats = categories();
         for (cat, entries) in &cats {
             for e in entries {
-                assert!(!e.command.is_empty(), "empty command in category {cat}",);
+                assert!(!e.command.is_empty(), "empty command in category {cat}");
                 assert!(
                     !e.notes.is_empty(),
                     "empty notes for {} in category {cat}",
