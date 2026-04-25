@@ -33,7 +33,7 @@ point.
 
 - **rpg** — this project: a Postgres terminal in Rust, psql-compatible, with built-in DBA diagnostics and an AI assistant. Single static binary.
 - **REPL** — the rpg interactive loop: read input → parse → dispatch → execute → render.
-- **psql-compat** — the contract that `\`-commands behave identically to psql. Verified by `tests/psql_regression.rs`.
+- **psql-compat** — the contract that `\`-commands behave identically to psql. Verified by `tests/compat/test-psql-regress.sh` (regression suite) and `tests/compat/test-compat.sh` (golden output diff).
 - **Wire protocol** — the Postgres frontend protocol; rpg speaks it via `tokio-postgres`.
 
 ## Command system
@@ -72,7 +72,7 @@ design discussion and PR descriptions.
 - **`TxState`** — current transaction state (idle, in-block, failed). Tracked alongside `ReplSettings`.
 - **`ExecMode`** — `Plan` / `Interactive` / `Yolo`. Determines how `/ask` and text2sql forwarding behave.
 - **`InputMode`** — `Sql` / `Text2Sql`. Determines whether bare lines are treated as SQL or natural-language prompts.
-- **`Conversation`** — AI chat history plus token accounting. Lives on `ReplSettings`.
+- **`ConversationContext`** — AI chat history plus token accounting. Lives on `ReplSettings` as the `conversation` field. Shorthand "the conversation" refers to this struct.
 
 ## Subsystems referenced in design
 
