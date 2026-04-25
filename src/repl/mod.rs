@@ -9211,6 +9211,69 @@ mod tests {
         );
     }
 
+    // Regression test for #824 H6: prompt-backtick subshells inherit the
+    // full process env, leaking secrets like PGPASSWORD / *_API_KEY when a
+    // malicious PROMPT1 is loaded (e.g. via untrusted `.rpg.toml`, see H5).
+    // The fix in `expand_prompt_backticks` runs the subshell with a
+    // hardened, allowlisted environment.  This test exercises the threat
+    // model: a sensitive variable is set in the parent process; the prompt
+    // expands `printenv` for that variable; the rendered output must not
+    // contain the secret.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn backtick_subshell_does_not_inherit_sensitive_env() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Pick variable names from the documented block-list.  Any one of
+        // these leaking would be a security-relevant regression.
+        let cases: &[(&str, &str)] = &[
+            ("PGPASSWORD", "rpg-h6-pgpassword-should-not-leak"),
+            ("ANTHROPIC_API_KEY", "rpg-h6-anthropic-should-not-leak"),
+            ("OPENAI_API_KEY", "rpg-h6-openai-should-not-leak"),
+            ("AWS_SECRET_ACCESS_KEY", "rpg-h6-aws-should-not-leak"),
+            ("RPG_TEST_SECRET_TOKEN", "rpg-h6-generic-should-not-leak"),
+        ];
+        for (name, value) in cases {
+            // Tests that mutate env are serialised by ENV_MUTEX.
+            std::env::set_var(name, value);
+            let template = format!("[`printenv {name}`]");
+            let rendered = expand_prompt_backticks(&template);
+            // Remove before asserting so we never leak state if the
+            // assertion fires.
+            std::env::remove_var(name);
+            assert!(
+                !rendered.contains(value),
+                "prompt backtick must not leak {name}; got: {rendered:?}"
+            );
+        }
+    }
+
+    // Allowlisted variables (HOME, PATH, USER, ...) MUST still be visible
+    // to the subshell so that real-world prompts like
+    // `PROMPT1='[`git branch --show-current`] '` keep working.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn backtick_subshell_keeps_allowlisted_env() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // PATH is required for the subshell to find `printenv` itself, so
+        // a positive test on PATH would be circular.  Use HOME instead:
+        // it is on the allowlist and `printenv HOME` works without PATH
+        // shenanigans because `printenv` is resolved via PATH (allowlisted).
+        let sentinel = "/tmp/rpg-h6-home-allowed";
+        let saved_home = std::env::var_os("HOME");
+        // Serialised by ENV_MUTEX.
+        std::env::set_var("HOME", sentinel);
+        let rendered = expand_prompt_backticks("[`printenv HOME`]");
+        // Restore HOME so other tests that depend on it are unaffected.
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(
+            rendered, format!("[{sentinel}]"),
+            "HOME must be forwarded to prompt-backtick subshell"
+        );
+    }
+
     // -- build_prompt_from_settings -------------------------------------------
 
     #[test]
