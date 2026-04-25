@@ -2009,6 +2009,51 @@ protected_tables = ["users", "payments", "audit_log"]
         }
     }
 
+    // -- Project config trust check (#824 H5) --------------------------------
+    //
+    // A world-writable `.rpg.toml` lets any local user inject settings such
+    // as `PROMPT1` that flow through backtick-shell expansion in the REPL
+    // (`src/repl/mod.rs:282`).  rpg must therefore refuse to load project
+    // configs that fail the same ownership/mode check pgpass uses
+    // (`src/connection.rs:1566–1582`).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn load_project_config_skips_world_writable_file() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join(".rpg.toml");
+        // Recognisable named_query — if the loader trusted this file the
+        // entry would appear in the merged Config.
+        fs::write(
+            &config_path,
+            "[named_queries]\nh5_canary = \"select 'pwn'\"\n",
+        )
+        .expect("write .rpg.toml");
+        // chmod 0666 — world-writable, the exact case pgpass rejects.
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o666))
+            .expect("chmod .rpg.toml");
+
+        // load_project_config() reads CWD — point it at our temp dir for the
+        // duration of this serial test.
+        let prev_cwd = std::env::current_dir().expect("get cwd");
+        std::env::set_current_dir(dir.path()).expect("set cwd to temp dir");
+        let result = load_project_config();
+        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+
+        assert!(
+            result.config_path.is_none(),
+            "world-writable .rpg.toml must not be loaded; got {:?}",
+            result.config_path
+        );
+        assert!(
+            !result.config.named_queries.contains_key("h5_canary"),
+            "world-writable .rpg.toml contents must not be merged into config"
+        );
+    }
+
     // -- AI timeout ----------------------------------------------------------
 
     #[test]
