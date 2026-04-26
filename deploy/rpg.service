@@ -13,7 +13,7 @@
 
 [Unit]
 Description=Rpg — self-driving Postgres agent
-Documentation=https://github.com/NikolayS/project-alpha
+Documentation=https://github.com/NikolayS/rpg
 After=network-online.target postgresql.service
 Wants=network-online.target
 

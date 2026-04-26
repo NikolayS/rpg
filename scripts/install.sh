@@ -3,9 +3,9 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 # install.sh — install rpg from GitHub releases
-# Usage: curl -fsSL https://raw.githubusercontent.com/NikolayS/project-alpha/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/NikolayS/rpg/main/scripts/install.sh | bash
 
-GITHUB_REPO="NikolayS/project-alpha"
+GITHUB_REPO="NikolayS/rpg"
 BINARY_NAME="rpg"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 
