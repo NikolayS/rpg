@@ -37,6 +37,28 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: "1.88"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: msrv-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            msrv-${{ runner.os }}-cargo-
+      - name: Drop rust-toolchain.toml so MSRV toolchain is used
+        run: rm -f rust-toolchain.toml
+      - name: Verify build with MSRV
+        run: cargo check --all-targets --all-features
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -58,12 +80,16 @@ jobs:
         run: cargo test
 
   integration:
-    name: Integration Tests
+    name: Integration Tests (PG ${{ matrix.pg_version }})
     runs-on: ubuntu-latest
     needs: [lint, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ["14", "15", "16", "17", "18"]
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.pg_version }}
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass
@@ -236,7 +262,7 @@ jobs:
     needs: [lint, test]
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass
@@ -250,7 +276,7 @@ jobs:
           --health-retries 15
           --health-start-period 5s
       postgres-scram:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -292,7 +318,7 @@ jobs:
           docker run -d --name pg-tls -p 5433:5432 \
             -e POSTGRES_PASSWORD=testpass \
             -v /tmp/pg-tls:/tmp/pg-tls:ro \
-            --entrypoint /bin/bash postgres:17 \
+            --entrypoint /bin/bash postgres:18 \
             -c "cp /tmp/pg-tls/server.crt /tmp/pg.crt && cp /tmp/pg-tls/server.key /tmp/pg.key && chown postgres:postgres /tmp/pg.crt /tmp/pg.key && chmod 600 /tmp/pg.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/pg.crt -c ssl_key_file=/tmp/pg.key"
           for i in $(seq 1 20); do
             docker exec pg-tls pg_isready -U postgres && break || sleep 1
@@ -327,7 +353,7 @@ jobs:
     needs: [lint, test]
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass
