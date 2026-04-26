@@ -808,18 +808,17 @@ fn check_project_config_trust(path: &Path) -> Result<(), String> {
     {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(path).map_err(|e| format!("cannot stat: {e}"))?;
-        let uid = unsafe { libc::geteuid() };
-        if meta.uid() != uid {
-            return Err(format!(
-                "owned by uid {} (current uid {uid}); refusing to load",
-                meta.uid()
-            ));
+        // Compare uids without including either value in the error message:
+        // CodeQL's cleartext-logging rule treats `geteuid()` results as
+        // sensitive and flags them when they reach a logger (mirrors #817's
+        // taint-chain break for ConnParams).  The diagnostic value of
+        // showing the numeric uids is low — the user can `ls -l` the file.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err("not owned by the current user; refusing to load".into());
         }
-        let mode = meta.mode() & 0o777;
-        if mode & 0o022 != 0 {
+        if meta.mode() & 0o022 != 0 {
             return Err(format!(
-                "mode {mode:04o} is group/other writable; \
-                 run `chmod 0600 {}` to fix",
+                "group/other writable; run `chmod 0600 {}` to fix",
                 path.display()
             ));
         }
