@@ -781,6 +781,54 @@ pub fn find_project_config(_start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Verify a project-level `.rpg.toml` is safe to load (#824 H5).
+///
+/// Project configs can set fields like `PROMPT1` that flow through the REPL's
+/// backtick subshell expansion (`src/repl/mod.rs:282`), so a world-writable or
+/// other-owned `.rpg.toml` is a code-execution vector when running rpg inside
+/// an untrusted clone.  Mirror the pgpass check at
+/// `src/connection.rs:1566–1582`: require current-user ownership and no
+/// group/other write bits.
+///
+/// Returns `Ok(())` when the file is trusted, or `Err(reason)` describing the
+/// violation.  On non-unix platforms the OS does not expose POSIX ownership
+/// or mode bits in a portable way, so the check is a no-op there — matching
+/// how the pgpass check is also gated `#[cfg(unix)]`.
+///
+/// User-level configs under `~/.config/rpg/` are *not* run through this
+/// check: the home directory is implicitly trusted, same as psql treats
+/// `~/.psqlrc`.
+///
+/// TODO(#824 H5): follow up with a TOFU-style allowlist at
+/// `~/.config/rpg/trusted_project_configs` (direnv-style opt-in trust) so
+/// users can knowingly load configs that fail this minimum check.
+#[cfg(not(target_arch = "wasm32"))]
+fn check_project_config_trust(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).map_err(|e| format!("cannot stat: {e}"))?;
+        // Compare uids without including either value in the error message:
+        // CodeQL's cleartext-logging rule treats `geteuid()` results as
+        // sensitive and flags them when they reach a logger (mirrors #817's
+        // taint-chain break for ConnParams).  The diagnostic value of
+        // showing the numeric uids is low — the user can `ls -l` the file.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err("not owned by the current user; refusing to load".into());
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "group/other writable; run `chmod 0600 {}` to fix",
+                path.display()
+            ));
+        }
+    }
+    // On non-unix targets we cannot perform this check portably; the loader
+    // proceeds.  Documented above; tracked under #824 H5 follow-up.
+    let _ = path;
+    Ok(())
+}
+
 /// Load a `.rpg.toml` project config file and look for `POSTGRES.md`
 /// alongside it.
 ///
@@ -788,6 +836,10 @@ pub fn find_project_config(_start_dir: &Path) -> Option<PathBuf> {
 /// directory.  Returns a [`ProjectConfigResult`] that is always safe to
 /// use: when no file is found, the config field holds a default value
 /// and the path fields are `None`.
+///
+/// Project configs are run through [`check_project_config_trust`] before
+/// loading; an untrusted file is skipped with a stderr warning, never an
+/// abort.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_project_config() -> ProjectConfigResult {
     let Ok(cwd) = std::env::current_dir() else {
@@ -798,12 +850,23 @@ pub fn load_project_config() -> ProjectConfigResult {
 
     let (config, config_path) = match config_path {
         Some(p) => {
-            match std::fs::read_to_string(&p)
-                .map_err(|e| e.to_string())
-                .and_then(|s| toml::from_str::<ProjectConfig>(&s).map_err(|e| e.to_string()))
-            {
-                Ok(c) => (c, Some(p)),
-                Err(_) => (ProjectConfig::default(), None),
+            // #824 H5: refuse to load project configs we do not trust.  Skip
+            // (do not abort) so an untrusted `.rpg.toml` cannot prevent rpg
+            // from starting; mirrors pgpass behaviour.
+            if let Err(reason) = check_project_config_trust(&p) {
+                rpg_eprintln!(
+                    "rpg: warning: ignoring project config \"{}\": {reason}",
+                    p.display()
+                );
+                (ProjectConfig::default(), None)
+            } else {
+                match std::fs::read_to_string(&p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| toml::from_str::<ProjectConfig>(&s).map_err(|e| e.to_string()))
+                {
+                    Ok(c) => (c, Some(p)),
+                    Err(_) => (ProjectConfig::default(), None),
+                }
             }
         }
         None => (ProjectConfig::default(), None),
@@ -2007,6 +2070,51 @@ protected_tables = ["users", "payments", "audit_log"]
             // A .rpg.toml exists somewhere above the temp dir — that is fine.
             assert!(path.file_name().unwrap() == ".rpg.toml");
         }
+    }
+
+    // -- Project config trust check (#824 H5) --------------------------------
+    //
+    // A world-writable `.rpg.toml` lets any local user inject settings such
+    // as `PROMPT1` that flow through backtick-shell expansion in the REPL
+    // (`src/repl/mod.rs:282`).  rpg must therefore refuse to load project
+    // configs that fail the same ownership/mode check pgpass uses
+    // (`src/connection.rs:1566–1582`).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn load_project_config_skips_world_writable_file() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join(".rpg.toml");
+        // Recognisable named_query — if the loader trusted this file the
+        // entry would appear in the merged Config.
+        fs::write(
+            &config_path,
+            "[named_queries]\nh5_canary = \"select 'pwn'\"\n",
+        )
+        .expect("write .rpg.toml");
+        // chmod 0666 — world-writable, the exact case pgpass rejects.
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o666))
+            .expect("chmod .rpg.toml");
+
+        // load_project_config() reads CWD — point it at our temp dir for the
+        // duration of this serial test.
+        let prev_cwd = std::env::current_dir().expect("get cwd");
+        std::env::set_current_dir(dir.path()).expect("set cwd to temp dir");
+        let result = load_project_config();
+        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+
+        assert!(
+            result.config_path.is_none(),
+            "world-writable .rpg.toml must not be loaded; got {:?}",
+            result.config_path
+        );
+        assert!(
+            !result.config.named_queries.contains_key("h5_canary"),
+            "world-writable .rpg.toml contents must not be merged into config"
+        );
     }
 
     // -- AI timeout ----------------------------------------------------------
