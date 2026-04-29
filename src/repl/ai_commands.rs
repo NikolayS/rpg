@@ -395,399 +395,357 @@ pub(super) async fn dispatch_ai_command(
     settings: &mut ReplSettings,
     tx: &mut TxState,
 ) -> Option<MetaResult> {
-    // Budget gate — skip for non-AI and budget-diagnostic commands.
-    let is_budget_exempt = input == "/clear"
-        || input.starts_with("/compact")
-        || input.starts_with("/budget")
-        || input == "/init"
-        || input.starts_with("/dba")
-        || input.starts_with("/sql")
-        || input.starts_with("/text2sql")
-        || input.starts_with("/t2s")
-        || input.starts_with("/mode")
-        || input.starts_with("/plan")
-        || input.starts_with("/yolo")
-        || input.starts_with("/interactive")
-        || input.starts_with("/profiles")
-        || input.starts_with("/refresh")
-        || input.starts_with("/session")
-        || input.starts_with("/log-file")
-        || input.starts_with("/explain-share")
-        || input.starts_with("/commands")
-        || input.starts_with("/version")
-        || input.starts_with("/f2")
-        || input.starts_with("/f3")
-        || input.starts_with("/f4")
-        || input.starts_with("/f5")
-        || input.starts_with("/ns ")
-        || input == "/n+"
-        || input.starts_with("/nd ")
-        || input.starts_with("/np ")
-        || input.starts_with("/n ")
-        || input.starts_with("/ash")
-        || input == "/rpg";
-    if !is_budget_exempt && check_token_budget(settings) {
+    use crate::slashcmd::{self, SlashCmd};
+
+    let parsed = slashcmd::parse(input);
+
+    // Budget gate — only the actual AI request commands consume tokens.
+    // The exemption list is now a property of the variant
+    // (`SlashCmd::requires_ai_budget`), replacing the hand-curated chain
+    // that used to live here.
+    if parsed.cmd.requires_ai_budget() && check_token_budget(settings) {
         return None;
     }
 
-    // ------------------------------------------------------------------
-    // AI commands
-    // ------------------------------------------------------------------
-
-    if let Some(prompt) = input.strip_prefix("/ask").map(str::trim) {
-        if prompt.is_empty() {
-            rpg_eprintln!("Usage: /ask <natural language description>");
-            return None;
-        }
-        match settings.exec_mode {
-            ExecMode::Plan => handle_ai_plan(client, prompt, settings, params).await,
-            _ => handle_ai_ask(client, prompt, settings, params, tx).await,
-        }
-    } else if input == "/fix" || input.starts_with("/fix ") {
-        handle_ai_fix(client, settings, params, tx).await;
-    // /explain-share <service> — upload last EXPLAIN plan to external visualiser.
-    } else if let Some(service) = input.strip_prefix("/explain-share").map(str::trim) {
-        if service.is_empty() {
-            rpg_eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
-        } else {
-            dispatch_explain_share(client, settings, service).await;
-        }
-    } else if let Some(query_arg) = input.strip_prefix("/explain").map(str::trim) {
-        handle_ai_explain(client, query_arg, settings, params).await;
-    } else if let Some(query_arg) = input.strip_prefix("/optimize").map(str::trim) {
-        handle_ai_optimize(client, query_arg, settings, params).await;
-    } else if let Some(table_arg) = input.strip_prefix("/describe").map(str::trim) {
-        if table_arg.is_empty() {
-            rpg_eprintln!("Usage: /describe <table_name>");
-            return None;
-        }
-        handle_ai_describe(client, table_arg, settings, params).await;
-    } else if input == "/clear" {
-        settings.conversation.clear();
-        rpg_eprintln!("AI conversation context cleared.");
-    } else if let Some(focus) = input.strip_prefix("/compact").map(str::trim) {
-        if settings.conversation.is_empty() {
-            rpg_eprintln!("Nothing to compact — conversation context is empty.");
-        } else {
-            let focus = if focus.is_empty() { None } else { Some(focus) };
-            let before = settings.conversation.entries.len();
-            settings.conversation.compact(focus);
-            rpg_eprintln!(
-                "Compacted {before} entries → {} entries (~{} tokens)",
-                settings.conversation.entries.len(),
-                settings.conversation.token_estimate(),
-            );
-        }
-    } else if input == "/budget" {
-        handle_ai_budget(settings);
-    } else if input == "/init" {
-        handle_init(client, settings, params).await;
-
-    // ------------------------------------------------------------------
-    // rpg-specific commands (/ namespace)
-    // ------------------------------------------------------------------
-
-    // /dba [subcommand] — database diagnostics.
-    } else if let Some(rest) = input.strip_prefix("/dba").map(str::trim) {
-        let subcommand = rest;
-        let plus = subcommand.ends_with('+');
-        let subcommand = subcommand.trim_end_matches('+').trim();
-        let caps = settings.db_capabilities.clone();
-        let ai_context = crate::dba::execute(client, subcommand, plus, Some(&caps), settings).await;
-        if let Some(ref context) = ai_context {
-            interpret_dba_output(context, subcommand, settings).await;
-        }
-
-    // /ash — active session history TUI.
-    } else if input == "/rpg" {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use std::io::IsTerminal;
-            if !std::io::stdout().is_terminal() {
-                rpg_eprintln!("/rpg requires an interactive terminal");
+    match parsed.cmd {
+        // ------------------------------------------------------------------
+        // AI commands
+        // ------------------------------------------------------------------
+        SlashCmd::Ask { prompt } => {
+            if prompt.is_empty() {
+                rpg_eprintln!("Usage: /ask <natural language description>");
                 return None;
             }
-            crate::rpg::run_game();
+            match settings.exec_mode {
+                ExecMode::Plan => handle_ai_plan(client, &prompt, settings, params).await,
+                _ => handle_ai_ask(client, &prompt, settings, params, tx).await,
+            }
         }
-        #[cfg(target_arch = "wasm32")]
-        rpg_eprintln!("/rpg requires ratatui which is not available on wasm32-unknown-unknown");
-    } else if input == "/ash" || input.starts_with("/ash ") {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use std::io::IsTerminal;
-            if !std::io::stdout().is_terminal() {
-                rpg_eprintln!("/ash requires an interactive terminal");
+        SlashCmd::Fix => {
+            handle_ai_fix(client, settings, params, tx).await;
+        }
+        SlashCmd::Explain { query } => {
+            handle_ai_explain(client, &query, settings, params).await;
+        }
+        SlashCmd::Optimize { query } => {
+            handle_ai_optimize(client, &query, settings, params).await;
+        }
+        SlashCmd::Describe { table } => {
+            if table.is_empty() {
+                rpg_eprintln!("Usage: /describe <table_name>");
                 return None;
             }
-            // Parse optional --cpu N flag: /ash --cpu 8
-            let ash_args = input.strip_prefix("/ash").map_or("", str::trim);
-            let cpu_override = parse_ash_cpu_flag(ash_args);
-            if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
-                rpg_eprintln!("/ash: {e}");
-            }
+            handle_ai_describe(client, &table, settings, params).await;
         }
-        #[cfg(target_arch = "wasm32")]
-        rpg_eprintln!("/ash requires ratatui which is not available on wasm32-unknown-unknown");
-
-    // /sql — switch to SQL input mode.
-    } else if input == "/sql" {
-        let result = MetaResult::SetInputMode(InputMode::Sql);
-        let label = apply_mode_change(&result, settings);
-        rpg_eprintln!("Input mode: {label}");
-
-    // /text2sql, /t2s — switch to text-to-SQL input mode.
-    } else if input == "/text2sql" || input == "/t2s" {
-        let result = MetaResult::SetInputMode(InputMode::Text2Sql);
-        let label = apply_mode_change(&result, settings);
-        rpg_eprintln!("Input mode: {label}");
-
-    // /mode — show current input and execution mode.
-    } else if input == "/mode" {
-        let input_label = match settings.input_mode {
-            InputMode::Sql => "sql",
-            InputMode::Text2Sql => "text2sql",
-        };
-        let exec_label = match settings.exec_mode {
-            ExecMode::Interactive => "interactive",
-            ExecMode::Plan => "plan",
-            ExecMode::Yolo => "yolo",
-        };
-        rpg_eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
-
-    // /plan — enter plan execution mode.
-    } else if input == "/plan" {
-        let result = MetaResult::SetExecMode(ExecMode::Plan);
-        let label = apply_mode_change(&result, settings);
-        rpg_eprintln!("Execution mode: {label}");
-
-    // /yolo — enter YOLO mode (text2sql + auto-execute).
-    } else if input == "/yolo" {
-        let result = MetaResult::SetExecMode(ExecMode::Yolo);
-        let label = apply_mode_change(&result, settings);
-        rpg_eprintln!("Execution mode: {label}");
-
-    // /interactive — return to interactive (default) mode.
-    } else if input == "/interactive" {
-        let result = MetaResult::SetExecMode(ExecMode::Interactive);
-        let label = apply_mode_change(&result, settings);
-        rpg_eprintln!("Execution mode: {label}");
-
-    // /profiles — list configured connection profiles.
-    } else if input == "/profiles" {
-        print_profiles(&settings.config);
-
-    // /refresh — reload schema cache for tab completion.
-    } else if input == "/refresh" {
-        #[cfg(not(target_arch = "wasm32"))]
-        match &settings.schema_cache {
-            None => {
-                rpg_eprintln!("/refresh: no active connection or not in interactive mode");
-            }
-            Some(cache) => match load_schema_cache(client).await {
-                Ok(loaded) => {
-                    *cache.write().unwrap() = loaded;
-                    rpg_println!("Schema cache refreshed.");
-                }
-                Err(e) => {
-                    rpg_eprintln!("/refresh: failed to reload schema cache: {e}");
-                }
-            },
+        SlashCmd::Clear => {
+            settings.conversation.clear();
+            rpg_eprintln!("AI conversation context cleared.");
         }
-        #[cfg(target_arch = "wasm32")]
-        rpg_eprintln!("/refresh: schema completion not available in browser");
-
-    // /session [subcommand] — session persistence.
-    } else if let Some(rest) = input.strip_prefix("/session").map(str::trim) {
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        let sub = parts.next().unwrap_or("");
-        let arg = parts.next().map_or("", str::trim).to_owned();
-        match sub {
-            "" | "list" => dispatch_session_list(),
-            "save" => dispatch_session_save(
-                params,
-                &settings.session_id,
-                if arg.is_empty() {
+        SlashCmd::Compact { focus } => {
+            if settings.conversation.is_empty() {
+                rpg_eprintln!("Nothing to compact — conversation context is empty.");
+            } else {
+                let focus = if focus.is_empty() {
                     None
                 } else {
-                    Some(arg.as_str())
-                },
-                settings.query_count,
-            ),
-            "delete" | "del" => {
-                if arg.is_empty() {
-                    rpg_eprintln!("Usage: /session delete <id>");
-                } else {
-                    dispatch_session_delete(&arg);
+                    Some(focus.as_str())
+                };
+                let before = settings.conversation.entries.len();
+                settings.conversation.compact(focus);
+                rpg_eprintln!(
+                    "Compacted {before} entries → {} entries (~{} tokens)",
+                    settings.conversation.entries.len(),
+                    settings.conversation.token_estimate(),
+                );
+            }
+        }
+        SlashCmd::Budget => {
+            handle_ai_budget(settings);
+        }
+        SlashCmd::Init => {
+            handle_init(client, settings, params).await;
+        }
+
+        // ------------------------------------------------------------------
+        // rpg-specific commands (/ namespace)
+        // ------------------------------------------------------------------
+        SlashCmd::Dba { subcommand, plus } => {
+            let caps = settings.db_capabilities.clone();
+            let ai_context =
+                crate::dba::execute(client, &subcommand, plus, Some(&caps), settings).await;
+            if let Some(ref context) = ai_context {
+                interpret_dba_output(context, &subcommand, settings).await;
+            }
+        }
+        SlashCmd::Rpg => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use std::io::IsTerminal;
+                if !std::io::stdout().is_terminal() {
+                    rpg_eprintln!("/rpg requires an interactive terminal");
+                    return None;
+                }
+                crate::rpg::run_game();
+            }
+            #[cfg(target_arch = "wasm32")]
+            rpg_eprintln!("/rpg requires ratatui which is not available on wasm32-unknown-unknown");
+        }
+        SlashCmd::Ash { args } => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use std::io::IsTerminal;
+                if !std::io::stdout().is_terminal() {
+                    rpg_eprintln!("/ash requires an interactive terminal");
+                    return None;
+                }
+                let cpu_override = parse_ash_cpu_flag(&args);
+                if let Err(e) = crate::ash::run_ash(client, settings, cpu_override).await {
+                    rpg_eprintln!("/ash: {e}");
                 }
             }
-            "resume" | "connect" => {
-                if arg.is_empty() {
-                    rpg_eprintln!("Usage: /session resume <id>");
-                } else if let Some(result) = dispatch_session_resume(&arg).await {
-                    return Some(result);
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = args;
+                rpg_eprintln!(
+                    "/ash requires ratatui which is not available on wasm32-unknown-unknown"
+                );
+            }
+        }
+
+        // -- Modes ----------------------------------------------------------
+        SlashCmd::SqlMode => {
+            let result = MetaResult::SetInputMode(InputMode::Sql);
+            let label = apply_mode_change(&result, settings);
+            rpg_eprintln!("Input mode: {label}");
+        }
+        SlashCmd::Text2SqlMode => {
+            let result = MetaResult::SetInputMode(InputMode::Text2Sql);
+            let label = apply_mode_change(&result, settings);
+            rpg_eprintln!("Input mode: {label}");
+        }
+        SlashCmd::ShowMode => {
+            let input_label = match settings.input_mode {
+                InputMode::Sql => "sql",
+                InputMode::Text2Sql => "text2sql",
+            };
+            let exec_label = match settings.exec_mode {
+                ExecMode::Interactive => "interactive",
+                ExecMode::Plan => "plan",
+                ExecMode::Yolo => "yolo",
+            };
+            rpg_eprintln!("Input mode: {input_label}  Execution mode: {exec_label}");
+        }
+        SlashCmd::PlanMode => {
+            let result = MetaResult::SetExecMode(ExecMode::Plan);
+            let label = apply_mode_change(&result, settings);
+            rpg_eprintln!("Execution mode: {label}");
+        }
+        SlashCmd::YoloMode => {
+            let result = MetaResult::SetExecMode(ExecMode::Yolo);
+            let label = apply_mode_change(&result, settings);
+            rpg_eprintln!("Execution mode: {label}");
+        }
+        SlashCmd::InteractiveMode => {
+            let result = MetaResult::SetExecMode(ExecMode::Interactive);
+            let label = apply_mode_change(&result, settings);
+            rpg_eprintln!("Execution mode: {label}");
+        }
+
+        // -- REPL management -----------------------------------------------
+        SlashCmd::Profiles => {
+            print_profiles(&settings.config);
+        }
+        SlashCmd::Refresh => {
+            #[cfg(not(target_arch = "wasm32"))]
+            match &settings.schema_cache {
+                None => {
+                    rpg_eprintln!("/refresh: no active connection or not in interactive mode");
                 }
-            }
-            _ => rpg_eprintln!("/session: unknown subcommand \"{sub}\". Try /session list."),
-        }
-
-    // /log-file [path] — start or stop query audit logging.
-    } else if let Some(rest) = input.strip_prefix("/log-file").map(str::trim) {
-        let path = if rest.is_empty() {
-            None
-        } else {
-            Some(rest.to_owned())
-        };
-        let parsed = crate::metacmd::ParsedMeta {
-            cmd: crate::metacmd::MetaCmd::LogFile(path),
-            plus: false,
-            system: false,
-            pattern: None,
-            echo_hidden: false,
-            kind_filter: None,
-            continuation: None,
-            expanded: false,
-        };
-        dispatch_io(&parsed, client, params, settings, tx).await;
-
-    // /commands — list custom Lua meta-commands.
-    } else if input == "/commands" {
-        let cmds = &settings.lua_registry.commands;
-        if cmds.is_empty() {
-            rpg_println!(
-                "No custom commands loaded.\n\
-                 Add Lua scripts to ~/.config/rpg/commands/*.lua"
-            );
-        } else {
-            let mut out = String::from("Custom commands:\n");
-            for cmd in cmds {
-                use std::fmt::Write as _;
-                let _ = writeln!(out, "  /{:<20} {}", cmd.name, cmd.description);
-            }
-            maybe_page(settings, &out);
-        }
-
-    // /version — show rpg version and build information.
-    } else if input == "/version" {
-        rpg_println!("{}", crate::version_string());
-        if let Some(ref sv) = settings.db_capabilities.server_version {
-            rpg_println!("Server: PostgreSQL {sv}");
-        }
-
-    // /f2..f5 — function key toggles.
-    } else if input == "/f2" {
-        apply_fkey_toggle(FKeyAction::Completion, settings);
-    } else if input == "/f3" {
-        apply_fkey_toggle(FKeyAction::SingleLine, settings);
-    } else if input == "/f4" {
-        apply_fkey_toggle(FKeyAction::ViEmacs, settings);
-    } else if input == "/f5" {
-        apply_fkey_toggle(FKeyAction::AutoExplain, settings);
-
-    // /ns <name> <query> — save a named query.
-    } else if input == "/ns" || input.starts_with("/ns ") {
-        let rest = input["/ns".len()..].trim();
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        let name = parts.next().unwrap_or("").to_owned();
-        let query = parts.next().map_or("", str::trim).to_owned();
-        if name.is_empty() || query.is_empty() {
-            rpg_eprintln!("Usage: /ns <name> <query>");
-        } else if crate::named::NamedQueries::is_valid_name(&name) {
-            let mut nq = crate::named::NamedQueries::load();
-            nq.set(&name, &query);
-            match nq.save() {
-                Ok(()) => {
-                    if !settings.quiet {
-                        rpg_eprintln!("Saved query \"{name}\".");
+                Some(cache) => match load_schema_cache(client).await {
+                    Ok(loaded) => {
+                        *cache.write().unwrap() = loaded;
+                        rpg_println!("Schema cache refreshed.");
                     }
+                    Err(e) => {
+                        rpg_eprintln!("/refresh: failed to reload schema cache: {e}");
+                    }
+                },
+            }
+            #[cfg(target_arch = "wasm32")]
+            rpg_eprintln!("/refresh: schema completion not available in browser");
+        }
+        SlashCmd::SessionList => {
+            dispatch_session_list();
+        }
+        SlashCmd::SessionSave { name } => {
+            let arg = if name.is_empty() {
+                None
+            } else {
+                Some(name.as_str())
+            };
+            dispatch_session_save(params, &settings.session_id, arg, settings.query_count);
+        }
+        SlashCmd::SessionDelete { id } => {
+            if id.is_empty() {
+                rpg_eprintln!("Usage: /session delete <id>");
+            } else {
+                dispatch_session_delete(&id);
+            }
+        }
+        SlashCmd::SessionResume { id } => {
+            if id.is_empty() {
+                rpg_eprintln!("Usage: /session resume <id>");
+            } else if let Some(result) = dispatch_session_resume(&id).await {
+                return Some(result);
+            }
+        }
+        SlashCmd::SessionUnknown { sub } => {
+            rpg_eprintln!("/session: unknown subcommand \"{sub}\". Try /session list.");
+        }
+        SlashCmd::LogFile { path } => {
+            let parsed_meta = crate::metacmd::ParsedMeta {
+                cmd: crate::metacmd::MetaCmd::LogFile(path),
+                plus: false,
+                system: false,
+                pattern: None,
+                echo_hidden: false,
+                kind_filter: None,
+                continuation: None,
+                expanded: false,
+            };
+            dispatch_io(&parsed_meta, client, params, settings, tx).await;
+        }
+        SlashCmd::ExplainShare { service } => {
+            if service.is_empty() {
+                rpg_eprintln!("Usage: /explain-share <depesz|dalibo|pgmustard>");
+            } else {
+                dispatch_explain_share(client, settings, &service).await;
+            }
+        }
+        SlashCmd::Commands => {
+            let cmds = &settings.lua_registry.commands;
+            if cmds.is_empty() {
+                rpg_println!(
+                    "No custom commands loaded.\n\
+                     Add Lua scripts to ~/.config/rpg/commands/*.lua"
+                );
+            } else {
+                let mut out = String::from("Custom commands:\n");
+                for cmd in cmds {
+                    use std::fmt::Write as _;
+                    let _ = writeln!(out, "  /{:<20} {}", cmd.name, cmd.description);
                 }
-                Err(e) => rpg_eprintln!("/ns: {e}"),
+                maybe_page(settings, &out);
             }
-        } else {
-            rpg_eprintln!(
-                "/ns: invalid query name \"{name}\": \
-                 names must contain only alphanumerics and underscores"
-            );
         }
-
-    // /n+ — list all named queries.
-    } else if input == "/n+" {
-        let nq = crate::named::NamedQueries::load();
-        let queries = nq.list();
-        if queries.is_empty() {
-            rpg_println!("No named queries saved.");
-        } else {
-            let mut out = String::new();
-            for (name, query) in queries {
-                use std::fmt::Write as FmtWrite;
-                let _ = writeln!(out, "  {name}: {query}");
+        SlashCmd::Version => {
+            rpg_println!("{}", crate::version_string());
+            if let Some(ref sv) = settings.db_capabilities.server_version {
+                rpg_println!("Server: PostgreSQL {sv}");
             }
-            maybe_page(settings, &out);
         }
+        SlashCmd::F2 => apply_fkey_toggle(FKeyAction::Completion, settings),
+        SlashCmd::F3 => apply_fkey_toggle(FKeyAction::SingleLine, settings),
+        SlashCmd::F4 => apply_fkey_toggle(FKeyAction::ViEmacs, settings),
+        SlashCmd::F5 => apply_fkey_toggle(FKeyAction::AutoExplain, settings),
 
-    // /nd <name> — delete a named query.
-    } else if input == "/nd" || input.starts_with("/nd ") {
-        let name = input["/nd".len()..].trim();
-        if name.is_empty() {
-            rpg_eprintln!("Usage: /nd <name>");
-        } else {
-            let mut nq = crate::named::NamedQueries::load();
-            if nq.delete(name) {
+        // -- Named queries -------------------------------------------------
+        SlashCmd::NamedSave { name, query } => {
+            if name.is_empty() || query.is_empty() {
+                rpg_eprintln!("Usage: /ns <name> <query>");
+            } else if crate::named::NamedQueries::is_valid_name(&name) {
+                let mut nq = crate::named::NamedQueries::load();
+                nq.set(&name, &query);
                 match nq.save() {
                     Ok(()) => {
                         if !settings.quiet {
-                            rpg_eprintln!("Deleted query \"{name}\".");
+                            rpg_eprintln!("Saved query \"{name}\".");
                         }
                     }
-                    Err(e) => rpg_eprintln!("/nd: {e}"),
+                    Err(e) => rpg_eprintln!("/ns: {e}"),
                 }
             } else {
-                rpg_eprintln!("/nd: unknown query \"{name}\"");
+                rpg_eprintln!(
+                    "/ns: invalid query name \"{name}\": \
+                     names must contain only alphanumerics and underscores"
+                );
             }
         }
-
-    // /np <name> — print a named query without executing.
-    } else if input == "/np" || input.starts_with("/np ") {
-        let name = input["/np".len()..].trim();
-        if name.is_empty() {
-            rpg_eprintln!("Usage: /np <name>");
-        } else {
+        SlashCmd::NamedList => {
             let nq = crate::named::NamedQueries::load();
-            match nq.get(name) {
-                Some(query) => rpg_println!("{query}"),
-                None => rpg_eprintln!("/np: unknown query \"{name}\""),
-            }
-        }
-
-    // /n <name> [args...] — execute a named query.
-    } else if input == "/n" || input.starts_with("/n ") {
-        let rest = input["/n".len()..].trim();
-        if rest.is_empty() {
-            rpg_eprintln!("Usage: /n <name> [args...]");
-        } else {
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            let name = parts.next().unwrap_or("").to_owned();
-            let args_str = parts.next().unwrap_or("").trim();
-            let args: Vec<String> = args_str.split_whitespace().map(str::to_owned).collect();
-            let nq = crate::named::NamedQueries::load();
-            match nq.get(&name) {
-                Some(query) => {
-                    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                    let sql = crate::named::NamedQueries::substitute(query, &arg_refs);
-                    execute_query(client, &sql, settings, tx).await;
+            let queries = nq.list();
+            if queries.is_empty() {
+                rpg_println!("No named queries saved.");
+            } else {
+                let mut out = String::new();
+                for (name, query) in queries {
+                    use std::fmt::Write as FmtWrite;
+                    let _ = writeln!(out, "  {name}: {query}");
                 }
-                None => rpg_eprintln!("/n: unknown query \"{name}\""),
+                maybe_page(settings, &out);
             }
         }
-    } else {
-        rpg_eprintln!(
-            "Unknown command: {input}\n\
-             AI: /ask, /fix, /explain, /optimize, /describe, /init, /clear, /compact, /budget\n\
-             Diagnostics: /dba, /ash\n\
-             Modes: /sql, /text2sql, /t2s, /plan, /yolo, /interactive, /mode\n\
-             Queries: /ns, /n, /n+, /nd, /np\n\
-             REPL: /profiles, /refresh, /session, /log-file, /explain-share, /commands, /version, /f2-f5"
+        SlashCmd::NamedDelete { name } => {
+            if name.is_empty() {
+                rpg_eprintln!("Usage: /nd <name>");
+            } else {
+                let mut nq = crate::named::NamedQueries::load();
+                if nq.delete(&name) {
+                    match nq.save() {
+                        Ok(()) => {
+                            if !settings.quiet {
+                                rpg_eprintln!("Deleted query \"{name}\".");
+                            }
+                        }
+                        Err(e) => rpg_eprintln!("/nd: {e}"),
+                    }
+                } else {
+                    rpg_eprintln!("/nd: unknown query \"{name}\"");
+                }
+            }
+        }
+        SlashCmd::NamedPrint { name } => {
+            if name.is_empty() {
+                rpg_eprintln!("Usage: /np <name>");
+            } else {
+                let nq = crate::named::NamedQueries::load();
+                match nq.get(&name) {
+                    Some(query) => rpg_println!("{query}"),
+                    None => rpg_eprintln!("/np: unknown query \"{name}\""),
+                }
+            }
+        }
+        SlashCmd::NamedExec { rest } => {
+            if rest.is_empty() {
+                rpg_eprintln!("Usage: /n <name> [args...]");
+            } else {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let name = parts.next().unwrap_or("").to_owned();
+                let args_str = parts.next().unwrap_or("").trim();
+                let args: Vec<String> = args_str.split_whitespace().map(str::to_owned).collect();
+                let nq = crate::named::NamedQueries::load();
+                match nq.get(&name) {
+                    Some(query) => {
+                        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                        let sql = crate::named::NamedQueries::substitute(query, &arg_refs);
+                        execute_query(client, &sql, settings, tx).await;
+                    }
+                    None => rpg_eprintln!("/n: unknown query \"{name}\""),
+                }
+            }
+        }
 
-        );
+        // -- Fallback ------------------------------------------------------
+        SlashCmd::Unknown { input } => {
+            rpg_eprintln!(
+                "Unknown command: {input}\n\
+                 AI: /ask, /fix, /explain, /optimize, /describe, /init, /clear, /compact, /budget\n\
+                 Diagnostics: /dba, /ash\n\
+                 Modes: /sql, /text2sql, /t2s, /plan, /yolo, /interactive, /mode\n\
+                 Queries: /ns, /n, /n+, /nd, /np\n\
+                 REPL: /profiles, /refresh, /session, /log-file, /explain-share, /commands, /version, /f2-f5"
+            );
+        }
     }
 
     None
