@@ -293,6 +293,7 @@ fn query_boolean_format() {
 
 /// `\sf user_order_count` shows function source.
 #[test]
+#[serial]
 fn session_sf_shows_function_source() {
     // Apply the fixture schema that defines user_order_count.
     let (_, _, setup_code) = run_rpg(&[
@@ -317,6 +318,7 @@ fn session_sf_shows_function_source() {
 
 /// `\sv active_products` shows view definition.
 #[test]
+#[serial]
 fn session_sv_shows_view_def() {
     let (stdout, stderr, code) = run_rpg(&["-c", "\\sv active_products"]);
     let combined = format!("{stdout}{stderr}");
@@ -348,6 +350,7 @@ async fn session_reconnect_same_db() {
 
 /// `\sf` on a real function via raw client returns source text.
 #[tokio::test]
+#[serial]
 async fn session_sf_via_raw_client() {
     use tokio_postgres::NoTls;
 
@@ -411,6 +414,7 @@ async fn session_sf_via_raw_client() {
 
 /// `\sv` on a real view via raw client returns definition text.
 #[tokio::test]
+#[serial]
 async fn session_sv_via_raw_client() {
     use tokio_postgres::NoTls;
 
@@ -761,6 +765,7 @@ async fn describe_dx_lists_extensions() {
 
 /// `\df` lists functions (at minimum the output exits 0).
 #[tokio::test]
+#[serial]
 async fn describe_df_lists_functions() {
     let (stdout, stderr, code) = run_rpg(&["-c", r"\df"]);
     assert_eq!(
